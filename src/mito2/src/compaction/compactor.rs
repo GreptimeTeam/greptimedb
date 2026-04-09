@@ -299,12 +299,27 @@ pub trait Compactor: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-/// DefaultCompactor is the default implementation of Compactor.
-pub struct DefaultCompactor;
-
-impl DefaultCompactor {
-    /// Merge a single compaction output into SST files.
+/// Trait for merging a single compaction output into SST files.
+///
+/// This is extracted from `DefaultCompactor` to allow injecting mock
+/// implementations in tests.
+#[async_trait::async_trait]
+pub trait SstMerger: Send + Sync + 'static {
     async fn merge_single_output(
+        &self,
+        compaction_region: CompactionRegion,
+        output: CompactionOutput,
+        write_opts: WriteOptions,
+    ) -> Result<Vec<FileMeta>>;
+}
+
+/// The production [`SstMerger`] that reads, merges, and writes SST files.
+pub struct DefaultSstMerger;
+
+#[async_trait::async_trait]
+impl SstMerger for DefaultSstMerger {
+    async fn merge_single_output(
+        &self,
         compaction_region: CompactionRegion,
         output: CompactionOutput,
         write_opts: WriteOptions,
@@ -424,8 +439,32 @@ impl DefaultCompactor {
     }
 }
 
+/// DefaultCompactor is the default implementation of Compactor.
+///
+/// It is parameterized by an [`SstMerger`] to allow injecting mock
+/// implementations in tests.
+pub struct DefaultCompactor<M = DefaultSstMerger> {
+    merger: Arc<M>,
+}
+
+impl Default for DefaultCompactor {
+    fn default() -> Self {
+        Self {
+            merger: Arc::new(DefaultSstMerger),
+        }
+    }
+}
+
+impl<M: SstMerger> DefaultCompactor<M> {
+    pub fn with_merger(merger: M) -> Self {
+        Self {
+            merger: Arc::new(merger),
+        }
+    }
+}
+
 #[async_trait::async_trait]
-impl Compactor for DefaultCompactor {
+impl<M: SstMerger> Compactor for DefaultCompactor<M> {
     async fn merge_ssts(
         &self,
         compaction_region: &CompactionRegion,
@@ -447,7 +486,13 @@ impl Compactor for DefaultCompactor {
                 max_file_size: picker_output.max_file_size,
                 ..Default::default()
             };
-            let fut = Self::merge_single_output(compaction_region.clone(), output, write_opts);
+            let merger = self.merger.clone();
+            let compaction_region = compaction_region.clone();
+            let fut = async move {
+                merger
+                    .merge_single_output(compaction_region, output, write_opts)
+                    .await
+            };
             tasks.push((inputs_to_remove, fut));
         }
 
@@ -580,5 +625,244 @@ impl Compactor for DefaultCompactor {
             .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use store_api::storage::{FileId, RegionId};
+
+    use super::*;
+    use crate::cache::CacheManager;
+    use crate::compaction::picker::PickerOutput;
+    use crate::sst::file::FileHandle;
+    use crate::sst::file_purger::NoopFilePurger;
+    use crate::sst::version::SstVersion;
+    use crate::test_util::memtable_util::metadata_for_test;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+
+    fn dummy_file_meta() -> FileMeta {
+        FileMeta {
+            region_id: RegionId::new(1, 1),
+            file_id: FileId::random(),
+            file_size: 100,
+            ..Default::default()
+        }
+    }
+
+    fn new_file_handle(meta: FileMeta) -> FileHandle {
+        FileHandle::new(meta, Arc::new(NoopFilePurger))
+    }
+
+    /// Build a minimal [`CompactionRegion`] suitable for tests where the
+    /// [`SstMerger`] is mocked and never touches the access layer.
+    async fn new_test_compaction_region() -> CompactionRegion {
+        let env = SchedulerEnv::new().await;
+        let metadata = metadata_for_test();
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        CompactionRegion {
+            region_id: RegionId::new(1, 1),
+            region_options: RegionOptions::default(),
+            engine_config: Arc::new(MitoConfig::default()),
+            region_metadata: metadata.clone(),
+            cache_manager: Arc::new(CacheManager::default()),
+            access_layer: env.access_layer.clone(),
+            manifest_ctx,
+            current_version: CompactionVersion {
+                metadata,
+                options: RegionOptions::default(),
+                ssts: Arc::new(SstVersion::new()),
+                compaction_time_window: None,
+            },
+            file_purger: None,
+            ttl: None,
+            max_parallelism: 1,
+        }
+    }
+
+    /// An [`SstMerger`] that returns pre-configured results per call index.
+    ///
+    /// Call 0 gets `results[0]`, call 1 gets `results[1]`, etc.
+    struct MockMerger {
+        results: Vec<Result<Vec<FileMeta>>>,
+        call_idx: AtomicUsize,
+    }
+
+    impl MockMerger {
+        fn new(results: Vec<Result<Vec<FileMeta>>>) -> Self {
+            Self {
+                results,
+                call_idx: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SstMerger for MockMerger {
+        async fn merge_single_output(
+            &self,
+            _compaction_region: CompactionRegion,
+            _output: CompactionOutput,
+            _write_opts: WriteOptions,
+        ) -> Result<Vec<FileMeta>> {
+            let idx = self.call_idx.fetch_add(1, Ordering::SeqCst);
+            match self.results.get(idx) {
+                Some(Ok(files)) => Ok(files.clone()),
+                Some(Err(_)) => crate::error::InvalidMetaSnafu {
+                    reason: format!("simulated failure at index {idx}"),
+                }
+                .fail(),
+                None => panic!("MockMerger: no result configured for call index {idx}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_partial_merge_failure_collects_only_successful_outputs() {
+        common_telemetry::init_default_ut_logging();
+
+        let compaction_region = new_test_compaction_region().await;
+
+        // Prepare 3 compaction outputs: output 0 and 2 succeed, output 1 fails.
+        let input_meta_0 = dummy_file_meta();
+        let input_meta_1 = dummy_file_meta();
+        let input_meta_2 = dummy_file_meta();
+
+        let output_meta_0 = vec![dummy_file_meta()];
+        let output_meta_2 = vec![dummy_file_meta(), dummy_file_meta()];
+
+        let merger = MockMerger::new(vec![
+            Ok(output_meta_0.clone()),
+            Err(crate::error::InvalidMetaSnafu {
+                reason: "boom".to_string(),
+            }
+            .build()),
+            Ok(output_meta_2.clone()),
+        ]);
+        let compactor = DefaultCompactor::with_merger(merger);
+
+        let picker_output = PickerOutput {
+            outputs: vec![
+                CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![new_file_handle(input_meta_0.clone())],
+                    filter_deleted: false,
+                    output_time_range: None,
+                },
+                CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![new_file_handle(input_meta_1.clone())],
+                    filter_deleted: false,
+                    output_time_range: None,
+                },
+                CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![new_file_handle(input_meta_2.clone())],
+                    filter_deleted: false,
+                    output_time_range: None,
+                },
+            ],
+            expired_ssts: vec![],
+            time_window_size: 3600,
+            max_file_size: None,
+        };
+
+        let merge_output = compactor
+            .merge_ssts(&compaction_region, picker_output)
+            .await
+            .unwrap();
+
+        // Outputs 0 and 2 succeeded (1 + 2 = 3 files added).
+        assert_eq!(merge_output.files_to_add.len(), 3);
+        // Only inputs from successful merges should be removed.
+        assert_eq!(merge_output.files_to_remove.len(), 2);
+
+        let removed_ids: Vec<_> = merge_output
+            .files_to_remove
+            .iter()
+            .map(|f| f.file_id)
+            .collect();
+        assert!(removed_ids.contains(&input_meta_0.file_id));
+        assert!(removed_ids.contains(&input_meta_2.file_id));
+        // The failed output's input must NOT be removed.
+        assert!(!removed_ids.contains(&input_meta_1.file_id));
+    }
+
+    #[tokio::test]
+    async fn test_all_outputs_succeed() {
+        common_telemetry::init_default_ut_logging();
+
+        let compaction_region = new_test_compaction_region().await;
+        let input_meta = dummy_file_meta();
+        let output_meta = vec![dummy_file_meta()];
+
+        let merger = MockMerger::new(vec![Ok(output_meta.clone())]);
+        let compactor = DefaultCompactor::with_merger(merger);
+
+        let picker_output = PickerOutput {
+            outputs: vec![CompactionOutput {
+                output_level: 1,
+                inputs: vec![new_file_handle(input_meta.clone())],
+                filter_deleted: false,
+                output_time_range: None,
+            }],
+            expired_ssts: vec![],
+            time_window_size: 3600,
+            max_file_size: None,
+        };
+
+        let merge_output = compactor
+            .merge_ssts(&compaction_region, picker_output)
+            .await
+            .unwrap();
+
+        assert_eq!(merge_output.files_to_add.len(), 1);
+        assert_eq!(merge_output.files_to_add[0].file_id, output_meta[0].file_id);
+        assert_eq!(merge_output.files_to_remove.len(), 1);
+        assert_eq!(merge_output.files_to_remove[0].file_id, input_meta.file_id);
+    }
+
+    #[tokio::test]
+    async fn test_expired_ssts_always_removed() {
+        common_telemetry::init_default_ut_logging();
+
+        let compaction_region = new_test_compaction_region().await;
+        let input_meta = dummy_file_meta();
+        let expired_meta = dummy_file_meta();
+
+        // The single merge output fails, but expired SSTs should still be removed.
+        let merger = MockMerger::new(vec![Err(crate::error::InvalidMetaSnafu {
+            reason: "fail".to_string(),
+        }
+        .build())]);
+        let compactor = DefaultCompactor::with_merger(merger);
+
+        let picker_output = PickerOutput {
+            outputs: vec![CompactionOutput {
+                output_level: 1,
+                inputs: vec![new_file_handle(input_meta.clone())],
+                filter_deleted: false,
+                output_time_range: None,
+            }],
+            expired_ssts: vec![new_file_handle(expired_meta.clone())],
+            time_window_size: 3600,
+            max_file_size: None,
+        };
+
+        let merge_output = compactor
+            .merge_ssts(&compaction_region, picker_output)
+            .await
+            .unwrap();
+
+        // No files added (merge failed).
+        assert!(merge_output.files_to_add.is_empty());
+        // Only the expired SST should be in files_to_remove (not the failed merge's input).
+        assert_eq!(merge_output.files_to_remove.len(), 1);
+        assert_eq!(
+            merge_output.files_to_remove[0].file_id,
+            expired_meta.file_id
+        );
     }
 }
