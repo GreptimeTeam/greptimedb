@@ -328,8 +328,6 @@ impl FileRangeContext {
         skip_fields: bool,
     ) -> RowGroupBuildContext<'a> {
         RowGroupBuildContext {
-            filters: &self.base.filters,
-            physical_filters: &self.base.physical_filters,
             row_group_idx,
             row_selection,
             fetch_metrics,

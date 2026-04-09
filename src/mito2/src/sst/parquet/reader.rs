@@ -1673,12 +1673,6 @@ pub(crate) struct RowGroupReaderBuilder {
 /// Context passed to [RowGroupReaderBuilder::build()] carrying all information
 /// needed for prefiltering decisions.
 pub(crate) struct RowGroupBuildContext<'a> {
-    /// Simple filters pushed down. Used by prefilter on other columns.
-    #[allow(dead_code)]
-    pub(crate) filters: &'a [SimpleFilterContext],
-    /// Physical filters pushed down. Used by prefilter on other columns.
-    #[allow(dead_code)]
-    pub(crate) physical_filters: &'a [PhysicalFilterContext],
     /// Index of the row group to read.
     pub(crate) row_group_idx: usize,
     /// Row selection for the row group. `None` means all rows.
@@ -1922,7 +1916,6 @@ impl SimpleFilterContext {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 /// The physical filter to evaluate or the prune result of the default value.
 pub(crate) enum MaybePhysicalFilter {
     /// The filter to evaluate.
@@ -1934,7 +1927,6 @@ pub(crate) enum MaybePhysicalFilter {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 /// Context to evaluate a physical expression for a parquet file.
 pub(crate) struct PhysicalFilterContext {
     /// Filter to evaluate.
@@ -1949,7 +1941,6 @@ pub(crate) struct PhysicalFilterContext {
     schema: SchemaRef,
 }
 
-#[allow(dead_code)]
 impl PhysicalFilterContext {
     /// Creates a context for the `expr`.
     ///
@@ -1958,7 +1949,7 @@ impl PhysicalFilterContext {
     pub(crate) fn new_opt(
         sst_meta: &RegionMetadataRef,
         expected_meta: Option<&RegionMetadata>,
-        read_format: &ReadFormat,
+        read_format: &FlatReadFormat,
         expr: &Expr,
     ) -> Option<Self> {
         let column_name = Self::single_column_name(expr)?;
