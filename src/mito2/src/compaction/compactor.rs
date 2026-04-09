@@ -38,7 +38,7 @@ use crate::compaction::picker::{PickerOutput, new_picker};
 use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
 use crate::config::MitoConfig;
 use crate::error::{
-    EmptyRegionDirSnafu, InvalidPartitionExprSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result,
+    EmptyRegionDirSnafu, InvalidPartitionExprSnafu, ObjectStoreNotFoundSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
@@ -431,47 +431,71 @@ impl Compactor for DefaultCompactor {
         compaction_region: &CompactionRegion,
         mut picker_output: PickerOutput,
     ) -> Result<MergeOutput> {
-        let mut futs = Vec::with_capacity(picker_output.outputs.len());
-        let mut compacted_inputs =
-            Vec::with_capacity(picker_output.outputs.iter().map(|o| o.inputs.len()).sum());
         let internal_parallelism = compaction_region.max_parallelism.max(1);
         let compaction_time_window = picker_output.time_window_size;
+        let region_id = compaction_region.region_id;
+
+        // Build tasks along with their input file metas so we can track which
+        // inputs correspond to each task.
+        let mut tasks: Vec<(Vec<FileMeta>, _)> = Vec::with_capacity(picker_output.outputs.len());
 
         for output in picker_output.outputs.drain(..) {
             let inputs_to_remove: Vec<_> =
                 output.inputs.iter().map(|f| f.meta_ref().clone()).collect();
-            compacted_inputs.extend(inputs_to_remove.iter().cloned());
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 max_file_size: picker_output.max_file_size,
                 ..Default::default()
             };
-            futs.push(Self::merge_single_output(
-                compaction_region.clone(),
-                output,
-                write_opts,
-            ));
-        }
-        let mut output_files = Vec::with_capacity(futs.len());
-        while !futs.is_empty() {
-            let mut task_chunk = Vec::with_capacity(internal_parallelism);
-            for _ in 0..internal_parallelism {
-                if let Some(task) = futs.pop() {
-                    task_chunk.push(common_runtime::spawn_compact(task));
-                }
-            }
-            let metas = futures::future::try_join_all(task_chunk)
-                .await
-                .context(JoinSnafu)?
-                .into_iter()
-                .collect::<Result<Vec<Vec<_>>>>()?;
-            output_files.extend(metas.into_iter().flatten());
+            let fut = Self::merge_single_output(compaction_region.clone(), output, write_opts);
+            tasks.push((inputs_to_remove, fut));
         }
 
-        // In case of remote compaction, we still allow the region edit after merge to
-        // clean expired ssts.
-        let mut inputs: Vec<_> = compacted_inputs.into_iter().collect();
-        inputs.extend(
+        let mut output_files = Vec::with_capacity(tasks.len());
+        let mut compacted_inputs = Vec::new();
+
+        while !tasks.is_empty() {
+            let mut chunk: Vec<(Vec<FileMeta>, _)> = Vec::with_capacity(internal_parallelism);
+            for _ in 0..internal_parallelism {
+                if let Some(task) = tasks.pop() {
+                    chunk.push(task);
+                }
+            }
+            let spawned: Vec<_> = chunk
+                .into_iter()
+                .map(|(inputs, fut)| {
+                    let handle = common_runtime::spawn_compact(fut);
+                    (inputs, handle)
+                })
+                .collect();
+
+            for (inputs, handle) in spawned {
+                match handle.await {
+                    Ok(Ok(files)) => {
+                        output_files.extend(files);
+                        compacted_inputs.extend(inputs);
+                    }
+                    Ok(Err(e)) => {
+                        warn!(
+                            e; "Region {} failed to merge compaction output with inputs: [{}], skipping",
+                            region_id,
+                            inputs.iter().map(|f| f.file_id.to_string()).join(",")
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Region {} compaction task join error for inputs: [{}], skipping: {}",
+                            region_id,
+                            inputs.iter().map(|f| f.file_id.to_string()).join(","),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Include expired SSTs in removals — these don't depend on merge success.
+        compacted_inputs.extend(
             picker_output
                 .expired_ssts
                 .iter()
@@ -480,7 +504,7 @@ impl Compactor for DefaultCompactor {
 
         Ok(MergeOutput {
             files_to_add: output_files,
-            files_to_remove: inputs,
+            files_to_remove: compacted_inputs,
             compaction_time_window: Some(compaction_time_window),
         })
     }
