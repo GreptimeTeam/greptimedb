@@ -12,15 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod context;
-pub mod error;
-pub mod fake;
-pub mod gc_model;
-pub mod generator;
-pub mod ir;
-pub mod translator;
-pub mod utils;
-pub mod validator;
-
-#[cfg(test)]
-pub mod test_utils;
+pub mod action;
+pub mod oracle;
+pub mod runner;
+pub mod state;

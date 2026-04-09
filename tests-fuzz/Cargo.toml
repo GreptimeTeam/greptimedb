@@ -163,3 +163,17 @@ path = "targets/migration/fuzz_migrate_metric_regions.rs"
 test = false
 bench = false
 doc = false
+
+[[bin]]
+name = "fuzz_gc_model_cross_region"
+path = "targets/gc/fuzz_gc_model_cross_region.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "replay_gc_model_cross_region"
+path = "src/bin/replay_gc_model_cross_region.rs"
+test = false
+bench = false
+doc = false
