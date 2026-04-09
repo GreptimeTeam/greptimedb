@@ -368,22 +368,6 @@ pub(crate) struct PrefilterResult {
 ///
 /// Reads only the prefilter columns (currently the PK dictionary column),
 /// applies filters, and returns a refined [RowSelection].
-pub(crate) async fn execute_prefilter(
-    prefilter_ctx: &mut PrefilterContext,
-    reader_builder: &RowGroupReaderBuilder,
-    build_ctx: &RowGroupBuildContext<'_>,
-) -> Result<PrefilterResult> {
-    execute_general_prefilter(
-        prefilter_ctx.projection.clone(),
-        &mut prefilter_ctx.pk_filter,
-        &prefilter_ctx.filters,
-        &prefilter_ctx.physical_filters,
-        reader_builder,
-        build_ctx,
-    )
-    .await
-}
-
 fn compute_projection_mask(
     column_names: &HashSet<String>,
     arrow_schema: &datatypes::arrow::datatypes::SchemaRef,
@@ -402,11 +386,8 @@ fn compute_projection_mask(
     )
 }
 
-async fn execute_general_prefilter(
-    projection: ProjectionMask,
-    pk_filter: &mut Option<Box<dyn PrimaryKeyFilter>>,
-    filters: &[SimpleFilterContext],
-    physical_filters: &[PhysicalFilterContext],
+pub(crate) async fn execute_prefilter(
+    prefilter_ctx: &mut PrefilterContext,
     reader_builder: &RowGroupReaderBuilder,
     build_ctx: &RowGroupBuildContext<'_>,
 ) -> Result<PrefilterResult> {
@@ -414,7 +395,7 @@ async fn execute_general_prefilter(
         .build_with_projection(
             build_ctx.row_group_idx,
             build_ctx.row_selection.clone(),
-            projection,
+            prefilter_ctx.projection.clone(),
             build_ctx.fetch_metrics,
         )
         .await?;
@@ -435,9 +416,9 @@ async fn execute_general_prefilter(
 
         let batch_mask = match apply_filters_to_batch(
             &batch,
-            pk_filter,
-            filters,
-            physical_filters,
+            &mut prefilter_ctx.pk_filter,
+            &prefilter_ctx.filters,
+            &prefilter_ctx.physical_filters,
             reader_builder.file_path(),
         )? {
             Some(mask) => mask,
