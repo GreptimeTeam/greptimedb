@@ -43,6 +43,8 @@ use pgwire::api::results::FieldInfo;
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::types::format::FormatOptions as PgFormatOptions;
 use query::planner::DfLogicalPlanner;
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
@@ -293,11 +295,11 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
     // Note that we only support a small amount of pg data types
     match origin {
         &Type::BOOL => Ok(ConcreteDataType::boolean_datatype()),
-        &Type::CHAR => Ok(ConcreteDataType::int8_datatype()),
         &Type::INT2 => Ok(ConcreteDataType::int16_datatype()),
         &Type::INT4 => Ok(ConcreteDataType::int32_datatype()),
         &Type::INT8 => Ok(ConcreteDataType::int64_datatype()),
-        &Type::VARCHAR | &Type::TEXT => Ok(ConcreteDataType::string_datatype()),
+        &Type::NUMERIC => Ok(ConcreteDataType::uint64_datatype()),
+        &Type::VARCHAR | &Type::CHAR | &Type::TEXT => Ok(ConcreteDataType::string_datatype()),
         &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Ok(ConcreteDataType::timestamp_datatype(
             common_time::timestamp::TimeUnit::Millisecond,
         )),
@@ -305,9 +307,6 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         &Type::TIME => Ok(ConcreteDataType::timestamp_datatype(
             common_time::timestamp::TimeUnit::Microsecond,
         )),
-        &Type::CHAR_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
-            ConcreteDataType::int8_datatype(),
-        ))),
         &Type::INT2_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
             ConcreteDataType::int16_datatype(),
         ))),
@@ -317,70 +316,16 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         &Type::INT8_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
             ConcreteDataType::int64_datatype(),
         ))),
-        &Type::VARCHAR_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
-            ConcreteDataType::string_datatype(),
+        &Type::NUMERIC_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
+            ConcreteDataType::uint64_datatype(),
         ))),
+        &Type::VARCHAR_ARRAY | &Type::CHAR_ARRAY | &Type::TEXT_ARRAY => Ok(
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
+        ),
         _ => server_error::InternalSnafu {
             err_msg: format!("unimplemented datatype {origin:?}"),
         }
         .fail(),
-    }
-}
-
-pub(super) fn parameter_to_string(portal: &Portal<PgSqlPlan>, idx: usize) -> PgWireResult<String> {
-    // the index is managed from portal's parameters count so it's safe to
-    // unwrap here.
-    let param_type = portal
-        .statement
-        .parameter_types
-        .get(idx)
-        .unwrap()
-        .as_ref()
-        .unwrap_or(&Type::UNKNOWN);
-    match param_type {
-        &Type::VARCHAR | &Type::TEXT => Ok(format!(
-            "'{}'",
-            portal
-                .parameter::<String>(idx, param_type)?
-                .as_deref()
-                .unwrap_or("")
-        )),
-        &Type::BOOL => Ok(portal
-            .parameter::<bool>(idx, param_type)?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::INT4 => Ok(portal
-            .parameter::<i32>(idx, param_type)?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::INT8 => Ok(portal
-            .parameter::<i64>(idx, param_type)?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::FLOAT4 => Ok(portal
-            .parameter::<f32>(idx, param_type)?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::FLOAT8 => Ok(portal
-            .parameter::<f64>(idx, param_type)?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::DATE => Ok(portal
-            .parameter::<NaiveDate>(idx, param_type)?
-            .map(|v| v.format("%Y-%m-%d").to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::TIMESTAMP => Ok(portal
-            .parameter::<NaiveDateTime>(idx, param_type)?
-            .map(|v| v.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::INTERVAL => Ok(portal
-            .parameter::<PgInterval>(idx, param_type)?
-            .map(|v| v.to_sql())
-            .unwrap_or_else(|| "".to_owned())),
-        _ => Err(invalid_parameter_error(
-            "unsupported_parameter_type",
-            Some(param_type.to_string()),
-        )),
     }
 }
 
@@ -442,7 +387,7 @@ pub(super) fn parameters_to_scalar_values(
         };
 
         let value = match &client_type {
-            &Type::VARCHAR | &Type::TEXT => {
+            &Type::VARCHAR | &Type::TEXT | &Type::CHAR => {
                 let data = portal.parameter::<String>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
@@ -556,6 +501,36 @@ pub(super) fn parameters_to_scalar_values(
                     }
                 } else {
                     ScalarValue::Int64(data)
+                }
+            }
+            &Type::NUMERIC => {
+                let data = portal.parameter::<Decimal>(idx, &client_type)?;
+                if let Some(server_type) = &server_type {
+                    match server_type {
+                        ConcreteDataType::UInt64(_) => {
+                            ScalarValue::UInt64(data.and_then(|n| n.to_u64()))
+                        }
+                        ConcreteDataType::Decimal128(dt) => ScalarValue::Decimal128(
+                            data.map(|n| n.mantissa()),
+                            dt.precision(),
+                            dt.scale(),
+                        ),
+                        ConcreteDataType::Timestamp(unit) => {
+                            to_timestamp_scalar_value(
+                                data.and_then(|n| n.to_i64()),
+                                unit,
+                                server_type,
+                            )?
+                        }
+                        _ => {
+                            return Err(invalid_parameter_error(
+                                "invalid_parameter_type",
+                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                            ));
+                        }
+                    }
+                } else {
+                    ScalarValue::UInt64(data.and_then(|n| n.to_u64()))
                 }
             }
             &Type::FLOAT4 => {

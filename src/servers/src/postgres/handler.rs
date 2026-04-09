@@ -456,18 +456,9 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                 .do_exec_plan(sql_plan.statement.clone(), plan, query_ctx.clone())
                 .await
         } else {
-            // manually replace variables in prepared statement when no
-            // logical_plan is generated. This happens when logical plan is not
-            // supported for certain statements.
-            let mut sql = sql_plan.query.clone();
-            for i in 0..portal.parameter_len() {
-                sql = sql.replace(&format!("${}", i + 1), &parameter_to_string(portal, i)?);
-            }
-
-            self.query_handler
-                .do_query(&sql, query_ctx.clone())
-                .await
-                .remove(0)
+            // no logical plan is generated
+            // TODO(sunng87): report error on parse phase
+            return Err(PgWireError::ApiError(format!("Unsupported statement for extended query: {}", &sql_plan.query).into()));
         };
 
         send_warning_opt(client, query_ctx.clone()).await?;

@@ -106,6 +106,7 @@ quoted-string = "0.6"
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
+rust_decimal = { workspace = true, features = ["db-postgres"] }
 rust-embed = { version = "6.6", optional = true, features = ["debug-embed"] }
 rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"

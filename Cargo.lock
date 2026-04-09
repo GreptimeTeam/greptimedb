@@ -12080,6 +12080,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rust-embed",
+ "rust_decimal",
  "rustls",
  "rustls-pemfile",
  "rustls-pki-types",
