@@ -28,7 +28,7 @@ use common_telemetry::{error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
-use datatypes::arrow::array::{Array as _, ArrayRef, BooleanArray};
+use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
@@ -455,12 +455,23 @@ impl ParquetReaderBuilder {
         let (filters, physical_filters) = if let Some(predicate) = &self.predicate {
             let mut simple_filters = Vec::new();
             let mut physical_filters = Vec::new();
+            let field_prefilter_enabled = self.pre_filter_mode == PreFilterMode::All;
             for expr in predicate.exprs() {
-                if let Some(filter) = SimpleFilterContext::new_opt(
+                if let Some(mut filter) = SimpleFilterContext::new_opt(
                     &region_meta,
                     self.expected_metadata.as_deref(),
                     expr,
                 ) {
+                    let prefilter_uses_column = filter.filter().as_filter().is_some_and(|filter| {
+                        read_format
+                            .arrow_schema()
+                            .column_with_name(filter.column_name())
+                            .is_some()
+                    });
+                    let usable_prefilter = (field_prefilter_enabled
+                        || filter.semantic_type() != SemanticType::Field)
+                        && (prefilter_uses_column || filter.usable_primary_key_filter());
+                    filter.set_usable_prefilter(usable_prefilter);
                     simple_filters.push(filter);
                     continue;
                 }
@@ -525,7 +536,6 @@ impl ParquetReaderBuilder {
             reader_builder,
             RangeBase {
                 filters,
-                physical_filters,
                 dyn_filters,
                 read_format,
                 expected_metadata: self.expected_metadata.clone(),
@@ -1813,6 +1823,16 @@ pub(crate) enum MaybeFilter {
     Pruned,
 }
 
+impl MaybeFilter {
+    /// Returns the inner filter when it is available.
+    pub(crate) fn as_filter(&self) -> Option<&SimpleFilterEvaluator> {
+        match self {
+            MaybeFilter::Filter(filter) => Some(filter),
+            MaybeFilter::Matched | MaybeFilter::Pruned => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 /// Context to evaluate the column filter for a parquet file.
 pub(crate) struct SimpleFilterContext {
@@ -1822,6 +1842,10 @@ pub(crate) struct SimpleFilterContext {
     column_id: ColumnId,
     /// Semantic type of the column.
     semantic_type: SemanticType,
+    /// The data type of the column.
+    data_type: ConcreteDataType,
+    /// Whether this filter can be applied by parquet prefiltering in the current read path.
+    usable_prefilter: bool,
     /// Whether this filter can be applied by flat parquet primary-key prefiltering.
     usable_primary_key_filter: bool,
 }
@@ -1878,6 +1902,8 @@ impl SimpleFilterContext {
             filter: maybe_filter,
             column_id: column_metadata.column_id,
             semantic_type: column_metadata.semantic_type,
+            data_type: column_metadata.column_schema.data_type.clone(),
+            usable_prefilter: false,
             usable_primary_key_filter,
         })
     }
@@ -1895,6 +1921,21 @@ impl SimpleFilterContext {
     /// Returns the semantic type of the column.
     pub(crate) fn semantic_type(&self) -> SemanticType {
         self.semantic_type
+    }
+
+    /// Returns the data type of the column.
+    pub(crate) fn data_type(&self) -> &ConcreteDataType {
+        &self.data_type
+    }
+
+    /// Returns whether this filter can be applied by parquet prefiltering.
+    pub(crate) fn usable_prefilter(&self) -> bool {
+        self.usable_prefilter
+    }
+
+    /// Updates whether this filter can be applied by parquet prefiltering.
+    pub(crate) fn set_usable_prefilter(&mut self, usable_prefilter: bool) {
+        self.usable_prefilter = usable_prefilter;
     }
 
     /// Returns whether this filter is eligible for flat parquet PK prefiltering.
@@ -1916,21 +1957,10 @@ impl SimpleFilterContext {
 }
 
 #[derive(Clone)]
-/// The physical filter to evaluate or the prune result of the default value.
-pub(crate) enum MaybePhysicalFilter {
-    /// The filter to evaluate.
-    Filter(Arc<dyn PhysicalExpr>),
-    /// The filter matches the default value.
-    Matched,
-    /// The filter is pruned.
-    Pruned,
-}
-
-#[derive(Clone)]
 /// Context to evaluate a physical expression for a parquet file.
 pub(crate) struct PhysicalFilterContext {
     /// Filter to evaluate.
-    filter: MaybePhysicalFilter,
+    filter: Arc<dyn PhysicalExpr>,
     /// Id of the column to evaluate.
     column_id: ColumnId,
     /// Name of the column to evaluate.
@@ -1953,15 +1983,18 @@ impl PhysicalFilterContext {
         expr: &Expr,
     ) -> Option<Self> {
         let column_name = Self::single_column_name(expr)?;
-        let (column_metadata, column_in_sst) = match expected_meta {
+        let column_metadata = match expected_meta {
             Some(meta) => {
                 let column = meta.column_by_name(&column_name)?;
-                let column_in_sst = sst_meta.column_by_id(column.column_id).is_some();
-                (column, column_in_sst)
+                let sst_column = sst_meta.column_by_id(column.column_id)?;
+                if sst_column.column_schema.name != column_name {
+                    return None;
+                }
+                column
             }
             None => {
                 let column = sst_meta.column_by_name(&column_name)?;
-                (column, true)
+                column
             }
         };
 
@@ -1984,43 +2017,14 @@ impl PhysicalFilterContext {
                 }
             };
         let schema = Arc::new(ArrowSchema::new(vec![field]));
-        let physical_expr = Predicate::new(vec![expr.clone()])
-            .to_physical_exprs(&schema)
+        let physical_expr = Predicate::to_physical_expr(expr, &schema)
             .inspect_err(|e| {
                 error!("Unable to build physical filter for {expr}, schema: {schema:?}, err: {e}");
             })
-            .ok()?
-            .into_iter()
-            .next()?;
-
-        let filter = if column_in_sst {
-            MaybePhysicalFilter::Filter(physical_expr)
-        } else {
-            let default_value = column_metadata
-                .column_schema
-                .create_default()
-                .ok()
-                .flatten()?;
-            let scalar_value = default_value
-                .try_to_scalar_value(&column_metadata.column_schema.data_type)
-                .ok()?;
-            let array = scalar_value.to_array_of_size(1).ok()?;
-            let record_batch = RecordBatch::try_new(schema.clone(), vec![array]).ok()?;
-            let evaluated = physical_expr.evaluate(&record_batch).ok()?;
-            let array = evaluated.into_array(record_batch.num_rows()).ok()?;
-            let boolean_array = array.as_any().downcast_ref::<BooleanArray>()?;
-            if boolean_array.is_null(0) {
-                return None;
-            }
-            if boolean_array.value(0) {
-                MaybePhysicalFilter::Matched
-            } else {
-                MaybePhysicalFilter::Pruned
-            }
-        };
+            .ok()?;
 
         Some(Self {
-            filter,
+            filter: physical_expr,
             column_id: column_metadata.column_id,
             column_name,
             semantic_type: column_metadata.semantic_type,
@@ -2040,7 +2044,7 @@ impl PhysicalFilterContext {
     }
 
     /// Returns the filter to evaluate.
-    pub(crate) fn filter(&self) -> &MaybePhysicalFilter {
+    pub(crate) fn filter(&self) -> &Arc<dyn PhysicalExpr> {
         &self.filter
     }
 
@@ -2414,5 +2418,28 @@ mod tests {
         .unwrap();
         assert!(!mismatched_ctx.usable_primary_key_filter());
         assert!(mismatched_ctx.primary_key_prefilter().is_none());
+    }
+
+    #[test]
+    fn test_physical_filter_context_skips_renamed_column() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        let ctx = PhysicalFilterContext::new_opt(
+            &metadata,
+            Some(expected_metadata.as_ref()),
+            &read_format,
+            &col("tag_0").eq(lit("a")),
+        );
+
+        assert!(ctx.is_none());
     }
 }

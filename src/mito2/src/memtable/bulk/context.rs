@@ -109,7 +109,6 @@ impl BulkIterContext {
         Ok(Self {
             base: RangeBase {
                 filters: simple_filters,
-                physical_filters: vec![],
                 dyn_filters,
                 read_format,
                 prune_schema: region_metadata.schema.clone(),

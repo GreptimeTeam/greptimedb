@@ -43,8 +43,8 @@ use crate::error::{
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::reader::{
-    MaybeFilter, MaybePhysicalFilter, PhysicalFilterContext, RowGroupBuildContext,
-    RowGroupReaderBuilder, SimpleFilterContext,
+    MaybeFilter, PhysicalFilterContext, RowGroupBuildContext, RowGroupReaderBuilder,
+    SimpleFilterContext,
 };
 
 pub(crate) fn matching_row_ranges_by_primary_key(
@@ -233,6 +233,7 @@ pub(crate) struct PrefilterContext {
     /// Simple filters that can be evaluated directly from the prefilter batch.
     filters: Vec<SimpleFilterContext>,
     /// Physical filters that can be evaluated directly from the prefilter batch.
+    /// Physical expressions are only applied in the prefilter phase.
     physical_filters: Vec<PhysicalFilterContext>,
 }
 
@@ -281,19 +282,16 @@ impl PrefilterContextBuilder {
         let mut prefilter_physical_filters = Vec::new();
 
         for filter_ctx in filters {
-            if !field_prefilter_enabled && filter_ctx.semantic_type() == SemanticType::Field {
-                continue;
-            }
-
             let filter = match filter_ctx.filter() {
                 MaybeFilter::Filter(filter) => filter,
                 MaybeFilter::Matched | MaybeFilter::Pruned => continue,
             };
 
-            if read_format
-                .arrow_schema()
-                .column_with_name(filter.column_name())
-                .is_some()
+            if filter_ctx.usable_prefilter()
+                && read_format
+                    .arrow_schema()
+                    .column_with_name(filter.column_name())
+                    .is_some()
             {
                 prefilter_column_names.insert(filter.column_name().to_string());
                 prefilter_filters.push(filter_ctx.clone());
@@ -304,10 +302,6 @@ impl PrefilterContextBuilder {
 
         for filter_ctx in physical_filters {
             if !field_prefilter_enabled && filter_ctx.semantic_type() == SemanticType::Field {
-                continue;
-            }
-
-            if !matches!(filter_ctx.filter(), MaybePhysicalFilter::Filter(_)) {
                 continue;
             }
 
@@ -520,11 +514,7 @@ fn apply_filters_to_batch(
     }
 
     for filter_ctx in physical_filters {
-        let filter = match filter_ctx.filter() {
-            MaybePhysicalFilter::Filter(filter) => filter,
-            MaybePhysicalFilter::Matched => continue,
-            MaybePhysicalFilter::Pruned => return Ok(None),
-        };
+        let filter = filter_ctx.filter();
 
         let (idx, _) = batch
             .schema()
@@ -664,7 +654,11 @@ mod tests {
     ) -> Vec<SimpleFilterContext> {
         exprs
             .iter()
-            .filter_map(|expr| SimpleFilterContext::new_opt(metadata, None, expr))
+            .filter_map(|expr| {
+                let mut filter = SimpleFilterContext::new_opt(metadata, None, expr)?;
+                filter.set_usable_prefilter(true);
+                Some(filter)
+            })
             .collect()
     }
 
@@ -859,7 +853,8 @@ mod tests {
         )
         .unwrap();
         let codec = build_primary_key_codec(metadata.as_ref());
-        let filters = new_simple_filter_contexts(&metadata, &[col("field_0").gt(lit(1_u64))]);
+        let mut filters = new_simple_filter_contexts(&metadata, &[col("field_0").gt(lit(1_u64))]);
+        filters[0].set_usable_prefilter(false);
         let parquet_schema = parquet_schema(&read_format);
 
         let builder = PrefilterContextBuilder::new(
@@ -873,6 +868,7 @@ mod tests {
         );
         assert!(builder.is_none());
 
+        filters[0].set_usable_prefilter(true);
         let builder = PrefilterContextBuilder::new(
             &read_format,
             &codec,

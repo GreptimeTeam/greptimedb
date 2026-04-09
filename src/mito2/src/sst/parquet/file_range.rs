@@ -297,6 +297,7 @@ impl FileRangeContext {
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
     /// If a partition expr filter is configured, it is also applied.
+    /// Physical filter exprs are not evaluated here; they are only applied during prefiltering.
     pub(crate) fn precise_filter_flat(
         &self,
         input: RecordBatch,
@@ -369,8 +370,6 @@ pub(crate) struct PartitionFilterContext {
 pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
-    /// Physical filters pushed down.
-    pub(crate) physical_filters: Vec<PhysicalFilterContext>,
     /// Dynamic filter physical exprs.
     pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
@@ -416,13 +415,13 @@ impl RangeBase {
         &self,
         input: RecordBatch,
         skip_fields: bool,
-        skip_prefiltered_filters: bool,
+        has_prefilter: bool,
     ) -> Result<Option<RecordBatch>> {
         let mut tag_decode_state = TagDecodeState::new();
         let mask = self.compute_filter_mask_flat(
             &input,
             skip_fields,
-            skip_prefiltered_filters,
+            has_prefilter,
             &mut tag_decode_state,
         )?;
 
@@ -459,6 +458,7 @@ impl RangeBase {
 
     /// Computes the filter mask for the input RecordBatch based on pushed down predicates.
     /// If a partition expr filter is configured, it is applied later in `precise_filter_flat` but **NOT** in this function.
+    /// Physical filter exprs are excluded here and only apply during prefiltering.
     ///
     /// Returns `None` if the entire batch is filtered out, otherwise returns the boolean mask.
     ///
@@ -469,7 +469,7 @@ impl RangeBase {
         &self,
         input: &RecordBatch,
         skip_fields: bool,
-        skip_prefiltered_filters: bool,
+        has_prefilter: bool,
         tag_decode_state: &mut TagDecodeState,
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
@@ -491,13 +491,9 @@ impl RangeBase {
                 continue;
             }
 
-            // Flat parquet PK prefiltering already applied these tag predicates while refining
-            // row selection, so skip them here to avoid decoding/evaluating the same condition twice.
-            if should_skip_simple_filter_after_prefilter(
-                skip_prefiltered_filters,
-                skip_fields,
-                filter_ctx,
-            ) {
+            // Skip simple filters only when parquet prefilter already evaluated the same
+            // condition while refining row selection.
+            if should_skip_simple_filter_after_prefilter(has_prefilter, filter_ctx) {
                 continue;
             }
 
@@ -530,61 +526,6 @@ impl RangeBase {
                 mask = mask.bitand(&result);
             }
             // Non-tag column not found in projection.
-        }
-
-        for filter_ctx in &self.physical_filters {
-            let filter = match filter_ctx.filter() {
-                MaybePhysicalFilter::Filter(filter) => filter,
-                MaybePhysicalFilter::Matched => continue,
-                MaybePhysicalFilter::Pruned => return Ok(None),
-            };
-
-            if skip_fields && filter_ctx.semantic_type() == SemanticType::Field {
-                continue;
-            }
-
-            if should_skip_physical_filter_after_prefilter(
-                skip_prefiltered_filters,
-                skip_fields,
-                filter_ctx,
-            ) {
-                continue;
-            }
-
-            let column =
-                if let Some((idx, _)) = input.schema().column_with_name(filter_ctx.column_name()) {
-                    Some(input.column(idx).clone())
-                } else if filter_ctx.semantic_type() == SemanticType::Tag {
-                    self.maybe_decode_tag_column(
-                        metadata,
-                        filter_ctx.column_id(),
-                        input,
-                        tag_decode_state,
-                    )?
-                } else {
-                    None
-                };
-
-            let Some(column) = column else {
-                continue;
-            };
-
-            let record_batch = RecordBatch::try_new(filter_ctx.schema().clone(), vec![column])
-                .context(NewRecordBatchSnafu)?;
-            let evaluated = filter
-                .evaluate(&record_batch)
-                .context(EvalPartitionFilterSnafu)?;
-            let array = evaluated
-                .into_array(record_batch.num_rows())
-                .context(EvalPartitionFilterSnafu)?;
-            let boolean_array =
-                array
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .context(UnexpectedSnafu {
-                        reason: "Failed to downcast physical filter result to BooleanArray",
-                    })?;
-            mask = mask.bitand(boolean_array.values());
         }
 
         Ok(Some(mask))
@@ -728,33 +669,14 @@ impl RangeBase {
 }
 
 fn should_skip_simple_filter_after_prefilter(
-    skip_prefiltered_filters: bool,
-    skip_fields: bool,
+    has_prefilter: bool,
     filter_ctx: &SimpleFilterContext,
 ) -> bool {
-    if !skip_prefiltered_filters {
+    if !has_prefilter {
         return false;
     }
 
-    match filter_ctx.semantic_type() {
-        SemanticType::Field => !skip_fields,
-        SemanticType::Tag | SemanticType::Timestamp => true,
-    }
-}
-
-fn should_skip_physical_filter_after_prefilter(
-    skip_prefiltered_filters: bool,
-    skip_fields: bool,
-    filter_ctx: &PhysicalFilterContext,
-) -> bool {
-    if !skip_prefiltered_filters {
-        return false;
-    }
-
-    match filter_ctx.semantic_type() {
-        SemanticType::Field => !skip_fields,
-        SemanticType::Tag | SemanticType::Timestamp => true,
-    }
+    filter_ctx.usable_prefilter()
 }
 
 #[cfg(test)]
@@ -767,10 +689,7 @@ mod tests {
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::test_util::sst_util::{new_record_batch_with_custom_sequence, sst_region_metadata};
 
-    fn new_test_range_base(
-        filters: Vec<SimpleFilterContext>,
-        physical_filters: Vec<PhysicalFilterContext>,
-    ) -> RangeBase {
+    fn new_test_range_base(filters: Vec<SimpleFilterContext>) -> RangeBase {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
@@ -783,7 +702,6 @@ mod tests {
 
         RangeBase {
             filters,
-            physical_filters,
             dyn_filters: vec![],
             read_format,
             expected_metadata: None,
@@ -799,11 +717,12 @@ mod tests {
     #[test]
     fn test_compute_filter_mask_flat_skips_prefiltered_pk_filters() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let filters = vec![
+        let mut filters = vec![
             SimpleFilterContext::new_opt(&metadata, None, &col("tag_0").eq(lit("a"))).unwrap(),
             SimpleFilterContext::new_opt(&metadata, None, &col("field_0").gt(lit(1_u64))).unwrap(),
         ];
-        let base = new_test_range_base(filters, vec![]);
+        filters[0].set_usable_prefilter(true);
+        let base = new_test_range_base(filters);
         let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
 
         let mask_without_skip = base
@@ -816,11 +735,11 @@ mod tests {
             .compute_filter_mask_flat(&batch, false, true, &mut TagDecodeState::new())
             .unwrap()
             .unwrap();
-        assert_eq!(mask_with_skip.count_set_bits(), 4);
+        assert_eq!(mask_with_skip.count_set_bits(), 2);
     }
 
     #[test]
-    fn test_compute_filter_mask_flat_skips_prefiltered_physical_filters() {
+    fn test_compute_filter_mask_flat_does_not_postfilter_physical_filters() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = ReadFormat::new_flat(
             metadata.clone(),
@@ -830,23 +749,21 @@ mod tests {
             true,
         )
         .unwrap();
-        let physical_filters = vec![
-            PhysicalFilterContext::new_opt(
-                &metadata,
-                None,
-                &read_format,
-                &((col("field_0") + lit(1_u64)).gt(lit(2_u64))),
-            )
-            .unwrap(),
-        ];
-        let base = new_test_range_base(vec![], physical_filters);
+        let physical_filter = crate::sst::parquet::reader::PhysicalFilterContext::new_opt(
+            &metadata,
+            None,
+            &read_format,
+            &((col("field_0") + lit(1_u64)).gt(lit(2_u64))),
+        );
+        assert!(physical_filter.is_some());
+        let base = new_test_range_base(vec![]);
         let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
 
         let mask_without_skip = base
             .compute_filter_mask_flat(&batch, false, false, &mut TagDecodeState::new())
             .unwrap()
             .unwrap();
-        assert_eq!(mask_without_skip.count_set_bits(), 2);
+        assert_eq!(mask_without_skip.count_set_bits(), 4);
 
         let mask_with_skip = base
             .compute_filter_mask_flat(&batch, false, true, &mut TagDecodeState::new())
