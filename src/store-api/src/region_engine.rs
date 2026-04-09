@@ -67,7 +67,7 @@ impl From<SettableRegionRoleState> for RegionRole {
             SettableRegionRoleState::Follower => RegionRole::Follower,
             SettableRegionRoleState::DowngradingLeader => RegionRole::DowngradingLeader,
             SettableRegionRoleState::Leader => RegionRole::Leader,
-            SettableRegionRoleState::StagingLeader => RegionRole::Leader, // Still a leader role
+            SettableRegionRoleState::StagingLeader => RegionRole::StagingLeader,
         }
     }
 }
@@ -210,6 +210,11 @@ pub enum RegionRole {
     Follower,
     // Writable region(mito2), Readonly region(file).
     Leader,
+    // Leader is in staging mode.
+    //
+    // This is leader-like and writable, but it follows the staging workflow
+    // semantics instead of a normal leader's steady state.
+    StagingLeader,
     // Leader is downgrading to follower.
     //
     // This state is used to prevent new write requests.
@@ -221,6 +226,7 @@ impl Display for RegionRole {
         match self {
             RegionRole::Follower => write!(f, "Follower"),
             RegionRole::Leader => write!(f, "Leader"),
+            RegionRole::StagingLeader => write!(f, "Leader(Staging)"),
             RegionRole::DowngradingLeader => write!(f, "Leader(Downgrading)"),
         }
     }
@@ -228,7 +234,7 @@ impl Display for RegionRole {
 
 impl RegionRole {
     pub fn writable(&self) -> bool {
-        matches!(self, RegionRole::Leader)
+        matches!(self, RegionRole::Leader | RegionRole::StagingLeader)
     }
 }
 
@@ -237,6 +243,8 @@ impl From<RegionRole> for PbRegionRole {
         match value {
             RegionRole::Follower => PbRegionRole::Follower,
             RegionRole::Leader => PbRegionRole::Leader,
+            // Phase 1 keeps wire compatibility by flattening staging into Leader.
+            RegionRole::StagingLeader => PbRegionRole::Leader,
             RegionRole::DowngradingLeader => PbRegionRole::DowngradingLeader,
         }
     }

@@ -241,12 +241,14 @@ async fn test_unified_state_transitions_with_format(flat_format: bool) {
         .await
         .unwrap();
     assert_success_response(&result, 0);
+    assert_eq!(engine.role(region_id), Some(RegionRole::StagingLeader));
 
     let result = engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
         .await
         .unwrap();
     assert_success_response(&result, 0);
+    assert_eq!(engine.role(region_id), Some(RegionRole::Leader));
 
     // Leader -> StagingLeader -> Follower (exit staging via demotion)
     engine
@@ -259,6 +261,7 @@ async fn test_unified_state_transitions_with_format(flat_format: bool) {
         .await
         .unwrap();
     assert_success_response(&result, 0);
+    assert_eq!(engine.role(region_id), Some(RegionRole::Follower));
 
     // Note: Direct Follower -> Leader promotion is no longer allowed
     // Use existing set_region_role method for follower -> leader promotion
@@ -277,6 +280,7 @@ async fn test_unified_state_transitions_with_format(flat_format: bool) {
         .await
         .unwrap();
     assert_success_response(&result, 0);
+    assert_eq!(engine.role(region_id), Some(RegionRole::DowngradingLeader));
 
     // Note: Direct DowngradingLeader -> Leader is no longer allowed
     // Use existing set_region_role method for downgrading -> leader promotion
@@ -323,6 +327,97 @@ async fn test_unified_state_transitions_with_format(flat_format: bool) {
 async fn test_restricted_state_transitions() {
     test_restricted_state_transitions_with_format(false).await;
     test_restricted_state_transitions_with_format(true).await;
+}
+
+#[tokio::test]
+async fn test_direct_set_region_role_staging_leader_is_noop() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    engine
+        .set_region_role(region_id, RegionRole::StagingLeader)
+        .unwrap();
+
+    assert_eq!(engine.role(region_id), Some(RegionRole::Leader));
+
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::StagingLeader)
+        .unwrap();
+
+    assert_eq!(engine.role(region_id), Some(RegionRole::Follower));
+}
+
+#[tokio::test]
+async fn test_direct_set_region_role_exits_staging_state_only() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    assert_eq!(engine.role(region_id), Some(RegionRole::StagingLeader));
+
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    assert_eq!(engine.role(region_id), Some(RegionRole::Leader));
+
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    assert_eq!(engine.role(region_id), Some(RegionRole::Follower));
+}
+
+#[tokio::test]
+async fn test_set_region_role_can_exit_staging_to_leader() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    assert_eq!(engine.role(region_id), Some(RegionRole::StagingLeader));
+
+    engine.set_region_role(region_id, RegionRole::Leader).unwrap();
+
+    assert_eq!(engine.role(region_id), Some(RegionRole::Leader));
 }
 
 async fn test_restricted_state_transitions_with_format(flat_format: bool) {

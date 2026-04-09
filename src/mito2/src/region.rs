@@ -333,6 +333,17 @@ impl MitoRegion {
         self.manifest_ctx.set_role(next_role, self.region_id);
     }
 
+    pub(crate) fn region_role(&self) -> RegionRole {
+        match self.state() {
+            RegionRoleState::Follower => RegionRole::Follower,
+            RegionRoleState::Leader(RegionLeaderState::Staging) => RegionRole::StagingLeader,
+            RegionRoleState::Leader(RegionLeaderState::Downgrading) => {
+                RegionRole::DowngradingLeader
+            }
+            RegionRoleState::Leader(_) => RegionRole::Leader,
+        }
+    }
+
     /// Sets the altering state.
     /// You should call this method in the worker loop.
     pub(crate) fn set_altering(&self) -> Result<()> {
@@ -1041,9 +1052,12 @@ impl ManifestContext {
     /// Transition:
     /// - Follower -> Leader
     /// - Downgrading Leader -> Leader
+    /// - Staging Leader -> Leader
     /// - Leader -> Follower
+    /// - Staging Leader -> Follower
     /// - Downgrading Leader -> Follower
     /// - Leader -> Downgrading Leader
+    /// - Staging Leader -> Downgrading Leader
     ///
     /// ```
     pub(crate) fn set_role(&self, next_role: RegionRole, region_id: RegionId) {
@@ -1075,6 +1089,7 @@ impl ManifestContext {
                     if matches!(
                         state,
                         RegionRoleState::Follower
+                            | RegionRoleState::Leader(RegionLeaderState::Staging)
                             | RegionRoleState::Leader(RegionLeaderState::Downgrading)
                     ) {
                         Some(RegionRoleState::Leader(RegionLeaderState::Writable))
@@ -1095,6 +1110,12 @@ impl ManifestContext {
                         }
                     }
                 }
+            }
+            RegionRole::StagingLeader => {
+                info!(
+                    "Ignore direct conversion of region {} to staging leader; staging requires the dedicated workflow",
+                    region_id
+                );
             }
             RegionRole::DowngradingLeader => {
                 match self.state.compare_exchange(
@@ -1679,6 +1700,13 @@ mod tests {
 
         // Follower -> Leader
         manifest_ctx.set_role(RegionRole::Leader, region_id);
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+
+        // Direct Leader -> StagingLeader should be ignored.
+        manifest_ctx.set_role(RegionRole::StagingLeader, region_id);
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
