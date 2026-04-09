@@ -497,7 +497,10 @@ impl<M: SstMerger> Compactor for DefaultCompactor<M> {
         }
 
         let mut output_files = Vec::with_capacity(tasks.len());
-        let mut compacted_inputs = Vec::new();
+        let mut compacted_inputs = Vec::with_capacity(
+            tasks.iter().map(|(inputs, _)| inputs.len()).sum::<usize>()
+                + picker_output.expired_ssts.len(),
+        );
 
         while !tasks.is_empty() {
             let mut chunk: Vec<(Vec<FileMeta>, _)> = Vec::with_capacity(internal_parallelism);
