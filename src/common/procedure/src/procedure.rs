@@ -177,6 +177,18 @@ pub struct Context {
     pub provider: ContextProviderRef,
 }
 
+impl Context {
+    /// Returns true if current procedure state is retrying.
+    pub async fn is_retrying(&self) -> Option<bool> {
+        self.provider
+            .procedure_state(self.procedure_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.is_retrying())
+    }
+}
+
 /// A `Procedure` represents an operation or a set of operations to be performed step-by-step.
 #[async_trait]
 pub trait Procedure: Send {

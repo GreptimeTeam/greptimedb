@@ -172,8 +172,24 @@ impl CreateTableProcedure {
     ///   - [Code::Cancelled](tonic::status::Code::Cancelled)
     ///   - [Code::DeadlineExceeded](tonic::status::Code::DeadlineExceeded)
     ///   - [Code::Unavailable](tonic::status::Code::Unavailable)
-    pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
-        let table_route = self.table_route()?.clone();
+    pub async fn on_datanode_create_regions(&mut self, retrying: bool) -> Result<Status> {
+        let mut table_route = self.table_route()?.clone();
+        if retrying {
+            info!(
+                "Remapping region routes addresses for retrying create regions for table: {}",
+                self.data.table_ref()
+            );
+            let storage = self
+                .context
+                .table_metadata_manager
+                .table_route_manager()
+                .table_route_storage();
+            // The peer addresses may change during retries,
+            // so we always remap the region routes.
+            storage
+                .remap_region_routes(&mut table_route.region_routes)
+                .await?;
+        }
         // Registers opening regions
         let guards = self.register_opening_regions(&self.context, &table_route.region_routes)?;
         if !guards.is_empty() {
@@ -301,7 +317,10 @@ impl Procedure for CreateTableProcedure {
 
         match state {
             CreateTableState::Prepare => self.on_prepare().await,
-            CreateTableState::DatanodeCreateRegions => self.on_datanode_create_regions().await,
+            CreateTableState::DatanodeCreateRegions => {
+                let retrying = ctx.is_retrying().await.unwrap_or(false);
+                self.on_datanode_create_regions(retrying).await
+            }
             CreateTableState::CreateMetadata => self.on_create_metadata(ctx.procedure_id).await,
         }
         .map_err(map_to_procedure_error)
@@ -339,7 +358,7 @@ pub struct CreateTableData {
     #[serde(default)]
     pub column_metadatas: Vec<ColumnMetadata>,
     /// None stands for not allocated yet.
-    table_route: Option<PhysicalTableRouteValue>,
+    pub(crate) table_route: Option<PhysicalTableRouteValue>,
     /// None stands for not allocated yet.
     pub region_wal_options: Option<HashMap<RegionNumber, String>>,
 }

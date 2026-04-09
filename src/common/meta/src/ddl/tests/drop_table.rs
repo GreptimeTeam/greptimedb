@@ -34,7 +34,7 @@ use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::datanode_handler::{DatanodeWatcher, NaiveDatanodeHandler};
 use crate::ddl::test_util::{
     create_logical_table, create_physical_table, create_physical_table_metadata,
-    test_create_logical_table_task, test_create_physical_table_task,
+    put_datanode_address, test_create_logical_table_task, test_create_physical_table_task,
 };
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
@@ -146,7 +146,7 @@ async fn test_on_datanode_drop_regions() {
     // Drop table
     let mut procedure = DropTableProcedure::new(task, ddl_context);
     procedure.on_prepare().await.unwrap();
-    procedure.on_datanode_drop_regions().await.unwrap();
+    procedure.on_datanode_drop_regions(false).await.unwrap();
 
     let check = |peer: Peer,
                  request: RegionRequest,
@@ -184,6 +184,50 @@ async fn test_on_datanode_drop_regions() {
     check(peer, request, 4, RegionId::new(table_id, 2), true);
     let (peer, request) = results.remove(0);
     check(peer, request, 5, RegionId::new(table_id, 1), true);
+}
+
+#[tokio::test]
+async fn test_on_datanode_drop_regions_remaps_addresses_when_retrying() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let datanode_handler = DatanodeWatcher::new(tx);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::new(1, "old-leader")),
+                follower_peers: vec![Peer::new(5, "old-follower")],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let task = new_drop_table_task(table_name, table_id, false);
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    procedure.on_prepare().await.unwrap();
+
+    put_datanode_address(&ddl_context, 1, "new-leader").await;
+    put_datanode_address(&ddl_context, 5, "new-follower").await;
+
+    procedure.on_datanode_drop_regions(true).await.unwrap();
+
+    let mut peers = Vec::new();
+    for _ in 0..2 {
+        peers.push(rx.try_recv().unwrap().0);
+    }
+    peers.sort_unstable_by_key(|p| p.id);
+    assert_eq!(peers[0].addr, "new-leader");
+    assert_eq!(peers[1].addr, "new-follower");
 }
 
 #[tokio::test]

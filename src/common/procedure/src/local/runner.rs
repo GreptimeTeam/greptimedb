@@ -1293,6 +1293,60 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_retrying_state_visible_in_context_on_retry() {
+        let retrying_states = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = retrying_states.clone();
+        let mut times = 0;
+
+        let exec_fn = move |ctx: Context| {
+            times += 1;
+            let captured = captured.clone();
+            async move {
+                let is_retrying = ctx.is_retrying().await;
+                captured.lock().unwrap().push(is_retrying);
+                if times == 1 {
+                    Err(Error::retry_later(MockError::new(StatusCode::Unexpected)))
+                } else {
+                    Ok(Status::done())
+                }
+            }
+            .boxed()
+        };
+
+        let procedure = ProcedureAdapter {
+            data: "retrying_state".to_string(),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
+            exec_fn,
+            rollback_fn: None,
+        };
+
+        let dir = create_temp_dir("retrying_state");
+        let meta = procedure.new_meta(ROOT_ID);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store));
+        let mut runner = new_runner(meta.clone(), Box::new(procedure), procedure_store);
+        let ctx = context_with_provider(
+            meta.id,
+            runner.manager_ctx.clone() as Arc<dyn ContextProvider>,
+        );
+
+        runner
+            .manager_ctx
+            .procedures
+            .write()
+            .unwrap()
+            .insert(meta.id, runner.meta.clone());
+        runner.manager_ctx.start();
+
+        runner.execute_once(&ctx).await;
+        runner.execute_once(&ctx).await;
+
+        let states = retrying_states.lock().unwrap().clone();
+        assert_eq!(states, vec![Some(false), Some(true)]);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_execute_on_retry_later_error_with_child() {
         common_telemetry::init_default_ut_logging();
