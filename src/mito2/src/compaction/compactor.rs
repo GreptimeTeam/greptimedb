@@ -42,7 +42,6 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::metrics;
 use crate::read::FlatSource;
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
@@ -56,6 +55,7 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::version::{SstVersion, SstVersionRef};
+use crate::{error, metrics};
 
 /// Region version for compaction that does not hold memtables.
 #[derive(Clone)]
@@ -534,6 +534,7 @@ impl<M: SstMerger> Compactor for DefaultCompactor<M> {
                             inputs.iter().map(|f| f.file_id.to_string()).join(","),
                             e
                         );
+                        return Err(e).context(error::JoinSnafu);
                     }
                 }
             }
