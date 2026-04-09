@@ -43,8 +43,8 @@ use pgwire::api::results::FieldInfo;
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::types::format::FormatOptions as PgFormatOptions;
 use query::planner::DfLogicalPlanner;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
@@ -515,13 +515,11 @@ pub(super) fn parameters_to_scalar_values(
                             dt.precision(),
                             dt.scale(),
                         ),
-                        ConcreteDataType::Timestamp(unit) => {
-                            to_timestamp_scalar_value(
-                                data.and_then(|n| n.to_i64()),
-                                unit,
-                                server_type,
-                            )?
-                        }
+                        ConcreteDataType::Timestamp(unit) => to_timestamp_scalar_value(
+                            data.and_then(|n| n.to_i64()),
+                            unit,
+                            server_type,
+                        )?,
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",

@@ -458,7 +458,13 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         } else {
             // no logical plan is generated
             // TODO(sunng87): report error on parse phase
-            return Err(PgWireError::ApiError(format!("Unsupported statement for extended query: {}", &sql_plan.query).into()));
+            return Err(PgWireError::ApiError(
+                format!(
+                    "Unsupported statement for extended query: {}",
+                    &sql_plan.query
+                )
+                .into(),
+            ));
         };
 
         send_warning_opt(client, query_ctx.clone()).await?;
