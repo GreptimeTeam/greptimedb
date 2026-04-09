@@ -41,8 +41,12 @@ use crate::ddl::test_util::create_table::{
     TestCreateTableExprBuilder, build_raw_table_info_from_expr,
 };
 use crate::ddl::{DdlContext, TableMetadata};
+use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
 use crate::key::table_route::TableRouteValue;
+use crate::key::{MetadataKey, MetadataValue};
+use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
+use crate::rpc::store::PutRequest;
 
 pub async fn create_physical_table_metadata(
     ddl_context: &DdlContext,
@@ -52,6 +56,21 @@ pub async fn create_physical_table_metadata(
     ddl_context
         .table_metadata_manager
         .create_table_metadata(table_info, table_route, HashMap::default())
+        .await
+        .unwrap();
+}
+
+pub async fn put_datanode_address(ddl_context: &DdlContext, node_id: u64, addr: &str) {
+    ddl_context
+        .table_metadata_manager
+        .kv_backend()
+        .put(PutRequest {
+            key: NodeAddressKey::with_datanode(node_id).to_bytes(),
+            value: NodeAddressValue::new(Peer::new(node_id, addr))
+                .try_as_raw_value()
+                .unwrap(),
+            ..Default::default()
+        })
         .await
         .unwrap();
 }

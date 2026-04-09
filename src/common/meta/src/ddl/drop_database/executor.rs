@@ -96,10 +96,25 @@ impl State for DropDatabaseExecutor {
     async fn next(
         &mut self,
         ddl_ctx: &DdlContext,
-        _ctx: &mut DropDatabaseContext,
+        ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)> {
         self.register_dropping_regions(ddl_ctx)?;
         let executor = DropTableExecutor::new(self.table_name.clone(), self.table_id, true);
+        if ctx.retrying {
+            info!(
+                "Remapping region routes addresses for retrying drop regions for table_id: {}",
+                self.table_id
+            );
+            let storage = ddl_ctx
+                .table_metadata_manager
+                .table_route_manager()
+                .table_route_storage();
+            // The peer addresses may change during retries,
+            // so we always remap the region routes.
+            storage
+                .remap_region_routes(&mut self.physical_region_routes)
+                .await?;
+        }
         // Deletes metadata for table permanently.
         let table_route_value = TableRouteValue::new(
             self.table_id,
@@ -157,7 +172,10 @@ mod tests {
     use crate::ddl::drop_database::cursor::DropDatabaseCursor;
     use crate::ddl::drop_database::executor::DropDatabaseExecutor;
     use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
-    use crate::ddl::test_util::{create_logical_table, create_physical_table};
+    use crate::ddl::test_util::datanode_handler::DatanodeWatcher;
+    use crate::ddl::test_util::{
+        create_logical_table, create_physical_table, put_datanode_address,
+    };
     use crate::error::{self, Error, Result};
     use crate::key::datanode_table::DatanodeTableKey;
     use crate::peer::Peer;
@@ -206,6 +224,7 @@ mod tests {
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
                 tables: None,
+                retrying: false,
             };
             let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
             assert!(!status.need_persist());
@@ -218,6 +237,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let mut state = DropDatabaseExecutor::new(
             physical_table_id,
@@ -258,6 +278,7 @@ mod tests {
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
                 tables: None,
+                retrying: false,
             };
             let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
             assert!(!status.need_persist());
@@ -270,6 +291,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let mut state = DropDatabaseExecutor::new(
             logical_table_id,
@@ -360,6 +382,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let err = state.next(&ddl_context, &mut ctx).await.unwrap_err();
         assert!(err.is_retry_later());
@@ -389,6 +412,7 @@ mod tests {
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
                 tables: None,
+                retrying: false,
             };
             state.recover(&ddl_context).unwrap();
             assert_eq!(state.dropping_regions.len(), 1);
@@ -397,5 +421,46 @@ mod tests {
             let cursor = state.as_any().downcast_ref::<DropDatabaseCursor>().unwrap();
             assert_eq!(cursor.target, DropTableTarget::Physical);
         }
+    }
+
+    #[tokio::test]
+    async fn test_next_remaps_addresses_when_retrying() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
+        let ddl_context = new_ddl_context(node_manager);
+        let physical_table_id = create_physical_table(&ddl_context, "phy").await;
+        let (_, table_route) = ddl_context
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(physical_table_id)
+            .await
+            .unwrap();
+
+        let mut state = DropDatabaseExecutor::new(
+            physical_table_id,
+            physical_table_id,
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy"),
+            table_route.region_routes,
+            DropTableTarget::Physical,
+        );
+        state.physical_region_routes[0]
+            .leader_peer
+            .as_mut()
+            .unwrap()
+            .addr = "old-addr".to_string();
+        let mut ctx = DropDatabaseContext {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            drop_if_exists: false,
+            tables: None,
+            retrying: true,
+        };
+
+        put_datanode_address(&ddl_context, 0, "new-addr").await;
+
+        state.next(&ddl_context, &mut ctx).await.unwrap();
+
+        let (peer, _) = rx.try_recv().unwrap();
+        assert_eq!(peer.addr, "new-addr");
     }
 }
