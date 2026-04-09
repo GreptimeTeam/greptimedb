@@ -810,7 +810,66 @@ pub(super) fn parameters_to_scalar_values(
                     ScalarValue::Null
                 }
             }
-            &Type::VARCHAR_ARRAY => {
+            &Type::NUMERIC_ARRAY => {
+                let data = portal.parameter::<Vec<Option<Decimal>>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    if let Some(ConcreteDataType::List(list_type)) = &server_type {
+                        match list_type.item_type() {
+                            ConcreteDataType::UInt64(_) => {
+                                let values = data
+                                    .into_iter()
+                                    .map(|n| ScalarValue::UInt64(n.and_then(|n| n.to_u64())))
+                                    .collect::<Vec<_>>();
+                                ScalarValue::List(ScalarValue::new_list(
+                                    &values,
+                                    &ArrowDataType::UInt64,
+                                    true,
+                                ))
+                            }
+                            ConcreteDataType::Decimal128(dt) => {
+                                let values = data
+                                    .into_iter()
+                                    .map(|n| {
+                                        ScalarValue::Decimal128(
+                                            n.map(|n| n.mantissa()),
+                                            dt.precision(),
+                                            dt.scale(),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                ScalarValue::List(ScalarValue::new_list(
+                                    &values,
+                                    &ArrowDataType::Decimal128(dt.precision(), dt.scale()),
+                                    true,
+                                ))
+                            }
+                            _ => {
+                                return Err(invalid_parameter_error(
+                                    "invalid_parameter_type",
+                                    Some(format!(
+                                        "Expected: {}, found: {}",
+                                        list_type.item_type(),
+                                        client_type
+                                    )),
+                                ));
+                            }
+                        }
+                    } else {
+                        let values = data
+                            .into_iter()
+                            .map(|n| ScalarValue::UInt64(n.and_then(|n| n.to_u64())))
+                            .collect::<Vec<_>>();
+                        ScalarValue::List(ScalarValue::new_list(
+                            &values,
+                            &ArrowDataType::UInt64,
+                            true,
+                        ))
+                    }
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::VARCHAR_ARRAY | &Type::TEXT_ARRAY | &Type::CHAR_ARRAY => {
                 let data = portal.parameter::<Vec<Option<String>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
