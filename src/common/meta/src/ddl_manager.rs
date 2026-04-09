@@ -45,7 +45,7 @@ use crate::ddl::drop_view::DropViewProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{DdlContext, utils};
 use crate::error::{
-    CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu, ProcedureOutputSnafu,
+    self, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu, ProcedureOutputSnafu,
     RegisterProcedureLoaderSnafu, RegisterRepartitionProcedureLoaderSnafu, Result,
     SubmitProcedureSnafu, TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
     UnexpectedLogicalRouteTableSnafu, WaitProcedureSnafu,
@@ -658,6 +658,16 @@ async fn handle_truncate_table_task(
         .with_context(|| TableInfoNotFoundSnafu {
             table: table_ref.to_string(),
         })?;
+    let physical_table_id = table_metadata_manager
+        .table_route_manager()
+        .get_physical_table_id(table_id)
+        .await?;
+    ensure!(
+        physical_table_id == table_id,
+        error::UnexpectedSnafu {
+            err_msg: "Truncate table is only supported for physical tables."
+        }
+    );
 
     let (id, _) = ddl_manager
         .submit_truncate_table_task(truncate_table_task, table_info_value)
