@@ -146,7 +146,6 @@ pub const SERVICE_NAME_COLUMN: &str = "service_name";
 pub const PARENT_SPAN_ID_COLUMN: &str = "parent_span_id";
 pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
 pub const TRACE_TABLE_NAME_SESSION_KEY: &str = "trace_table_name";
-pub const TRACE_TABLE_PARTITIONS_SESSION_KEY: &str = "trace_table_partitions";
 // ---- End of special table and fields ----
 
 /// Generate the trace services table name from the trace table name by adding `_services` suffix.

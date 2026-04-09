@@ -29,8 +29,8 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
-    TRACE_TABLE_NAME_SESSION_KEY, TRACE_TABLE_PARTITIONS_SESSION_KEY, default_engine,
-    trace_operations_table_name, trace_services_table_name,
+    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_operations_table_name,
+    trace_services_table_name,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -62,7 +62,7 @@ use table::TableRef;
 use table::metadata::TableInfo;
 use table::requests::{
     AUTO_CREATE_TABLE_KEY, InsertRequest as TableInsertRequest, TABLE_DATA_MODEL,
-    TABLE_DATA_MODEL_TRACE_V1, VALID_TABLE_OPTION_KEYS,
+    TABLE_DATA_MODEL_TRACE_V1, TRACE_TABLE_PARTITIONS_HINT_KEY, VALID_TABLE_OPTION_KEYS,
 };
 use table::table_reference::TableReference;
 
@@ -624,7 +624,7 @@ impl Inserter {
                     .unwrap_or(TRACE_TABLE_NAME);
 
                 let trace_table_partitions = ctx
-                    .extension(TRACE_TABLE_PARTITIONS_SESSION_KEY)
+                    .extension(TRACE_TABLE_PARTITIONS_HINT_KEY)
                     .and_then(|v| v.parse::<u32>().ok());
 
                 // note that auto create table shouldn't be ttl instant table
