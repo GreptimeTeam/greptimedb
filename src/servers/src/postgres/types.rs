@@ -505,30 +505,24 @@ pub(super) fn parameters_to_scalar_values(
             }
             &Type::NUMERIC => {
                 let data = portal.parameter::<Decimal>(idx, &client_type)?;
-                if let Some(server_type) = &server_type {
-                    match server_type {
-                        ConcreteDataType::UInt64(_) => {
-                            ScalarValue::UInt64(data.and_then(|n| n.to_u64()))
-                        }
-                        ConcreteDataType::Decimal128(dt) => ScalarValue::Decimal128(
-                            data.map(|n| n.mantissa()),
-                            dt.precision(),
-                            dt.scale(),
-                        ),
-                        ConcreteDataType::Timestamp(unit) => to_timestamp_scalar_value(
-                            data.and_then(|n| n.to_i64()),
-                            unit,
-                            server_type,
-                        )?,
-                        _ => {
-                            return Err(invalid_parameter_error(
-                                "invalid_parameter_type",
-                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
-                            ));
-                        }
+                match &server_type {
+                    Some(ConcreteDataType::Decimal128(dt)) => ScalarValue::Decimal128(
+                        data.map(|n| n.mantissa()),
+                        dt.precision(),
+                        dt.scale(),
+                    ),
+                    Some(st @ ConcreteDataType::Timestamp(unit)) => {
+                        to_timestamp_scalar_value(data.and_then(|n| n.to_i64()), unit, st)?
                     }
-                } else {
-                    ScalarValue::UInt64(data.and_then(|n| n.to_u64()))
+                    Some(ConcreteDataType::UInt64(_)) | None => {
+                        ScalarValue::UInt64(data.and_then(|n| n.to_u64()))
+                    }
+                    Some(st) => {
+                        return Err(invalid_parameter_error(
+                            "invalid_parameter_type",
+                            Some(format!("Expected: {}, found: {}", st, client_type)),
+                        ));
+                    }
                 }
             }
             &Type::FLOAT4 => {
@@ -813,48 +807,7 @@ pub(super) fn parameters_to_scalar_values(
             &Type::NUMERIC_ARRAY => {
                 let data = portal.parameter::<Vec<Option<Decimal>>>(idx, &client_type)?;
                 if let Some(data) = data {
-                    if let Some(ConcreteDataType::List(list_type)) = &server_type {
-                        match list_type.item_type() {
-                            ConcreteDataType::UInt64(_) => {
-                                let values = data
-                                    .into_iter()
-                                    .map(|n| ScalarValue::UInt64(n.and_then(|n| n.to_u64())))
-                                    .collect::<Vec<_>>();
-                                ScalarValue::List(ScalarValue::new_list(
-                                    &values,
-                                    &ArrowDataType::UInt64,
-                                    true,
-                                ))
-                            }
-                            ConcreteDataType::Decimal128(dt) => {
-                                let values = data
-                                    .into_iter()
-                                    .map(|n| {
-                                        ScalarValue::Decimal128(
-                                            n.map(|n| n.mantissa()),
-                                            dt.precision(),
-                                            dt.scale(),
-                                        )
-                                    })
-                                    .collect::<Vec<_>>();
-                                ScalarValue::List(ScalarValue::new_list(
-                                    &values,
-                                    &ArrowDataType::Decimal128(dt.precision(), dt.scale()),
-                                    true,
-                                ))
-                            }
-                            _ => {
-                                return Err(invalid_parameter_error(
-                                    "invalid_parameter_type",
-                                    Some(format!(
-                                        "Expected: {}, found: {}",
-                                        list_type.item_type(),
-                                        client_type
-                                    )),
-                                ));
-                            }
-                        }
-                    } else {
+                    let build_u64_list = |data: Vec<Option<Decimal>>| {
                         let values = data
                             .into_iter()
                             .map(|n| ScalarValue::UInt64(n.and_then(|n| n.to_u64())))
@@ -864,6 +817,54 @@ pub(super) fn parameters_to_scalar_values(
                             &ArrowDataType::UInt64,
                             true,
                         ))
+                    };
+                    if let Some(server_type) = &server_type {
+                        match server_type {
+                            ConcreteDataType::List(list_type) => match list_type.item_type() {
+                                ConcreteDataType::UInt64(_) => build_u64_list(data),
+                                ConcreteDataType::Decimal128(dt) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|n| {
+                                            ScalarValue::Decimal128(
+                                                n.map(|n| n.mantissa()),
+                                                dt.precision(),
+                                                dt.scale(),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Decimal128(dt.precision(), dt.scale()),
+                                        true,
+                                    ))
+                                }
+                                _ => {
+                                    // the server type is not a list of decimal or uint64
+                                    return Err(invalid_parameter_error(
+                                        "invalid_parameter_type",
+                                        Some(format!(
+                                            "Expected: {}, found: {}",
+                                            list_type.item_type(),
+                                            client_type
+                                        )),
+                                    ));
+                                }
+                            },
+                            _ => {
+                                // the server type is not a list
+                                return Err(invalid_parameter_error(
+                                    "invalid_parameter_type",
+                                    Some(format!(
+                                        "Expected: {}, found: {}",
+                                        server_type, client_type
+                                    )),
+                                ));
+                            }
+                        }
+                    } else {
+                        // server type not provided
+                        build_u64_list(data)
                     }
                 } else {
                     ScalarValue::Null
