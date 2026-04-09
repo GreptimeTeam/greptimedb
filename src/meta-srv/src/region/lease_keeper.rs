@@ -63,7 +63,9 @@ fn renew_region_lease_via_region_route(
     if let Some(leader) = &region_route.leader_peer
         && leader.id == datanode_id
     {
-        let region_role = if region_route.is_leader_downgrading() {
+        let region_role = if region_route.is_leader_staging() {
+            RegionRole::StagingLeader
+        } else if region_route.is_leader_downgrading() {
             RegionRole::DowngradingLeader
         } else {
             RegionRole::Leader
@@ -312,6 +314,12 @@ mod tests {
         assert_eq!(
             renew_region_lease_via_region_route(&region_route, leader_peer_id, region_id),
             Some((region_id, RegionRole::DowngradingLeader))
+        );
+
+        region_route.leader_state = Some(LeaderState::Staging);
+        assert_eq!(
+            renew_region_lease_via_region_route(&region_route, leader_peer_id, region_id),
+            Some((region_id, RegionRole::StagingLeader))
         );
     }
 
@@ -580,5 +588,119 @@ mod tests {
                 )])
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_renew_region_leases_reported_staging_expected_leader() {
+        let table_id = 1024;
+        let table_info: TableInfo = new_test_table_info(table_id);
+
+        let region_id = RegionId::new(table_id, 1);
+        let leader_peer_id = 1024;
+        let region_route = RegionRouteBuilder::default()
+            .region(Region::new_test(region_id))
+            .leader_peer(Peer::empty(leader_peer_id))
+            .build()
+            .unwrap();
+
+        let keeper = new_test_keeper();
+        let table_metadata_manager = keeper.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(vec![region_route]),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+
+        let RenewRegionLeasesResponse {
+            non_exists,
+            renewed,
+        } = keeper
+            .renew_region_leases(leader_peer_id, &[(region_id, RegionRole::StagingLeader)])
+            .await
+            .unwrap();
+
+        assert!(non_exists.is_empty());
+        assert_eq!(
+            renewed,
+            HashMap::from([(
+                region_id,
+                RegionLeaseInfo::from((region_id, RegionRole::Leader))
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_renew_region_leases_reported_staging_expected_staging() {
+        let table_id = 1024;
+        let table_info: TableInfo = new_test_table_info(table_id);
+
+        let region_id = RegionId::new(table_id, 1);
+        let leader_peer_id = 1024;
+        let region_route = RegionRouteBuilder::default()
+            .region(Region::new_test(region_id))
+            .leader_peer(Peer::empty(leader_peer_id))
+            .leader_state(LeaderState::Staging)
+            .build()
+            .unwrap();
+
+        let keeper = new_test_keeper();
+        let table_metadata_manager = keeper.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(vec![region_route]),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+
+        let RenewRegionLeasesResponse {
+            non_exists,
+            renewed,
+        } = keeper
+            .renew_region_leases(leader_peer_id, &[(region_id, RegionRole::StagingLeader)])
+            .await
+            .unwrap();
+
+        assert!(non_exists.is_empty());
+        assert_eq!(
+            renewed,
+            HashMap::from([(
+                region_id,
+                RegionLeaseInfo::from((region_id, RegionRole::StagingLeader))
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_renew_region_leases_operating_region_preserves_reported_role() {
+        let keeper = new_test_keeper();
+        let datanode_id = 1024;
+        let region_id = RegionId::new(2048, 1);
+
+        let _guard = keeper
+            .memory_region_keeper
+            .register(datanode_id, region_id)
+            .unwrap();
+
+        let RenewRegionLeasesResponse {
+            non_exists,
+            renewed,
+        } = keeper
+            .renew_region_leases(datanode_id, &[(region_id, RegionRole::StagingLeader)])
+            .await
+            .unwrap();
+
+        assert!(non_exists.is_empty());
+        assert_eq!(
+            renewed,
+            HashMap::from([(
+                region_id,
+                RegionLeaseInfo::operating(region_id, RegionRole::StagingLeader)
+            )])
+        );
     }
 }

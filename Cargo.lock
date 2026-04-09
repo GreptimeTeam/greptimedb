@@ -5681,7 +5681,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=092ba1d01e2da676dca66cca7eebb55009da8ef8#092ba1d01e2da676dca66cca7eebb55009da8ef8"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=285a2ff2ebee12b1994c84a3c58a8d8d622a9b5e#285a2ff2ebee12b1994c84a3c58a8d8d622a9b5e"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -5691,7 +5691,6 @@ dependencies = [
  "strum_macros 0.25.3",
  "tonic 0.14.2",
  "tonic-prost",
- "tonic-prost-build",
 ]
 
 [[package]]

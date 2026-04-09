@@ -129,7 +129,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
         let leader_regions = stat
             .region_stats
             .iter()
-            .filter(|s| s.role == RegionRole::Leader)
+            .filter(|s| matches!(s.role, RegionRole::Leader | RegionRole::StagingLeader))
             .count();
         let follower_regions = stat.region_stats.len() - leader_regions;
 

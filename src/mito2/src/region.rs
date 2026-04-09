@@ -1121,21 +1121,20 @@ impl ManifestContext {
                 }
             }
             RegionRole::Leader => {
-                if self.current_state() == RegionRoleState::Leader(RegionLeaderState::Staging) {
-                    if self
+                if self.current_state() == RegionRoleState::Leader(RegionLeaderState::Staging)
+                    && self
                         .exit_staging(
                             region_id,
                             RegionRoleState::Leader(RegionLeaderState::Writable),
                         )
                         .is_ok()
-                    {
-                        info!(
-                            "Convert region {} to leader, previous role state: {:?}",
-                            region_id,
-                            RegionRoleState::Leader(RegionLeaderState::Staging)
-                        );
-                        return;
-                    }
+                {
+                    info!(
+                        "Convert region {} to leader, previous role state: {:?}",
+                        region_id,
+                        RegionRoleState::Leader(RegionLeaderState::Staging)
+                    );
+                    return;
                 }
                 match self.state.fetch_update(|state| {
                     if matches!(
@@ -1510,8 +1509,8 @@ pub fn parse_partition_expr(partition_expr_str: Option<&str>) -> Result<Option<P
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
-    use std::sync::{Arc, Mutex};
 
     use common_datasource::compression::CompressionType;
     use common_test_util::temp_dir::create_temp_dir;

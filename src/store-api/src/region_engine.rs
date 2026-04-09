@@ -243,8 +243,7 @@ impl From<RegionRole> for PbRegionRole {
         match value {
             RegionRole::Follower => PbRegionRole::Follower,
             RegionRole::Leader => PbRegionRole::Leader,
-            // Phase 1 keeps wire compatibility by flattening staging into Leader.
-            RegionRole::StagingLeader => PbRegionRole::Leader,
+            RegionRole::StagingLeader => PbRegionRole::StagingLeader,
             RegionRole::DowngradingLeader => PbRegionRole::DowngradingLeader,
         }
     }
@@ -254,6 +253,7 @@ impl From<PbRegionRole> for RegionRole {
     fn from(value: PbRegionRole) -> Self {
         match value {
             PbRegionRole::Leader => RegionRole::Leader,
+            PbRegionRole::StagingLeader => RegionRole::StagingLeader,
             PbRegionRole::Follower => RegionRole::Follower,
             PbRegionRole::DowngradingLeader => RegionRole::DowngradingLeader,
         }
