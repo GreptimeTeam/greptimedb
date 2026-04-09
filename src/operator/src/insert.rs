@@ -29,8 +29,8 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
-    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_operations_table_name,
-    trace_services_table_name,
+    TRACE_TABLE_NAME_SESSION_KEY, TRACE_TABLE_PARTITIONS_SESSION_KEY, default_engine,
+    trace_operations_table_name, trace_services_table_name,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -623,6 +623,10 @@ impl Inserter {
                     .extension(TRACE_TABLE_NAME_SESSION_KEY)
                     .unwrap_or(TRACE_TABLE_NAME);
 
+                let trace_table_partitions = ctx
+                    .extension(TRACE_TABLE_PARTITIONS_SESSION_KEY)
+                    .and_then(|v| v.parse::<u32>().ok());
+
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
@@ -647,8 +651,18 @@ impl Inserter {
                     } else {
                         // prebuilt partition rules for uuid data: see the function
                         // for more information
-                        let partitions = partition_rule_for_hexstring(TRACE_ID_COLUMN)
+                        let partitions = if matches!(trace_table_partitions, Some(0) | Some(1)) {
+                            // disable partitions
+                            None
+                        } else {
+                            let p = partition_rule_for_hexstring(
+                                TRACE_ID_COLUMN,
+                                trace_table_partitions,
+                            )
                             .context(CreatePartitionRulesSnafu)?;
+                            Some(p)
+                        };
+
                         // add skip index to
                         // - trace_id: when searching by trace id
                         // - parent_span_id: when searching root span
@@ -681,7 +695,7 @@ impl Inserter {
                         let table = self
                             .create_physical_table(
                                 create_table,
-                                Some(partitions),
+                                partitions,
                                 ctx,
                                 statement_executor,
                             )
