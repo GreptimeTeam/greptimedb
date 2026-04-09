@@ -156,11 +156,6 @@ pub struct MitoRegion {
     pub(crate) topic_latest_entry_id: AtomicU64,
     /// The total bytes written to the region.
     pub(crate) written_bytes: Arc<AtomicU64>,
-    /// Partition info of the region in staging mode.
-    ///
-    /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
-    /// so we need to store the partition info separately.
-    pub(crate) staging_partition_info: Mutex<Option<StagingPartitionInfo>>,
     /// manifest stats
     stats: ManifestStats,
 }
@@ -404,9 +399,8 @@ impl MitoRegion {
     /// You should call this method in the worker loop.
     /// Transitions from Staging to Writable state.
     pub fn exit_staging(&self) -> Result<()> {
-        *self.staging_partition_info.lock().unwrap() = None;
-        self.compare_exchange_state(
-            RegionLeaderState::Staging,
+        self.manifest_ctx.exit_staging(
+            self.region_id,
             RegionRoleState::Leader(RegionLeaderState::Writable),
         )
     }
@@ -830,7 +824,7 @@ impl MitoRegion {
     pub fn maybe_staging_partition_expr_str(&self) -> Option<String> {
         let is_staging = self.is_staging();
         if is_staging {
-            let staging_partition_info = self.staging_partition_info.lock().unwrap();
+            let staging_partition_info = self.manifest_ctx.staging_partition_info();
             if staging_partition_info.is_none() {
                 warn!(
                     "Staging partition expr is none for region {} in staging state",
@@ -848,8 +842,8 @@ impl MitoRegion {
 
     pub fn expected_partition_expr_version(&self) -> u64 {
         if self.is_staging() {
-            let staging_partition_info = self.staging_partition_info.lock().unwrap();
-            staging_partition_info
+            self.manifest_ctx
+                .staging_partition_info()
                 .as_ref()
                 .map(|info| info.partition_rule_version)
                 .unwrap_or_default()
@@ -863,8 +857,8 @@ impl MitoRegion {
         if !self.is_staging() {
             return false;
         }
-        let staging_partition_info = self.staging_partition_info.lock().unwrap();
-        staging_partition_info
+        self.manifest_ctx
+            .staging_partition_info()
             .as_ref()
             .map(|info| {
                 matches!(
@@ -884,6 +878,11 @@ pub(crate) struct ManifestContext {
     /// The state of the region. The region checks the state before updating
     /// manifest.
     state: AtomicCell<RegionRoleState>,
+    /// Partition info of the region in staging mode.
+    ///
+    /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
+    /// so we need to store the partition info separately.
+    staging_partition_info: Mutex<Option<StagingPartitionInfo>>,
 }
 
 impl ManifestContext {
@@ -891,7 +890,44 @@ impl ManifestContext {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
+            staging_partition_info: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn staging_partition_info(&self) -> Option<StagingPartitionInfo> {
+        self.staging_partition_info.lock().unwrap().clone()
+    }
+
+    pub(crate) fn set_staging_partition_info(&self, staging_partition_info: StagingPartitionInfo) {
+        let mut current = self.staging_partition_info.lock().unwrap();
+        debug_assert!(current.is_none());
+        *current = Some(staging_partition_info);
+    }
+
+    fn clear_staging_partition_info(&self) {
+        *self.staging_partition_info.lock().unwrap() = None;
+    }
+
+    pub(crate) fn exit_staging(
+        &self,
+        region_id: RegionId,
+        next_state: RegionRoleState,
+    ) -> Result<()> {
+        self.state
+            .compare_exchange(
+                RegionRoleState::Leader(RegionLeaderState::Staging),
+                next_state,
+            )
+            .map_err(|actual| {
+                RegionStateSnafu {
+                    region_id,
+                    state: actual,
+                    expect: RegionRoleState::Leader(RegionLeaderState::Staging),
+                }
+                .build()
+            })?;
+        self.clear_staging_partition_info();
+        Ok(())
     }
 
     pub(crate) async fn manifest_version(&self) -> ManifestVersion {
@@ -1085,11 +1121,26 @@ impl ManifestContext {
                 }
             }
             RegionRole::Leader => {
+                if self.current_state() == RegionRoleState::Leader(RegionLeaderState::Staging) {
+                    if self
+                        .exit_staging(
+                            region_id,
+                            RegionRoleState::Leader(RegionLeaderState::Writable),
+                        )
+                        .is_ok()
+                    {
+                        info!(
+                            "Convert region {} to leader, previous role state: {:?}",
+                            region_id,
+                            RegionRoleState::Leader(RegionLeaderState::Staging)
+                        );
+                        return;
+                    }
+                }
                 match self.state.fetch_update(|state| {
                     if matches!(
                         state,
                         RegionRoleState::Follower
-                            | RegionRoleState::Leader(RegionLeaderState::Staging)
                             | RegionRoleState::Leader(RegionLeaderState::Downgrading)
                     ) {
                         Some(RegionRoleState::Leader(RegionLeaderState::Writable))
@@ -1533,7 +1584,6 @@ mod tests {
             topic_latest_entry_id: Default::default(),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: ManifestStats::default(),
-            staging_partition_info: Mutex::new(None),
         }
     }
 
@@ -1853,7 +1903,6 @@ mod tests {
             topic_latest_entry_id: Default::default(),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: ManifestStats::default(),
-            staging_partition_info: Mutex::new(None),
         };
 
         // Test initial state

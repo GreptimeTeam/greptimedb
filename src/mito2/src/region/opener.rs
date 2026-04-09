@@ -17,7 +17,7 @@
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use common_telemetry::{debug, error, info, warn};
@@ -349,7 +349,6 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(0),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats,
-            staging_partition_info: Mutex::new(None),
         }))
     }
 
@@ -586,8 +585,6 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats.clone(),
-            // TODO(weny): reload the staging partition info from the manifest.
-            staging_partition_info: Mutex::new(None),
         };
 
         let region = Arc::new(region);
