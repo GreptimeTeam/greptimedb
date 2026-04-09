@@ -307,6 +307,14 @@ impl RegionScanExec {
         self.distribution
     }
 
+    pub fn append_mode(&self) -> bool {
+        self.append_mode
+    }
+
+    pub fn total_rows(&self) -> usize {
+        self.total_rows
+    }
+
     pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {
         let mut scanner = self.scanner.lock().unwrap();
         // set distinguish_partition_range won't fail
