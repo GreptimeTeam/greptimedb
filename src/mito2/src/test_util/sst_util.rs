@@ -36,10 +36,10 @@ use store_api::metric_engine_consts::{
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{FileId, RegionId};
 
-use crate::read::{Batch, FlatSource, Source};
+use crate::read::{Batch, FlatSource};
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
-use crate::test_util::{VecBatchReader, new_batch_builder, new_noop_file_purger};
+use crate::test_util::{new_batch_builder, new_noop_file_purger};
 
 /// Test region id.
 const REGION_ID: RegionId = RegionId::new(0, 0);
@@ -188,12 +188,6 @@ pub fn new_sparse_primary_key(
     let mut buffer = Vec::new();
     codec.encode_value_refs(&values, &mut buffer).unwrap();
     buffer
-}
-
-/// Creates a [Source] from `batches`.
-pub fn new_source(batches: &[Batch]) -> Source {
-    let reader = VecBatchReader::new(batches);
-    Source::Reader(Box::new(reader))
 }
 
 /// Creates a SST file handle with provided file id

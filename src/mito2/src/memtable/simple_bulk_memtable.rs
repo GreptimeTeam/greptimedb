@@ -421,10 +421,6 @@ mod tests {
     use store_api::storage::{RegionId, SequenceNumber, SequenceRange};
 
     use super::*;
-    use crate::read;
-    use crate::read::dedup::DedupReader;
-    use crate::read::merge::MergeReaderBuilder;
-    use crate::read::{BatchReader, Source};
     use crate::region::options::MergeMode;
     use crate::test_util::column_metadata_to_column_schema;
 
@@ -619,81 +615,6 @@ mod tests {
             .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(1, batch.num_rows());
-    }
-
-    #[tokio::test]
-    async fn test_write_dedup() {
-        let memtable = new_test_memtable(true, MergeMode::LastRow);
-        let kvs = build_key_values(
-            &memtable.region_metadata,
-            0,
-            &[(1, 1.0, "a".to_string())],
-            OpType::Put,
-        );
-        let kv = kvs.iter().next().unwrap();
-        memtable.write_one(kv).unwrap();
-        memtable.freeze().unwrap();
-
-        let kvs = build_key_values(
-            &memtable.region_metadata,
-            1,
-            &[(1, 1.0, "a".to_string())],
-            OpType::Delete,
-        );
-        let kv = kvs.iter().next().unwrap();
-        memtable.write_one(kv).unwrap();
-
-        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
-        let mut source = vec![];
-        for r in ranges.ranges.values() {
-            source.push(Source::Iter(r.build_iter().unwrap()));
-        }
-
-        let reader = MergeReaderBuilder::from_sources(source)
-            .build()
-            .await
-            .unwrap();
-
-        let mut reader = DedupReader::new(reader, read::dedup::LastRow::new(false), None);
-        let mut num_rows = 0;
-        while let Some(b) = reader.next_batch().await.unwrap() {
-            num_rows += b.num_rows();
-        }
-        assert_eq!(num_rows, 1);
-    }
-
-    #[tokio::test]
-    async fn test_delete_only() {
-        let memtable = new_test_memtable(true, MergeMode::LastRow);
-        let kvs = build_key_values(
-            &memtable.region_metadata,
-            0,
-            &[(1, 1.0, "a".to_string())],
-            OpType::Delete,
-        );
-        let kv = kvs.iter().next().unwrap();
-        memtable.write_one(kv).unwrap();
-        memtable.freeze().unwrap();
-
-        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
-        let mut source = vec![];
-        for r in ranges.ranges.values() {
-            source.push(Source::Iter(r.build_iter().unwrap()));
-        }
-
-        let reader = MergeReaderBuilder::from_sources(source)
-            .build()
-            .await
-            .unwrap();
-
-        let mut reader = DedupReader::new(reader, read::dedup::LastRow::new(false), None);
-        let mut num_rows = 0;
-        while let Some(b) = reader.next_batch().await.unwrap() {
-            num_rows += b.num_rows();
-            assert_eq!(b.num_rows(), 1);
-            assert_eq!(b.op_types().get_data(0).unwrap(), OpType::Delete as u8);
-        }
-        assert_eq!(num_rows, 1);
     }
 
     #[tokio::test]
@@ -902,8 +823,8 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test]
-    async fn test_write_read_large_string() {
+    #[test]
+    fn test_write_read_large_string() {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
         builder
             .push_column_metadata(ColumnMetadata {
@@ -948,25 +869,12 @@ mod tests {
             .unwrap();
         let MemtableRanges { ranges, .. } =
             memtable.ranges(None, RangesOptions::default()).unwrap();
-        let mut source = if ranges.len() == 1 {
-            let only_range = ranges.into_values().next().unwrap();
-            Source::Iter(only_range.build_iter().unwrap())
-        } else {
-            let sources = ranges
-                .into_values()
-                .map(|r| r.build_iter().map(Source::Iter))
-                .collect::<error::Result<Vec<_>>>()
-                .unwrap();
-            let merge_reader = MergeReaderBuilder::from_sources(sources)
-                .build()
-                .await
-                .unwrap();
-            Source::Reader(Box::new(merge_reader))
-        };
-
         let mut rows = 0;
-        while let Some(b) = source.next_batch().await.unwrap() {
-            rows += b.num_rows();
+        for range in ranges.into_values() {
+            let iter = range.build_iter().unwrap();
+            for batch in iter {
+                rows += batch.unwrap().num_rows();
+            }
         }
         assert_eq!(rows, 2);
     }
