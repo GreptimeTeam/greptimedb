@@ -456,16 +456,13 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                 .do_exec_plan(sql_plan.statement.clone(), plan, query_ctx.clone())
                 .await
         } else {
-            // manually replace variables in prepared statement when no
-            // logical_plan is generated. This happens when logical plan is not
-            // supported for certain statements.
-            let mut sql = sql_plan.query.clone();
-            for i in 0..portal.parameter_len() {
-                sql = sql.replace(&format!("${}", i + 1), &parameter_to_string(portal, i)?);
-            }
-
+            // We won't replace params from statement manually any more.
+            // Newer version of datafusion can generate plan for SELECT/INSERT/UPDATE/DELETE.
+            // Only CREATE TABLE and others minor statements cannot generate sql plan,
+            // in this case, we assume these statements will not carry parameters
+            // and execute them directly.
             self.query_handler
-                .do_query(&sql, query_ctx.clone())
+                .do_query(&sql_plan.query, query_ctx.clone())
                 .await
                 .remove(0)
         };
