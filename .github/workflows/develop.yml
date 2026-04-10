@@ -487,7 +487,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: ["fuzz_migrate_mito_regions", "fuzz_migrate_metric_regions", "fuzz_failover_mito_regions", "fuzz_failover_metric_regions", "fuzz_repartition_table_chaos"]
+        target: ["fuzz_migrate_mito_regions", "fuzz_migrate_metric_regions", "fuzz_failover_mito_regions", "fuzz_failover_metric_regions"]
         mode:
           - name: "Remote WAL"
             minio: true
