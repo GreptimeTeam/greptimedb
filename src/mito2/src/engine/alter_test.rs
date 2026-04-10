@@ -19,10 +19,11 @@ use std::time::Duration;
 
 use api::v1::helper::{row, tag_column_schema};
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, Row, Rows, SemanticType};
+use api::v1::{ColumnDataType, Row, Rows, SemanticType, Value};
 use common_error::ext::ErrorExt;
 use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
 use common_recordbatch::RecordBatches;
+use datafusion_expr::col;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions};
 use store_api::metadata::ColumnMetadata;
@@ -41,8 +42,8 @@ use crate::error;
 use crate::sst::FormatType;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, put_rows,
-    rows_schema,
+    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, column_metadata_to_column_schema,
+    flush_region, put_rows, rows_schema,
 };
 
 async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
@@ -100,6 +101,54 @@ fn alter_column_fulltext_options() -> RegionAlterRequest {
             }],
         },
     }
+}
+
+fn add_nullable_field1() -> RegionAlterRequest {
+    RegionAlterRequest {
+        kind: AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "field_1",
+                        ConcreteDataType::float64_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Field,
+                    column_id: 3,
+                },
+                location: None,
+            }],
+        },
+    }
+}
+
+fn build_row_with_added_field(
+    metadata: &[ColumnMetadata],
+    tag_0: &str,
+    field_0: f64,
+    field_1: Option<f64>,
+    ts_millis: i64,
+) -> Row {
+    let values = metadata
+        .iter()
+        .map(|column| match column.column_schema.name.as_str() {
+            "tag_0" => Value {
+                value_data: Some(ValueData::StringValue(tag_0.to_string())),
+            },
+            "field_0" => Value {
+                value_data: Some(ValueData::F64Value(field_0)),
+            },
+            "field_1" => Value {
+                value_data: field_1.map(ValueData::F64Value),
+            },
+            "ts" => Value {
+                value_data: Some(ValueData::TimestampMillisecondValue(ts_millis)),
+            },
+            name => panic!("unexpected column {name}"),
+        })
+        .collect();
+
+    Row { values }
 }
 
 fn check_region_version(
@@ -234,6 +283,95 @@ async fn test_alter_region_with_format(flat_format: bool) {
         .unwrap();
     scan_check_after_alter(&engine, region_id, expected).await;
     check_region_version(&engine, region_id, 1, 3, 1, 3);
+}
+
+#[tokio::test]
+async fn test_filter_is_null_after_alter_add_field() {
+    test_filter_is_null_after_alter_add_field_with_format(false).await;
+    test_filter_is_null_after_alter_add_field_with_format(true).await;
+}
+
+async fn test_filter_is_null_after_alter_add_field_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: vec![build_rows_for_key("a", 0, 1, 1)
+                .into_iter()
+                .next()
+                .unwrap()],
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    engine
+        .handle_request(region_id, RegionRequest::Alter(add_nullable_field1()))
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let metadata = region.metadata().column_metadatas.clone();
+    let schema = metadata
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: vec![build_row_with_added_field(&metadata, "a", 1.0, Some(10.0), 0)],
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                filters: vec![col("field_1").is_null()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
+    assert_eq!(0, total_rows);
 }
 
 /// Build rows with schema (string, f64, ts_millis, string).
