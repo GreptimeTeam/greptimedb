@@ -1075,27 +1075,36 @@ impl ManifestContext {
     /// Sets the [`RegionRole`].
     ///
     /// ```text
-    ///     +------------------------------------------+
-    ///     |                      +-----------------+ |
-    ///     |                      |                 | |
-    /// +---+------+       +-------+-----+        +--v-v---+
-    /// | Follower |       | Downgrading |        | Leader |
-    /// +---^-^----+       +-----+-^-----+        +--+-+---+
-    ///     | |                  | |                 | |
-    ///     | +------------------+ +-----------------+ |
-    ///     +------------------------------------------+
-    ///
-    /// Transition:
-    /// - Follower -> Leader
-    /// - Downgrading Leader -> Leader
-    /// - Staging Leader -> Leader
-    /// - Leader -> Follower
-    /// - Staging Leader -> Follower
-    /// - Downgrading Leader -> Follower
-    /// - Leader -> Downgrading Leader
-    /// - Staging Leader -> Downgrading Leader
+    ///                  +---------------------+
+    ///                  |   Staging Leader    |
+    ///                  +----------+----------+
+    ///                             |
+    ///                             v
+    ///     +----------+     +------+-------+     +-------------+
+    ///     | Follower | <-> |    Leader    | <-> | Downgrading |
+    ///     +-----+----+     +------+-------+     +------+------+
+    ///           ^                 ^                    |
+    ///           +-----------------+--------------------+
     ///
     /// ```
+    ///
+    /// # State Transitions
+    ///
+    /// From `Follower`:
+    /// - `Follower -> Leader`
+    ///
+    /// From `Leader`:
+    /// - `Leader -> Follower`
+    /// - `Leader -> Downgrading Leader`
+    ///
+    /// From `Staging Leader`:
+    /// - `Staging Leader -> Leader`
+    /// - `Staging Leader -> Follower`
+    /// - `Staging Leader -> Downgrading Leader`
+    ///
+    /// From `Downgrading Leader`:
+    /// - `Downgrading Leader -> Leader`
+    /// - `Downgrading Leader -> Follower`
     pub(crate) fn set_role(&self, next_role: RegionRole, region_id: RegionId) {
         match next_role {
             RegionRole::Follower => {
