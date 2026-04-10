@@ -355,7 +355,7 @@ mod tests {
                     };
                     let result = f.invoke_async_with_args(func_args).await.unwrap_err();
                     assert_eq!(
-                        "Execution error: Handler error: Missing TableMutationHandler, not expected",
+                        "Execution error: Missing TableMutationHandler, not expected",
                         result.to_string()
                     );
                 }

@@ -173,7 +173,7 @@ mod tests {
         };
         let result = f.invoke_async_with_args(func_args).await.unwrap_err();
         assert_eq!(
-            "Execution error: Handler error: Missing ProcedureServiceHandler, not expected",
+            "Execution error: Missing ProcedureServiceHandler, not expected",
             result.to_string()
         );
     }
