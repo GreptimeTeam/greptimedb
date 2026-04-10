@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::hint::black_box;
 
 use bytes::Bytes;
@@ -82,5 +83,74 @@ fn encode_sparse(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, encode_sparse);
+/// Encodes a primary key with the given number of tags.
+fn encode_pk(num_tags: u32) -> (SparsePrimaryKeyCodec, Vec<u8>) {
+    // Use schemaless() so all columns (including reserved ones) are recognized during parsing.
+    let codec = SparsePrimaryKeyCodec::schemaless();
+    let dummy_table_id = 1024u32;
+    let dummy_tsid = 42u64;
+
+    let tags: Vec<_> = (0..num_tags)
+        .map(|idx| {
+            let tag_value = idx.to_string().repeat(10);
+            (idx, Bytes::copy_from_slice(tag_value.as_bytes()))
+        })
+        .collect();
+
+    let mut buffer = Vec::new();
+    codec
+        .encode_internal(dummy_table_id, dummy_tsid, &mut buffer)
+        .unwrap();
+    codec
+        .encode_raw_tag_value(tags.iter().map(|(c, b)| (*c, &b[..])), &mut buffer)
+        .unwrap();
+
+    (codec, buffer)
+}
+
+fn bench_has_column(c: &mut Criterion) {
+    for num_tags in [5, 10, 50, 100] {
+        let (codec, pk) = encode_pk(num_tags);
+        let mut group = c.benchmark_group(format!("has_column/{num_tags}_tags"));
+
+        group.bench_function("table_id", |b| {
+            b.iter(|| {
+                let mut offsets_map = HashMap::new();
+                black_box(codec.has_column(&pk, &mut offsets_map, RESERVED_COLUMN_ID_TABLE_ID));
+            });
+        });
+
+        group.bench_function("tsid", |b| {
+            b.iter(|| {
+                let mut offsets_map = HashMap::new();
+                black_box(codec.has_column(&pk, &mut offsets_map, RESERVED_COLUMN_ID_TSID));
+            });
+        });
+
+        group.bench_function("first_tag", |b| {
+            b.iter(|| {
+                let mut offsets_map = HashMap::new();
+                black_box(codec.has_column(&pk, &mut offsets_map, 0));
+            });
+        });
+
+        group.bench_function("middle_tag", |b| {
+            b.iter(|| {
+                let mut offsets_map = HashMap::new();
+                black_box(codec.has_column(&pk, &mut offsets_map, num_tags / 2));
+            });
+        });
+
+        group.bench_function("last_tag", |b| {
+            b.iter(|| {
+                let mut offsets_map = HashMap::new();
+                black_box(codec.has_column(&pk, &mut offsets_map, num_tags - 1));
+            });
+        });
+
+        group.finish();
+    }
+}
+
+criterion_group!(benches, encode_sparse, bench_has_column);
 criterion_main!(benches);
