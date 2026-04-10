@@ -200,7 +200,7 @@ impl CompactionScheduler {
             max_parallelism,
         );
 
-        match self
+        let result = match self
             .schedule_compaction_request(request, compact_options)
             .await
         {
@@ -210,12 +210,15 @@ impl CompactionScheduler {
                 // DDL/compaction state even though no compaction is actually running.
                 status.active_compaction = Some(active_compaction);
                 self.region_status.insert(region_id, status);
-                self.listener.on_compaction_scheduled(region_id);
+
                 Ok(())
             }
             Ok(None) => Ok(()),
             Err(e) => Err(e),
-        }
+        };
+
+        self.listener.on_compaction_scheduled(region_id);
+        result
     }
 
     // Handle pending manual compaction request for the region.
