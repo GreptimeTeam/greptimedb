@@ -273,7 +273,7 @@ spec:
       - default
       labelSelectors:
         app: datanode
-  direction: Both
+  direction: both
   mode: one
   selector:
     namespaces:
