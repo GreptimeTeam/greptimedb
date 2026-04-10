@@ -33,7 +33,7 @@ use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{Schema, SchemaRef};
-use datatypes::types::{IntervalType, TimestampType, jsonb_to_string};
+use datatypes::types::{Decimal128Type, IntervalType, TimestampType, jsonb_to_string};
 use datatypes::value::StructValue;
 use futures::Stream;
 use pg_interval::Interval as PgInterval;
@@ -352,6 +352,17 @@ where
     }
 }
 
+fn to_decimal_scalar_value(data: Option<Decimal>, ctype: &Decimal128Type) -> ScalarValue {
+    if let Some(data) = data {
+        let mut value = data;
+        value.rescale(ctype.scale() as u32);
+
+        ScalarValue::Decimal128(Some(value.mantissa()), ctype.precision(), ctype.scale())
+    } else {
+        ScalarValue::Decimal128(None, ctype.precision(), ctype.scale())
+    }
+}
+
 pub(super) fn parameters_to_scalar_values(
     plan: &LogicalPlan,
     portal: &Portal<PgSqlPlan>,
@@ -506,11 +517,7 @@ pub(super) fn parameters_to_scalar_values(
             &Type::NUMERIC => {
                 let data = portal.parameter::<Decimal>(idx, &client_type)?;
                 match &server_type {
-                    Some(ConcreteDataType::Decimal128(dt)) => ScalarValue::Decimal128(
-                        data.map(|n| n.mantissa()),
-                        dt.precision(),
-                        dt.scale(),
-                    ),
+                    Some(ConcreteDataType::Decimal128(dt)) => to_decimal_scalar_value(data, dt),
                     Some(st @ ConcreteDataType::Timestamp(unit)) => {
                         to_timestamp_scalar_value(data.and_then(|n| n.to_i64()), unit, st)?
                     }
@@ -825,13 +832,7 @@ pub(super) fn parameters_to_scalar_values(
                                 ConcreteDataType::Decimal128(dt) => {
                                     let values = data
                                         .into_iter()
-                                        .map(|n| {
-                                            ScalarValue::Decimal128(
-                                                n.map(|n| n.mantissa()),
-                                                dt.precision(),
-                                                dt.scale(),
-                                            )
-                                        })
+                                        .map(|n| to_decimal_scalar_value(n, dt))
                                         .collect::<Vec<_>>();
                                     ScalarValue::List(ScalarValue::new_list(
                                         &values,
@@ -1131,6 +1132,7 @@ pub fn format_options_from_query_ctx(query_ctx: &QueryContextRef) -> Arc<PgForma
 
 #[cfg(test)]
 mod test {
+    use std::str::FromStr;
     use std::sync::Arc;
 
     use arrow::array::{
@@ -1548,5 +1550,27 @@ mod test {
         } else {
             panic!("test_invalid_parameter failed");
         }
+    }
+
+    #[test]
+    fn test_to_decimal_scalar_value() {
+        let dt = Decimal128Type::new(18, 4);
+
+        let d = Decimal::from_str("12345.6789").unwrap();
+        assert_eq!(d.mantissa(), 123456789i128);
+        let scalar = to_decimal_scalar_value(Some(d), &dt);
+        assert_eq!(scalar, ScalarValue::Decimal128(Some(123456789), 18, 4));
+
+        let d = Decimal::from_str("100.5").unwrap();
+        assert_eq!(d.mantissa(), 1005);
+        let scalar = to_decimal_scalar_value(Some(d), &dt);
+        assert_eq!(scalar, ScalarValue::Decimal128(Some(1005000), 18, 4));
+
+        let d = Decimal::from_str("-9876.5432").unwrap();
+        let scalar = to_decimal_scalar_value(Some(d), &dt);
+        assert_eq!(scalar, ScalarValue::Decimal128(Some(-98765432), 18, 4));
+
+        let scalar = to_decimal_scalar_value(None, &dt);
+        assert_eq!(scalar, ScalarValue::Decimal128(None, 18, 4));
     }
 }
