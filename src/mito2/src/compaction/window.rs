@@ -225,7 +225,7 @@ mod tests {
 
         let mut ssts = SstVersion::new();
 
-        ssts.add_files(
+        ssts.add_files_with_cache_manager(
             file_purger_ref,
             files.iter().map(|(file_id, start, end, level)| FileMeta {
                 file_id: *file_id,
@@ -236,6 +236,9 @@ mod tests {
                 level: *level,
                 ..Default::default()
             }),
+            Some(&metadata),
+            None,
+            None,
         );
 
         CompactionVersion {

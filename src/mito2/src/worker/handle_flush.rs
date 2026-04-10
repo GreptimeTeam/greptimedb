@@ -256,10 +256,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region.file_purger.clone(),
             );
         } else {
-            region.version_control.apply_edit(
+            region.version_control.apply_edit_with_cache_manager(
                 Some(request.edit.clone()),
                 &request.memtables_to_remove,
                 region.file_purger.clone(),
+                Some(&self.cache_manager),
+                Some(&request.primary_key_ranges),
             );
         }
 

@@ -204,6 +204,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region.file_purger.clone(),
             new_mutable,
             region_options,
+            Some(&self.cache_manager),
         );
         let version = version_builder.build();
         region.version_control.overwrite_current(Arc::new(version));
@@ -323,10 +324,12 @@ impl<S> RegionWorkerLoop<S> {
             // Only apply the edit if the result is ok and region is not in staging state.
             if edit_result.result.is_ok() {
                 // Applies the edit to the region.
-                region.version_control.apply_edit(
+                region.version_control.apply_edit_with_cache_manager(
                     Some(edit_result.edit),
                     &[],
                     region.file_purger.clone(),
+                    Some(&self.cache_manager),
+                    None,
                 );
             }
             if edit_result.update_region_state {

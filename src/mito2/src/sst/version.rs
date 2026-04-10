@@ -17,11 +17,38 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use common_time::{TimeToLive, Timestamp};
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 
+use crate::cache::CacheManagerRef;
 use crate::sst::file::{FileHandle, FileMeta, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::parquet::metadata::extract_primary_key_range;
+
+fn build_file_handle(
+    file: FileMeta,
+    file_purger: FilePurgerRef,
+    region_metadata: &RegionMetadataRef,
+    cache_manager: Option<&CacheManagerRef>,
+    primary_key_ranges: Option<&HashMap<FileId, (Bytes, Bytes)>>,
+) -> FileHandle {
+    let handle = FileHandle::new(file, file_purger);
+    if let Some(primary_key_range) =
+        primary_key_ranges.and_then(|ranges| ranges.get(&handle.file_id().file_id()).cloned())
+    {
+        handle.set_primary_key_range(primary_key_range);
+    } else if let Some(cache_manager) = cache_manager
+        && let Some(parquet_meta) =
+            cache_manager.get_parquet_meta_data_from_mem_cache(handle.file_id())
+        && let Some(primary_key_range) = extract_primary_key_range(&parquet_meta, region_metadata)
+    {
+        handle.set_primary_key_range(primary_key_range);
+    }
+
+    handle
+}
 
 /// A version of all SSTs in a region.
 #[derive(Debug, Clone)]
@@ -45,19 +72,30 @@ impl SstVersion {
         &self.levels
     }
 
-    /// Add files to the version. If a file with the same `file_id` already exists,
-    /// it will be overwritten with the new file.
-    ///
-    /// # Panics
-    /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
-    pub(crate) fn add_files(
+    pub(crate) fn add_files_with_cache_manager(
         &mut self,
         file_purger: FilePurgerRef,
         files_to_add: impl Iterator<Item = FileMeta>,
+        region_metadata: Option<&RegionMetadataRef>,
+        cache_manager: Option<&CacheManagerRef>,
+        primary_key_ranges: Option<&HashMap<FileId, (Bytes, Bytes)>>,
     ) {
         for file in files_to_add {
             let level = file.level;
             let new_index_version = file.index_version;
+            let build_handle = || {
+                if let Some(region_metadata) = region_metadata {
+                    build_file_handle(
+                        file.clone(),
+                        file_purger.clone(),
+                        region_metadata,
+                        cache_manager,
+                        primary_key_ranges,
+                    )
+                } else {
+                    FileHandle::new(file.clone(), file_purger.clone())
+                }
+            };
             // If the file already exists, then we should only replace the handle when the index is outdated.
             self.levels[level as usize]
                 .files
@@ -75,10 +113,10 @@ impl SstVersion {
                         }
                     } else {
                         // include case like old file have no index or index is outdated
-                        *f = FileHandle::new(file.clone(), file_purger.clone());
+                        *f = build_handle();
                     }
                 })
-                .or_insert_with(|| FileHandle::new(file.clone(), file_purger.clone()));
+                .or_insert_with(build_handle);
         }
     }
 
@@ -246,8 +284,14 @@ mod tests {
 
         let mut version = SstVersion::new();
         // files[1] is added multiple times, and that's ok.
-        version.add_files(purger.clone(), files[..=1].iter().cloned());
-        version.add_files(purger, files[1..].iter().cloned());
+        version.add_files_with_cache_manager(
+            purger.clone(),
+            files[..=1].iter().cloned(),
+            None,
+            None,
+            None,
+        );
+        version.add_files_with_cache_manager(purger, files[1..].iter().cloned(), None, None, None);
 
         let added_files = &version.levels()[0].files;
         assert_eq!(added_files.len(), 3);
