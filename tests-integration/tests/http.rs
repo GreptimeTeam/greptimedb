@@ -52,11 +52,11 @@ use servers::http::header::constants::{
     GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
 };
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
+use servers::http::otlp::GoogleRpcStatus;
 use servers::http::prometheus::{Column, PrometheusJsonResponse, PrometheusResponse};
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
-use servers::http::otlp::GoogleRpcStatus;
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
@@ -5775,7 +5775,9 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     let body = res.bytes().await;
     let status = GoogleRpcStatus::decode(body.as_ref()).unwrap();
     assert!(
-        status.message.contains("Accepted 0 spans, rejected 1 spans"),
+        status
+            .message
+            .contains("Accepted 0 spans, rejected 1 spans"),
         "unexpected error body: {status:?}"
     );
 
