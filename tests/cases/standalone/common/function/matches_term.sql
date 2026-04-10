@@ -47,6 +47,16 @@ SELECT matches_term('café>', 'café') as result;
 -- Expect: true
 SELECT matches_term('русский!', 'русский') as result;
 
+-- Phase 1 mixed Chinese and numeric behavior
+SELECT matches_term('登录手机号18888888888的动态key', '手机号') as result;
+SELECT matches_term('登录手机号18888888888的动态key', '18888888888') as result;
+SELECT matches_term('登录手机号18888888888的动态key', '手机') as result;
+SELECT matches_term('登录手机号18888888888的动态key', '机号') as result;
+SELECT matches_term('登录手机号18888888888的动态key', '机号1888') as result;
+SELECT matches_term('中国农业银行', '农业') as result;
+SELECT matches_term('中国农业银行账号', '行账号') as result;
+SELECT matches_term('错误error日志', 'error') as result;
+
 -- Test complete word matching
 CREATE TABLE logs (
     `id` TIMESTAMP TIME INDEX,
