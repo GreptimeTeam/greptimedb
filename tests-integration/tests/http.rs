@@ -5376,6 +5376,35 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
 
+    // invalid partition count
+    let trace_table_part_abc = "trace_table_part_abc";
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
+            ),
+            (
+                HeaderName::from_static("x-greptime-trace-table-name"),
+                HeaderValue::from_static(trace_table_part_abc),
+            ),
+            (
+                HeaderName::from_static("x-greptime-hints"),
+                HeaderValue::from_static("trace_table_partitions=abc"),
+            ),
+        ],
+        "/v1/otlp/v1/traces",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+
     // write traces data with gzip
     let res = send_req(
         &client,

@@ -623,9 +623,22 @@ impl Inserter {
                     .extension(TRACE_TABLE_NAME_SESSION_KEY)
                     .unwrap_or(TRACE_TABLE_NAME);
 
-                let trace_table_partitions = ctx
-                    .extension(TRACE_TABLE_PARTITIONS_HINT_KEY)
-                    .and_then(|v| v.parse::<u32>().ok());
+                let trace_table_partitions = if let Some(trace_table_partitions) =
+                    ctx.extension(TRACE_TABLE_PARTITIONS_HINT_KEY)
+                {
+                    let p = trace_table_partitions.parse::<u32>().map_err(|_| {
+                        InvalidInsertRequestSnafu {
+                            reason: format!(
+                                "Failed to parse trace_table_partitions: {}",
+                                trace_table_partitions
+                            ),
+                        }
+                        .build()
+                    })?;
+                    Some(p)
+                } else {
+                    None
+                };
 
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
