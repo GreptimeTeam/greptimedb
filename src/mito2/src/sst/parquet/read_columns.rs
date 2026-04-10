@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use parquet::arrow::ProjectionMask;
 use parquet::schema::types::SchemaDescriptor;
 
 /// A nested field access path inside one parquet root column.
@@ -103,8 +104,21 @@ impl ParquetReadColumn {
     }
 }
 
+/// Builds a projection mask from parquet read columns.
+pub fn build_projection_mask(
+    parquet_read_cols: &ParquetReadColumns,
+    parquet_schema_desc: &SchemaDescriptor,
+) -> ProjectionMask {
+    if parquet_read_cols.has_nested() {
+        let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, &parquet_read_cols);
+        ProjectionMask::leaves(parquet_schema_desc, leaf_indices.into_iter())
+    } else {
+        ProjectionMask::roots(parquet_schema_desc, parquet_read_cols.root_indices_iter())
+    }
+}
+
 /// Builds parquet leaf-column indices from parquet read columns.
-pub fn build_parquet_leaves_indices(
+fn build_parquet_leaves_indices(
     parquet_schema_desc: &SchemaDescriptor,
     projection: &ParquetReadColumns,
 ) -> Vec<usize> {
