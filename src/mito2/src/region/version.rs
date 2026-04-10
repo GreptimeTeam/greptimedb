@@ -23,13 +23,16 @@
 //! Reason: data may be flushed/compacted and some data with old sequence may be removed
 //! and became invisible between step 1 and 2, so need to acquire version at first.
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use bytes::Bytes;
 use common_telemetry::info;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::SequenceNumber;
+use store_api::storage::{FileId, SequenceNumber};
 
+use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
@@ -141,11 +144,22 @@ impl VersionControl {
         memtables_to_remove: &[MemtableId],
         purger: FilePurgerRef,
     ) {
+        self.apply_edit_with_cache_manager(edit, memtables_to_remove, purger, None, None);
+    }
+
+    pub(crate) fn apply_edit_with_cache_manager(
+        &self,
+        edit: Option<RegionEdit>,
+        memtables_to_remove: &[MemtableId],
+        purger: FilePurgerRef,
+        cache_manager: Option<&CacheManagerRef>,
+        primary_key_ranges: Option<&HashMap<FileId, (Bytes, Bytes)>>,
+    ) {
         let version = self.current().version;
         let builder = VersionBuilder::from_version(version);
         let committed_sequence = edit.as_ref().and_then(|e| e.committed_sequence);
         let builder = if let Some(edit) = edit {
-            builder.apply_edit(edit, purger)
+            builder.apply_edit_with_cache_manager(edit, purger, cache_manager, primary_key_ranges)
         } else {
             builder
         };
@@ -444,8 +458,13 @@ impl VersionBuilder {
         self
     }
 
-    /// Apply edit to the builder.
-    pub(crate) fn apply_edit(mut self, edit: RegionEdit, file_purger: FilePurgerRef) -> Self {
+    pub(crate) fn apply_edit_with_cache_manager(
+        mut self,
+        edit: RegionEdit,
+        file_purger: FilePurgerRef,
+        cache_manager: Option<&CacheManagerRef>,
+        primary_key_ranges: Option<&HashMap<FileId, (Bytes, Bytes)>>,
+    ) -> Self {
         if let Some(entry_id) = edit.flushed_entry_id {
             self.flushed_entry_id = self.flushed_entry_id.max(entry_id);
         }
@@ -457,7 +476,13 @@ impl VersionBuilder {
         }
         if !edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty() {
             let mut ssts = (*self.ssts).clone();
-            ssts.add_files(file_purger, edit.files_to_add.into_iter());
+            ssts.add_files_with_cache_manager(
+                file_purger,
+                edit.files_to_add.into_iter(),
+                Some(&self.metadata),
+                cache_manager,
+                primary_key_ranges,
+            );
             ssts.remove_files(edit.files_to_remove.into_iter());
             self.ssts = Arc::new(ssts);
         }
@@ -475,14 +500,21 @@ impl VersionBuilder {
         self
     }
 
-    /// Add files to the builder.
-    pub(crate) fn add_files(
+    pub(crate) fn add_files_with_cache_manager(
         mut self,
         file_purger: FilePurgerRef,
         files: impl Iterator<Item = FileMeta>,
+        cache_manager: Option<&CacheManagerRef>,
+        primary_key_ranges: Option<&HashMap<FileId, (Bytes, Bytes)>>,
     ) -> Self {
         let mut ssts = (*self.ssts).clone();
-        ssts.add_files(file_purger, files);
+        ssts.add_files_with_cache_manager(
+            file_purger,
+            files,
+            Some(&self.metadata),
+            cache_manager,
+            primary_key_ranges,
+        );
         self.ssts = Arc::new(ssts);
 
         self

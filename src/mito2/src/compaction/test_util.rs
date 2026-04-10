@@ -14,6 +14,7 @@
 
 use std::num::NonZeroU64;
 
+use bytes::Bytes;
 use common_time::Timestamp;
 use store_api::storage::FileId;
 
@@ -86,5 +87,42 @@ pub fn new_file_handle_with_size_and_sequence(
             partition_expr: None,
         },
         file_purger,
+    )
+}
+
+/// Test util to create file handles with custom size and primary-key range.
+pub fn new_file_handle_with_size_sequence_and_primary_key_range(
+    file_id: FileId,
+    start_ts_millis: i64,
+    end_ts_millis: i64,
+    level: Level,
+    sequence: u64,
+    file_size: u64,
+    primary_key_range: Option<(Bytes, Bytes)>,
+) -> FileHandle {
+    let file_purger = new_noop_file_purger();
+    FileHandle::new_with_primary_key_range(
+        FileMeta {
+            region_id: 0.into(),
+            file_id,
+            time_range: (
+                Timestamp::new_millisecond(start_ts_millis),
+                Timestamp::new_millisecond(end_ts_millis),
+            ),
+            level,
+            file_size,
+            max_row_group_uncompressed_size: file_size,
+            available_indexes: Default::default(),
+            indexes: Default::default(),
+            index_file_size: 0,
+            index_version: 0,
+            num_rows: 0,
+            num_row_groups: 0,
+            num_series: 0,
+            sequence: NonZeroU64::new(sequence),
+            partition_expr: None,
+        },
+        file_purger,
+        primary_key_range,
     )
 }

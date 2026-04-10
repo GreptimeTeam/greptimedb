@@ -23,6 +23,7 @@ use api::helper::{
 };
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
+use bytes::Bytes;
 use common_telemetry::info;
 use datatypes::prelude::DataType;
 use partition::expr::PartitionExpr;
@@ -928,6 +929,8 @@ pub(crate) struct FlushFinished {
     pub(crate) is_staging: bool,
     /// Reason for flush.
     pub(crate) flush_reason: FlushReason,
+    /// Freshly derived PK ranges for new SSTs.
+    pub(crate) primary_key_ranges: HashMap<FileId, (Bytes, Bytes)>,
 }
 
 impl FlushFinished {
@@ -989,6 +992,8 @@ pub(crate) struct CompactionFinished {
     pub(crate) start_time: Instant,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
+    /// Freshly derived PK ranges for new SSTs.
+    pub(crate) primary_key_ranges: HashMap<FileId, (Bytes, Bytes)>,
 }
 
 impl CompactionFinished {

@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::num::NonZero;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::region::compact_request;
+use bytes::Bytes;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
 use common_time::TimeToLive;
@@ -28,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
@@ -54,6 +56,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::WriteOptions;
+use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::version::{SstVersion, SstVersionRef};
 use crate::{error, metrics};
 
@@ -190,7 +193,13 @@ pub async fn open_compaction_region(
 
     let current_version = {
         let mut ssts = SstVersion::new();
-        ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
+        ssts.add_files_with_cache_manager(
+            file_purger.clone(),
+            manifest.files.values().cloned(),
+            Some(&region_metadata),
+            None,
+            None,
+        );
         CompactionVersion {
             metadata: region_metadata.clone(),
             options: req.region_options.clone(),
@@ -258,6 +267,8 @@ pub struct MergeOutput {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
     pub compaction_time_window: Option<i64>,
+    #[serde(skip)]
+    pub primary_key_ranges: HashMap<FileId, (Bytes, Bytes)>,
 }
 
 impl MergeOutput {
@@ -324,7 +335,7 @@ impl SstMerger for DefaultSstMerger {
         compaction_region: CompactionRegion,
         output: CompactionOutput,
         write_opts: WriteOptions,
-    ) -> Result<Vec<FileMeta>> {
+    ) -> Result<(Vec<FileMeta>, HashMap<FileId, (Bytes, Bytes)>)> {
         let region_id = compaction_region.region_id;
         let storage = compaction_region.region_options.storage.clone();
         let index_options = compaction_region
@@ -410,24 +421,34 @@ impl SstMerger for DefaultSstMerger {
             })?,
         };
 
+        let mut primary_key_ranges = HashMap::new();
         let output_files = sst_infos
             .into_iter()
-            .map(|sst_info| FileMeta {
-                region_id,
-                file_id: sst_info.file_id,
-                time_range: sst_info.time_range,
-                level: output.output_level,
-                file_size: sst_info.file_size,
-                max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
-                available_indexes: sst_info.index_metadata.build_available_indexes(),
-                indexes: sst_info.index_metadata.build_indexes(),
-                index_file_size: sst_info.index_metadata.file_size,
-                index_version: 0,
-                num_rows: sst_info.num_rows as u64,
-                num_row_groups: sst_info.num_row_groups,
-                sequence: max_sequence,
-                partition_expr: partition_expr.clone(),
-                num_series: sst_info.num_series,
+            .map(|sst_info| {
+                if let Some(file_metadata) = &sst_info.file_metadata
+                    && let Some(primary_key_range) =
+                        extract_primary_key_range(file_metadata, &region_metadata)
+                {
+                    primary_key_ranges.insert(sst_info.file_id, primary_key_range);
+                }
+
+                FileMeta {
+                    region_id,
+                    file_id: sst_info.file_id,
+                    time_range: sst_info.time_range,
+                    level: output.output_level,
+                    file_size: sst_info.file_size,
+                    max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
+                    available_indexes: sst_info.index_metadata.build_available_indexes(),
+                    indexes: sst_info.index_metadata.build_indexes(),
+                    index_file_size: sst_info.index_metadata.file_size,
+                    index_version: 0,
+                    num_rows: sst_info.num_rows as u64,
+                    num_row_groups: sst_info.num_row_groups,
+                    sequence: max_sequence,
+                    partition_expr: partition_expr.clone(),
+                    num_series: sst_info.num_series,
+                }
             })
             .collect::<Vec<_>>();
         let output_file_names = output_files.iter().map(|f| f.file_id.to_string()).join(",");
@@ -436,7 +457,7 @@ impl SstMerger for DefaultSstMerger {
             region_id, input_file_names, output_file_names, flat_format, metrics
         );
         metrics.observe();
-        Ok(output_files)
+        Ok((output_files, primary_key_ranges))
     }
 }
 
@@ -499,6 +520,7 @@ where
         }
 
         let mut output_files = Vec::with_capacity(tasks.len());
+        let mut primary_key_ranges = HashMap::new();
         let mut compacted_inputs = Vec::with_capacity(
             tasks.iter().map(|(inputs, _)| inputs.len()).sum::<usize>()
                 + picker_output.expired_ssts.len(),
@@ -523,6 +545,7 @@ where
                 match handle.await {
                     Ok(Ok(files)) => {
                         output_files.extend(files);
+                        primary_key_ranges.extend(ranges);
                         compacted_inputs.extend(inputs);
                     }
                     Ok(Err(e)) => {
@@ -557,6 +580,7 @@ where
             files_to_add: output_files,
             files_to_remove: compacted_inputs,
             compaction_time_window: Some(compaction_time_window),
+            primary_key_ranges,
         })
     }
 

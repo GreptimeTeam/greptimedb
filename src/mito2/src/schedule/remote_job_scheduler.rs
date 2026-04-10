@@ -158,6 +158,7 @@ impl Notifier for DefaultNotifier {
                             senders: waiters,
                             start_time: result.start_time,
                             edit,
+                            primary_key_ranges: Default::default(),
                         }),
                         Err(err) => {
                             error!(

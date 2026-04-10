@@ -129,7 +129,12 @@ impl VersionControlBuilder {
             None,
         ));
         VersionBuilder::new(metadata, mutable)
-            .add_files(self.file_purger.clone(), self.files.values().cloned())
+            .add_files_with_cache_manager(
+                self.file_purger.clone(),
+                self.files.values().cloned(),
+                None,
+                None,
+            )
             .build()
     }
 

@@ -28,7 +28,8 @@ use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::run::{
-    FileGroup, Item, Ranged, find_sorted_runs, merge_seq_files, reduce_runs,
+    FileGroup, Item, Ranged, find_sorted_runs, merge_seq_files, primary_key_ranges_overlap,
+    reduce_runs,
 };
 use crate::compaction::{CompactionOutput, get_expired_ssts};
 use crate::sst::file::{FileHandle, Level, overlaps};
@@ -96,14 +97,25 @@ impl TwcsPicker {
                 continue;
             }
 
-            let mut inputs = if found_runs > 1 {
+            // In append mode, PK-disjoint detection may collapse what were
+            // multiple overlapping sorted runs into a single run. We still want
+            // to compact all files together to reduce read fanout. We detect
+            // this by checking if any file groups have overlapping time ranges
+            // (which would have been separate runs without PK awareness).
+            let append_mode_force_compact = self.append_mode
+                && found_runs == 1
+                && files_to_merge.len() > 2
+                && has_time_overlapping_pairs(&files_to_merge);
+
+            let mut inputs = if append_mode_force_compact {
+                files_to_merge
+            } else if found_runs > 1 {
                 reduce_runs(sorted_runs)
             } else {
                 let run = sorted_runs.last().unwrap();
                 if run.items().len() < self.trigger_file_num {
                     continue;
                 }
-                // no overlapping files, try merge small files
                 merge_seq_files(run.items(), self.max_output_file_size)
             };
 
@@ -268,12 +280,14 @@ struct Window {
     files: HashMap<Option<NonZeroU64>, FileGroup>,
     time_window: i64,
     overlapping: bool,
+    primary_key_range: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
 impl Window {
     /// Creates a new [Window] with given file.
     fn new_with_file(file: FileHandle) -> Self {
         let (start, end) = file.time_range();
+        let primary_key_range = file.primary_key_range();
         let files = HashMap::from([(file.meta_ref().sequence, FileGroup::new_with_file(file))]);
         Self {
             start,
@@ -281,6 +295,7 @@ impl Window {
             files,
             time_window: 0,
             overlapping: false,
+            primary_key_range,
         }
     }
 
@@ -294,6 +309,12 @@ impl Window {
         let (start, end) = file.time_range();
         self.start = self.start.min(start);
         self.end = self.end.max(end);
+        self.primary_key_range = match (self.primary_key_range.take(), file.primary_key_range()) {
+            (Some((lhs_min, lhs_max)), Some((rhs_min, rhs_max))) => {
+                Some((lhs_min.min(rhs_min), lhs_max.max(rhs_max)))
+            }
+            _ => None,
+        };
 
         match self.files.entry(file.meta_ref().sequence) {
             Entry::Occupied(mut o) => {
@@ -308,6 +329,23 @@ impl Window {
     fn files(&self) -> impl Iterator<Item = &FileGroup> {
         self.files.values()
     }
+}
+
+/// Checks if any pair of file groups has overlapping time ranges
+/// (ignoring PK ranges). This detects cases where PK-disjoint
+/// collapsing reduced multiple sorted runs into one.
+fn has_time_overlapping_pairs(files: &[FileGroup]) -> bool {
+    for i in 0..files.len() {
+        let (i_start, i_end) = files[i].range();
+        for other in files.iter().skip(i + 1) {
+            let (j_start, j_end) = other.range();
+            // Strict time overlap (same as Ranged::overlap default)
+            if i_start.max(j_start) < i_end.min(j_end) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Assigns files to windows with predefined window size (in seconds) by their max timestamps.
@@ -347,18 +385,27 @@ fn assign_to_windows<'a>(
     let mut windows = windows.into_values().collect::<Vec<_>>();
     windows.sort_unstable_by(|l, r| l.start.cmp(&r.start).then(l.end.cmp(&r.end).reverse()));
 
-    let mut current_range: (Timestamp, Timestamp) = windows[0].range(); // windows cannot be empty.
+    for idx in 0..windows.len() {
+        let lhs_range = windows[idx].range();
+        for next_idx in idx + 1..windows.len() {
+            let rhs_range = windows[next_idx].range();
+            if rhs_range.0 > lhs_range.1 {
+                break;
+            }
 
-    for idx in 1..windows.len() {
-        let next_range = windows[idx].range();
-        if overlaps(&current_range, &next_range) {
-            windows[idx - 1].overlapping = true;
-            windows[idx].overlapping = true;
+            let windows_overlap = overlaps(&lhs_range, &rhs_range)
+                && match (
+                    &windows[idx].primary_key_range,
+                    &windows[next_idx].primary_key_range,
+                ) {
+                    (Some(lhs), Some(rhs)) => primary_key_ranges_overlap(lhs, rhs),
+                    _ => true,
+                };
+            if windows_overlap {
+                windows[idx].overlapping = true;
+                windows[next_idx].overlapping = true;
+            }
         }
-        current_range = (
-            current_range.0.min(next_range.0),
-            current_range.1.max(next_range.1),
-        );
     }
 
     windows.into_iter().map(|w| (w.time_window, w)).collect()
@@ -390,11 +437,13 @@ fn find_latest_window_in_seconds<'a>(
 mod tests {
     use std::collections::HashSet;
 
+    use bytes::Bytes;
     use store_api::storage::FileId;
 
     use super::*;
     use crate::compaction::test_util::{
         new_file_handle, new_file_handle_with_sequence, new_file_handle_with_size_and_sequence,
+        new_file_handle_with_size_sequence_and_primary_key_range,
     };
     use crate::sst::file::Level;
 
@@ -566,6 +615,10 @@ mod tests {
     /// (Window value, overlapping, files' time ranges in window)
     type ExpectedWindowSpec = (i64, bool, Vec<(i64, i64)>);
 
+    fn pk_range(min: &'static [u8], max: &'static [u8]) -> Option<(Bytes, Bytes)> {
+        Some((Bytes::from_static(min), Bytes::from_static(max)))
+    }
+
     fn check_assign_to_windows_with_overlapping(
         file_time_ranges: &[(i64, i64)],
         time_window: i64,
@@ -696,6 +749,63 @@ mod tests {
                 (4, false, vec![(3000, 3999)]),
             ],
         );
+    }
+
+    #[test]
+    fn test_assign_to_windows_not_overlapping_when_pk_disjoint() {
+        let files = [
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                0,
+                1000,
+                0,
+                1,
+                10,
+                pk_range(b"a", b"f"),
+            ),
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                500,
+                1999,
+                0,
+                2,
+                10,
+                pk_range(b"x", b"z"),
+            ),
+        ];
+
+        let windows = assign_to_windows(files.iter(), 2);
+
+        assert!(!windows.get(&2).unwrap().overlapping);
+    }
+
+    #[test]
+    fn test_assign_to_windows_pk_unknown_in_earlier_window_does_not_poison_later_windows() {
+        let files = [
+            new_file_handle(FileId::random(), 0, 1999, 0),
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                2000,
+                3999,
+                0,
+                1,
+                10,
+                pk_range(b"a", b"f"),
+            ),
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                3000,
+                4999,
+                0,
+                2,
+                10,
+                pk_range(b"x", b"z"),
+            ),
+        ];
+
+        let windows = assign_to_windows(files.iter(), 2);
+
+        assert!(!windows.get(&4).unwrap().overlapping);
     }
 
     struct CompactionPickerTestCase {
@@ -830,6 +940,124 @@ mod tests {
             }],
         }
         .check();
+    }
+
+    #[test]
+    fn test_build_output_skips_pk_disjoint_files() {
+        let files = [
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                0,
+                2999,
+                0,
+                1,
+                10,
+                pk_range(b"a", b"f"),
+            ),
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                50,
+                2998,
+                0,
+                2,
+                10,
+                pk_range(b"x", b"z"),
+            ),
+        ];
+        let mut windows = assign_to_windows(files.iter(), 3);
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: None,
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+        }
+        .build_output(RegionId::from_u64(0), &mut windows, active_window);
+
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_append_mode_build_output_compacts_pk_disjoint_files_in_same_window() {
+        let files = [
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                1000,
+                2000,
+                0,
+                1,
+                10,
+                pk_range(b"a", b"a"),
+            ),
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                0,
+                1000,
+                0,
+                2,
+                10,
+                pk_range(b"a", b"a"),
+            ),
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                0,
+                1000,
+                0,
+                3,
+                10,
+                pk_range(b"b", b"b"),
+            ),
+        ];
+        let mut windows = assign_to_windows(files.iter(), 3);
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: None,
+            max_output_file_size: None,
+            append_mode: true,
+            max_background_tasks: None,
+        }
+        .build_output(RegionId::from_u64(0), &mut windows, active_window);
+
+        assert_eq!(1, output.len());
+        assert_eq!(3, output[0].inputs.len());
+    }
+
+    #[test]
+    fn test_append_mode_build_output_does_not_force_compact_two_files() {
+        let files = [
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                1000,
+                2000,
+                0,
+                1,
+                10,
+                pk_range(b"a", b"a"),
+            ),
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                0,
+                1000,
+                0,
+                2,
+                10,
+                pk_range(b"a", b"a"),
+            ),
+        ];
+        let mut windows = assign_to_windows(files.iter(), 3);
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: None,
+            max_output_file_size: None,
+            append_mode: true,
+            max_background_tasks: None,
+        }
+        .build_output(RegionId::from_u64(0), &mut windows, active_window);
+
+        assert!(output.is_empty());
     }
 
     #[test]

@@ -70,7 +70,7 @@ use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::{self, region_dir_from_table_dir};
-use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
@@ -504,6 +504,7 @@ impl RegionOpener {
             file_purger.clone(),
             mutable,
             region_options,
+            self.cache_manager.as_ref(),
         );
         let version = version_builder.build();
         let flushed_entry_id = version.flushed_entry_id;
@@ -603,9 +604,15 @@ pub(crate) fn version_builder_from_manifest(
     file_purger: FilePurgerRef,
     mutable: TimePartitionsRef,
     region_options: RegionOptions,
+    cache_manager: Option<&CacheManagerRef>,
 ) -> VersionBuilder {
     VersionBuilder::new(metadata, mutable)
-        .add_files(file_purger, manifest.files.values().cloned())
+        .add_files_with_cache_manager(
+            file_purger,
+            manifest.files.values().cloned(),
+            cache_manager,
+            None,
+        )
         .flushed_entry_id(manifest.flushed_entry_id)
         .flushed_sequence(manifest.flushed_sequence)
         .truncated_entry_id(manifest.truncated_entry_id)
@@ -991,6 +998,7 @@ fn maybe_load_cache(
 /// - If the region storage backend is local filesystem (`Scheme::Fs`), it may also load metadata
 ///   directly from the local store.
 /// - It will not fetch metadata from remote object stores (S3/GCS/OSS/...).
+#[allow(clippy::too_many_arguments)]
 async fn preload_parquet_meta_cache_for_files(
     region_id: RegionId,
     cache_manager: CacheManagerRef,
@@ -998,6 +1006,7 @@ async fn preload_parquet_meta_cache_for_files(
     table_dir: String,
     path_type: PathType,
     object_store: object_store::ObjectStore,
+    region_metadata: RegionMetadataRef,
     mut files: Vec<FileHandle>,
 ) -> usize {
     if !cache_manager.sst_meta_cache_enabled()
@@ -1021,11 +1030,14 @@ async fn preload_parquet_meta_cache_for_files(
 
         let file_id = file_handle.file_id();
         let mut cache_metrics = MetadataCacheMetrics::default();
-        if cache_manager
+        if let Some(metadata) = cache_manager
             .get_parquet_meta_data(file_id, &mut cache_metrics, Default::default())
             .await
-            .is_some()
         {
+            if let Some(primary_key_range) = extract_primary_key_range(&metadata, &region_metadata)
+            {
+                file_handle.set_primary_key_range(primary_key_range);
+            }
             // Metadata is either already in memory or loaded from file cache.
             if cache_metrics.mem_cache_hit == 0 {
                 loaded += 1;
@@ -1042,6 +1054,11 @@ async fn preload_parquet_meta_cache_for_files(
         let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
         match loader.load(&mut cache_metrics).await {
             Ok(metadata) => {
+                if let Some(primary_key_range) =
+                    extract_primary_key_range(&metadata, &region_metadata)
+                {
+                    file_handle.set_primary_key_range(primary_key_range);
+                }
                 cache_manager.put_parquet_meta_data(file_id, Arc::new(metadata), None);
                 loaded += 1;
             }
@@ -1090,6 +1107,7 @@ fn maybe_preload_parquet_meta_cache(
         let table_dir = region.access_layer.table_dir().to_string();
         let path_type = region.access_layer.path_type();
         let object_store = region.access_layer.object_store().clone();
+        let region_metadata = region.version_control.current().version.metadata.clone();
 
         // Collect SST files. Do not hold the version longer than needed.
         let mut files = Vec::new();
@@ -1109,6 +1127,7 @@ fn maybe_preload_parquet_meta_cache(
             table_dir,
             path_type,
             object_store,
+            region_metadata,
             files,
         )
         .await;
@@ -1147,7 +1166,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use common_time::Timestamp;
-    use datatypes::arrow::array::{ArrayRef, Int64Array};
+    use datatypes::arrow::array::{ArrayRef, BinaryArray, Int64Array};
     use datatypes::arrow::record_batch::RecordBatch;
     use object_store::ObjectStore;
     use object_store::services::{Fs, Memory};
@@ -1203,7 +1222,15 @@ mod tests {
         let file_id = FileId::random();
 
         let col = Arc::new(Int64Array::from_iter_values([1, 2, 3])) as ArrayRef;
-        let batch = RecordBatch::try_from_iter([("col", col)]).unwrap();
+        let primary_key = Arc::new(BinaryArray::from_iter_values([b"a", b"b", b"c"])) as ArrayRef;
+        let batch = RecordBatch::try_from_iter([
+            ("col", col),
+            (
+                store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME,
+                primary_key,
+            ),
+        ])
+        .unwrap();
         let parquet_bytes = sst_parquet_bytes(&batch);
         let file_size = parquet_bytes.len() as u64;
 
@@ -1258,7 +1285,8 @@ mod tests {
             table_dir.to_string(),
             path_type,
             source_store.clone(),
-            vec![file_handle],
+            Arc::new(sst_region_metadata()),
+            vec![file_handle.clone()],
         )
         .await;
 
@@ -1269,6 +1297,7 @@ mod tests {
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
                 .is_some()
         );
+        assert!(file_handle.primary_key_range().is_some());
     }
 
     #[tokio::test]
@@ -1327,6 +1356,7 @@ mod tests {
             table_dir.to_string(),
             path_type,
             object_store,
+            Arc::new(sst_region_metadata()),
             vec![file_handle],
         )
         .await;
@@ -1399,6 +1429,7 @@ mod tests {
             table_dir.to_string(),
             path_type,
             object_store,
+            Arc::new(sst_region_metadata()),
             vec![file_handle],
         )
         .await;

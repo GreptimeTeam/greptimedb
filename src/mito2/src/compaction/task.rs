@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::Instant;
 
+use bytes::Bytes;
 use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::{error, info, warn};
 use itertools::Itertools;
 use snafu::ResultExt;
+use store_api::storage::FileId;
 use tokio::sync::mpsc;
 
 use crate::compaction::compactor::{CompactionRegion, Compactor};
@@ -184,7 +187,9 @@ impl CompactionTaskImpl {
         );
     }
 
-    async fn handle_expiration_and_compaction(&mut self) -> error::Result<RegionEdit> {
+    async fn handle_expiration_and_compaction(
+        &mut self,
+    ) -> error::Result<(RegionEdit, HashMap<FileId, (Bytes, Bytes)>)> {
         self.mark_files_compacting(true);
 
         // 1. In case of local compaction, we can delete expired ssts in advance.
@@ -243,9 +248,12 @@ impl CompactionTaskImpl {
             .with_label_values(&["write_manifest"])
             .start_timer();
 
-        self.compactor
+        let primary_key_ranges = compaction_result.primary_key_ranges.clone();
+        let edit = self
+            .compactor
             .update_manifest(&self.compaction_region, compaction_result)
-            .await
+            .await?;
+        Ok((edit, primary_key_ranges))
     }
 
     /// Handles compaction failure, notifies all waiters.
@@ -297,12 +305,15 @@ impl CompactionTask for CompactionTaskImpl {
         };
 
         let notify = match self.handle_expiration_and_compaction().await {
-            Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
-                region_id: self.compaction_region.region_id,
-                senders: std::mem::take(&mut self.waiters),
-                start_time: self.start_time,
-                edit,
-            }),
+            Ok((edit, primary_key_ranges)) => {
+                BackgroundNotify::CompactionFinished(CompactionFinished {
+                    region_id: self.compaction_region.region_id,
+                    senders: std::mem::take(&mut self.waiters),
+                    start_time: self.start_time,
+                    edit,
+                    primary_key_ranges,
+                })
+            }
             Err(e) => {
                 error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
                 let err = Arc::new(e);
