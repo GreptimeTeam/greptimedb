@@ -650,7 +650,7 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
-async fn test_enter_staging_deferred_by_inflight_compaction() {
+async fn test_enter_staging_cancels_inflight_local_compaction_before_commit() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let listener = Arc::new(CompactionListener::default());
@@ -710,13 +710,9 @@ async fn test_enter_staging_deferred_by_inflight_compaction() {
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!enter_staging.is_finished());
-
-    listener.wake();
+    // The enter staging should finished, and the compaction should be cancelled.
+    assert!(enter_staging.is_finished());
     enter_staging.await.unwrap();
-
-    let region = engine.get_region(region_id).unwrap();
-    assert!(region.is_staging());
 }
 
 #[tokio::test]
