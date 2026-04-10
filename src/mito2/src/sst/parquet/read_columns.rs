@@ -110,8 +110,8 @@ pub fn build_projection_mask(
     parquet_schema_desc: &SchemaDescriptor,
 ) -> ProjectionMask {
     if parquet_read_cols.has_nested() {
-        let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, &parquet_read_cols);
-        ProjectionMask::leaves(parquet_schema_desc, leaf_indices.into_iter())
+        let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, parquet_read_cols);
+        ProjectionMask::leaves(parquet_schema_desc, leaf_indices)
     } else {
         ProjectionMask::roots(parquet_schema_desc, parquet_read_cols.root_indices_iter())
     }
