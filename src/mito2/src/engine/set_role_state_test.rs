@@ -475,6 +475,120 @@ async fn test_set_region_role_leader_clears_staging_partition_info() {
     assert!(region.manifest_ctx.staging_partition_info().is_none());
 }
 
+#[tokio::test]
+async fn test_set_region_role_follower_clears_staging_partition_info() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert!(region.manifest_ctx.staging_partition_info().is_some());
+
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(engine.role(region_id), Some(RegionRole::Follower));
+    assert!(region.manifest_ctx.staging_partition_info().is_none());
+}
+
+#[tokio::test]
+async fn test_set_region_role_downgrading_leader_clears_staging_partition_info() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert!(region.manifest_ctx.staging_partition_info().is_some());
+
+    engine
+        .set_region_role(region_id, RegionRole::DowngradingLeader)
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(engine.role(region_id), Some(RegionRole::DowngradingLeader));
+    assert!(region.manifest_ctx.staging_partition_info().is_none());
+}
+
+#[tokio::test]
+async fn test_can_reenter_staging_after_direct_exit_cleanup() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(engine.role(region_id), Some(RegionRole::StagingLeader));
+    assert!(region.manifest_ctx.staging_partition_info().is_some());
+}
+
 async fn test_restricted_state_transitions_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env

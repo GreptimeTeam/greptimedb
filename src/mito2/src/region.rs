@@ -1108,6 +1108,17 @@ impl ManifestContext {
     pub(crate) fn set_role(&self, next_role: RegionRole, region_id: RegionId) {
         match next_role {
             RegionRole::Follower => {
+                if self
+                    .exit_staging(region_id, RegionRoleState::Follower)
+                    .is_ok()
+                {
+                    info!(
+                        "Convert region {} to follower, previous role state: {:?}",
+                        region_id,
+                        RegionRoleState::Leader(RegionLeaderState::Staging)
+                    );
+                    return;
+                }
                 match self.state.fetch_update(|state| {
                     if !matches!(state, RegionRoleState::Follower) {
                         Some(RegionRoleState::Follower)
@@ -1130,13 +1141,12 @@ impl ManifestContext {
                 }
             }
             RegionRole::Leader => {
-                if self.current_state() == RegionRoleState::Leader(RegionLeaderState::Staging)
-                    && self
-                        .exit_staging(
-                            region_id,
-                            RegionRoleState::Leader(RegionLeaderState::Writable),
-                        )
-                        .is_ok()
+                if self
+                    .exit_staging(
+                        region_id,
+                        RegionRoleState::Leader(RegionLeaderState::Writable),
+                    )
+                    .is_ok()
                 {
                     info!(
                         "Convert region {} to leader, previous role state: {:?}",
@@ -1177,6 +1187,20 @@ impl ManifestContext {
                 );
             }
             RegionRole::DowngradingLeader => {
+                if self
+                    .exit_staging(
+                        region_id,
+                        RegionRoleState::Leader(RegionLeaderState::Downgrading),
+                    )
+                    .is_ok()
+                {
+                    info!(
+                        "Convert region {} to downgrading region, previous role state: {:?}",
+                        region_id,
+                        RegionRoleState::Leader(RegionLeaderState::Staging)
+                    );
+                    return;
+                }
                 match self.state.compare_exchange(
                     RegionRoleState::Leader(RegionLeaderState::Writable),
                     RegionRoleState::Leader(RegionLeaderState::Downgrading),
