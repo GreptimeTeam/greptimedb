@@ -56,6 +56,7 @@ use servers::http::prometheus::{Column, PrometheusJsonResponse, PrometheusRespon
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
+use servers::http::otlp::GoogleRpcStatus;
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
@@ -5770,15 +5771,12 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         false,
     )
     .await;
-    assert_eq!(StatusCode::OK, res.status());
-    let body = ExportTraceServiceResponse::decode(res.bytes().await).unwrap();
-    let partial_success = body.partial_success.as_ref().unwrap();
-    assert_eq!(partial_success.rejected_spans, 1);
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    let body = res.bytes().await;
+    let status = GoogleRpcStatus::decode(body.as_ref()).unwrap();
     assert!(
-        partial_success
-            .error_message
-            .contains("Accepted 0 spans, rejected 1 spans"),
-        "unexpected partial success body: {body:?}"
+        status.message.contains("Accepted 0 spans, rejected 1 spans"),
+        "unexpected error body: {status:?}"
     );
 
     validate_data(
@@ -5980,24 +5978,18 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         false,
     )
     .await;
-    assert_eq!(StatusCode::OK, res.status());
-    let body = ExportTraceServiceResponse::decode(res.bytes().await).unwrap();
-    let partial_success = body.partial_success.as_ref().unwrap();
-    assert_eq!(partial_success.rejected_spans, 2);
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    let body = GoogleRpcStatus::decode(res.bytes().await.as_ref()).unwrap();
     assert!(
-        partial_success
-            .error_message
-            .contains("Accepted 0 spans, rejected 2 spans"),
-        "unexpected partial success body: {body:?}"
+        body.message.contains("Accepted 0 spans, rejected 2 spans"),
+        "unexpected error body: {body:?}"
     );
     assert!(
-        partial_success
-            .error_message
-            .contains("Chunk fallback triggered by")
-            || partial_success
-                .error_message
+        body.message.contains("Chunk fallback triggered by")
+            || body
+                .message
                 .contains("Discarded 2 spans after ambiguous chunk failure"),
-        "unexpected partial success body: {body:?}"
+        "unexpected error body: {body:?}"
     );
 
     guard.remove_all().await;
