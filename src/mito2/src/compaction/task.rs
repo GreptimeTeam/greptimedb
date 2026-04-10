@@ -16,22 +16,24 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::Instant;
 
+use common_base::cancellation::CancellableFuture;
 use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::{error, info, warn};
 use itertools::Itertools;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 
-use crate::compaction::compactor::{CompactionRegion, Compactor};
+use crate::compaction::compactor::{CompactionRegion, Compactor, MergeOutput};
 use crate::compaction::memory_manager::{CompactionMemoryGuard, CompactionMemoryManager};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
+use crate::compaction::{RunningLocalCompaction, RunningLocalCompactionRef};
 use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
 use crate::region::RegionRoleState;
 use crate::request::{
-    BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, RegionEditResult,
-    WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, CompactionCancelled, CompactionFailed, CompactionFinished, OutputTx,
+    RegionEditResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::file::FileMeta;
 use crate::worker::WorkerListener;
@@ -41,6 +43,8 @@ use crate::{error, metrics};
 pub const MAX_PARALLEL_COMPACTION: usize = 1;
 
 pub(crate) struct CompactionTaskImpl {
+    /// Shared local-compaction state for cooperative cancellation.
+    pub(crate) local_compaction: RunningLocalCompactionRef,
     pub compaction_region: CompactionRegion,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
@@ -184,7 +188,7 @@ impl CompactionTaskImpl {
         );
     }
 
-    async fn handle_expiration_and_compaction(&mut self) -> error::Result<RegionEdit> {
+    async fn handle_expiration_and_compaction(&mut self) -> error::Result<MergeOutput> {
         self.mark_files_compacting(true);
 
         // 1. In case of local compaction, we can delete expired ssts in advance.
@@ -239,6 +243,16 @@ impl CompactionTaskImpl {
             .on_merge_ssts_finished(self.compaction_region.region_id)
             .await;
 
+        Ok(compaction_result)
+    }
+
+    async fn update_manifest(
+        &self,
+        compaction_result: crate::compaction::compactor::MergeOutput,
+    ) -> error::Result<RegionEdit> {
+        // Stop accepting cancellation once we are about to publish the compaction edit.
+        RunningLocalCompaction::mark_commit_started(&self.local_compaction);
+
         let _manifest_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])
             .start_timer();
@@ -276,34 +290,50 @@ impl CompactionTaskImpl {
 #[async_trait::async_trait]
 impl CompactionTask for CompactionTaskImpl {
     async fn run(&mut self) {
-        // Acquire memory budget before starting compaction
-        let _memory_guard = match self.acquire_memory_with_policy().await {
-            Ok(guard) => guard,
-            Err(e) => {
-                error!(e; "Failed to acquire memory for compaction, region id: {}", self.compaction_region.region_id);
-                let err = Arc::new(e);
-                self.on_failure(err.clone());
-                let notify = BackgroundNotify::CompactionFailed(CompactionFailed {
-                    region_id: self.compaction_region.region_id,
-                    err,
-                });
-                self.send_to_worker(WorkerRequest::Background {
-                    region_id: self.compaction_region.region_id,
-                    notify,
-                })
-                .await;
-                return;
-            }
-        };
+        let cancel_handle =
+            crate::compaction::RunningLocalCompaction::cancel_handle(&self.local_compaction);
 
-        let notify = match self.handle_expiration_and_compaction().await {
-            Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
-                region_id: self.compaction_region.region_id,
-                senders: std::mem::take(&mut self.waiters),
-                start_time: self.start_time,
-                edit,
-            }),
-            Err(e) => {
+        let notify = match CancellableFuture::new(
+            async {
+                let _memory_guard = self.acquire_memory_with_policy().await?;
+                self.handle_expiration_and_compaction().await
+            },
+            cancel_handle,
+        )
+        .await
+        {
+            Ok(Ok(merge_output)) => match self.update_manifest(merge_output).await {
+                Ok(edit) => {
+                    let senders = std::mem::take(&mut self.waiters);
+                    BackgroundNotify::CompactionFinished(CompactionFinished {
+                        region_id: self.compaction_region.region_id,
+                        senders,
+                        start_time: self.start_time,
+                        edit,
+                    })
+                }
+                Err(e) => {
+                    error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
+                    let err = Arc::new(e);
+                    self.on_failure(err.clone());
+                    BackgroundNotify::CompactionFailed(CompactionFailed {
+                        region_id: self.compaction_region.region_id,
+                        err,
+                    })
+                }
+            },
+            Err(_) => {
+                info!(
+                    "Compaction cancelled, region id: {}",
+                    self.compaction_region.region_id
+                );
+                let senders = std::mem::take(&mut self.waiters);
+                BackgroundNotify::CompactionCancelled(CompactionCancelled {
+                    region_id: self.compaction_region.region_id,
+                    senders,
+                })
+            }
+            Ok(Err(e)) => {
                 error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
                 let err = Arc::new(e);
                 // notify compaction waiters

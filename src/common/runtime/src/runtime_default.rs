@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use tokio::runtime::Handle;
 pub use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 
 use crate::Builder;
 use crate::runtime::{Dropper, RuntimeTrait};
@@ -37,6 +38,15 @@ impl DefaultRuntime {
             handle,
             _dropper: dropper,
         }
+    }
+
+    /// Spawns a future onto this runtime and tracks it inside the provided [`JoinSet`].
+    pub fn spawn_on<F>(&self, join_set: &mut JoinSet<F::Output>, future: F)
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        join_set.spawn_on(future, &self.handle);
     }
 }
 

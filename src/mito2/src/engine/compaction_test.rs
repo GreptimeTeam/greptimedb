@@ -650,7 +650,7 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
-async fn test_enter_staging_deferred_by_inflight_compaction() {
+async fn test_enter_staging_cancels_inflight_local_compaction_before_commit() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let listener = Arc::new(CompactionListener::default());
@@ -717,6 +717,16 @@ async fn test_enter_staging_deferred_by_inflight_compaction() {
 
     let region = engine.get_region(region_id).unwrap();
     assert!(region.is_staging());
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        2,
+        scanner.num_files(),
+        "compaction edit should not be applied"
+    );
 }
 
 #[tokio::test]

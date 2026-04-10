@@ -23,7 +23,7 @@ pub mod runtime_throttleable;
 pub use global::{
     block_on_compact, block_on_global, compact_runtime, create_runtime, global_runtime,
     init_global_runtimes, spawn_blocking_compact, spawn_blocking_global, spawn_blocking_hb,
-    spawn_compact, spawn_global, spawn_hb,
+    spawn_compact, spawn_compact_on, spawn_global, spawn_hb,
 };
 
 pub use crate::repeated_task::{BoxedTaskFunction, RepeatedTask, TaskFunction};
