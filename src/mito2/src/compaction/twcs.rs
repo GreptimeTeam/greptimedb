@@ -97,19 +97,7 @@ impl TwcsPicker {
                 continue;
             }
 
-            // In append mode, PK-disjoint detection may collapse what were
-            // multiple overlapping sorted runs into a single run. We still want
-            // to compact all files together to reduce read fanout. We detect
-            // this by checking if any file groups have overlapping time ranges
-            // (which would have been separate runs without PK awareness).
-            let append_mode_force_compact = self.append_mode
-                && found_runs == 1
-                && files_to_merge.len() > 2
-                && has_time_overlapping_pairs(&files_to_merge);
-
-            let mut inputs = if append_mode_force_compact {
-                files_to_merge
-            } else if found_runs > 1 {
+            let mut inputs = if found_runs > 1 {
                 reduce_runs(sorted_runs)
             } else {
                 let run = sorted_runs.last().unwrap();
@@ -329,23 +317,6 @@ impl Window {
     fn files(&self) -> impl Iterator<Item = &FileGroup> {
         self.files.values()
     }
-}
-
-/// Checks if any pair of file groups has overlapping time ranges
-/// (ignoring PK ranges). This detects cases where PK-disjoint
-/// collapsing reduced multiple sorted runs into one.
-fn has_time_overlapping_pairs(files: &[FileGroup]) -> bool {
-    for i in 0..files.len() {
-        let (i_start, i_end) = files[i].range();
-        for other in files.iter().skip(i + 1) {
-            let (j_start, j_end) = other.range();
-            // Strict time overlap (same as Ranged::overlap default)
-            if i_start.max(j_start) < i_end.min(j_end) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Assigns files to windows with predefined window size (in seconds) by their max timestamps.
@@ -971,88 +942,6 @@ mod tests {
             time_window_seconds: None,
             max_output_file_size: None,
             append_mode: false,
-            max_background_tasks: None,
-        }
-        .build_output(RegionId::from_u64(0), &mut windows, active_window);
-
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn test_append_mode_build_output_compacts_pk_disjoint_files_in_same_window() {
-        let files = [
-            new_file_handle_with_size_sequence_and_primary_key_range(
-                FileId::random(),
-                1000,
-                2000,
-                0,
-                1,
-                10,
-                pk_range(b"a", b"a"),
-            ),
-            new_file_handle_with_size_sequence_and_primary_key_range(
-                FileId::random(),
-                0,
-                1000,
-                0,
-                2,
-                10,
-                pk_range(b"a", b"a"),
-            ),
-            new_file_handle_with_size_sequence_and_primary_key_range(
-                FileId::random(),
-                0,
-                1000,
-                0,
-                3,
-                10,
-                pk_range(b"b", b"b"),
-            ),
-        ];
-        let mut windows = assign_to_windows(files.iter(), 3);
-        let active_window = find_latest_window_in_seconds(files.iter(), 3);
-        let output = TwcsPicker {
-            trigger_file_num: 4,
-            time_window_seconds: None,
-            max_output_file_size: None,
-            append_mode: true,
-            max_background_tasks: None,
-        }
-        .build_output(RegionId::from_u64(0), &mut windows, active_window);
-
-        assert_eq!(1, output.len());
-        assert_eq!(3, output[0].inputs.len());
-    }
-
-    #[test]
-    fn test_append_mode_build_output_does_not_force_compact_two_files() {
-        let files = [
-            new_file_handle_with_size_sequence_and_primary_key_range(
-                FileId::random(),
-                1000,
-                2000,
-                0,
-                1,
-                10,
-                pk_range(b"a", b"a"),
-            ),
-            new_file_handle_with_size_sequence_and_primary_key_range(
-                FileId::random(),
-                0,
-                1000,
-                0,
-                2,
-                10,
-                pk_range(b"a", b"a"),
-            ),
-        ];
-        let mut windows = assign_to_windows(files.iter(), 3);
-        let active_window = find_latest_window_in_seconds(files.iter(), 3);
-        let output = TwcsPicker {
-            trigger_file_num: 4,
-            time_window_seconds: None,
-            max_output_file_size: None,
-            append_mode: true,
             max_background_tasks: None,
         }
         .build_output(RegionId::from_u64(0), &mut windows, active_window);
