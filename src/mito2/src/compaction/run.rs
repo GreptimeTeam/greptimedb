@@ -15,7 +15,7 @@
 //! This file contains code to find sorted runs in a set if ranged items and
 //! along with the best way to merge these items to satisfy the desired run count.
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use common_base::BitVec;
 use common_base::readable_size::ReadableSize;
 use common_time::Timestamp;
@@ -51,7 +51,7 @@ pub trait Ranged {
 }
 
 pub(crate) fn primary_key_ranges_overlap(lhs: &(Bytes, Bytes), rhs: &(Bytes, Bytes)) -> bool {
-    lhs.0.clone().max(rhs.0.clone()) <= lhs.1.clone().min(rhs.1.clone())
+    lhs.0.chunk().max(rhs.0.chunk()) <= lhs.1.chunk().min(rhs.1.chunk())
 }
 
 fn merge_primary_key_ranges(
@@ -335,20 +335,18 @@ where
                 // item is already assigned.
                 continue;
             }
-            match current_run.items.last() {
-                None => {
-                    // current run is empty, just add current_item
+            if current_run.items.is_empty() {
+                // current run is empty, just add current_item
+                selected.set(true);
+                current_run.push_item(item.clone());
+            } else {
+                // the current item does not overlap with any item in current run,
+                // then it belongs to current run.
+                let overlaps_any = current_run.items.iter().any(|i| i.overlap(item));
+                if !overlaps_any {
+                    // does not overlap, push to current run
                     selected.set(true);
                     current_run.push_item(item.clone());
-                }
-                Some(last) => {
-                    // the current item does not overlap with the last item in current run,
-                    // then it belongs to current run.
-                    if !last.overlap(item) {
-                        // does not overlap, push to current run
-                        selected.set(true);
-                        current_run.push_item(item.clone());
-                    }
                 }
             }
         }
@@ -841,6 +839,45 @@ mod tests {
 
         assert_eq!(1, runs.len());
         assert_eq!(2, runs[0].items().len());
+    }
+
+    #[test]
+    fn test_find_sorted_runs_handles_2d_transitivity_break() {
+        let mut files = vec![
+            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                0,
+                100,
+                0,
+                1,
+                10,
+                pk_range(b"a", b"f"),
+            )),
+            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                50,
+                150,
+                0,
+                2,
+                10,
+                pk_range(b"x", b"z"),
+            )),
+            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                50,
+                150,
+                0,
+                3,
+                10,
+                pk_range(b"a", b"f"),
+            )),
+        ];
+
+        let runs = find_sorted_runs(&mut files);
+
+        assert_eq!(2, runs.len());
+        assert_eq!(2, runs[0].items().len());
+        assert_eq!(1, runs[1].items().len());
     }
 
     #[test]
