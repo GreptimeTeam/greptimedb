@@ -17,9 +17,10 @@
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
+use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error};
 use common_time::Timestamp;
@@ -417,8 +418,16 @@ impl fmt::Debug for FileHandle {
 
 impl FileHandle {
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
+        Self::new_with_primary_key_range(meta, file_purger, None)
+    }
+
+    pub fn new_with_primary_key_range(
+        meta: FileMeta,
+        file_purger: FilePurgerRef,
+        primary_key_range: Option<(Bytes, Bytes)>,
+    ) -> FileHandle {
         FileHandle {
-            inner: Arc::new(FileHandleInner::new(meta, file_purger)),
+            inner: Arc::new(FileHandleInner::new(meta, file_purger, primary_key_range)),
         }
     }
 
@@ -498,6 +507,14 @@ impl FileHandle {
     pub fn is_deleted(&self) -> bool {
         self.inner.deleted.load(Ordering::Relaxed)
     }
+
+    pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
+        self.inner.primary_key_range.read().unwrap().clone()
+    }
+
+    pub(crate) fn set_primary_key_range(&self, primary_key_range: (Bytes, Bytes)) {
+        *self.inner.primary_key_range.write().unwrap() = Some(primary_key_range);
+    }
 }
 
 /// Inner data of [FileHandle].
@@ -508,6 +525,7 @@ struct FileHandleInner {
     compacting: AtomicBool,
     deleted: AtomicBool,
     index_outdated: AtomicBool,
+    primary_key_range: RwLock<Option<(Bytes, Bytes)>>,
     file_purger: FilePurgerRef,
 }
 
@@ -523,13 +541,18 @@ impl Drop for FileHandleInner {
 
 impl FileHandleInner {
     /// There should only be one `FileHandleInner` for each file on a datanode
-    fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandleInner {
+    fn new(
+        meta: FileMeta,
+        file_purger: FilePurgerRef,
+        primary_key_range: Option<(Bytes, Bytes)>,
+    ) -> FileHandleInner {
         file_purger.new_file(&meta);
         FileHandleInner {
             meta,
             compacting: AtomicBool::new(false),
             deleted: AtomicBool::new(false),
             index_outdated: AtomicBool::new(false),
+            primary_key_range: RwLock::new(primary_key_range),
             file_purger,
         }
     }
