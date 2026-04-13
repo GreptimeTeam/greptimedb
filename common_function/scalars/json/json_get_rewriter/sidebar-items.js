@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["extract_scalar_function","extract_string_literal","is_json_get_function_call","parse_data_type_from_string","rewrite_arrow_cast_json_get","rewrite_json_get_cast"],"struct":["JsonGetRewriter"]};

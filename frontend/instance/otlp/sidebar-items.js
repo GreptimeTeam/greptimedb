@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TRACE_FAILURE_MESSAGE_LIMIT","TRACE_INGEST_CHUNK_SIZE"],"enum":["ChunkFailureReaction"],"fn":["wrap_trace_alter_failure"],"mod":["trace_types"],"struct":["TraceChunkIngestContext","TraceIngestState"]};

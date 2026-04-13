@@ -1,0 +1,443 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/metric-engine/src/batch_modifier.rs`."><title>batch_modifier.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="metric_engine" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0-nightly (ac7f9ec7d 2026-03-20)" data-channel="nightly" data-search-js="search-63369b7b.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">metric_engine/</div>batch_modifier.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright 2023 Greptime Team
+<a href=#2 id=2 data-nosnippet>2</a>//
+<a href=#3 id=3 data-nosnippet>3</a>// Licensed under the Apache License, Version 2.0 (the "License");
+<a href=#4 id=4 data-nosnippet>4</a>// you may not use this file except in compliance with the License.
+<a href=#5 id=5 data-nosnippet>5</a>// You may obtain a copy of the License at
+<a href=#6 id=6 data-nosnippet>6</a>//
+<a href=#7 id=7 data-nosnippet>7</a>//     http://www.apache.org/licenses/LICENSE-2.0
+<a href=#8 id=8 data-nosnippet>8</a>//
+<a href=#9 id=9 data-nosnippet>9</a>// Unless required by applicable law or agreed to in writing, software
+<a href=#10 id=10 data-nosnippet>10</a>// distributed under the License is distributed on an "AS IS" BASIS,
+<a href=#11 id=11 data-nosnippet>11</a>// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+<a href=#12 id=12 data-nosnippet>12</a>// See the License for the specific language governing permissions and
+<a href=#13 id=13 data-nosnippet>13</a>// limitations under the License.
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="kw">use </span>std::hash::Hasher;
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span>std::sync::Arc;
+<a href=#17 id=17 data-nosnippet>17</a>
+<a href=#18 id=18 data-nosnippet>18</a><span class="kw">use </span>datatypes::arrow::array::{Array, BinaryBuilder, StringArray, UInt64Array};
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">use </span>datatypes::arrow::datatypes::{DataType, Field, Schema <span class="kw">as </span>ArrowSchema};
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">use </span>datatypes::arrow::record_batch::RecordBatch;
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">use </span>fxhash::FxHasher;
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">use </span>mito_codec::row_converter::SparsePrimaryKeyCodec;
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">use </span>snafu::ResultExt;
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">use </span>store_api::storage::ColumnId;
+<a href=#25 id=25 data-nosnippet>25</a><span class="kw">use </span>store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+<a href=#26 id=26 data-nosnippet>26</a>
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">use </span><span class="kw">crate</span>::error::{EncodePrimaryKeySnafu, <span class="prelude-ty">Result</span>, UnexpectedRequestSnafu};
+<a href=#28 id=28 data-nosnippet>28</a>
+<a href=#29 id=29 data-nosnippet>29</a><span class="doccomment">/// Info about a tag column for TSID computation and sparse primary key encoding.
+<a href=#30 id=30 data-nosnippet>30</a></span><span class="attr">#[allow(dead_code)]
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="kw">pub struct </span>TagColumnInfo {
+<a href=#32 id=32 data-nosnippet>32</a>    <span class="doccomment">/// Column name (used for label-name hash).
+<a href=#33 id=33 data-nosnippet>33</a>    </span><span class="kw">pub </span>name: String,
+<a href=#34 id=34 data-nosnippet>34</a>    <span class="doccomment">/// Column index in the RecordBatch.
+<a href=#35 id=35 data-nosnippet>35</a>    </span><span class="kw">pub </span>index: usize,
+<a href=#36 id=36 data-nosnippet>36</a>    <span class="doccomment">/// Column ID in the physical region.
+<a href=#37 id=37 data-nosnippet>37</a>    </span><span class="kw">pub </span>column_id: ColumnId,
+<a href=#38 id=38 data-nosnippet>38</a>}
+<a href=#39 id=39 data-nosnippet>39</a>
+<a href=#40 id=40 data-nosnippet>40</a><span class="doccomment">/// Computes the TSID for each row in a [RecordBatch].
+<a href=#41 id=41 data-nosnippet>41</a>///
+<a href=#42 id=42 data-nosnippet>42</a>/// The TSID is a stable hash of the set of labels (tags) present in each row.
+<a href=#43 id=43 data-nosnippet>43</a>/// It accounts for both the names and values of all non-null tag columns.
+<a href=#44 id=44 data-nosnippet>44</a>///
+<a href=#45 id=45 data-nosnippet>45</a>/// # Logic
+<a href=#46 id=46 data-nosnippet>46</a>/// - If a row has no nulls across all `sorted_tag_columns`, it uses a precomputed hash of all label names.
+<a href=#47 id=47 data-nosnippet>47</a>/// - If a row has nulls, it dynamically computes a hash of the names of labels that are present (non-null).
+<a href=#48 id=48 data-nosnippet>48</a>/// - In both cases, it then hashes the values of those present labels in the order specified by `sorted_tag_columns`.
+<a href=#49 id=49 data-nosnippet>49</a></span><span class="kw">pub fn </span>compute_tsid_array(
+<a href=#50 id=50 data-nosnippet>50</a>    batch: <span class="kw-2">&amp;</span>RecordBatch,
+<a href=#51 id=51 data-nosnippet>51</a>    sorted_tag_columns: <span class="kw-2">&amp;</span>[TagColumnInfo],
+<a href=#52 id=52 data-nosnippet>52</a>    tag_arrays: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>StringArray],
+<a href=#53 id=53 data-nosnippet>53</a>) -&gt; UInt64Array {
+<a href=#54 id=54 data-nosnippet>54</a>    <span class="kw">let </span>num_rows = batch.num_rows();
+<a href=#55 id=55 data-nosnippet>55</a>
+<a href=#56 id=56 data-nosnippet>56</a>    <span class="kw">let </span>label_name_hash = {
+<a href=#57 id=57 data-nosnippet>57</a>        <span class="kw">let </span><span class="kw-2">mut </span>hasher = FxHasher::default();
+<a href=#58 id=58 data-nosnippet>58</a>        <span class="kw">for </span>tag_col <span class="kw">in </span>sorted_tag_columns {
+<a href=#59 id=59 data-nosnippet>59</a>            hasher.write(tag_col.name.as_bytes());
+<a href=#60 id=60 data-nosnippet>60</a>            hasher.write_u8(<span class="number">0xff</span>);
+<a href=#61 id=61 data-nosnippet>61</a>        }
+<a href=#62 id=62 data-nosnippet>62</a>        hasher.finish()
+<a href=#63 id=63 data-nosnippet>63</a>    };
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a>    <span class="kw">let </span><span class="kw-2">mut </span>tsid_values = Vec::with_capacity(num_rows);
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="kw">for </span>row <span class="kw">in </span><span class="number">0</span>..num_rows {
+<a href=#67 id=67 data-nosnippet>67</a>        <span class="kw">let </span>has_null = tag_arrays.iter().any(|arr| arr.is_null(row));
+<a href=#68 id=68 data-nosnippet>68</a>
+<a href=#69 id=69 data-nosnippet>69</a>        <span class="kw">let </span>tsid = <span class="kw">if </span>!has_null {
+<a href=#70 id=70 data-nosnippet>70</a>            <span class="kw">let </span><span class="kw-2">mut </span>hasher = FxHasher::default();
+<a href=#71 id=71 data-nosnippet>71</a>            hasher.write_u64(label_name_hash);
+<a href=#72 id=72 data-nosnippet>72</a>            <span class="kw">for </span>arr <span class="kw">in </span>tag_arrays {
+<a href=#73 id=73 data-nosnippet>73</a>                hasher.write(arr.value(row).as_bytes());
+<a href=#74 id=74 data-nosnippet>74</a>                hasher.write_u8(<span class="number">0xff</span>);
+<a href=#75 id=75 data-nosnippet>75</a>            }
+<a href=#76 id=76 data-nosnippet>76</a>            hasher.finish()
+<a href=#77 id=77 data-nosnippet>77</a>        } <span class="kw">else </span>{
+<a href=#78 id=78 data-nosnippet>78</a>            <span class="kw">let </span><span class="kw-2">mut </span>name_hasher = FxHasher::default();
+<a href=#79 id=79 data-nosnippet>79</a>            <span class="kw">for </span>(tc, arr) <span class="kw">in </span>sorted_tag_columns.iter().zip(tag_arrays.iter()) {
+<a href=#80 id=80 data-nosnippet>80</a>                <span class="kw">if </span>!arr.is_null(row) {
+<a href=#81 id=81 data-nosnippet>81</a>                    name_hasher.write(tc.name.as_bytes());
+<a href=#82 id=82 data-nosnippet>82</a>                    name_hasher.write_u8(<span class="number">0xff</span>);
+<a href=#83 id=83 data-nosnippet>83</a>                }
+<a href=#84 id=84 data-nosnippet>84</a>            }
+<a href=#85 id=85 data-nosnippet>85</a>            <span class="kw">let </span>row_label_hash = name_hasher.finish();
+<a href=#86 id=86 data-nosnippet>86</a>
+<a href=#87 id=87 data-nosnippet>87</a>            <span class="kw">let </span><span class="kw-2">mut </span>val_hasher = FxHasher::default();
+<a href=#88 id=88 data-nosnippet>88</a>            val_hasher.write_u64(row_label_hash);
+<a href=#89 id=89 data-nosnippet>89</a>            <span class="kw">for </span>arr <span class="kw">in </span>tag_arrays {
+<a href=#90 id=90 data-nosnippet>90</a>                <span class="kw">if </span>!arr.is_null(row) {
+<a href=#91 id=91 data-nosnippet>91</a>                    val_hasher.write(arr.value(row).as_bytes());
+<a href=#92 id=92 data-nosnippet>92</a>                    val_hasher.write_u8(<span class="number">0xff</span>);
+<a href=#93 id=93 data-nosnippet>93</a>                }
+<a href=#94 id=94 data-nosnippet>94</a>            }
+<a href=#95 id=95 data-nosnippet>95</a>            val_hasher.finish()
+<a href=#96 id=96 data-nosnippet>96</a>        };
+<a href=#97 id=97 data-nosnippet>97</a>
+<a href=#98 id=98 data-nosnippet>98</a>        tsid_values.push(tsid);
+<a href=#99 id=99 data-nosnippet>99</a>    }
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a>    UInt64Array::from(tsid_values)
+<a href=#102 id=102 data-nosnippet>102</a>}
+<a href=#103 id=103 data-nosnippet>103</a>
+<a href=#104 id=104 data-nosnippet>104</a><span class="kw">fn </span>build_tag_arrays&lt;<span class="lifetime">'a</span>&gt;(
+<a href=#105 id=105 data-nosnippet>105</a>    batch: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>RecordBatch,
+<a href=#106 id=106 data-nosnippet>106</a>    sorted_tag_columns: <span class="kw-2">&amp;</span>[TagColumnInfo],
+<a href=#107 id=107 data-nosnippet>107</a>) -&gt; Vec&lt;<span class="kw-2">&amp;</span><span class="lifetime">'a </span>StringArray&gt; {
+<a href=#108 id=108 data-nosnippet>108</a>    sorted_tag_columns
+<a href=#109 id=109 data-nosnippet>109</a>        .iter()
+<a href=#110 id=110 data-nosnippet>110</a>        .map(|tc| {
+<a href=#111 id=111 data-nosnippet>111</a>            batch
+<a href=#112 id=112 data-nosnippet>112</a>                .column(tc.index)
+<a href=#113 id=113 data-nosnippet>113</a>                .as_any()
+<a href=#114 id=114 data-nosnippet>114</a>                .downcast_ref::&lt;StringArray&gt;()
+<a href=#115 id=115 data-nosnippet>115</a>                .expect(<span class="string">"tag column must be utf8"</span>)
+<a href=#116 id=116 data-nosnippet>116</a>        })
+<a href=#117 id=117 data-nosnippet>117</a>        .collect()
+<a href=#118 id=118 data-nosnippet>118</a>}
+<a href=#119 id=119 data-nosnippet>119</a>
+<a href=#120 id=120 data-nosnippet>120</a><span class="doccomment">/// Modifies a [RecordBatch] to include a sparse primary key column.
+<a href=#121 id=121 data-nosnippet>121</a>///
+<a href=#122 id=122 data-nosnippet>122</a>/// This function transforms the input `batch` into a new `RecordBatch` where the first column
+<a href=#123 id=123 data-nosnippet>123</a>/// is the generated primary key (named [PRIMARY_KEY_COLUMN_NAME]), followed by columns
+<a href=#124 id=124 data-nosnippet>124</a>/// indicated by `extra_column_indices`.
+<a href=#125 id=125 data-nosnippet>125</a>///
+<a href=#126 id=126 data-nosnippet>126</a>/// The primary key uses a "sparse" encoding, which compactly represents the row's identity
+<a href=#127 id=127 data-nosnippet>127</a>/// by only including non-null tag values. The encoding, handled by [SparsePrimaryKeyCodec],
+<a href=#128 id=128 data-nosnippet>128</a>/// consists of:
+<a href=#129 id=129 data-nosnippet>129</a>/// 1. The `table_id`.
+<a href=#130 id=130 data-nosnippet>130</a>/// 2. A `tsid` (Time Series ID), which is a hash of the present tags.
+<a href=#131 id=131 data-nosnippet>131</a>/// 3. The actual non-null tag values paired with their `column_id`.
+<a href=#132 id=132 data-nosnippet>132</a>///
+<a href=#133 id=133 data-nosnippet>133</a>/// # Parameters
+<a href=#134 id=134 data-nosnippet>134</a>/// - `batch`: The source [RecordBatch].
+<a href=#135 id=135 data-nosnippet>135</a>/// - `table_id`: The ID of the table.
+<a href=#136 id=136 data-nosnippet>136</a>/// - `sorted_tag_columns`: Metadata for tag columns, used for both TSID computation and PK encoding.
+<a href=#137 id=137 data-nosnippet>137</a>/// - `extra_column_indices`: Indices of columns from the original batch to keep in the output
+<a href=#138 id=138 data-nosnippet>138</a>///   (typically the timestamp and value fields).
+<a href=#139 id=139 data-nosnippet>139</a></span><span class="kw">pub fn </span>modify_batch_sparse(
+<a href=#140 id=140 data-nosnippet>140</a>    batch: RecordBatch,
+<a href=#141 id=141 data-nosnippet>141</a>    table_id: u32,
+<a href=#142 id=142 data-nosnippet>142</a>    sorted_tag_columns: <span class="kw-2">&amp;</span>[TagColumnInfo],
+<a href=#143 id=143 data-nosnippet>143</a>    extra_column_indices: <span class="kw-2">&amp;</span>[usize],
+<a href=#144 id=144 data-nosnippet>144</a>) -&gt; <span class="prelude-ty">Result</span>&lt;RecordBatch&gt; {
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="kw">let </span>num_rows = batch.num_rows();
+<a href=#146 id=146 data-nosnippet>146</a>    <span class="kw">let </span>codec = SparsePrimaryKeyCodec::schemaless();
+<a href=#147 id=147 data-nosnippet>147</a>    <span class="kw">let </span>tag_arrays: Vec&lt;<span class="kw-2">&amp;</span>StringArray&gt; = build_tag_arrays(<span class="kw-2">&amp;</span>batch, sorted_tag_columns);
+<a href=#148 id=148 data-nosnippet>148</a>    <span class="kw">let </span>tsid_array = compute_tsid_array(<span class="kw-2">&amp;</span>batch, sorted_tag_columns, <span class="kw-2">&amp;</span>tag_arrays);
+<a href=#149 id=149 data-nosnippet>149</a>
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="kw">let </span><span class="kw-2">mut </span>pk_builder = BinaryBuilder::with_capacity(num_rows, <span class="number">0</span>);
+<a href=#151 id=151 data-nosnippet>151</a>    <span class="kw">let </span><span class="kw-2">mut </span>buffer = Vec::new();
+<a href=#152 id=152 data-nosnippet>152</a>    <span class="kw">for </span>row <span class="kw">in </span><span class="number">0</span>..num_rows {
+<a href=#153 id=153 data-nosnippet>153</a>        buffer.clear();
+<a href=#154 id=154 data-nosnippet>154</a>        codec
+<a href=#155 id=155 data-nosnippet>155</a>            .encode_internal(table_id, tsid_array.value(row), <span class="kw-2">&amp;mut </span>buffer)
+<a href=#156 id=156 data-nosnippet>156</a>            .context(EncodePrimaryKeySnafu)<span class="question-mark">?</span>;
+<a href=#157 id=157 data-nosnippet>157</a>
+<a href=#158 id=158 data-nosnippet>158</a>        <span class="kw">let </span>tags = sorted_tag_columns
+<a href=#159 id=159 data-nosnippet>159</a>            .iter()
+<a href=#160 id=160 data-nosnippet>160</a>            .zip(tag_arrays.iter())
+<a href=#161 id=161 data-nosnippet>161</a>            .filter(|(<span class="kw">_</span>, arr)| !arr.is_null(row))
+<a href=#162 id=162 data-nosnippet>162</a>            .map(|(tc, arr)| (tc.column_id, arr.value(row).as_bytes()));
+<a href=#163 id=163 data-nosnippet>163</a>        codec
+<a href=#164 id=164 data-nosnippet>164</a>            .encode_raw_tag_value(tags, <span class="kw-2">&amp;mut </span>buffer)
+<a href=#165 id=165 data-nosnippet>165</a>            .context(EncodePrimaryKeySnafu)<span class="question-mark">?</span>;
+<a href=#166 id=166 data-nosnippet>166</a>
+<a href=#167 id=167 data-nosnippet>167</a>        pk_builder.append_value(<span class="kw-2">&amp;</span>buffer);
+<a href=#168 id=168 data-nosnippet>168</a>    }
+<a href=#169 id=169 data-nosnippet>169</a>
+<a href=#170 id=170 data-nosnippet>170</a>    <span class="kw">let </span>pk_array = pk_builder.finish();
+<a href=#171 id=171 data-nosnippet>171</a>
+<a href=#172 id=172 data-nosnippet>172</a>    <span class="kw">let </span><span class="kw-2">mut </span>fields = <span class="macro">vec!</span>[Arc::new(Field::new(
+<a href=#173 id=173 data-nosnippet>173</a>        PRIMARY_KEY_COLUMN_NAME,
+<a href=#174 id=174 data-nosnippet>174</a>        DataType::Binary,
+<a href=#175 id=175 data-nosnippet>175</a>        <span class="bool-val">false</span>,
+<a href=#176 id=176 data-nosnippet>176</a>    ))];
+<a href=#177 id=177 data-nosnippet>177</a>    <span class="kw">let </span><span class="kw-2">mut </span>columns: Vec&lt;Arc&lt;<span class="kw">dyn </span>Array&gt;&gt; = <span class="macro">vec!</span>[Arc::new(pk_array)];
+<a href=#178 id=178 data-nosnippet>178</a>
+<a href=#179 id=179 data-nosnippet>179</a>    <span class="kw">for </span><span class="kw-2">&amp;</span>idx <span class="kw">in </span>extra_column_indices {
+<a href=#180 id=180 data-nosnippet>180</a>        fields.push(batch.schema().fields()[idx].clone());
+<a href=#181 id=181 data-nosnippet>181</a>        columns.push(batch.column(idx).clone());
+<a href=#182 id=182 data-nosnippet>182</a>    }
+<a href=#183 id=183 data-nosnippet>183</a>
+<a href=#184 id=184 data-nosnippet>184</a>    <span class="kw">let </span>new_schema = Arc::new(ArrowSchema::new(fields));
+<a href=#185 id=185 data-nosnippet>185</a>    RecordBatch::try_new(new_schema, columns).map_err(|e| {
+<a href=#186 id=186 data-nosnippet>186</a>        UnexpectedRequestSnafu {
+<a href=#187 id=187 data-nosnippet>187</a>            reason: <span class="macro">format!</span>(<span class="string">"Failed to build modified sparse RecordBatch: {e}"</span>),
+<a href=#188 id=188 data-nosnippet>188</a>        }
+<a href=#189 id=189 data-nosnippet>189</a>        .build()
+<a href=#190 id=190 data-nosnippet>190</a>    })
+<a href=#191 id=191 data-nosnippet>191</a>}
+<a href=#192 id=192 data-nosnippet>192</a>
+<a href=#193 id=193 data-nosnippet>193</a><span class="attr">#[cfg(test)]
+<a href=#194 id=194 data-nosnippet>194</a></span><span class="kw">mod </span>tests {
+<a href=#195 id=195 data-nosnippet>195</a>    <span class="kw">use </span>std::collections::HashMap;
+<a href=#196 id=196 data-nosnippet>196</a>    <span class="kw">use </span>std::sync::Arc;
+<a href=#197 id=197 data-nosnippet>197</a>
+<a href=#198 id=198 data-nosnippet>198</a>    <span class="kw">use </span>api::v1::value::ValueData;
+<a href=#199 id=199 data-nosnippet>199</a>    <span class="kw">use </span>api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+<a href=#200 id=200 data-nosnippet>200</a>    <span class="kw">use </span>datatypes::arrow::array::{BinaryArray, Int64Array, StringArray};
+<a href=#201 id=201 data-nosnippet>201</a>    <span class="kw">use </span>datatypes::arrow::datatypes::{DataType, Field, Schema <span class="kw">as </span>ArrowSchema};
+<a href=#202 id=202 data-nosnippet>202</a>    <span class="kw">use </span>datatypes::arrow::record_batch::RecordBatch;
+<a href=#203 id=203 data-nosnippet>203</a>    <span class="kw">use </span>store_api::codec::PrimaryKeyEncoding;
+<a href=#204 id=204 data-nosnippet>204</a>    <span class="kw">use </span>store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+<a href=#205 id=205 data-nosnippet>205</a>
+<a href=#206 id=206 data-nosnippet>206</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#207 id=207 data-nosnippet>207</a>    <span class="kw">use </span><span class="kw">crate</span>::row_modifier::{RowModifier, RowsIter, TableIdInput};
+<a href=#208 id=208 data-nosnippet>208</a>
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="kw">fn </span>build_sparse_test_batch() -&gt; RecordBatch {
+<a href=#210 id=210 data-nosnippet>210</a>        <span class="kw">let </span>schema = Arc::new(ArrowSchema::new(<span class="macro">vec!</span>[
+<a href=#211 id=211 data-nosnippet>211</a>            Field::new(<span class="string">"greptime_timestamp"</span>, DataType::Int64, <span class="bool-val">false</span>),
+<a href=#212 id=212 data-nosnippet>212</a>            Field::new(<span class="string">"greptime_value"</span>, DataType::Float64, <span class="bool-val">true</span>),
+<a href=#213 id=213 data-nosnippet>213</a>            Field::new(<span class="string">"namespace"</span>, DataType::Utf8, <span class="bool-val">true</span>),
+<a href=#214 id=214 data-nosnippet>214</a>            Field::new(<span class="string">"host"</span>, DataType::Utf8, <span class="bool-val">true</span>),
+<a href=#215 id=215 data-nosnippet>215</a>        ]));
+<a href=#216 id=216 data-nosnippet>216</a>        RecordBatch::try_new(
+<a href=#217 id=217 data-nosnippet>217</a>            schema,
+<a href=#218 id=218 data-nosnippet>218</a>            <span class="macro">vec!</span>[
+<a href=#219 id=219 data-nosnippet>219</a>                Arc::new(Int64Array::from(<span class="macro">vec!</span>[<span class="number">1000</span>])),
+<a href=#220 id=220 data-nosnippet>220</a>                Arc::new(datatypes::arrow::array::Float64Array::from(<span class="macro">vec!</span>[<span class="number">42.0</span>])),
+<a href=#221 id=221 data-nosnippet>221</a>                Arc::new(StringArray::from(<span class="macro">vec!</span>[<span class="string">"greptimedb"</span>])),
+<a href=#222 id=222 data-nosnippet>222</a>                Arc::new(StringArray::from(<span class="macro">vec!</span>[<span class="string">"127.0.0.1"</span>])),
+<a href=#223 id=223 data-nosnippet>223</a>            ],
+<a href=#224 id=224 data-nosnippet>224</a>        )
+<a href=#225 id=225 data-nosnippet>225</a>        .unwrap()
+<a href=#226 id=226 data-nosnippet>226</a>    }
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="kw">fn </span>sparse_tag_columns() -&gt; Vec&lt;TagColumnInfo&gt; {
+<a href=#229 id=229 data-nosnippet>229</a>        <span class="macro">vec!</span>[
+<a href=#230 id=230 data-nosnippet>230</a>            TagColumnInfo {
+<a href=#231 id=231 data-nosnippet>231</a>                name: <span class="string">"host"</span>.to_string(),
+<a href=#232 id=232 data-nosnippet>232</a>                index: <span class="number">3</span>,
+<a href=#233 id=233 data-nosnippet>233</a>                column_id: <span class="number">3</span>,
+<a href=#234 id=234 data-nosnippet>234</a>            },
+<a href=#235 id=235 data-nosnippet>235</a>            TagColumnInfo {
+<a href=#236 id=236 data-nosnippet>236</a>                name: <span class="string">"namespace"</span>.to_string(),
+<a href=#237 id=237 data-nosnippet>237</a>                index: <span class="number">2</span>,
+<a href=#238 id=238 data-nosnippet>238</a>                column_id: <span class="number">2</span>,
+<a href=#239 id=239 data-nosnippet>239</a>            },
+<a href=#240 id=240 data-nosnippet>240</a>        ]
+<a href=#241 id=241 data-nosnippet>241</a>    }
+<a href=#242 id=242 data-nosnippet>242</a>
+<a href=#243 id=243 data-nosnippet>243</a>    <span class="attr">#[test]
+<a href=#244 id=244 data-nosnippet>244</a>    </span><span class="kw">fn </span>test_compute_tsid_basic() {
+<a href=#245 id=245 data-nosnippet>245</a>        <span class="kw">let </span>schema = Arc::new(ArrowSchema::new(<span class="macro">vec!</span>[
+<a href=#246 id=246 data-nosnippet>246</a>            Field::new(<span class="string">"namespace"</span>, DataType::Utf8, <span class="bool-val">true</span>),
+<a href=#247 id=247 data-nosnippet>247</a>            Field::new(<span class="string">"host"</span>, DataType::Utf8, <span class="bool-val">true</span>),
+<a href=#248 id=248 data-nosnippet>248</a>        ]));
+<a href=#249 id=249 data-nosnippet>249</a>        <span class="kw">let </span>batch = RecordBatch::try_new(
+<a href=#250 id=250 data-nosnippet>250</a>            schema,
+<a href=#251 id=251 data-nosnippet>251</a>            <span class="macro">vec!</span>[
+<a href=#252 id=252 data-nosnippet>252</a>                Arc::new(StringArray::from(<span class="macro">vec!</span>[<span class="string">"greptimedb"</span>])),
+<a href=#253 id=253 data-nosnippet>253</a>                Arc::new(StringArray::from(<span class="macro">vec!</span>[<span class="string">"127.0.0.1"</span>])),
+<a href=#254 id=254 data-nosnippet>254</a>            ],
+<a href=#255 id=255 data-nosnippet>255</a>        )
+<a href=#256 id=256 data-nosnippet>256</a>        .unwrap();
+<a href=#257 id=257 data-nosnippet>257</a>
+<a href=#258 id=258 data-nosnippet>258</a>        <span class="kw">let </span>tag_columns: Vec&lt;TagColumnInfo&gt; = <span class="macro">vec!</span>[
+<a href=#259 id=259 data-nosnippet>259</a>            TagColumnInfo {
+<a href=#260 id=260 data-nosnippet>260</a>                name: <span class="string">"host"</span>.to_string(),
+<a href=#261 id=261 data-nosnippet>261</a>                index: <span class="number">1</span>,
+<a href=#262 id=262 data-nosnippet>262</a>                column_id: <span class="number">2</span>,
+<a href=#263 id=263 data-nosnippet>263</a>            },
+<a href=#264 id=264 data-nosnippet>264</a>            TagColumnInfo {
+<a href=#265 id=265 data-nosnippet>265</a>                name: <span class="string">"namespace"</span>.to_string(),
+<a href=#266 id=266 data-nosnippet>266</a>                index: <span class="number">0</span>,
+<a href=#267 id=267 data-nosnippet>267</a>                column_id: <span class="number">1</span>,
+<a href=#268 id=268 data-nosnippet>268</a>            },
+<a href=#269 id=269 data-nosnippet>269</a>        ];
+<a href=#270 id=270 data-nosnippet>270</a>        <span class="kw">let </span>tag_arrays = build_tag_arrays(<span class="kw-2">&amp;</span>batch, <span class="kw-2">&amp;</span>tag_columns);
+<a href=#271 id=271 data-nosnippet>271</a>        <span class="kw">let </span>tsid_array = compute_tsid_array(<span class="kw-2">&amp;</span>batch, <span class="kw-2">&amp;</span>tag_columns, <span class="kw-2">&amp;</span>tag_arrays);
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a>        <span class="macro">assert_eq!</span>(tsid_array.value(<span class="number">0</span>), <span class="number">2721566936019240841</span>);
+<a href=#274 id=274 data-nosnippet>274</a>    }
+<a href=#275 id=275 data-nosnippet>275</a>
+<a href=#276 id=276 data-nosnippet>276</a>    <span class="attr">#[test]
+<a href=#277 id=277 data-nosnippet>277</a>    </span><span class="kw">fn </span>test_compute_tsid_with_nulls() {
+<a href=#278 id=278 data-nosnippet>278</a>        <span class="kw">let </span>schema = Arc::new(ArrowSchema::new(<span class="macro">vec!</span>[
+<a href=#279 id=279 data-nosnippet>279</a>            Field::new(<span class="string">"a"</span>, DataType::Utf8, <span class="bool-val">true</span>),
+<a href=#280 id=280 data-nosnippet>280</a>            Field::new(<span class="string">"b"</span>, DataType::Utf8, <span class="bool-val">true</span>),
+<a href=#281 id=281 data-nosnippet>281</a>        ]));
+<a href=#282 id=282 data-nosnippet>282</a>        <span class="kw">let </span>batch_no_null = RecordBatch::try_new(
+<a href=#283 id=283 data-nosnippet>283</a>            schema.clone(),
+<a href=#284 id=284 data-nosnippet>284</a>            <span class="macro">vec!</span>[
+<a href=#285 id=285 data-nosnippet>285</a>                Arc::new(StringArray::from(<span class="macro">vec!</span>[<span class="string">"A"</span>])),
+<a href=#286 id=286 data-nosnippet>286</a>                Arc::new(StringArray::from(<span class="macro">vec!</span>[<span class="string">"B"</span>])),
+<a href=#287 id=287 data-nosnippet>287</a>            ],
+<a href=#288 id=288 data-nosnippet>288</a>        )
+<a href=#289 id=289 data-nosnippet>289</a>        .unwrap();
+<a href=#290 id=290 data-nosnippet>290</a>        <span class="kw">let </span>tag_cols_2: Vec&lt;TagColumnInfo&gt; = <span class="macro">vec!</span>[
+<a href=#291 id=291 data-nosnippet>291</a>            TagColumnInfo {
+<a href=#292 id=292 data-nosnippet>292</a>                name: <span class="string">"a"</span>.to_string(),
+<a href=#293 id=293 data-nosnippet>293</a>                index: <span class="number">0</span>,
+<a href=#294 id=294 data-nosnippet>294</a>                column_id: <span class="number">1</span>,
+<a href=#295 id=295 data-nosnippet>295</a>            },
+<a href=#296 id=296 data-nosnippet>296</a>            TagColumnInfo {
+<a href=#297 id=297 data-nosnippet>297</a>                name: <span class="string">"b"</span>.to_string(),
+<a href=#298 id=298 data-nosnippet>298</a>                index: <span class="number">1</span>,
+<a href=#299 id=299 data-nosnippet>299</a>                column_id: <span class="number">2</span>,
+<a href=#300 id=300 data-nosnippet>300</a>            },
+<a href=#301 id=301 data-nosnippet>301</a>        ];
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="kw">let </span>tag_arrays_2 = build_tag_arrays(<span class="kw-2">&amp;</span>batch_no_null, <span class="kw-2">&amp;</span>tag_cols_2);
+<a href=#303 id=303 data-nosnippet>303</a>        <span class="kw">let </span>tsid_no_null = compute_tsid_array(<span class="kw-2">&amp;</span>batch_no_null, <span class="kw-2">&amp;</span>tag_cols_2, <span class="kw-2">&amp;</span>tag_arrays_2);
+<a href=#304 id=304 data-nosnippet>304</a>
+<a href=#305 id=305 data-nosnippet>305</a>        <span class="kw">let </span>schema3 = Arc::new(ArrowSchema::new(<span class="macro">vec!</span>[
+<a href=#306 id=306 data-nosnippet>306</a>            Field::new(<span class="string">"a"</span>, DataType::Utf8, <span class="bool-val">true</span>),
+<a href=#307 id=307 data-nosnippet>307</a>            Field::new(<span class="string">"b"</span>, DataType::Utf8, <span class="bool-val">true</span>),
+<a href=#308 id=308 data-nosnippet>308</a>            Field::new(<span class="string">"c"</span>, DataType::Utf8, <span class="bool-val">true</span>),
+<a href=#309 id=309 data-nosnippet>309</a>        ]));
+<a href=#310 id=310 data-nosnippet>310</a>        <span class="kw">let </span>batch_with_null = RecordBatch::try_new(
+<a href=#311 id=311 data-nosnippet>311</a>            schema3,
+<a href=#312 id=312 data-nosnippet>312</a>            <span class="macro">vec!</span>[
+<a href=#313 id=313 data-nosnippet>313</a>                Arc::new(StringArray::from(<span class="macro">vec!</span>[<span class="string">"A"</span>])),
+<a href=#314 id=314 data-nosnippet>314</a>                Arc::new(StringArray::from(<span class="macro">vec!</span>[<span class="string">"B"</span>])),
+<a href=#315 id=315 data-nosnippet>315</a>                Arc::new(StringArray::from(<span class="macro">vec!</span>[<span class="prelude-val">None </span><span class="kw">as </span><span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;])),
+<a href=#316 id=316 data-nosnippet>316</a>            ],
+<a href=#317 id=317 data-nosnippet>317</a>        )
+<a href=#318 id=318 data-nosnippet>318</a>        .unwrap();
+<a href=#319 id=319 data-nosnippet>319</a>        <span class="kw">let </span>tag_cols_3: Vec&lt;TagColumnInfo&gt; = <span class="macro">vec!</span>[
+<a href=#320 id=320 data-nosnippet>320</a>            TagColumnInfo {
+<a href=#321 id=321 data-nosnippet>321</a>                name: <span class="string">"a"</span>.to_string(),
+<a href=#322 id=322 data-nosnippet>322</a>                index: <span class="number">0</span>,
+<a href=#323 id=323 data-nosnippet>323</a>                column_id: <span class="number">1</span>,
+<a href=#324 id=324 data-nosnippet>324</a>            },
+<a href=#325 id=325 data-nosnippet>325</a>            TagColumnInfo {
+<a href=#326 id=326 data-nosnippet>326</a>                name: <span class="string">"b"</span>.to_string(),
+<a href=#327 id=327 data-nosnippet>327</a>                index: <span class="number">1</span>,
+<a href=#328 id=328 data-nosnippet>328</a>                column_id: <span class="number">2</span>,
+<a href=#329 id=329 data-nosnippet>329</a>            },
+<a href=#330 id=330 data-nosnippet>330</a>            TagColumnInfo {
+<a href=#331 id=331 data-nosnippet>331</a>                name: <span class="string">"c"</span>.to_string(),
+<a href=#332 id=332 data-nosnippet>332</a>                index: <span class="number">2</span>,
+<a href=#333 id=333 data-nosnippet>333</a>                column_id: <span class="number">3</span>,
+<a href=#334 id=334 data-nosnippet>334</a>            },
+<a href=#335 id=335 data-nosnippet>335</a>        ];
+<a href=#336 id=336 data-nosnippet>336</a>        <span class="kw">let </span>tag_arrays_3 = build_tag_arrays(<span class="kw-2">&amp;</span>batch_with_null, <span class="kw-2">&amp;</span>tag_cols_3);
+<a href=#337 id=337 data-nosnippet>337</a>        <span class="kw">let </span>tsid_with_null = compute_tsid_array(<span class="kw-2">&amp;</span>batch_with_null, <span class="kw-2">&amp;</span>tag_cols_3, <span class="kw-2">&amp;</span>tag_arrays_3);
+<a href=#338 id=338 data-nosnippet>338</a>
+<a href=#339 id=339 data-nosnippet>339</a>        <span class="macro">assert_eq!</span>(tsid_no_null.value(<span class="number">0</span>), tsid_with_null.value(<span class="number">0</span>));
+<a href=#340 id=340 data-nosnippet>340</a>    }
+<a href=#341 id=341 data-nosnippet>341</a>
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="attr">#[test]
+<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="kw">fn </span>test_modify_batch_sparse() {
+<a href=#344 id=344 data-nosnippet>344</a>        <span class="kw">let </span>batch = build_sparse_test_batch();
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="kw">let </span>tag_columns = sparse_tag_columns();
+<a href=#346 id=346 data-nosnippet>346</a>        <span class="kw">let </span>non_tag_indices = <span class="macro">vec!</span>[<span class="number">0</span>, <span class="number">1</span>];
+<a href=#347 id=347 data-nosnippet>347</a>        <span class="kw">let </span>table_id: u32 = <span class="number">1025</span>;
+<a href=#348 id=348 data-nosnippet>348</a>
+<a href=#349 id=349 data-nosnippet>349</a>        <span class="kw">let </span>modified =
+<a href=#350 id=350 data-nosnippet>350</a>            modify_batch_sparse(batch, table_id, <span class="kw-2">&amp;</span>tag_columns, <span class="kw-2">&amp;</span>non_tag_indices).unwrap();
+<a href=#351 id=351 data-nosnippet>351</a>
+<a href=#352 id=352 data-nosnippet>352</a>        <span class="macro">assert_eq!</span>(modified.num_columns(), <span class="number">3</span>);
+<a href=#353 id=353 data-nosnippet>353</a>        <span class="macro">assert_eq!</span>(modified.schema().field(<span class="number">0</span>).name(), PRIMARY_KEY_COLUMN_NAME);
+<a href=#354 id=354 data-nosnippet>354</a>        <span class="macro">assert_eq!</span>(modified.schema().field(<span class="number">1</span>).name(), <span class="string">"greptime_timestamp"</span>);
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="macro">assert_eq!</span>(modified.schema().field(<span class="number">2</span>).name(), <span class="string">"greptime_value"</span>);
+<a href=#356 id=356 data-nosnippet>356</a>    }
+<a href=#357 id=357 data-nosnippet>357</a>
+<a href=#358 id=358 data-nosnippet>358</a>    <span class="attr">#[test]
+<a href=#359 id=359 data-nosnippet>359</a>    </span><span class="kw">fn </span>test_modify_batch_sparse_matches_row_modifier() {
+<a href=#360 id=360 data-nosnippet>360</a>        <span class="kw">let </span>batch = build_sparse_test_batch();
+<a href=#361 id=361 data-nosnippet>361</a>        <span class="kw">let </span>tag_columns = sparse_tag_columns();
+<a href=#362 id=362 data-nosnippet>362</a>        <span class="kw">let </span>non_tag_indices = <span class="macro">vec!</span>[<span class="number">0</span>, <span class="number">1</span>];
+<a href=#363 id=363 data-nosnippet>363</a>        <span class="kw">let </span>table_id: u32 = <span class="number">1025</span>;
+<a href=#364 id=364 data-nosnippet>364</a>        <span class="kw">let </span>modified =
+<a href=#365 id=365 data-nosnippet>365</a>            modify_batch_sparse(batch, table_id, <span class="kw-2">&amp;</span>tag_columns, <span class="kw-2">&amp;</span>non_tag_indices).unwrap();
+<a href=#366 id=366 data-nosnippet>366</a>
+<a href=#367 id=367 data-nosnippet>367</a>        <span class="kw">let </span>name_to_column_id: HashMap&lt;String, ColumnId&gt; = [
+<a href=#368 id=368 data-nosnippet>368</a>            (<span class="string">"greptime_timestamp"</span>.to_string(), <span class="number">0</span>),
+<a href=#369 id=369 data-nosnippet>369</a>            (<span class="string">"greptime_value"</span>.to_string(), <span class="number">1</span>),
+<a href=#370 id=370 data-nosnippet>370</a>            (<span class="string">"namespace"</span>.to_string(), <span class="number">2</span>),
+<a href=#371 id=371 data-nosnippet>371</a>            (<span class="string">"host"</span>.to_string(), <span class="number">3</span>),
+<a href=#372 id=372 data-nosnippet>372</a>        ]
+<a href=#373 id=373 data-nosnippet>373</a>        .into_iter()
+<a href=#374 id=374 data-nosnippet>374</a>        .collect();
+<a href=#375 id=375 data-nosnippet>375</a>
+<a href=#376 id=376 data-nosnippet>376</a>        <span class="kw">let </span>rows = Rows {
+<a href=#377 id=377 data-nosnippet>377</a>            schema: <span class="macro">vec!</span>[
+<a href=#378 id=378 data-nosnippet>378</a>                ColumnSchema {
+<a href=#379 id=379 data-nosnippet>379</a>                    column_name: <span class="string">"greptime_timestamp"</span>.to_string(),
+<a href=#380 id=380 data-nosnippet>380</a>                    datatype: ColumnDataType::TimestampMillisecond <span class="kw">as </span>i32,
+<a href=#381 id=381 data-nosnippet>381</a>                    semantic_type: SemanticType::Timestamp <span class="kw">as </span>i32,
+<a href=#382 id=382 data-nosnippet>382</a>                    ..Default::default()
+<a href=#383 id=383 data-nosnippet>383</a>                },
+<a href=#384 id=384 data-nosnippet>384</a>                ColumnSchema {
+<a href=#385 id=385 data-nosnippet>385</a>                    column_name: <span class="string">"greptime_value"</span>.to_string(),
+<a href=#386 id=386 data-nosnippet>386</a>                    datatype: ColumnDataType::Float64 <span class="kw">as </span>i32,
+<a href=#387 id=387 data-nosnippet>387</a>                    semantic_type: SemanticType::Field <span class="kw">as </span>i32,
+<a href=#388 id=388 data-nosnippet>388</a>                    ..Default::default()
+<a href=#389 id=389 data-nosnippet>389</a>                },
+<a href=#390 id=390 data-nosnippet>390</a>                ColumnSchema {
+<a href=#391 id=391 data-nosnippet>391</a>                    column_name: <span class="string">"namespace"</span>.to_string(),
+<a href=#392 id=392 data-nosnippet>392</a>                    datatype: ColumnDataType::String <span class="kw">as </span>i32,
+<a href=#393 id=393 data-nosnippet>393</a>                    semantic_type: SemanticType::Tag <span class="kw">as </span>i32,
+<a href=#394 id=394 data-nosnippet>394</a>                    ..Default::default()
+<a href=#395 id=395 data-nosnippet>395</a>                },
+<a href=#396 id=396 data-nosnippet>396</a>                ColumnSchema {
+<a href=#397 id=397 data-nosnippet>397</a>                    column_name: <span class="string">"host"</span>.to_string(),
+<a href=#398 id=398 data-nosnippet>398</a>                    datatype: ColumnDataType::String <span class="kw">as </span>i32,
+<a href=#399 id=399 data-nosnippet>399</a>                    semantic_type: SemanticType::Tag <span class="kw">as </span>i32,
+<a href=#400 id=400 data-nosnippet>400</a>                    ..Default::default()
+<a href=#401 id=401 data-nosnippet>401</a>                },
+<a href=#402 id=402 data-nosnippet>402</a>            ],
+<a href=#403 id=403 data-nosnippet>403</a>            rows: <span class="macro">vec!</span>[Row {
+<a href=#404 id=404 data-nosnippet>404</a>                values: <span class="macro">vec!</span>[
+<a href=#405 id=405 data-nosnippet>405</a>                    Value {
+<a href=#406 id=406 data-nosnippet>406</a>                        value_data: <span class="prelude-val">Some</span>(ValueData::TimestampMillisecondValue(<span class="number">1000</span>)),
+<a href=#407 id=407 data-nosnippet>407</a>                    },
+<a href=#408 id=408 data-nosnippet>408</a>                    Value {
+<a href=#409 id=409 data-nosnippet>409</a>                        value_data: <span class="prelude-val">Some</span>(ValueData::F64Value(<span class="number">42.0</span>)),
+<a href=#410 id=410 data-nosnippet>410</a>                    },
+<a href=#411 id=411 data-nosnippet>411</a>                    Value {
+<a href=#412 id=412 data-nosnippet>412</a>                        value_data: <span class="prelude-val">Some</span>(ValueData::StringValue(<span class="string">"greptimedb"</span>.to_string())),
+<a href=#413 id=413 data-nosnippet>413</a>                    },
+<a href=#414 id=414 data-nosnippet>414</a>                    Value {
+<a href=#415 id=415 data-nosnippet>415</a>                        value_data: <span class="prelude-val">Some</span>(ValueData::StringValue(<span class="string">"127.0.0.1"</span>.to_string())),
+<a href=#416 id=416 data-nosnippet>416</a>                    },
+<a href=#417 id=417 data-nosnippet>417</a>                ],
+<a href=#418 id=418 data-nosnippet>418</a>            }],
+<a href=#419 id=419 data-nosnippet>419</a>        };
+<a href=#420 id=420 data-nosnippet>420</a>
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="kw">let </span>row_iter = RowsIter::new(rows, <span class="kw-2">&amp;</span>name_to_column_id);
+<a href=#422 id=422 data-nosnippet>422</a>        <span class="kw">let </span>rows = RowModifier::default()
+<a href=#423 id=423 data-nosnippet>423</a>            .modify_rows(
+<a href=#424 id=424 data-nosnippet>424</a>                row_iter,
+<a href=#425 id=425 data-nosnippet>425</a>                TableIdInput::Single(table_id),
+<a href=#426 id=426 data-nosnippet>426</a>                PrimaryKeyEncoding::Sparse,
+<a href=#427 id=427 data-nosnippet>427</a>            )
+<a href=#428 id=428 data-nosnippet>428</a>            .unwrap();
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="kw">let </span>ValueData::BinaryValue(expected_pk) =
+<a href=#430 id=430 data-nosnippet>430</a>            rows.rows[<span class="number">0</span>].values[<span class="number">0</span>].value_data.clone().unwrap()
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="kw">else </span>{
+<a href=#432 id=432 data-nosnippet>432</a>            <span class="macro">panic!</span>(<span class="string">"expected binary primary key"</span>);
+<a href=#433 id=433 data-nosnippet>433</a>        };
+<a href=#434 id=434 data-nosnippet>434</a>
+<a href=#435 id=435 data-nosnippet>435</a>        <span class="kw">let </span>actual_array = modified
+<a href=#436 id=436 data-nosnippet>436</a>            .column(<span class="number">0</span>)
+<a href=#437 id=437 data-nosnippet>437</a>            .as_any()
+<a href=#438 id=438 data-nosnippet>438</a>            .downcast_ref::&lt;BinaryArray&gt;()
+<a href=#439 id=439 data-nosnippet>439</a>            .unwrap();
+<a href=#440 id=440 data-nosnippet>440</a>        <span class="macro">assert_eq!</span>(actual_array.value(<span class="number">0</span>), expected_pk.as_slice());
+<a href=#441 id=441 data-nosnippet>441</a>    }
+<a href=#442 id=442 data-nosnippet>442</a>}
+</code></pre></div></section></main></body></html>

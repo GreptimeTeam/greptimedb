@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["record_batch_to_ipc","record_batch_to_rows"]};

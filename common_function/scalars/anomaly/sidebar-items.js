@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["iqr","mad","utils","zscore"],"struct":["AnomalyFunction"]};

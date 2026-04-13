@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["execute_prefilter","is_usable_primary_key_filter","matching_row_ranges_by_primary_key","prefilter_flat_batch_by_primary_key"],"struct":["CachedPrimaryKeyFilter","PrefilterContext","PrefilterContextBuilder","PrefilterResult"]};

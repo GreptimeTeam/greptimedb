@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PermissionReq","PermissionResp"],"struct":["DefaultPermissionChecker"],"trait":["PermissionChecker"]};

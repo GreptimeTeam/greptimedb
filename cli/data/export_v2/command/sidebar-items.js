@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ExportV2Command"],"fn":["build_schema_ddl","canonical_schema_selection","chunk_plan_matches","format_chunk_plan","format_schema_selection","schema_selection_matches","validate_resume_config"],"struct":["ExportConfig","ExportCreate","ExportCreateCommand"]};

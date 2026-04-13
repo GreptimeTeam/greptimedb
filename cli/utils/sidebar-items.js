@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["resolve_relative_path","resolve_relative_path_with_current_dir"]};

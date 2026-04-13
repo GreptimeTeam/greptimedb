@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AGGREGATE_FUNCTION_ALIASES","SCALAR_FUNCTION_ALIASES"],"fn":["register_function_aliases"],"struct":["DfQueryPlanner","MetricsMemoryPool","QueryEngineState"]};

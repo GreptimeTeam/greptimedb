@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TraceReconcileDecision"],"fn":["choose_trace_reconcile_decision","enrich_trace_reconcile_error","is_trace_reconcile_candidate_type","push_observed_trace_type","validate_trace_column_rewrites"],"struct":["PendingTraceColumnRewrite"]};
