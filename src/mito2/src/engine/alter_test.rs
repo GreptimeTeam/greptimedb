@@ -42,8 +42,8 @@ use crate::error;
 use crate::sst::FormatType;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, column_metadata_to_column_schema,
-    flush_region, put_rows, rows_schema,
+    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key,
+    column_metadata_to_column_schema, flush_region, put_rows, rows_schema,
 };
 
 async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
@@ -327,10 +327,7 @@ async fn test_filter_is_null_after_alter_add_field_with_format(flat_format: bool
         region_id,
         Rows {
             schema: column_schemas,
-            rows: vec![build_rows_for_key("a", 0, 1, 1)
-                .into_iter()
-                .next()
-                .unwrap()],
+            rows: vec![build_rows_for_key("a", 0, 1, 1).into_iter().next().unwrap()],
         },
     )
     .await;
@@ -353,7 +350,13 @@ async fn test_filter_is_null_after_alter_add_field_with_format(flat_format: bool
         region_id,
         Rows {
             schema,
-            rows: vec![build_row_with_added_field(&metadata, "a", 1.0, Some(10.0), 0)],
+            rows: vec![build_row_with_added_field(
+                &metadata,
+                "a",
+                1.0,
+                Some(10.0),
+                0,
+            )],
         },
     )
     .await;

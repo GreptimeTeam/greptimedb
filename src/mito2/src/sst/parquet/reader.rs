@@ -677,7 +677,7 @@ impl ParquetReaderBuilder {
         metrics.rows_total += num_rows as usize;
 
         // Compute skip_fields once for all pruning operations
-        let skip_fields = self.compute_skip_fields(parquet_meta);
+        let skip_fields = self.pre_filter_mode.skip_fields();
 
         let mut output = self.row_groups_by_minmax(
             read_format,
@@ -1111,14 +1111,6 @@ impl ParquetReaderBuilder {
             pruned = true;
         }
         pruned
-    }
-
-    /// Computes whether to skip field columns when building statistics based on PreFilterMode.
-    fn compute_skip_fields(&self, _parquet_meta: &ParquetMetaData) -> bool {
-        match self.pre_filter_mode {
-            PreFilterMode::All => false,
-            PreFilterMode::SkipFields => true,
-        }
     }
 
     /// Computes row groups selection after min-max pruning.
@@ -1945,7 +1937,7 @@ impl ParquetReader {
                 return Ok(None);
             };
 
-            let skip_fields = self.context.should_skip_fields(row_group_idx);
+            let skip_fields = self.context.pre_filter_mode().skip_fields();
             let parquet_reader = self
                 .context
                 .reader_builder()
@@ -1978,7 +1970,7 @@ impl ParquetReader {
         debug_assert!(context.read_format().as_flat().is_some());
         let fetch_metrics = ParquetFetchMetrics::default();
         let reader = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
-            let skip_fields = context.should_skip_fields(row_group_idx);
+            let skip_fields = context.pre_filter_mode().skip_fields();
             let parquet_reader = context
                 .reader_builder()
                 .build(context.build_context(
