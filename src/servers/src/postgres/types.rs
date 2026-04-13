@@ -363,6 +363,13 @@ fn to_decimal_scalar_value(data: Option<Decimal>, ctype: &Decimal128Type) -> Sca
     }
 }
 
+fn numeric_out_of_range_error(value: impl std::fmt::Display) -> PgWireError {
+    invalid_parameter_error(
+        "numeric_value_out_of_range",
+        Some(format!("value {} is out of range for target type", value)),
+    )
+}
+
 pub(super) fn parameters_to_scalar_values(
     plan: &LogicalPlan,
     portal: &Portal<PgSqlPlan>,
@@ -440,14 +447,14 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<i16>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n.to_i8().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
                         ConcreteDataType::Int16(_) => ScalarValue::Int16(data),
                         ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
                         ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n.to_u8().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n.to_u16().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n.to_u32().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
                         ConcreteDataType::Timestamp(unit) => {
                             to_timestamp_scalar_value(data, unit, server_type)?
                         }
@@ -466,14 +473,14 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<i32>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n.to_i8().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n.to_i16().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
                         ConcreteDataType::Int32(_) => ScalarValue::Int32(data),
                         ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n.to_u8().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n.to_u16().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n.to_u32().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
                         ConcreteDataType::Timestamp(unit) => {
                             to_timestamp_scalar_value(data, unit, server_type)?
                         }
@@ -492,14 +499,14 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<i64>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n.to_i8().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n.to_i16().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n.to_i32().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
                         ConcreteDataType::Int64(_) => ScalarValue::Int64(data),
-                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n.to_u8().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n.to_u16().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n.to_u32().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
                         ConcreteDataType::Timestamp(unit) => {
                             to_timestamp_scalar_value(data, unit, server_type)?
                         }
@@ -536,14 +543,14 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<f32>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n.to_i8().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n.to_i16().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n.to_i32().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n.to_i64().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n.to_u8().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n.to_u16().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n.to_u32().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
                         ConcreteDataType::Float32(_) => ScalarValue::Float32(data),
                         ConcreteDataType::Float64(_) => {
                             ScalarValue::Float64(data.map(|n| n as f64))
@@ -563,16 +570,16 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<f64>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n.to_i8().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n.to_i16().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n.to_i32().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n.to_i64().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n.to_u8().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n.to_u16().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n.to_u32().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?),
                         ConcreteDataType::Float32(_) => {
-                            ScalarValue::Float32(data.map(|n| n as f32))
+                            ScalarValue::Float32(data.map(|n| n.to_f32().ok_or_else(|| numeric_out_of_range_error(n))).transpose()?)
                         }
                         ConcreteDataType::Float64(_) => ScalarValue::Float64(data),
                         _ => {
@@ -1572,5 +1579,195 @@ mod test {
 
         let scalar = to_decimal_scalar_value(None, &dt);
         assert_eq!(scalar, ScalarValue::Decimal128(None, 18, 4));
+    }
+
+    #[test]
+    fn test_int2_coerce_in_range() {
+        let v: i16 = 100;
+        assert_eq!(v.to_i8(), Some(100i8));
+        assert_eq!(v.to_i16(), Some(100i16));
+        assert_eq!(v.to_i32(), Some(100i32));
+        assert_eq!(v.to_i64(), Some(100i64));
+        assert_eq!(v.to_u8(), Some(100u8));
+        assert_eq!(v.to_u16(), Some(100u16));
+        assert_eq!(v.to_u32(), Some(100u32));
+        assert_eq!(v.to_u64(), Some(100u64));
+    }
+
+    #[test]
+    fn test_int2_coerce_out_of_range() {
+        assert!(127i16.to_i8().is_some());
+        assert!(128i16.to_i8().is_none());
+        assert!((-129i16).to_i8().is_none());
+        assert!((-128i16).to_i8().is_some());
+
+        assert!((-1i16).to_u8().is_none());
+        assert!((-1i16).to_u16().is_none());
+        assert!((-1i16).to_u32().is_none());
+        assert!((-1i16).to_u64().is_none());
+
+        assert!(255i16.to_u8().is_some());
+        assert!(256i16.to_u8().is_none());
+
+        assert!(i16::MAX.to_u16().is_some());
+        assert!(i16::MIN.to_u16().is_none());
+    }
+
+    #[test]
+    fn test_int4_coerce_out_of_range() {
+        assert!(i32::MAX.to_i8().is_none());
+        assert!(i32::MIN.to_i8().is_none());
+        assert!(127i32.to_i8().is_some());
+        assert!(128i32.to_i8().is_none());
+        assert!((-129i32).to_i8().is_none());
+
+        assert!(i32::MAX.to_i16().is_none());
+        assert!(i32::MIN.to_i16().is_none());
+        assert!((i16::MAX as i32).to_i16().is_some());
+        assert!(((i16::MAX as i32) + 1).to_i16().is_none());
+
+        assert!((-1i32).to_u64().is_none());
+        assert!(0i32.to_u64().is_some());
+
+        assert!(255i32.to_u8().is_some());
+        assert!(256i32.to_u8().is_none());
+        assert!((-1i32).to_u8().is_none());
+    }
+
+    #[test]
+    fn test_int8_coerce_out_of_range() {
+        assert!(i64::MAX.to_i8().is_none());
+        assert!(i64::MIN.to_i8().is_none());
+        assert!(127i64.to_i8().is_some());
+        assert!(128i64.to_i8().is_none());
+
+        assert!(i64::MAX.to_i16().is_none());
+        assert!(i64::MAX.to_i32().is_none());
+        assert!((i32::MAX as i64).to_i32().is_some());
+        assert!(((i32::MAX as i64) + 1).to_i32().is_none());
+
+        assert!((-1i64).to_u8().is_none());
+        assert!((-1i64).to_u16().is_none());
+        assert!((-1i64).to_u32().is_none());
+        assert!((-1i64).to_u64().is_none());
+
+        assert!(u8::MAX as i64 > 0);
+        assert!((u8::MAX as i64).to_u8().is_some());
+        assert!(((u8::MAX as i64) + 1).to_u8().is_none());
+
+        assert!((u32::MAX as i64 + 1).to_u32().is_none());
+    }
+
+    #[test]
+    fn test_float4_coerce_to_int_out_of_range() {
+        assert!(100.0f32.to_i8().is_some());
+        assert!(200.0f32.to_i8().is_none());
+        assert!((-200.0f32).to_i8().is_none());
+
+        assert!(100000.0f32.to_i16().is_none());
+        assert!(100000.0f32.to_i32().is_some());
+
+        assert!(f32::NAN.to_i32().is_none());
+        assert!(f32::INFINITY.to_i64().is_none());
+        assert!(f32::NEG_INFINITY.to_i64().is_none());
+
+        assert!((-1.0f32).to_u64().is_none());
+        assert!(0.0f32.to_u64().is_some());
+    }
+
+    #[test]
+    fn test_float4_coerce_to_float64_in_range() {
+        let v: f32 = 3.14;
+        assert_eq!(v.to_f64(), Some(v as f64));
+    }
+
+    #[test]
+    fn test_float8_coerce_to_int_out_of_range() {
+        assert!(100.0f64.to_i8().is_some());
+        assert!(200.0f64.to_i8().is_none());
+
+        assert!(1e18f64.to_i32().is_none());
+        assert!(1e18f64.to_i64().is_some());
+
+        assert!(f64::NAN.to_i64().is_none());
+        assert!(f64::INFINITY.to_i64().is_none());
+        assert!(f64::NEG_INFINITY.to_i64().is_none());
+
+        assert!((-1.0f64).to_u64().is_none());
+        assert!(0.0f64.to_u64().is_some());
+    }
+
+    #[test]
+    fn test_float8_coerce_to_float32_out_of_range() {
+        assert!(1.0f64.to_f32().is_some());
+        assert!(f64::MAX.to_f32().is_some());
+        assert!(f64::NAN.to_f32().is_some());
+    }
+
+    #[test]
+    fn test_float8_coerce_to_float32_overflow() {
+        let result = f64::MAX.to_f32();
+        assert!(result.is_some());
+        assert!(result.unwrap().is_infinite());
+    }
+
+    #[test]
+    fn test_numeric_out_of_range_error_format() {
+        let err = numeric_out_of_range_error(42i16);
+        match err {
+            PgWireError::UserError(info) => {
+                assert_eq!(info.code, "22023");
+                assert_eq!(info.message, "numeric_value_out_of_range");
+                assert!(info.detail.as_ref().unwrap().contains("42"));
+                assert!(info.detail.as_ref().unwrap().contains("out of range"));
+            }
+            _ => panic!("expected UserError"),
+        }
+    }
+
+    #[test]
+    fn test_coerce_pattern_returns_error_on_out_of_range() {
+        let v: i16 = 200;
+        let result: PgWireResult<i8> = v.to_i8().ok_or_else(|| numeric_out_of_range_error(v));
+        assert!(result.is_err());
+
+        let v: i32 = i32::MAX;
+        let result: PgWireResult<i16> = v.to_i16().ok_or_else(|| numeric_out_of_range_error(v));
+        assert!(result.is_err());
+
+        let v: i64 = i64::MAX;
+        let result: PgWireResult<i32> = v.to_i32().ok_or_else(|| numeric_out_of_range_error(v));
+        assert!(result.is_err());
+
+        let v: f32 = f32::NAN;
+        let result: PgWireResult<i32> = v.to_i32().ok_or_else(|| numeric_out_of_range_error(v));
+        assert!(result.is_err());
+
+        let v: f64 = 1e300;
+        let result: PgWireResult<i64> = v.to_i64().ok_or_else(|| numeric_out_of_range_error(v));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_pattern_succeeds_in_range() {
+        let v: i16 = 100;
+        let result: PgWireResult<i8> = v.to_i8().ok_or_else(|| numeric_out_of_range_error(v));
+        assert_eq!(result.unwrap(), 100i8);
+
+        let v: i32 = 1000;
+        let result: PgWireResult<i64> = v.to_i64().ok_or_else(|| numeric_out_of_range_error(v));
+        assert_eq!(result.unwrap(), 1000i64);
+
+        let v: i64 = 200;
+        let result: PgWireResult<u64> = v.to_u64().ok_or_else(|| numeric_out_of_range_error(v));
+        assert_eq!(result.unwrap(), 200u64);
+
+        let v: f32 = 1.5;
+        let result: PgWireResult<f64> = v.to_f64().ok_or_else(|| numeric_out_of_range_error(v));
+        assert_eq!(result.unwrap(), 1.5f64);
+
+        let v: f64 = 1.5;
+        let result: PgWireResult<f32> = v.to_f32().ok_or_else(|| numeric_out_of_range_error(v));
+        assert_eq!(result.unwrap(), 1.5f32);
     }
 }
