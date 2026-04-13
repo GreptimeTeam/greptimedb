@@ -22,7 +22,7 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     EnterStagingRequest, RegionFlushRequest, RegionRequest, StagingPartitionDirective,
 };
-use store_api::storage::{ProjectionInput, RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
@@ -130,7 +130,7 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
         .unwrap();
 
     // Scan data in staging mode - should only see initial 5 rows (staging SST not visible)
-    let projection_input = Some(ProjectionInput::new().with_projection(vec![1]));
+    let projection_input = Some(vec![1].into());
     let request = ScanRequest {
         projection_input,
         ..Default::default()
@@ -154,7 +154,7 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
     // Scan after exiting staging - the old SST (tag_0 = "0".."4") should have
     // rows filtered by partition expr (tag_0 >= "5"), which means none of them pass.
     // But the staging SST (tag_0 = "5".."10") satisfies the partition expr.
-    let projection_input = Some(ProjectionInput::new().with_projection(vec![1]));
+    let projection_input = Some(vec![1].into());
     let request = ScanRequest {
         projection_input,
         ..Default::default()

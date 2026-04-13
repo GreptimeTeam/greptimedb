@@ -44,7 +44,6 @@ impl FileRegion {
     pub fn query(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let store = build_backend(&self.url, &self.options).context(BuildBackendSnafu)?;
 
-        // TODO(fys): Support pushing down `projection_input.nested_paths` to file readers.
         let projection = request
             .projection_indices()
             .map(|projection| projection.to_vec());

@@ -191,7 +191,6 @@ mod test {
     use datatypes::prelude::*;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Helper, Int32Vector, StringVector};
-    use store_api::storage::ProjectionInput;
 
     use super::*;
 
@@ -199,7 +198,7 @@ mod test {
     async fn test_scan_with_projection() {
         let table = build_testing_table();
 
-        let projection_input = Some(ProjectionInput::new().with_projection(vec![1]));
+        let projection_input = Some(vec![1].into());
         let scan_req = ScanRequest {
             projection_input,
             ..Default::default()
