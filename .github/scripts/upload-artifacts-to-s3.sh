@@ -39,7 +39,7 @@ function upload_artifacts() {
       -u "$PROXY_USERNAME:$PROXY_PASSWORD" \
       -F "file=@$file" \
       --max-time 3600 \
-      --connect-timeout 100 \
+      --connect-timeout 20 \
       --retry 5 \
       --retry-delay 10 \
       --retry-max-time 3000 \
@@ -60,7 +60,7 @@ function update_version_info() {
         -u "$PROXY_USERNAME:$PROXY_PASSWORD" \
         -F "file=@latest-version.txt" \
         --max-time 3600 \
-        --connect-timeout 100 \
+        --connect-timeout 20 \
         --retry 5 \
         --retry-delay 10 \
         --retry-max-time 3000 \
@@ -77,7 +77,7 @@ function update_version_info() {
         -u "$PROXY_USERNAME:$PROXY_PASSWORD" \
         -F "file=@latest-nightly-version.txt" \
         --max-time 3600 \
-        --connect-timeout 100 \
+        --connect-timeout 20 \
         --retry 5 \
         --retry-delay 10 \
         --retry-max-time 3000 \
