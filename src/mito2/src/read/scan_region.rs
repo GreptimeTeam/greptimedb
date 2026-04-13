@@ -1296,7 +1296,7 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 
     match merge_mode {
-        MergeMode::LastRow => PreFilterMode::SkipFieldsOnDelete,
+        MergeMode::LastRow => PreFilterMode::SkipFields,
         MergeMode::LastNonNull => PreFilterMode::SkipFields,
     }
 }

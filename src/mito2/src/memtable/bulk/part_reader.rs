@@ -302,7 +302,6 @@ impl BulkPartBatchIter {
         let skip_fields = match self.context.pre_filter_mode() {
             PreFilterMode::All => false,
             PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => true,
         };
 
         let Some(filtered_batch) = apply_combined_filters(

@@ -359,6 +359,8 @@ async fn test_filter_is_null_after_alter_add_field_with_format(flat_format: bool
     .await;
     flush_region(&engine, region_id, None).await;
 
+    // We skip field filters under merge mode because the flushed field values may be stale before
+    // the row is merged with newer field data.
     let stream = engine
         .scan_to_stream(
             region_id,
@@ -370,8 +372,13 @@ async fn test_filter_is_null_after_alter_add_field_with_format(flat_format: bool
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
-    let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
-    assert_eq!(0, total_rows);
+    let expected = "\
++-------+---------+---------------------+---------+
+| tag_0 | field_0 | ts                  | field_1 |
++-------+---------+---------------------+---------+
+| a     | 1.0     | 1970-01-01T00:00:00 | 10.0    |
++-------+---------+---------------------+---------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
 /// Build rows with schema (string, f64, ts_millis, string).

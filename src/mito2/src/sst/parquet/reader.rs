@@ -72,7 +72,6 @@ use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::async_reader::SstAsyncFileReader;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
-    row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -1115,21 +1114,10 @@ impl ParquetReaderBuilder {
     }
 
     /// Computes whether to skip field columns when building statistics based on PreFilterMode.
-    fn compute_skip_fields(&self, parquet_meta: &ParquetMetaData) -> bool {
+    fn compute_skip_fields(&self, _parquet_meta: &ParquetMetaData) -> bool {
         match self.pre_filter_mode {
             PreFilterMode::All => false,
             PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => {
-                // Check if any row group contains delete op
-                let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
-                (0..parquet_meta.num_row_groups()).any(|rg_idx| {
-                    row_group_contains_delete(parquet_meta, rg_idx, &file_path)
-                        .inspect_err(|e| {
-                            warn!(e; "Failed to decode min value of op_type, fallback to not skipping fields");
-                        })
-                        .unwrap_or(false)
-                })
-            }
         }
     }
 
