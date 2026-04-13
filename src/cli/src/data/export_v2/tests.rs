@@ -53,12 +53,6 @@ async fn query_count(database_client: &DatabaseClient, schema: &str, table: &str
             }
             .build()
         }),
-        Value::String(s) => s.parse::<u64>().map_err(|_| {
-            InvalidArgumentsSnafu {
-                msg: format!("count is not numeric for query: {sql}, value: {s}"),
-            }
-            .build()
-        }),
         _ => InvalidArgumentsSnafu {
             msg: format!("unexpected count type for query: {sql}"),
         }
