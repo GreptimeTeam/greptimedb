@@ -15,7 +15,7 @@
 //! Import V2 CLI command.
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use clap::Parser;
@@ -260,6 +260,7 @@ impl Import {
         format: DataFormat,
         actual_prefixes: HashSet<String>,
     ) -> Result<()> {
+        let import_start = Instant::now();
         let total_chunks = chunks
             .iter()
             .filter(|chunk| chunk.status == ChunkStatus::Completed)
@@ -297,6 +298,7 @@ impl Import {
                 }
 
                 info!("  {}: importing...", schema);
+                let copy_start = Instant::now();
                 let source =
                     build_copy_source(&self.snapshot_uri, &self.storage_config, schema, chunk.id)
                         .context(ChunkImportFailedSnafu {
@@ -317,10 +319,11 @@ impl Import {
                     schema: schema.clone(),
                 })?;
 
-                info!("  {}: done", schema);
+                info!("  {}: done in {:?}", schema, copy_start.elapsed());
             }
         }
 
+        info!("Data import finished in {:?}", import_start.elapsed());
         Ok(())
     }
 }
