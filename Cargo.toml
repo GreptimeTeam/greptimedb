@@ -161,6 +161,7 @@ humantime = "2.1"
 humantime-serde = "1.1"
 hyper = "1.1"
 hyper-util = "0.1"
+icu_properties = "2.0.1"
 itertools = "0.14"
 jsonb = { version = "0.4.4", default-features = false }
 lazy_static = "1.4"

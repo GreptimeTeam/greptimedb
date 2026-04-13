@@ -20,6 +20,8 @@ use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
+use icu_properties::props::Script;
+use icu_properties::{CodePointMapData, CodePointMapDataBorrowed};
 use memchr::memmem;
 
 use crate::function::Function;
@@ -256,19 +258,11 @@ fn classify_char(c: char) -> CharClass {
     }
 }
 
+static HAN_SCRIPT_DATA: CodePointMapDataBorrowed<'static, Script> =
+    CodePointMapData::<Script>::new();
+
 fn is_han(c: char) -> bool {
-    matches!(
-        c as u32,
-        0x3400..=0x4DBF
-            | 0x4E00..=0x9FFF
-            | 0xF900..=0xFAFF
-            | 0x20000..=0x2A6DF
-            | 0x2A700..=0x2B73F
-            | 0x2B740..=0x2B81F
-            | 0x2B820..=0x2CEAF
-            | 0x2CEB0..=0x2EBEF
-            | 0x30000..=0x3134F
-    )
+    HAN_SCRIPT_DATA.get(c) == Script::Han
 }
 
 fn classify_term(term: &str) -> TermKind {
@@ -513,5 +507,13 @@ mod tests {
     fn han_terms_match_as_contiguous_substrings() {
         assert!(MatchesTermFinder::new("行账号").find("中国农业银行账号"));
         assert!(MatchesTermFinder::new("登录").find("登录手机号18888888888的动态key"));
+    }
+
+    #[test]
+    fn han_detection_uses_script_not_all_cjk() {
+        assert!(is_han('汉'));
+        assert!(is_han('\u{30000}'));
+        assert!(!is_han('あ'));
+        assert!(!is_han('한'));
     }
 }
