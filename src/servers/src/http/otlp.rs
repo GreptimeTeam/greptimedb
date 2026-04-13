@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use axum::Extension;
 use axum::extract::State;
-use axum::http::header;
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum_extra::TypedHeader;
 use bytes::Bytes;
@@ -44,7 +44,15 @@ use crate::http::extractor::{
 };
 use crate::http::header::{CONTENT_TYPE_PROTOBUF, write_cost_header_map};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
-use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler};
+use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler, TraceIngestOutcome};
+
+#[derive(Clone, prost::Message)]
+pub struct GoogleRpcStatus {
+    #[prost(int32, tag = "1")]
+    pub code: i32,
+    #[prost(string, tag = "2")]
+    pub message: String,
+}
 
 fn is_json_content_type(content_type: Option<&ContentType>) -> bool {
     match content_type {
@@ -129,7 +137,7 @@ pub async fn traces(
     Extension(mut query_ctx): Extension<QueryContext>,
     content_type: Option<TypedHeader<ContentType>>,
     bytes: Bytes,
-) -> Result<OtlpResponse<ExportTraceServiceResponse>> {
+) -> Result<OtlpTraceResponse> {
     if is_json_content_type(content_type.as_ref().map(|h| &h.0)) {
         return error::UnsupportedJsonContentTypeSnafu {}.fail();
     }
@@ -175,16 +183,14 @@ pub async fn traces(
             query_ctx,
         )
         .await
-        .map(|outcome| OtlpResponse {
-            resp_body: ExportTraceServiceResponse {
-                partial_success: outcome.error_message.map(|error_message| {
-                    ExportTracePartialSuccess {
-                        rejected_spans: outcome.rejected_spans as i64,
-                        error_message,
-                    }
-                }),
-            },
-            write_cost: outcome.write_cost,
+        .map(|outcome| {
+            if outcome.accepted_spans == 0 && outcome.rejected_spans > 0 {
+                OtlpTraceResponse::Failure(outcome)
+            } else if outcome.rejected_spans > 0 {
+                OtlpTraceResponse::PartialSuccess(outcome)
+            } else {
+                OtlpTraceResponse::FullSuccess(outcome)
+            }
         })
 }
 
@@ -258,5 +264,51 @@ impl<T: Message> IntoResponse for OtlpResponse<T> {
         header_map.insert(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.clone());
 
         (header_map, self.resp_body.encode_to_vec()).into_response()
+    }
+}
+
+pub enum OtlpTraceResponse {
+    FullSuccess(TraceIngestOutcome),
+    PartialSuccess(TraceIngestOutcome),
+    Failure(TraceIngestOutcome),
+}
+
+impl IntoResponse for OtlpTraceResponse {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            OtlpTraceResponse::FullSuccess(outcome) => {
+                let mut header_map = write_cost_header_map(outcome.write_cost);
+                header_map.insert(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.clone());
+                let body = ExportTraceServiceResponse {
+                    partial_success: None,
+                };
+                (header_map, body.encode_to_vec()).into_response()
+            }
+            OtlpTraceResponse::PartialSuccess(outcome) => {
+                let mut header_map = write_cost_header_map(outcome.write_cost);
+                header_map.insert(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.clone());
+                let body = ExportTraceServiceResponse {
+                    partial_success: outcome.error_message.map(|error_message| {
+                        ExportTracePartialSuccess {
+                            rejected_spans: outcome.rejected_spans as i64,
+                            error_message,
+                        }
+                    }),
+                };
+                (header_map, body.encode_to_vec()).into_response()
+            }
+            OtlpTraceResponse::Failure(outcome) => {
+                let status = GoogleRpcStatus {
+                    code: 0,
+                    message: outcome.error_message.unwrap_or_default(),
+                };
+                (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.as_ref())],
+                    status.encode_to_vec(),
+                )
+                    .into_response()
+            }
+        }
     }
 }
