@@ -59,7 +59,6 @@ use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
 use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
-use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
@@ -1028,9 +1027,8 @@ impl EncodedBulkPart {
         sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Option<BoxedRecordBatchIterator>> {
-        // Compute skip_fields for row group pruning using the same approach as compute_skip_fields in reader.rs.
-        let skip_fields_for_pruning =
-            Self::compute_skip_fields(context.pre_filter_mode(), &self.metadata.parquet_metadata);
+        // Compute skip_fields for row group pruning from the configured pre-filter mode.
+        let skip_fields_for_pruning = context.pre_filter_mode().skip_fields();
 
         // use predicate to find row groups to read.
         let row_groups_to_read =
@@ -1049,20 +1047,6 @@ impl EncodedBulkPart {
             mem_scan_metrics,
         )?;
         Ok(Some(Box::new(iter) as BoxedRecordBatchIterator))
-    }
-
-    /// Computes whether to skip field columns based on PreFilterMode.
-    fn compute_skip_fields(pre_filter_mode: PreFilterMode, parquet_meta: &ParquetMetaData) -> bool {
-        match pre_filter_mode {
-            PreFilterMode::All => false,
-            PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => {
-                // Check if any row group contains delete op
-                (0..parquet_meta.num_row_groups()).any(|rg_idx| {
-                    row_group_contains_delete(parquet_meta, rg_idx, "memtable").unwrap_or(true)
-                })
-            }
-        }
     }
 }
 

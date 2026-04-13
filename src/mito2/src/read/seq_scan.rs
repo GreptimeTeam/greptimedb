@@ -252,7 +252,6 @@ impl SeqScan {
 
         Ok(reader)
     }
-
     /// Scans the given partition when the part list is set properly.
     /// Otherwise the returned stream might not contains any data.
     fn scan_partition_impl(
