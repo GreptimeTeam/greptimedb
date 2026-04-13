@@ -1114,13 +1114,9 @@ impl EngineInner {
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
-        self.workers.get_region(region_id).map(|region| {
-            if region.is_follower() {
-                RegionRole::Follower
-            } else {
-                RegionRole::Leader
-            }
-        })
+        self.workers
+            .get_region(region_id)
+            .map(|region| region.region_role())
     }
 }
 
