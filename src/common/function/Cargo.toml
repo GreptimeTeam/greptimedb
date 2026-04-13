@@ -47,6 +47,7 @@ geo-types = { version = "0.7", optional = true }
 geohash = { version = "0.13", optional = true }
 h3o = { version = "0.6", optional = true }
 hyperloglogplus = "0.4"
+icu_properties.workspace = true
 jsonb.workspace = true
 jsonpath-rust = "0.7.5"
 memchr = "2.7"
