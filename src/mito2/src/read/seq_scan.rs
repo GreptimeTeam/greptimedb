@@ -41,6 +41,9 @@ use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::FlatLastRowReader;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
+use crate::read::range_cache::{
+    build_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
+};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, compute_parallel_channel_size,
@@ -181,19 +184,22 @@ impl SeqScan {
             sources,
             None,
             None,
+            false,
             compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE),
         )
         .await
     }
 
-    /// Builds a flat reader to read sources that returns RecordBatch. If `semaphore` is provided, reads sources in parallel
-    /// if possible.
+    /// Builds a flat reader to read sources that returns RecordBatch.
+    /// If `semaphore` is provided, reads sources in parallel if possible.
+    /// If `skip_dedup` is true, the merged stream is returned without applying flat dedup.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) async fn build_flat_reader_from_sources(
         stream_ctx: &StreamContext,
         mut sources: Vec<BoxedRecordBatchStream>,
         semaphore: Option<Arc<Semaphore>>,
         part_metrics: Option<&PartitionMetrics>,
+        skip_dedup: bool,
         channel_size: usize,
     ) -> Result<BoxedRecordBatchStream> {
         if let Some(semaphore) = semaphore.as_ref() {
@@ -215,7 +221,7 @@ impl SeqScan {
             FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE, metrics_reporter)
                 .await?;
 
-        let dedup = !stream_ctx.input.append_mode;
+        let dedup = !skip_dedup && !stream_ctx.input.append_mode;
         let dedup_metrics_reporter = part_metrics.map(|m| m.dedup_metrics_reporter());
         let reader = if dedup {
             match stream_ctx.input.merge_mode {
@@ -251,6 +257,62 @@ impl SeqScan {
         };
 
         Ok(reader)
+    }
+
+    /// Builds a flat read stream for one partition range.
+    pub(crate) async fn build_flat_partition_range_read(
+        stream_ctx: &Arc<StreamContext>,
+        part_range: &PartitionRange,
+        compaction: bool,
+        part_metrics: &PartitionMetrics,
+        partition_pruner: Arc<PartitionPruner>,
+        file_scan_semaphore: Option<Arc<Semaphore>>,
+        merge_semaphore: Option<Arc<Semaphore>>,
+    ) -> Result<(BoxedRecordBatchStream, usize)> {
+        let cache_key = build_range_cache_key(stream_ctx, part_range);
+
+        if let Some(key) = cache_key.as_ref() {
+            if let Some(value) = stream_ctx.input.cache_strategy.get_range_result(key) {
+                part_metrics.inc_range_cache_hit();
+                return Ok((cached_flat_range_stream(value), DEFAULT_READ_BATCH_SIZE));
+            }
+            part_metrics.inc_range_cache_miss();
+        }
+
+        let mut sources = Vec::new();
+        let split_batch_size = build_flat_sources(
+            stream_ctx,
+            part_range,
+            compaction,
+            part_metrics,
+            partition_pruner,
+            &mut sources,
+            file_scan_semaphore,
+        )
+        .await?;
+        let estimated_rows_per_batch = split_batch_size.unwrap_or(DEFAULT_READ_BATCH_SIZE);
+        let channel_size = compute_parallel_channel_size(estimated_rows_per_batch);
+        let stream = Self::build_flat_reader_from_sources(
+            stream_ctx,
+            sources,
+            merge_semaphore,
+            Some(part_metrics),
+            false,
+            channel_size,
+        )
+        .await?;
+
+        let stream = match cache_key {
+            Some(key) => cache_flat_range_stream(
+                stream,
+                stream_ctx.input.cache_strategy.clone(),
+                key,
+                part_metrics.clone(),
+            ),
+            None => stream,
+        };
+
+        Ok((stream, estimated_rows_per_batch))
     }
 
     /// Scans the given partition when the part list is set properly.
@@ -331,23 +393,16 @@ impl SeqScan {
 
             // Scans each part.
             for part_range in partition_ranges {
-                let mut sources = Vec::new();
-                let split_batch_size = build_flat_sources(
+                let (mut reader, _) = Self::build_flat_partition_range_read(
                     &stream_ctx,
                     &part_range,
                     compaction,
                     &part_metrics,
                     partition_pruner.clone(),
-                    &mut sources,
                     file_scan_semaphore.clone(),
-                ).await?;
-
-                let channel_size = compute_parallel_channel_size(
-                    split_batch_size.unwrap_or(DEFAULT_READ_BATCH_SIZE),
-                );
-                let mut reader =
-                    Self::build_flat_reader_from_sources(&stream_ctx, sources, semaphore.clone(), Some(&part_metrics), channel_size)
-                        .await?;
+                    semaphore.clone(),
+                )
+                .await?;
 
                 let mut metrics = ScannerMetrics {
                     scan_cost: fetch_start.elapsed(),

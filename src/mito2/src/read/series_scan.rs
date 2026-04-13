@@ -41,18 +41,18 @@ use tokio::sync::mpsc::error::{SendTimeoutError, TrySendError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{
-    Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
+    Error, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
 use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_parallel_channel_size,
+    PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_average_batch_size,
+    compute_parallel_channel_size,
 };
-use crate::read::seq_scan::{SeqScan, build_flat_sources};
+use crate::read::seq_scan::SeqScan;
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
-use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
@@ -227,7 +227,8 @@ impl SeriesScan {
         let (senders, receivers) = new_channel_list(self.properties.num_partitions());
         let mut distributor = SeriesDistributor {
             stream_ctx: self.stream_ctx.clone(),
-            semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
+            range_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
+            final_merge_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
             partitions: self.properties.partitions.clone(),
             pruner: self.pruner.clone(),
             senders,
@@ -420,8 +421,13 @@ impl SeriesScan {
 struct SeriesDistributor {
     /// Context for the scan stream.
     stream_ctx: Arc<StreamContext>,
-    /// Optional semaphore for limiting the number of concurrent scans.
-    semaphore: Option<Arc<Semaphore>>,
+    /// Semaphore for file scanning and range-level merging.
+    range_semaphore: Option<Arc<Semaphore>>,
+    /// Semaphore for the final merge across all range streams.
+    /// Must be separate from `range_semaphore` to avoid deadlock: final merge tasks
+    /// hold a permit while waiting for data from range-level merge tasks, which also
+    /// need permits to produce data.
+    final_merge_semaphore: Option<Arc<Semaphore>>,
     /// Partition ranges to scan.
     partitions: Vec<Vec<PartitionRange>>,
     /// Shared pruner for file range building.
@@ -483,36 +489,57 @@ impl SeriesDistributor {
         // build part cost.
         let mut fetch_start = Instant::now();
 
-        // Scans all parts.
-        let mut sources = Vec::with_capacity(self.partitions.len());
-        let mut min_batch_size: Option<usize> = None;
+        // Builds one deduped stream per partition range, then merges across ranges.
+        let build_start = Instant::now();
+        let mut tasks = Vec::new();
         for partition in &self.partitions {
-            sources.reserve(partition.len());
             for part_range in partition {
-                let split_batch_size = build_flat_sources(
-                    &self.stream_ctx,
-                    part_range,
-                    false,
-                    &part_metrics,
-                    partition_pruner.clone(),
-                    &mut sources,
-                    self.semaphore.clone(),
-                )
-                .await?;
-                if let Some(size) = split_batch_size {
-                    min_batch_size = Some(min_batch_size.map_or(size, |cur| cur.min(size)));
-                }
+                let stream_ctx = self.stream_ctx.clone();
+                let part_range = *part_range;
+                let part_metrics = part_metrics.clone();
+                let partition_pruner = partition_pruner.clone();
+                let file_scan_semaphore = self.range_semaphore.clone();
+                let merge_semaphore = self.range_semaphore.clone();
+                tasks.push(common_runtime::spawn_global(async move {
+                    SeqScan::build_flat_partition_range_read(
+                        &stream_ctx,
+                        &part_range,
+                        false,
+                        &part_metrics,
+                        partition_pruner,
+                        file_scan_semaphore,
+                        merge_semaphore,
+                    )
+                    .await
+                }));
             }
         }
-
-        // Builds a flat reader that merge sources from all parts.
+        let mut range_streams = Vec::with_capacity(tasks.len());
+        let mut estimated_batch_sizes = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let (stream, estimated_batch_size) = task.await.context(JoinSnafu)??;
+            range_streams.push(stream);
+            estimated_batch_sizes.push(estimated_batch_size);
+        }
         let channel_size =
-            compute_parallel_channel_size(min_batch_size.unwrap_or(DEFAULT_READ_BATCH_SIZE));
+            compute_parallel_channel_size(compute_average_batch_size(estimated_batch_sizes));
+        common_telemetry::debug!(
+            "SeriesDistributor built {} range_streams, region: {}, build cost: {:?}, channel_size: {}",
+            range_streams.len(),
+            self.stream_ctx.input.region_metadata().region_id,
+            build_start.elapsed(),
+            channel_size,
+        );
+
+        // Each partition range stream is already deduped, so skip dedup here.
+        // Use a separate semaphore for the final merge to avoid deadlock with
+        // range-level merge tasks that share the range_semaphore.
         let mut reader = SeqScan::build_flat_reader_from_sources(
             &self.stream_ctx,
-            sources,
-            self.semaphore.clone(),
+            range_streams,
+            self.final_merge_semaphore.clone(),
             Some(&part_metrics),
+            true,
             channel_size,
         )
         .await?;
