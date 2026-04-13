@@ -90,13 +90,14 @@ Those are cross-boundary combinations from adjacent text, not reasonable subterm
 
 1. `@@` is still rewritten to `matches_term(...)`.
 2. Query analysis produces the normal query tokens.
-3. For eligible Chinese analyzed tokens, the engine looks up lexicon tokens according to token position:
+3. This model assumes query-time and index-time analysis are aligned: expansion works over compatible analyzed token boundaries, not by repairing an arbitrary mismatch between raw query text and a completely different indexed tokenization.
+4. For eligible Chinese analyzed tokens, the engine looks up lexicon tokens according to token position:
    - a single-token query may use normal contains expansion
    - the first token in a multi-token query may only expand to tokens that use it as a suffix
    - the last token in a multi-token query may only expand to tokens that use it as a prefix
    - middle tokens do not expand
-4. The expanded token set becomes the probe set for bloom/fulltext recall.
-5. Final correctness still uses `matches_term`.
+5. The expanded token set becomes the probe set for bloom/fulltext recall.
+6. Final correctness still uses `matches_term`.
 
 This keeps recall and correctness separate:
 
@@ -170,6 +171,7 @@ That tradeoff is the main reason to propose lexicon expansion as the next step.
 
 - Expansion happens after query analysis, not on the raw full query string.
 - Single-token queries may use normal contains expansion.
+- This rule assumes indexed text and query text are analyzed with the same or compatible tokenizer boundaries.
 - Multi-token queries use outward-only expansion:
   - the first token may expand only to tokens that use it as a suffix, for example `登录 -> 立即登录`
   - the last token may expand only to tokens that use it as a prefix, for example `手机号 -> 手机号验证码`
