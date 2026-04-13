@@ -77,18 +77,4 @@ impl MemtableRowGroupReaderBuilder {
 
         builder.build().context(ReadDataPartSnafu)
     }
-
-    /// Computes whether to skip field filters for a specific row group based on PreFilterMode.
-    pub(crate) fn compute_skip_fields(
-        &self,
-        context: &BulkIterContextRef,
-        _row_group_idx: usize,
-    ) -> bool {
-        use crate::sst::parquet::file_range::PreFilterMode;
-
-        match context.pre_filter_mode() {
-            PreFilterMode::All => false,
-            PreFilterMode::SkipFields => true,
-        }
-    }
 }

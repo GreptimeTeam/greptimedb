@@ -146,7 +146,7 @@ impl FileRange {
             std::slice::from_ref(curr_row_group),
             read_format,
             self.context.base.expected_metadata.clone(),
-            self.compute_skip_fields(),
+            self.context.base.pre_filter_mode.skip_fields(),
         );
 
         // not costly to create a predicate here since dynamic filters are wrapped in Arc
@@ -156,13 +156,6 @@ impl FileRange {
             .first()
             .cloned()
             .unwrap_or(true) // unexpected, not skip just in case
-    }
-
-    fn compute_skip_fields(&self) -> bool {
-        match self.context.base.pre_filter_mode {
-            PreFilterMode::All => false,
-            PreFilterMode::SkipFields => true,
-        }
     }
 
     /// Returns a reader to read the [FileRange].
@@ -176,7 +169,7 @@ impl FileRange {
             return Ok(None);
         }
         // Compute skip_fields once for this row group
-        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
+        let skip_fields = self.context.base.pre_filter_mode.skip_fields();
         let parquet_reader = self
             .context
             .reader_builder
@@ -238,7 +231,7 @@ impl FileRange {
             return Ok(None);
         }
         // Compute skip_fields once for this row group
-        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
+        let skip_fields = self.context.base.pre_filter_mode.skip_fields();
         let parquet_reader = self
             .context
             .reader_builder
@@ -395,12 +388,8 @@ impl FileRangeContext {
         )
     }
 
-    /// Determines whether to skip field filters based on PreFilterMode.
-    pub(crate) fn should_skip_fields(&self, _row_group_idx: usize) -> bool {
-        match self.base.pre_filter_mode {
-            PreFilterMode::All => false,
-            PreFilterMode::SkipFields => true,
-        }
+    pub(crate) fn pre_filter_mode(&self) -> PreFilterMode {
+        self.base.pre_filter_mode
     }
 
     //// Decodes parquet metadata and finds if row group contains delete op.
@@ -440,6 +429,12 @@ pub enum PreFilterMode {
     All,
     /// Always skip fields.
     SkipFields,
+}
+
+impl PreFilterMode {
+    pub(crate) fn skip_fields(self) -> bool {
+        matches!(self, Self::SkipFields)
+    }
 }
 
 /// Context for partition expression filtering.
