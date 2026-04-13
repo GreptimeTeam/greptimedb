@@ -72,6 +72,7 @@ enum FlatBatchConverter {
 }
 
 impl FlatBatchConverter {
+    #[expect(unused)]
     fn arrow_schema(&self) -> &SchemaRef {
         match self {
             FlatBatchConverter::Flat(f) => f.arrow_schema(),
@@ -275,15 +276,16 @@ where
     pub async fn write_all_flat(
         &mut self,
         source: FlatSource,
+        override_schema: Option<SchemaRef>,
         override_sequence: Option<SequenceNumber>,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
+        let mut options = FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding);
+        options.override_schema = override_schema;
+
         let converter = FlatBatchConverter::Flat(
-            FlatWriteFormat::new(
-                self.metadata.clone(),
-                &FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding),
-            )
-            .with_override_sequence(override_sequence),
+            FlatWriteFormat::new(self.metadata.clone(), &options)
+                .with_override_sequence(override_sequence),
         );
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
@@ -406,7 +408,7 @@ where
         let arrow_batch = converter.convert_batch(&record_batch)?;
 
         let start = Instant::now();
-        self.maybe_init_writer(converter.arrow_schema(), opts)
+        self.maybe_init_writer(arrow_batch.schema_ref(), opts)
             .await?
             .write(&arrow_batch)
             .await

@@ -1253,7 +1253,7 @@ mod tests {
         .await;
 
         writer
-            .write_all_flat(flat_source, None, write_opts)
+            .write_all_flat(flat_source, None, None, write_opts)
             .await
             .unwrap()
             .remove(0)
@@ -1364,7 +1364,7 @@ mod tests {
         .await;
 
         let info = writer
-            .write_all_flat(flat_source, None, &write_opts)
+            .write_all_flat(flat_source, None, None, &write_opts)
             .await
             .unwrap()
             .remove(0);

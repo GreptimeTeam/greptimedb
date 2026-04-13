@@ -15,6 +15,7 @@
 //! Structs for partition ranges.
 
 use common_time::Timestamp;
+use datatypes::arrow::datatypes::SchemaRef;
 use smallvec::{SmallVec, smallvec};
 use store_api::region_engine::PartitionRange;
 use store_api::storage::TimeSeriesDistribution;
@@ -477,6 +478,11 @@ impl MemRangeBuilder {
     /// Returns the statistics of the memtable.
     pub(crate) fn stats(&self) -> &MemtableStats {
         &self.stats
+    }
+
+    /// Returns the record batch schema for this memtable range if available.
+    pub(crate) fn record_batch_schema(&self) -> Option<SchemaRef> {
+        self.range.record_batch_schema()
     }
 }
 

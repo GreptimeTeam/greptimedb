@@ -1,0 +1,182 @@
+create table json2_table (
+    ts timestamp time index,
+    j  json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat',
+);
+
+Affected Rows: 0
+
+insert into json2_table (ts, j)
+values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
+       (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
+
+Affected Rows: 2
+
+admin flush_table('json2_table');
+
++----------------------------------+
+| ADMIN flush_table('json2_table') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+insert into json2_table (ts, j)
+values (3, '{"a": {"b": 3}, "c": "s3"}');
+
+Affected Rows: 1
+
+insert into json2_table
+values (4, '{"a": {"b": -4}, "d": [{"e": {"g": -0.4}}]}'),
+       (5, '{"a": {}, "c": "s5"}'),
+       (6, '{"c": "s6"}');
+
+Affected Rows: 3
+
+admin flush_table('json2_table');
+
++----------------------------------+
+| ADMIN flush_table('json2_table') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+admin compact_table('json2_table', 'swcs', '86400');
+
++-----------------------------------------------------+
+| ADMIN compact_table('json2_table', 'swcs', '86400') |
++-----------------------------------------------------+
+| 0                                                   |
++-----------------------------------------------------+
+
+insert into json2_table
+values (7, '{"a": {"b": "s7"}, "c": [1], "d": [{"e": {"g": -0.7}}]}'),
+       (8, '{"a": {"b": 8}, "c": "s8"}');
+
+Affected Rows: 2
+
+admin flush_table('json2_table');
+
++----------------------------------+
+| ADMIN flush_table('json2_table') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+insert into json2_table
+values (9, '{"a": {"x": true}, "c": "s9", "d": [{"e": {"g": -0.9}}]}'),
+       (10, '{"a": {"b": 10}, "y": false}');
+
+Affected Rows: 2
+
+select j.a.b from json2_table order by ts;
+
++-----------------------------------------------------+
+| json2_get(json2_table.j,Utf8("a.b"),Utf8View(NULL)) |
++-----------------------------------------------------+
+| 1                                                   |
+| -2                                                  |
+| 3                                                   |
+| -4                                                  |
+|                                                     |
+|                                                     |
+| s7                                                  |
+| 8                                                   |
+|                                                     |
+| 10                                                  |
++-----------------------------------------------------+
+
+select j.a, j.a.x from json2_table order by ts;
+
++---------------------------------------------------+-----------------------------------------------------+
+| json2_get(json2_table.j,Utf8("a"),Utf8View(NULL)) | json2_get(json2_table.j,Utf8("a.x"),Utf8View(NULL)) |
++---------------------------------------------------+-----------------------------------------------------+
+| {b: 1, x: }                                       |                                                     |
+| {b: -2, x: }                                      |                                                     |
+| {b: 3, x: }                                       |                                                     |
+| {b: -4, x: }                                      |                                                     |
+| {b: , x: }                                        |                                                     |
+|                                                   |                                                     |
+| {b: s7, x: }                                      |                                                     |
+| {b: 8, x: }                                       |                                                     |
+| {b: , x: true}                                    | true                                                |
+| {b: 10, x: }                                      |                                                     |
++---------------------------------------------------+-----------------------------------------------------+
+
+select j.c, j.y from json2_table order by ts;
+
++---------------------------------------------------+---------------------------------------------------+
+| json2_get(json2_table.j,Utf8("c"),Utf8View(NULL)) | json2_get(json2_table.j,Utf8("y"),Utf8View(NULL)) |
++---------------------------------------------------+---------------------------------------------------+
+| s1                                                |                                                   |
+| s2                                                |                                                   |
+| s3                                                |                                                   |
+|                                                   |                                                   |
+| s5                                                |                                                   |
+| s6                                                |                                                   |
+| [1]                                               |                                                   |
+| s8                                                |                                                   |
+| s9                                                |                                                   |
+|                                                   | false                                             |
++---------------------------------------------------+---------------------------------------------------+
+
+select j from json2_table order by ts;
+
+Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Struct() but found Struct("a": Struct("b": Utf8, "x": Boolean), "c": Utf8, "d": List(Struct("e": Struct("f": Float64, "g": Float64))), "y": Boolean) at column index 0
+
+select * from json2_table order by ts;
+
+Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Struct() but found Struct("a": Struct("b": Utf8, "x": Boolean), "c": Utf8, "d": List(Struct("e": Struct("f": Float64, "g": Float64))), "y": Boolean) at column index 1
+
+select j.a.b + 1 from json2_table order by ts;
+
++-------------------------------------------------------------+
+| json2_get(json2_table.j,Utf8("a.b"),Int64(NULL)) + Int64(1) |
++-------------------------------------------------------------+
+| 2                                                           |
+| -1                                                          |
+| 4                                                           |
+| -3                                                          |
+|                                                             |
+|                                                             |
+|                                                             |
+| 9                                                           |
+|                                                             |
+| 11                                                          |
++-------------------------------------------------------------+
+
+select abs(j.a.b) from json2_table order by ts;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Function 'abs' expects NativeType::Numeric but received NativeType::String No function matches the given name and argument types 'abs(Utf8View)'. You might need to add explicit type casts.
+	Candidate functions:
+	abs(Numeric(1))
+
+-- "j.c" is of type "String", "abs" is expected to be all "null"s.
+select abs(j.c) from json2_table order by ts;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Function 'abs' expects NativeType::Numeric but received NativeType::String No function matches the given name and argument types 'abs(Utf8View)'. You might need to add explicit type casts.
+	Candidate functions:
+	abs(Numeric(1))
+
+select j.d from json2_table order by ts;
+
++---------------------------------------------------+
+| json2_get(json2_table.j,Utf8("d"),Utf8View(NULL)) |
++---------------------------------------------------+
+| [{e: {f: 0.1, g: }}]                              |
+| [{e: {f: 0.2, g: }}]                              |
+|                                                   |
+| [{e: {f: , g: -0.4}}]                             |
+|                                                   |
+|                                                   |
+| [{e: {g: -0.7}}]                                  |
+|                                                   |
+| [{e: {g: -0.9}}]                                  |
+|                                                   |
++---------------------------------------------------+
+
+drop table json2_table;
+
+Affected Rows: 0
+

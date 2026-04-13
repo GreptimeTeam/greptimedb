@@ -22,6 +22,7 @@ use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, FieldRef, Fields, Schema, SchemaRef,
 };
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use serde::{Deserialize, Serialize};
@@ -91,6 +92,7 @@ pub struct FlatSchemaOptions {
     /// when storing primary key columns.
     /// Only takes effect when `raw_pk_columns` is true.
     pub string_pk_use_dict: bool,
+    pub override_schema: Option<SchemaRef>,
 }
 
 impl Default for FlatSchemaOptions {
@@ -98,6 +100,7 @@ impl Default for FlatSchemaOptions {
         Self {
             raw_pk_columns: true,
             string_pk_use_dict: true,
+            override_schema: None,
         }
     }
 }
@@ -111,6 +114,7 @@ impl FlatSchemaOptions {
             Self {
                 raw_pk_columns: false,
                 string_pk_use_dict: false,
+                override_schema: None,
             }
         }
     }
@@ -131,7 +135,22 @@ pub fn to_flat_sst_arrow_schema(
 ) -> SchemaRef {
     let num_fields = flat_sst_arrow_schema_column_num(metadata, options);
     let mut fields = Vec::with_capacity(num_fields);
-    let schema = metadata.schema.arrow_schema();
+
+    let mut schema = metadata.schema.arrow_schema().clone();
+    if let Some(override_schema) = &options.override_schema {
+        let mut fields = Vec::with_capacity(schema.fields().len());
+        for field in schema.fields() {
+            if is_json_extension_type(field)
+                && let Some((_, override_field)) = override_schema.fields().find(field.name())
+            {
+                fields.push(override_field.clone());
+            } else {
+                fields.push(field.clone());
+            }
+        }
+        schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
+    };
+
     if options.raw_pk_columns {
         for pk_id in &metadata.primary_key {
             let pk_index = metadata.column_index_by_id(*pk_id).unwrap();

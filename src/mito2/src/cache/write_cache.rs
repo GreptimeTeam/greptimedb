@@ -256,7 +256,12 @@ impl WriteCache {
             }
             crate::sst::FormatType::Flat => {
                 writer
-                    .write_all_flat(write_request.source, write_request.max_sequence, write_opts)
+                    .write_all_flat(
+                        write_request.source,
+                        write_request.schema,
+                        write_request.max_sequence,
+                        write_opts,
+                    )
                     .await?
             }
         };
@@ -561,6 +566,7 @@ mod tests {
             bloom_filter_index_config: Default::default(),
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
+            schema: None,
         };
 
         let upload_request = SstUploadRequest {
@@ -664,6 +670,7 @@ mod tests {
             bloom_filter_index_config: Default::default(),
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
+            schema: None,
         };
         let write_opts = WriteOptions {
             row_group_size: 512,
@@ -755,6 +762,7 @@ mod tests {
             bloom_filter_index_config: Default::default(),
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
+            schema: None,
         };
         let write_opts = WriteOptions {
             row_group_size: 512,

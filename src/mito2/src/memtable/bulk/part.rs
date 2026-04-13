@@ -14,6 +14,7 @@
 
 //! Bulk part encoder/decoder.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,9 +33,13 @@ use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, Schema, SchemaRef, UInt32Type,
 };
 use datatypes::data_type::DataType;
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::{MutableVector, Vector};
+use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::types::json_type;
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
+use datatypes::vectors::json::array::JsonArray;
 use mito_codec::key_values::{KeyValue, KeyValues};
 use mito_codec::row_converter::PrimaryKeyCodec;
 use parquet::arrow::ArrowWriter;
@@ -49,9 +54,9 @@ use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{FileId, SequenceNumber, SequenceRange};
 
 use crate::error::{
-    self, ColumnNotFoundSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DataTypeMismatchSnafu,
-    EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu, InvalidRequestSnafu,
-    NewRecordBatchSnafu, Result,
+    self, ColumnNotFoundSnafu, ComputeArrowSnafu, ConvertValueSnafu, CreateDefaultSnafu,
+    DataTypeMismatchSnafu, EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu,
+    InvalidRequestSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
@@ -425,13 +430,15 @@ impl UnorderedPart {
             return Ok(Some(self.parts[0].batch.clone()));
         }
 
-        // Get the schema from the first part
+        // Get the schema from the first part and normalize JSON2 columns across all parts.
         let schema = self.parts[0].batch.schema();
-
-        // Concatenate all record batches
-        let batches: Vec<RecordBatch> = self.parts.iter().map(|p| p.batch.clone()).collect();
-        let concatenated =
-            arrow::compute::concat_batches(&schema, &batches).context(ComputeArrowSnafu)?;
+        let concatenated = if schema.has_json_extension_field() {
+            let (schema, batches) = normalize_json_columns_for_concat(schema, &self.parts)?;
+            arrow::compute::concat_batches(&schema, &batches).context(ComputeArrowSnafu)?
+        } else {
+            arrow::compute::concat_batches(&schema, self.parts.iter().map(|x| &x.batch))
+                .context(ComputeArrowSnafu)?
+        };
 
         // Sort the concatenated batch
         let sorted_batch = sort_primary_key_record_batch(&concatenated)?;
@@ -466,6 +473,77 @@ impl UnorderedPart {
         self.max_timestamp = i64::MIN;
         self.max_sequence = 0;
     }
+}
+
+fn normalize_json_columns_for_concat(
+    base_schema: SchemaRef,
+    parts: &[BulkPart],
+) -> Result<(SchemaRef, Vec<RecordBatch>)> {
+    debug_assert!(
+        parts
+            .iter()
+            .all(|x| x.batch.schema().fields().len() == base_schema.fields().len())
+    );
+
+    let mut merged_json_types = HashMap::new();
+    for (index, field) in base_schema.fields().iter().enumerate() {
+        if !is_json_extension_type(field) {
+            continue;
+        }
+
+        let merged = parts
+            .iter()
+            .map(|x| Cow::Borrowed(x.batch.schema_ref().field(index).data_type()))
+            .reduce(|acc, e| {
+                Cow::Owned(json_type::merge_as_json_type(acc.as_ref(), e.as_ref()).into_owned())
+            });
+        if let Some(merged) = merged {
+            merged_json_types.insert(index, merged.into_owned());
+        }
+    }
+
+    if merged_json_types.is_empty() {
+        let batches = parts.iter().map(|p| p.batch.clone()).collect();
+        return Ok((base_schema, batches));
+    }
+
+    let fields = base_schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            if let Some(data_type) = merged_json_types.get(&index) {
+                Arc::new(
+                    Field::new(field.name().clone(), data_type.clone(), field.is_nullable())
+                        .with_metadata(field.metadata().clone()),
+                )
+            } else {
+                field.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let normalized_schema = Arc::new(Schema::new(fields));
+
+    let mut normalized_batches = Vec::with_capacity(parts.len());
+    for part in parts {
+        let mut columns = Vec::with_capacity(part.batch.num_columns());
+        for (index, column) in part.batch.columns().iter().enumerate() {
+            if let Some(target_type) = merged_json_types.get(&index) {
+                columns.push(
+                    JsonArray::from(column)
+                        .try_align(target_type)
+                        .context(ConvertValueSnafu)?,
+                );
+            } else {
+                columns.push(column.clone());
+            }
+        }
+        let batch = RecordBatch::try_new(normalized_schema.clone(), columns)
+            .context(NewRecordBatchSnafu)?;
+        normalized_batches.push(batch);
+    }
+
+    Ok((normalized_schema, normalized_batches))
 }
 
 /// More accurate estimation of the size of a record batch.
@@ -679,7 +757,8 @@ impl BulkPartConverter {
         columns.push(values.sequence.to_arrow_array());
         columns.push(values.op_type.to_arrow_array());
 
-        let batch = RecordBatch::try_new(self.schema, columns).context(NewRecordBatchSnafu)?;
+        let schema = align_schema_with_json_array(self.schema, &columns);
+        let batch = RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)?;
         // Sorts the record batch.
         let batch = sort_primary_key_record_batch(&batch)?;
 
@@ -692,6 +771,26 @@ impl BulkPartConverter {
             raw_data: None,
         })
     }
+}
+
+fn align_schema_with_json_array(schema: SchemaRef, columns: &[ArrayRef]) -> SchemaRef {
+    if schema.fields().iter().all(|f| !is_json_extension_type(f)) {
+        return schema;
+    }
+
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    for (field, array) in schema.fields().iter().zip(columns) {
+        if !is_json_extension_type(field) {
+            fields.push(field.clone());
+            continue;
+        }
+
+        let mut field = field.as_ref().clone();
+        field.set_data_type(array.data_type().clone());
+        fields.push(Arc::new(field));
+    }
+
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
 }
 
 fn new_primary_key_column_builders(
@@ -1326,6 +1425,11 @@ impl MultiBulkPart {
         self.series_count
     }
 
+    /// Returns the schema of batches in this part.
+    pub(crate) fn record_batch_schema(&self) -> Option<SchemaRef> {
+        self.batches.first().map(|batch| batch.schema())
+    }
+
     /// Returns the number of record batches in this part.
     pub fn num_batches(&self) -> usize {
         self.batches.len()
@@ -1796,6 +1900,7 @@ mod tests {
             &FlatSchemaOptions {
                 raw_pk_columns: false,
                 string_pk_use_dict: true,
+                ..Default::default()
             },
         );
 
@@ -2233,6 +2338,7 @@ mod tests {
             &FlatSchemaOptions {
                 raw_pk_columns: false,
                 string_pk_use_dict: true,
+                ..Default::default()
             },
         );
 

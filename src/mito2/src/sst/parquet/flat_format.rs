@@ -49,7 +49,7 @@ use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, InvalidParquetSnafu, InvalidRecordBatchSnafu,
-    NewRecordBatchSnafu, Result,
+    NewRecordBatchSnafu, RecordBatchSnafu, Result,
 };
 use crate::sst::parquet::format::{
     FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
@@ -103,6 +103,11 @@ impl FlatWriteFormat {
         let sequence_array = Arc::new(UInt64Array::from(vec![override_sequence; batch.num_rows()]));
         columns[sequence_column_index(batch.num_columns())] = sequence_array;
 
+        let columns = common_recordbatch::recordbatch::maybe_align_json_array_with_schema(
+            &self.arrow_schema,
+            columns,
+        )
+        .context(RecordBatchSnafu)?;
         RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
     }
 }

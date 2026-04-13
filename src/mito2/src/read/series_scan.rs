@@ -514,6 +514,7 @@ impl SeriesDistributor {
             self.semaphore.clone(),
             Some(&part_metrics),
             channel_size,
+            None,
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();
