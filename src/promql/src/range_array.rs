@@ -248,7 +248,7 @@ fn pack(offset: u32, length: u32) -> i64 {
     bytemuck::cast::<[u32; 2], i64>([offset, length])
 }
 
-fn unpack(compound: i64) -> (u32, u32) {
+pub(crate) fn unpack(compound: i64) -> (u32, u32) {
     let [offset, length] = bytemuck::cast::<i64, [u32; 2]>(compound);
     (offset, length)
 }
