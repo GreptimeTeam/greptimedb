@@ -96,6 +96,7 @@ common-procedure-test.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 datafusion.workspace = true
 datafusion-expr.workspace = true
+either.workspace = true
 hex.workspace = true
 http.workspace = true
 itertools.workspace = true
