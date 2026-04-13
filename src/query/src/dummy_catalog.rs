@@ -363,18 +363,16 @@ impl FlowScanDecision {
 }
 
 fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<FlowScanDecision> {
-    let flow_extensions = FlowQueryExtensions::from_extensions(&query_ctx.extensions())?;
-
-    // Fast path for normal queries: no flow-related scan context at all, so keep
-    // the request as a plain scan and avoid any flow-specific decision making.
-    if !flow_extensions.has_flow_context() {
+    let Some(flow_extensions) =
+        FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())?
+    else {
         return Ok(FlowScanDecision {
             is_sink_scan: false,
             snapshot_on_scan: false,
             memtable_min_sequence: None,
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
         });
-    }
+    };
 
     // Sink-table scans intentionally bypass all flow scan semantics. They should
     // behave like plain reads and must not participate in incremental lower bounds
