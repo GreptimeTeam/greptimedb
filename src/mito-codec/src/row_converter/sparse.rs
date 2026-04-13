@@ -111,6 +111,15 @@ pub const RESERVED_COLUMN_ID_TABLE_ID: ColumnId = ReservedColumnId::table_id();
 /// The size of the column id in the encoded sparse row.
 pub const COLUMN_ID_ENCODE_SIZE: usize = 4;
 
+// Fixed byte offsets for reserved columns in the sparse encoding.
+// Layout: [table_id_col_id: 4B][marker: 1B][table_id: 4B][tsid_col_id: 4B][marker: 1B][tsid: 8B]
+/// Byte offset to the table_id value (after its 4-byte column id).
+const TABLE_ID_VALUE_OFFSET: usize = COLUMN_ID_ENCODE_SIZE;
+/// Byte offset to the tsid value (after 9-byte table_id entry + 4-byte tsid column id).
+const TSID_VALUE_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SIZE;
+/// Byte offset where tag columns start (after 9-byte table_id + 13-byte tsid entries).
+const TAGS_START_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SIZE + 9;
+
 impl SparsePrimaryKeyCodec {
     /// Creates a new [`SparsePrimaryKeyCodec`] instance.
     pub fn from_columns(columns_ids: impl Iterator<Item = ColumnId>) -> Self {
@@ -275,31 +284,42 @@ impl SparsePrimaryKeyCodec {
     }
 
     /// Returns the offset of the given column id in the given primary key.
+    ///
+    /// The pk must start with the table_id + tsid prefix written by `encode_internal`.
     pub fn has_column(
         &self,
         pk: &[u8],
         offsets_map: &mut HashMap<u32, usize>,
         column_id: ColumnId,
     ) -> Option<usize> {
-        if offsets_map.is_empty() {
-            let mut deserializer = Deserializer::new(pk);
-            let mut offset = 0;
-            while deserializer.has_remaining() {
-                let column_id = u32::deserialize(&mut deserializer).unwrap();
-                offset += 4;
-                offsets_map.insert(column_id, offset);
-                let Some(field) = self.get_field(column_id) else {
-                    break;
-                };
-
-                let skip = field.skip_deserialize(pk, &mut deserializer).unwrap();
-                offset += skip;
-            }
-
-            offsets_map.get(&column_id).copied()
-        } else {
-            offsets_map.get(&column_id).copied()
+        // table_id and tsid are at fixed offsets.
+        match column_id {
+            RESERVED_COLUMN_ID_TABLE_ID => return Some(TABLE_ID_VALUE_OFFSET),
+            RESERVED_COLUMN_ID_TSID => return Some(TSID_VALUE_OFFSET),
+            _ => {}
         }
+
+        if !offsets_map.is_empty() {
+            return offsets_map.get(&column_id).copied();
+        }
+
+        // Skip the fixed table_id + tsid prefix, parse only tag columns.
+        let mut deserializer = Deserializer::new(pk);
+        deserializer.advance(TAGS_START_OFFSET);
+        let mut offset = TAGS_START_OFFSET;
+        while deserializer.has_remaining() {
+            let col = u32::deserialize(&mut deserializer).unwrap();
+            offset += COLUMN_ID_ENCODE_SIZE;
+            offsets_map.insert(col, offset);
+            let Some(field) = self.get_field(col) else {
+                break;
+            };
+
+            let skip = field.skip_deserialize(pk, &mut deserializer).unwrap();
+            offset += skip;
+        }
+
+        offsets_map.get(&column_id).copied()
     }
 
     /// Decode value at `offset` in `pk`.

@@ -482,10 +482,13 @@ mod tests {
 
     fn encode_sparse_pk(
         metadata: &RegionMetadataRef,
+        table_id: u32,
+        tsid: u64,
         row: Vec<(ColumnId, ValueRef<'static>)>,
     ) -> Vec<u8> {
         let codec = SparsePrimaryKeyCodec::new(metadata);
         let mut pk = Vec::new();
+        codec.encode_internal(table_id, tsid, &mut pk).unwrap();
         codec.encode_to_vec(row.into_iter(), &mut pk).unwrap();
         pk
     }
@@ -509,7 +512,7 @@ mod tests {
             "pod",
             "greptime-frontend-6989d9899-22222",
         )]);
-        let pk = encode_sparse_pk(&metadata, create_test_row());
+        let pk = encode_sparse_pk(&metadata, 1, 0, create_test_row());
         let codec = SparsePrimaryKeyCodec::new(&metadata);
         let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec, false);
         assert!(filter.matches(&pk).unwrap());
@@ -522,7 +525,7 @@ mod tests {
             "pod",
             "greptime-frontend-6989d9899-22223",
         )]);
-        let pk = encode_sparse_pk(&metadata, create_test_row());
+        let pk = encode_sparse_pk(&metadata, 1, 0, create_test_row());
         let codec = SparsePrimaryKeyCodec::new(&metadata);
         let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec, false);
         assert!(!filter.matches(&pk).unwrap());
@@ -535,7 +538,7 @@ mod tests {
             "non-exist-label",
             "greptime-frontend-6989d9899-22222",
         )]);
-        let pk = encode_sparse_pk(&metadata, create_test_row());
+        let pk = encode_sparse_pk(&metadata, 1, 0, create_test_row());
         let codec = SparsePrimaryKeyCodec::new(&metadata);
         let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec, false);
         assert!(filter.matches(&pk).unwrap());
@@ -604,7 +607,7 @@ mod tests {
     #[test]
     fn test_sparse_primary_key_filter_order_ops() {
         let metadata = setup_metadata();
-        let pk = encode_sparse_pk(&metadata, create_test_row());
+        let pk = encode_sparse_pk(&metadata, 1, 0, create_test_row());
         let codec = SparsePrimaryKeyCodec::new(&metadata);
 
         let cases = [
