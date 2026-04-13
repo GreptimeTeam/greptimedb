@@ -314,6 +314,7 @@ pub trait SstMerger: Send + Sync + 'static {
 }
 
 /// The production [`SstMerger`] that reads, merges, and writes SST files.
+#[derive(Clone)]
 pub struct DefaultSstMerger;
 
 #[async_trait::async_trait]
@@ -444,27 +445,28 @@ impl SstMerger for DefaultSstMerger {
 /// It is parameterized by an [`SstMerger`] to allow injecting mock
 /// implementations in tests.
 pub struct DefaultCompactor<M = DefaultSstMerger> {
-    merger: Arc<M>,
+    merger: M,
 }
 
 impl Default for DefaultCompactor {
     fn default() -> Self {
         Self {
-            merger: Arc::new(DefaultSstMerger),
+            merger: DefaultSstMerger,
         }
     }
 }
 
 impl<M: SstMerger> DefaultCompactor<M> {
     pub fn with_merger(merger: M) -> Self {
-        Self {
-            merger: Arc::new(merger),
-        }
+        Self { merger }
     }
 }
 
 #[async_trait::async_trait]
-impl<M: SstMerger> Compactor for DefaultCompactor<M> {
+impl<M: SstMerger> Compactor for DefaultCompactor<M>
+where
+    M: Clone,
+{
     async fn merge_ssts(
         &self,
         compaction_region: &CompactionRegion,
@@ -634,6 +636,7 @@ impl<M: SstMerger> Compactor for DefaultCompactor<M> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use store_api::storage::{FileId, RegionId};
@@ -689,16 +692,17 @@ mod tests {
     /// An [`SstMerger`] that returns pre-configured results per call index.
     ///
     /// Call 0 gets `results[0]`, call 1 gets `results[1]`, etc.
+    #[derive(Clone)]
     struct MockMerger {
-        results: Vec<Result<Vec<FileMeta>>>,
-        call_idx: AtomicUsize,
+        results: Arc<Mutex<Vec<Result<Vec<FileMeta>>>>>,
+        call_idx: Arc<AtomicUsize>,
     }
 
     impl MockMerger {
         fn new(results: Vec<Result<Vec<FileMeta>>>) -> Self {
             Self {
-                results,
-                call_idx: AtomicUsize::new(0),
+                results: Arc::new(Mutex::new(results)),
+                call_idx: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -712,9 +716,9 @@ mod tests {
             _write_opts: WriteOptions,
         ) -> Result<Vec<FileMeta>> {
             let idx = self.call_idx.fetch_add(1, Ordering::SeqCst);
-            match self.results.get(idx) {
+            match self.results.lock().unwrap().get(idx) {
                 Some(Ok(files)) => Ok(files.clone()),
-                Some(Err(_)) => crate::error::InvalidMetaSnafu {
+                Some(Err(_)) => error::InvalidMetaSnafu {
                     reason: format!("simulated failure at index {idx}"),
                 }
                 .fail(),
@@ -739,7 +743,7 @@ mod tests {
 
         let merger = MockMerger::new(vec![
             Ok(output_meta_0.clone()),
-            Err(crate::error::InvalidMetaSnafu {
+            Err(error::InvalidMetaSnafu {
                 reason: "boom".to_string(),
             }
             .build()),
@@ -837,7 +841,7 @@ mod tests {
         let expired_meta = dummy_file_meta();
 
         // The single merge output fails, but expired SSTs should still be removed.
-        let merger = MockMerger::new(vec![Err(crate::error::InvalidMetaSnafu {
+        let merger = MockMerger::new(vec![Err(error::InvalidMetaSnafu {
             reason: "fail".to_string(),
         }
         .build())]);
