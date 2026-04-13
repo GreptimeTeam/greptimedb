@@ -42,7 +42,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // If the region is already in staging mode, verify the partition directive matches.
         if region.is_staging() {
-            let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
+            let staging_partition_info = region.manifest_ctx.staging_partition_info();
             // If the partition directive mismatches, return error.
             if staging_partition_info
                 .as_ref()
@@ -279,10 +279,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region: &MitoRegionRef,
         partition_directive: StagingPartitionDirective,
     ) {
-        let mut staging_partition_info = region.staging_partition_info.lock().unwrap();
-        debug_assert!(staging_partition_info.is_none());
-        *staging_partition_info = Some(StagingPartitionInfo::from_partition_directive(
-            partition_directive,
-        ));
+        region.manifest_ctx.set_staging_partition_info(
+            StagingPartitionInfo::from_partition_directive(partition_directive),
+        );
     }
 }

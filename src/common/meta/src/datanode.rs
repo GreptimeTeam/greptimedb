@@ -573,4 +573,27 @@ mod tests {
         let region_num = stat_val.region_num().unwrap();
         assert_eq!(2, region_num);
     }
+
+    #[test]
+    fn test_region_stat_from_heartbeat_preserves_staging_leader_role() {
+        let request = HeartbeatRequest {
+            header: Some(RequestHeader::default()),
+            peer: Some(api::v1::meta::Peer {
+                id: 1,
+                addr: "127.0.0.1:3001".to_string(),
+            }),
+            region_stats: vec![api::v1::meta::RegionStat {
+                region_id: RegionId::new(1024, 1).as_u64(),
+                engine: "mito".to_string(),
+                role: api::v1::meta::RegionRole::StagingLeader.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let stat = Stat::try_from(&request).unwrap();
+
+        assert_eq!(stat.region_stats.len(), 1);
+        assert_eq!(stat.region_stats[0].role, RegionRole::StagingLeader);
+    }
 }
