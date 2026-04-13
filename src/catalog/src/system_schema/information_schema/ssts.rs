@@ -63,7 +63,7 @@ impl InformationTable for InformationSchemaSstsManifest {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = if let Some(p) = &request.projection {
+        let schema = if let Some(p) = request.projection_indices() {
             Arc::new(self.schema.try_project(p).context(ProjectSchemaSnafu)?)
         } else {
             self.schema.clone()
@@ -117,7 +117,7 @@ impl InformationTable for InformationSchemaSstsStorage {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = if let Some(p) = &request.projection {
+        let schema = if let Some(p) = request.projection_input.as_ref().map(|p| &p.projection) {
             Arc::new(self.schema.try_project(p).context(ProjectSchemaSnafu)?)
         } else {
             self.schema.clone()
@@ -172,7 +172,7 @@ impl InformationTable for InformationSchemaSstsIndexMeta {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = if let Some(p) = &request.projection {
+        let schema = if let Some(p) = request.projection_input.as_ref().map(|p| &p.projection) {
             Arc::new(self.schema.try_project(p).context(ProjectSchemaSnafu)?)
         } else {
             self.schema.clone()
