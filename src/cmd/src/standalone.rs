@@ -80,7 +80,7 @@ pub const APP_NAME: &str = "greptime-standalone";
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
-    subcmd: SubCommand,
+    pub subcmd: SubCommand,
 }
 
 impl Command {
@@ -97,7 +97,7 @@ impl Command {
 }
 
 #[derive(Parser)]
-enum SubCommand {
+pub enum SubCommand {
     Start(StartCommand),
 }
 
@@ -236,6 +236,9 @@ pub struct StartCommand {
     /// The working home directory of this standalone instance.
     #[clap(long)]
     data_home: Option<String>,
+    /// Run GreptimeDB as a background daemon process
+    #[clap(short, long)]
+    pub daemon: bool,
 }
 
 impl StartCommand {
