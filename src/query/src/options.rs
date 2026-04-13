@@ -162,6 +162,11 @@ impl FlowQueryExtensions {
         Ok(self.incremental_after_seqs.is_some())
     }
 
+    /// Returns whether the parsed extensions carry any flow-specific scan context.
+    ///
+    /// This is used as the fast-path guard for ordinary queries in `dummy_catalog`.
+    /// Keep this helper in sync when adding new `FlowQueryExtensions` fields that
+    /// influence flow scan semantics.
     pub fn has_flow_context(&self) -> bool {
         self.incremental_after_seqs.is_some()
             || self.incremental_mode.is_some()

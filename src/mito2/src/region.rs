@@ -318,6 +318,11 @@ impl MitoRegion {
         self.version_control.committed_sequence()
     }
 
+    /// Returns the latest sequence that has already been persisted into SSTs.
+    ///
+    /// Incremental memtable-only reads must use a cursor greater than or equal to
+    /// this boundary; older cursors are stale because the corresponding updates may
+    /// already have been flushed out of memtables.
     pub fn flushed_sequence(&self) -> SequenceNumber {
         self.version_control.current().version.flushed_sequence
     }

@@ -197,7 +197,8 @@ impl TableProvider for DummyTableProvider {
             && let Some(query_ctx) = &self.query_ctx
             && let Some(snapshot_sequence) = scanner.snapshot_sequence()
         {
-            bind_snapshot_bound_region_seq(query_ctx, self.region_id, snapshot_sequence);
+            bind_snapshot_bound_region_seq(query_ctx, self.region_id, snapshot_sequence)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
         }
 
         let query_memory_tracker = self.engine.query_memory_tracker();
@@ -441,20 +442,20 @@ fn bind_snapshot_bound_region_seq(
     query_ctx: &QueryContext,
     region_id: RegionId,
     snapshot_sequence: u64,
-) -> u64 {
+) -> Result<u64> {
     if let Some(existing) = query_ctx.get_snapshot(region_id.as_u64()) {
         if existing != snapshot_sequence {
-            common_telemetry::warn!(
-                "conflicting snapshot sequence observed for region {} in a single query; keeping the first bound snapshot (existing={}, new={})",
+            return crate::error::ConflictingSnapshotSequenceSnafu {
                 region_id,
                 existing,
-                snapshot_sequence,
-            );
+                new: snapshot_sequence,
+            }
+            .fail();
         }
-        existing
+        Ok(existing)
     } else {
         query_ctx.set_snapshot(region_id.as_u64(), snapshot_sequence);
-        snapshot_sequence
+        Ok(snapshot_sequence)
     }
 }
 
@@ -719,9 +720,9 @@ mod tests {
             )]))))
             .build();
 
-        let seq = bind_snapshot_bound_region_seq(&query_ctx, region_id, 99);
+        let err = bind_snapshot_bound_region_seq(&query_ctx, region_id, 99).unwrap_err();
 
-        assert_eq!(seq, 42);
+        assert!(matches!(err, Error::ConflictingSnapshotSequence { .. }));
         assert_eq!(query_ctx.get_snapshot(region_id.as_u64()), Some(42));
     }
 
@@ -730,7 +731,7 @@ mod tests {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default().build();
 
-        let seq = bind_snapshot_bound_region_seq(&query_ctx, region_id, 99);
+        let seq = bind_snapshot_bound_region_seq(&query_ctx, region_id, 99).unwrap();
 
         assert_eq!(seq, 99);
         assert_eq!(query_ctx.get_snapshot(region_id.as_u64()), Some(99));
