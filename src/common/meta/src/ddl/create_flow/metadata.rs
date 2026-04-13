@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use snafu::OptionExt;
-
 use crate::ddl::create_flow::CreateFlowProcedure;
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::key::table_name::TableNameKey;
 
 impl CreateFlowProcedure {
@@ -36,7 +34,6 @@ impl CreateFlowProcedure {
 
     /// Ensures all source tables exist and collects source table ids
     pub(crate) async fn collect_source_tables(&mut self) -> Result<()> {
-        // Ensures all source tables exist.
         let keys = self
             .data
             .task
@@ -52,22 +49,25 @@ impl CreateFlowProcedure {
             .batch_get(keys)
             .await?;
 
-        let source_table_ids = self
+        let mut resolved = Vec::with_capacity(self.data.task.source_table_names.len());
+        let mut unresolved = Vec::new();
+
+        for (name, table_id) in self
             .data
             .task
             .source_table_names
             .iter()
             .zip(source_table_ids)
-            .map(|(name, table_id)| {
-                Ok(table_id
-                    .with_context(|| error::TableNotFoundSnafu {
-                        table_name: name.to_string(),
-                    })?
-                    .table_id())
-            })
-            .collect::<Result<Vec<_>>>()?;
+        {
+            match table_id {
+                Some(table_id) => resolved.push(table_id.table_id()),
+                None => unresolved.push(name.clone()),
+            }
+        }
 
-        self.data.source_table_ids = source_table_ids;
+        self.data.source_table_ids = resolved;
+        self.data.unresolved_source_table_names = unresolved;
+        self.data.last_activation_error = None;
         Ok(())
     }
 }
