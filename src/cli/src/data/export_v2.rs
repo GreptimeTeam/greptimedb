@@ -41,7 +41,7 @@
 mod chunker;
 mod command;
 mod coordinator;
-mod data;
+pub(crate) mod data;
 pub mod error;
 pub mod extractor;
 pub mod manifest;
