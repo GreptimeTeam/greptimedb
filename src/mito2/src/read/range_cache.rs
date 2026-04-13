@@ -374,11 +374,8 @@ impl CacheConcatState {
         })?;
 
         let compacted = compact_record_batches(batches)?;
-        self.estimated_size += compacted
-            .iter()
-            .map(|batch| batch.batch.get_array_memory_size())
-            .sum::<usize>();
-        self.cached_batches.extend(compacted);
+        self.estimated_size += compacted.batch.get_array_memory_size();
+        self.cached_batches.push(compacted);
         Ok(())
     }
 
@@ -387,13 +384,11 @@ impl CacheConcatState {
     }
 }
 
-fn compact_record_batches(batches: Vec<RecordBatch>) -> Result<Vec<CachedBatchSlice>> {
-    if batches.is_empty() {
-        return Ok(Vec::new());
-    }
+fn compact_record_batches(batches: Vec<RecordBatch>) -> Result<CachedBatchSlice> {
+    debug_assert!(!batches.is_empty());
 
     let slice_lengths = batches.iter().map(RecordBatch::num_rows).collect();
-    Ok(vec![build_cached_batch_slice(batches, slice_lengths)?])
+    build_cached_batch_slice(batches, slice_lengths)
 }
 
 fn build_cached_batch_slice(
@@ -909,9 +904,8 @@ mod tests {
 
         let compacted = compact_record_batches(batches).unwrap();
 
-        assert_eq!(compacted.len(), 1);
-        assert_eq!(compacted[0].batch.num_rows(), 5);
-        assert_eq!(compacted[0].slice_lengths, vec![2, 1, 2]);
+        assert_eq!(compacted.batch.num_rows(), 5);
+        assert_eq!(compacted.slice_lengths, vec![2, 1, 2]);
     }
 
     #[tokio::test]
