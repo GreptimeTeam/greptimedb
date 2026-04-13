@@ -20,6 +20,7 @@ use common_telemetry::info;
 use once_cell::sync::Lazy;
 use paste::paste;
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinSet;
 
 use crate::runtime::{BuilderBuild, RuntimeTrait};
 use crate::{Builder, JoinHandle, Runtime};
@@ -191,6 +192,15 @@ macro_rules! define_global_runtime_spawn {
 define_global_runtime_spawn!(global);
 define_global_runtime_spawn!(compact);
 define_global_runtime_spawn!(hb);
+
+/// Spawn a future onto the compact runtime and register it in the provided [`JoinSet`].
+pub fn spawn_compact_on<F>(join_set: &mut JoinSet<F::Output>, future: F)
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    GLOBAL_RUNTIMES.compact_runtime.spawn_on(join_set, future);
+}
 
 #[cfg(test)]
 mod tests {

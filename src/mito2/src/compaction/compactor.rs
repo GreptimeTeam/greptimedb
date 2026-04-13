@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
 use std::num::NonZero;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
+use tokio::task::JoinSet;
 
 use crate::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
@@ -422,6 +424,49 @@ impl DefaultCompactor {
         metrics.observe();
         Ok(output_files)
     }
+
+    async fn execute_merge_tasks<F, T>(
+        mut futures: Vec<F>,
+        internal_parallelism: usize,
+    ) -> Result<Vec<T>>
+    where
+        F: Future<Output = Result<T>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let mut output = Vec::with_capacity(futures.len());
+        let mut join_set = JoinSet::new();
+        let internal_parallelism = internal_parallelism.max(1);
+
+        loop {
+            while join_set.len() < internal_parallelism {
+                let Some(future) = futures.pop() else {
+                    break;
+                };
+
+                common_runtime::spawn_compact_on(&mut join_set, future);
+            }
+
+            if join_set.is_empty() {
+                break;
+            }
+
+            let next = join_set.join_next().await;
+
+            let Some(join_result) = next else {
+                break;
+            };
+            match join_result.context(JoinSnafu)? {
+                Ok(result) => output.push(result),
+                Err(err) => {
+                    join_set.abort_all();
+                    while join_set.join_next().await.is_some() {}
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(output)
+    }
 }
 
 #[async_trait::async_trait]
@@ -452,21 +497,11 @@ impl Compactor for DefaultCompactor {
                 write_opts,
             ));
         }
-        let mut output_files = Vec::with_capacity(futs.len());
-        while !futs.is_empty() {
-            let mut task_chunk = Vec::with_capacity(internal_parallelism);
-            for _ in 0..internal_parallelism {
-                if let Some(task) = futs.pop() {
-                    task_chunk.push(common_runtime::spawn_compact(task));
-                }
-            }
-            let metas = futures::future::try_join_all(task_chunk)
-                .await
-                .context(JoinSnafu)?
-                .into_iter()
-                .collect::<Result<Vec<Vec<_>>>>()?;
-            output_files.extend(metas.into_iter().flatten());
-        }
+        let output_files = Self::execute_merge_tasks(futs, internal_parallelism)
+            .await?
+            .into_iter()
+            .flatten()
+            .collect();
 
         // In case of remote compaction, we still allow the region edit after merge to
         // clean expired ssts.
@@ -556,5 +591,62 @@ impl Compactor for DefaultCompactor {
             .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use common_base::cancellation::CancellationHandle;
+    use tokio::time::sleep;
+
+    use super::DefaultCompactor;
+    use crate::error::Result;
+
+    struct DropCounter {
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_merge_tasks_aborts_spawned_tasks_on_cancellation() {
+        let cancel_handle = Arc::new(CancellationHandle::default());
+        let drops = Arc::new(AtomicUsize::new(0));
+        let futures = (0..3)
+            .map(|_| {
+                let drops = drops.clone();
+                async move {
+                    let _drop_counter = DropCounter { drops };
+                    pending::<Result<Vec<u8>>>().await
+                }
+            })
+            .collect();
+
+        let cancel_handle_for_task = cancel_handle.clone();
+        let task = tokio::spawn(async move {
+            common_base::cancellation::CancellableFuture::new(
+                DefaultCompactor::execute_merge_tasks(futures, 3),
+                cancel_handle_for_task,
+            )
+            .await
+        });
+
+        sleep(Duration::from_millis(50)).await;
+        cancel_handle.cancel();
+
+        let result = task.await.unwrap();
+        assert!(result.is_err());
+
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(drops.load(Ordering::Relaxed), 3);
     }
 }

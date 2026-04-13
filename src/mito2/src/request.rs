@@ -895,6 +895,8 @@ pub(crate) enum BackgroundNotify {
     IndexBuildFailed(IndexBuildFailed),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
+    /// Compaction has been cancelled cooperatively.
+    CompactionCancelled(CompactionCancelled),
     /// Compaction has failed.
     CompactionFailed(CompactionFailed),
     /// Truncate result.
@@ -989,6 +991,24 @@ pub(crate) struct CompactionFinished {
     pub(crate) start_time: Instant,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
+}
+
+/// Notifies a compaction job has been cancelled cooperatively.
+#[derive(Debug)]
+pub(crate) struct CompactionCancelled {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Waiters to wake once the cancellation has been observed by the worker.
+    pub(crate) senders: Vec<OutputTx>,
+}
+
+impl CompactionCancelled {
+    pub(crate) fn on_success(self) {
+        for sender in self.senders {
+            sender.send(Ok(0));
+        }
+        info!("Compaction cancelled for region: {}", self.region_id);
+    }
 }
 
 impl CompactionFinished {
