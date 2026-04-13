@@ -562,7 +562,7 @@ impl CompactionScheduler {
             listener,
             picker_output,
             compaction_region,
-            compactor: Arc::new(DefaultCompactor {}),
+            compactor: Arc::new(DefaultCompactor::default()),
             memory_manager: self.memory_manager.clone(),
             memory_policy: self.memory_policy,
             estimated_memory_bytes: estimated_bytes,
