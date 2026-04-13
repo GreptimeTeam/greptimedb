@@ -186,7 +186,7 @@ pub async fn traces(
         .map(|outcome| {
             if outcome.accepted_spans == 0 && outcome.rejected_spans > 0 {
                 OtlpTraceResponse::Failure(outcome)
-            } else if outcome.rejected_spans > 0 {
+            } else if outcome.rejected_spans > 0 || outcome.error_message.is_some() {
                 OtlpTraceResponse::PartialSuccess(outcome)
             } else {
                 OtlpTraceResponse::FullSuccess(outcome)
