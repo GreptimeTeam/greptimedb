@@ -345,16 +345,15 @@ impl MatchesTermFinder {
             let prev_ok = self.starts_with_other || boundary_ok(self.term_kind, prev, false);
 
             if prev_ok {
+                if self.term_kind == TermKind::HanContaining {
+                    return true;
+                }
+
                 let next_pos = actual_pos + self.finder.needle().len();
                 let next = text[next_pos..].chars().next();
                 let next_ok = self.ends_with_other || boundary_ok(self.term_kind, next, false);
 
-                let match_ok = match self.term_kind {
-                    TermKind::HanContaining => true,
-                    _ => prev_ok && next_ok,
-                };
-
-                if match_ok {
+                if next_ok {
                     return true;
                 }
             }
