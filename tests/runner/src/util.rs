@@ -448,7 +448,28 @@ pub fn get_binary_dir(mode: &str) -> PathBuf {
     workspace_root.push("target");
     workspace_root.push(mode);
 
-    workspace_root
+    if workspace_root.is_dir() {
+        workspace_root
+    } else {
+        // get build.target-dir from cargo config get "build.target-dir" -Z unstable-options --format json-value
+        let output = Command::new("cargo")
+            .args([
+                "config",
+                "get",
+                "build.target-dir",
+                "-Z",
+                "unstable-options",
+                "--format",
+                "json-value",
+            ])
+            .output()
+            .expect("Failed to execute cargo metadata");
+        let target_dir =
+            String::from_utf8(output.stdout).expect("Failed to parse cargo config output");
+        let mut target_dir_path = PathBuf::from(target_dir.trim().trim_matches('\"'));
+        target_dir_path.push(mode);
+        target_dir_path
+    }
 }
 
 /// Spin-waiting a socket address is available, or timeout.

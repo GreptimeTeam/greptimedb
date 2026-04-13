@@ -20,18 +20,27 @@ use crate::cmd::{Command, SubCommand};
 
 pub mod client;
 mod cmd;
+mod compatibility_runner;
 mod env;
 pub mod formatter;
+mod interceptors;
 pub mod protocol_interceptor;
 mod server_mode;
 mod util;
+mod version;
 
 #[tokio::main]
 async fn main() {
     let cmd = Command::parse();
 
-    match cmd.subcmd {
+    let result = match cmd.subcmd {
         SubCommand::Bare(cmd) => cmd.run().await,
         SubCommand::Kube(cmd) => cmd.run().await,
+        SubCommand::Compat(cmd) => cmd.run().await,
+    };
+
+    if let Err(err) = result {
+        println!("\x1b[31mError: {err:?}\x1b[0m");
+        std::process::exit(1);
     }
 }

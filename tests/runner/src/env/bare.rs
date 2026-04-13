@@ -316,7 +316,7 @@ impl Env {
 
         let abs_bins_dir = bins_dir
             .canonicalize()
-            .expect("Failed to canonicalize bins_dir");
+            .unwrap_or_else(|_| panic!("Failed to canonicalize bins_dir: {}", bins_dir.display()));
 
         let mut process = Command::new(abs_bins_dir.join(program))
             .current_dir(bins_dir.clone())
