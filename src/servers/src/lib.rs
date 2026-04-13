@@ -57,11 +57,10 @@ pub mod tls;
 /// Cached SQL and logical plan for database interfaces
 #[derive(Clone, Debug)]
 pub struct SqlPlan {
-    query: String,
-    // Store the parsed statement to determine if it is a query and whether to track it.
-    statement: Option<Statement>,
-    plan: Option<LogicalPlan>,
-    schema: Option<Schema>,
+    pub(crate) query: String,
+    pub(crate) statement: Option<Statement>,
+    pub(crate) plan: Option<LogicalPlan>,
+    pub(crate) schema: Option<Schema>,
 }
 
 /// Install the ring crypto provider for rustls process-wide. see:
