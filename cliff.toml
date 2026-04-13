@@ -12,9 +12,9 @@ footer = ""
 body = """
 # {{ version }}
 
-{%- if timestamp %}
+{% if timestamp -%}
 Release date: {{ timestamp | date(format="%B %d, %Y") }}
-{%- endif %}
+{% endif -%}
 
 {%- set breakings = commits | filter(attribute="breaking", value=true) -%}
 {%- if breakings | length > 0 %}
