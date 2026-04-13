@@ -46,6 +46,7 @@ use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::context::BulkIterContext;
 use crate::memtable::bulk::part::{
     BulkPart, BulkPartEncodeMetrics, BulkPartEncoder, MultiBulkPart, UnorderedPart,
+    should_prune_bulk_part,
 };
 use crate::memtable::bulk::part_reader::BulkPartBatchIter;
 use crate::memtable::stats::WriteMetrics;
@@ -795,6 +796,11 @@ impl IterBuilder for BulkRangeIterBuilder {
         _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
+        let metadata = self.context.read_format().metadata();
+        if should_prune_bulk_part(&self.part.batch, &self.context, metadata) {
+            return Ok(Box::new(std::iter::empty()));
+        }
+
         let series_count = self.part.estimated_series_count();
         let iter = BulkPartBatchIter::from_single(
             self.part.batch.clone(),
@@ -1232,6 +1238,7 @@ impl MemtableCompactor {
                 max_timestamp,
                 max_sequence,
                 estimated_series_count,
+                metadata,
             );
 
             common_telemetry::trace!(

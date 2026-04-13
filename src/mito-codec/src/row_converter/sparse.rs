@@ -34,6 +34,20 @@ use crate::row_converter::dense::SortField;
 use crate::row_converter::{CompositeValues, PrimaryKeyCodec, PrimaryKeyFilter};
 
 /// A codec for sparse key of metrics.
+///
+/// ## Encoding format
+/// Each primary key is encoded as a sequence of `(column_id, value)` pairs:
+/// - The first two fields are always the reserved `table_id` (uint32) and `tsid` (uint64).
+/// - User-defined labels follow, sorted by **column name** in lexicographical order.
+/// - Null values are omitted (not encoded).
+///
+/// The `column_id` is encoded as a 4-byte big-endian integer, and the value is encoded
+/// using memcomparable serialization.
+///
+/// `decode_leftmost` always decodes the first value from the encoded bytes (i.e., the
+/// `table_id` field).
+///
+/// ## Requirements
 /// It requires the input primary key columns are sorted by the column name in lexicographical order.
 /// It encodes the column id of the physical region.
 #[derive(Clone, Debug)]
