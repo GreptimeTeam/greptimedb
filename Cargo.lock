@@ -10686,6 +10686,7 @@ dependencies = [
  "datafusion-functions",
  "datafusion-optimizer",
  "datafusion-physical-expr",
+ "datafusion-proto",
  "datafusion-sql",
  "datatypes",
  "fastrand",

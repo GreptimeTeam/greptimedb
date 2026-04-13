@@ -43,6 +43,7 @@ datafusion-expr.workspace = true
 datafusion-functions.workspace = true
 datafusion-optimizer.workspace = true
 datafusion-physical-expr.workspace = true
+datafusion-proto.workspace = true
 datafusion-sql.workspace = true
 datatypes.workspace = true
 futures.workspace = true
