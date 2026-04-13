@@ -398,6 +398,10 @@ fn mask_secrets(sql: &str, secrets: &[Option<String>]) -> String {
         if let Some(secret) = secret
             && !secret.is_empty()
         {
+            let escaped = escape_sql_literal(secret);
+            if escaped != *secret {
+                masked = masked.replace(&escaped, "[REDACTED]");
+            }
             masked = masked.replace(secret, "[REDACTED]");
         }
     }
@@ -497,6 +501,17 @@ mod tests {
         assert!(connection.contains("SAS_TOKEN='sig=secret-token'"));
         assert!(masked.contains("SAS_TOKEN='[REDACTED]'"));
         assert!(!masked.contains("sig=secret-token"));
+    }
+
+    #[test]
+    fn test_mask_secrets_redacts_sql_escaped_literals() {
+        let sql =
+            "COPY DATABASE \"greptime\".\"public\" TO 's3://bucket' CONNECTION (SECRET='ab''cd');";
+        let masked = mask_secrets(sql, &[Some("ab'cd".to_string())]);
+
+        assert!(!masked.contains("ab'cd"));
+        assert!(!masked.contains("ab''cd"));
+        assert!(masked.contains("SECRET='[REDACTED]'"));
     }
 
     #[test]
