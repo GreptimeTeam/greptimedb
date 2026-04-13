@@ -302,7 +302,6 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod test {
     use store_api::region_request::RegionRequest;
-    use store_api::storage::ProjectionInput;
 
     use super::*;
     use crate::test_util::{
@@ -335,8 +334,7 @@ mod test {
             .unwrap();
 
         // check explicit projection
-        let projection_input =
-            Some(ProjectionInput::new().with_projection(vec![0, 1, 2, 3, 4, 5, 6]));
+        let projection_input = Some(vec![0, 1, 2, 3, 4, 5, 6].into());
         let scan_req = ScanRequest {
             projection_input,
             filters: vec![],
@@ -351,8 +349,8 @@ mod test {
             .unwrap();
 
         assert_eq!(
-            scan_req.projection_input.unwrap().projection,
-            vec![11, 10, 9, 8, 0, 1, 4]
+            scan_req.projection_indices().unwrap(),
+            &[11, 10, 9, 8, 0, 1, 4]
         );
         assert_eq!(scan_req.filters.len(), 1);
         assert_eq!(
@@ -370,8 +368,8 @@ mod test {
             .await
             .unwrap();
         assert_eq!(
-            scan_req.projection_input.unwrap().projection,
-            vec![11, 10, 9, 8, 0, 1, 4]
+            scan_req.projection_indices().unwrap(),
+            &[11, 10, 9, 8, 0, 1, 4]
         );
     }
 }

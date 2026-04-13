@@ -622,8 +622,7 @@ impl ScanbenchCommand {
         let mut total_rows_all = 0u64;
         let mut total_elapsed_all = std::time::Duration::ZERO;
 
-        let projection_input =
-            projection.map(|projection| ProjectionInput::new().with_projection(projection));
+        let projection_input = projection.map(ProjectionInput::new);
         for iteration in 0..self.iterations {
             let request = ScanRequest {
                 projection_input: projection_input.clone(),

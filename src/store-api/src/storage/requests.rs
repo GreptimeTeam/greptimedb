@@ -254,7 +254,7 @@ mod tests {
         };
         assert_eq!(request.to_string(), "ScanRequest {  }");
 
-        let projection_input = Some(ProjectionInput::new().with_projection(vec![1, 2]));
+        let projection_input = Some(vec![1, 2].into());
         let request = ScanRequest {
             projection_input,
             filters: vec![
@@ -266,7 +266,7 @@ mod tests {
         };
         assert_eq!(
             request.to_string(),
-            r#"ScanRequest { projection: [1, 2], filters: [i > Int32(1), s = Utf8("x")], limit: 10 }"#
+            r#"ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [] }, filters: [i > Int32(1), s = Utf8("x")], limit: 10 }"#
         );
 
         let request = ScanRequest {
@@ -282,7 +282,7 @@ mod tests {
             r#"ScanRequest { filters: [i > Int32(1), s = Utf8("x")], limit: 10 }"#
         );
 
-        let projection_input = Some(ProjectionInput::new().with_projection(vec![1, 2]));
+        let projection_input = Some(vec![1, 2].into());
         let request = ScanRequest {
             projection_input,
             limit: Some(10),
@@ -290,7 +290,7 @@ mod tests {
         };
         assert_eq!(
             request.to_string(),
-            "ScanRequest { projection: [1, 2], limit: 10 }"
+            "ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [] }, limit: 10 }"
         );
 
         let request = ScanRequest {

@@ -411,7 +411,6 @@ mod tests {
     use datatypes::arrow_array::StringArray;
 
     use super::*;
-    use crate::storage::ProjectionInput;
 
     #[test]
     fn test_sst_entry_manifest_to_record_batch() {
@@ -910,7 +909,7 @@ mod tests {
     #[test]
     fn test_manifest_build_plan() {
         // Note: filter must reference a column in the projected schema
-        let projection_input = Some(ProjectionInput::new().with_projection(vec![0, 1, 2]));
+        let projection_input = Some(vec![0, 1, 2].into());
         let request = ScanRequest {
             projection_input,
             filters: vec![binary_expr(col("table_id"), Operator::Gt, lit(0))],
@@ -942,7 +941,7 @@ mod tests {
 
     #[test]
     fn test_storage_build_plan() {
-        let projection_input = Some(ProjectionInput::new().with_projection(vec![0, 2]));
+        let projection_input = Some(vec![0, 2].into());
         let request = ScanRequest {
             projection_input,
             filters: vec![binary_expr(col("file_path"), Operator::Eq, lit("/a"))],

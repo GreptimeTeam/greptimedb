@@ -48,19 +48,22 @@ pub struct ProjectionInput {
 }
 
 impl ProjectionInput {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_projection(self, projection: Vec<usize>) -> Self {
-        Self { projection, ..self }
-    }
-
-    pub fn with_nested_paths(self, nested_paths: Vec<NestedPath>) -> Self {
+    pub fn new(projection: Vec<usize>) -> Self {
         Self {
-            nested_paths,
-            ..self
+            projection,
+            nested_paths: Vec::new(),
         }
+    }
+
+    pub fn with_nested_paths(mut self, nested_paths: Vec<NestedPath>) -> Self {
+        self.nested_paths = nested_paths;
+        self
+    }
+}
+
+impl From<Vec<usize>> for ProjectionInput {
+    fn from(projection: Vec<usize>) -> Self {
+        Self::new(projection)
     }
 }
 

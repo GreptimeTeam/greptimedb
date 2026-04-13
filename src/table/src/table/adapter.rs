@@ -26,7 +26,7 @@ use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDow
 use datafusion_expr::expr::Expr;
 use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::Column;
-use store_api::storage::{ProjectionInput, ScanRequest, VectorSearchRequest};
+use store_api::storage::{ScanRequest, VectorSearchRequest};
 
 use crate::table::{TableRef, TableType};
 
@@ -104,8 +104,7 @@ impl TableProvider for DfTableProviderAdapter {
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).collect();
-        let projection_input =
-            projection.map(|p| ProjectionInput::new().with_projection(p.clone()));
+        let projection_input = projection.map(|p| p.clone().into());
         let request = {
             let mut request = self.scan_req.lock().unwrap();
             request.filters = filters;

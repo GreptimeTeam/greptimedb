@@ -41,7 +41,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionDeleteRequest, RegionPutRequest};
-use store_api::storage::{ProjectionInput, RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::error::{
@@ -349,7 +349,7 @@ impl MetadataRegion {
                 METADATA_SCHEMA_VALUE_COLUMN_INDEX,
             ]
         };
-        let projection_input = Some(ProjectionInput::new().with_projection(projection));
+        let projection_input = Some(projection.into());
         ScanRequest {
             projection_input,
             filters: vec![filter_expr],
@@ -362,7 +362,7 @@ impl MetadataRegion {
             METADATA_SCHEMA_KEY_COLUMN_INDEX,
             METADATA_SCHEMA_VALUE_COLUMN_INDEX,
         ];
-        let projection_input = Some(ProjectionInput::new().with_projection(projection));
+        let projection_input = Some(projection.into());
         ScanRequest {
             projection_input,
             ..Default::default()
@@ -681,8 +681,7 @@ impl MetadataRegion {
         let filter_expr = datafusion::prelude::col(METADATA_SCHEMA_KEY_COLUMN_NAME)
             .eq(datafusion::prelude::lit(key));
 
-        let projection_input =
-            Some(ProjectionInput::new().with_projection(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]));
+        let projection_input = Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX].into());
         let scan_req = ScanRequest {
             projection_input,
             filters: vec![filter_expr],

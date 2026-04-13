@@ -36,8 +36,7 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
 use store_api::storage::{
-    ProjectionInput, RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
-    VectorSearchRequest,
+    RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector, VectorSearchRequest,
 };
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
@@ -179,8 +178,7 @@ impl TableProvider for DummyTableProvider {
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let mut request = self.scan_request.lock().unwrap().clone();
-        request.projection_input =
-            projection.map(|p| ProjectionInput::new().with_projection(p.clone()));
+        request.projection_input = projection.map(|p| p.clone().into());
         request.filters = filters.to_vec();
         request.limit = limit;
 
