@@ -168,6 +168,26 @@ mod tests {
     }
 
     #[test]
+    fn test_chinese_tokenizer_issue_7943_sample() {
+        let tokenizer = ChineseTokenizer;
+        let text = "登录手机号18888888888的动态key：829889AC8";
+        let tokens = tokenizer.tokenize(text);
+        assert_eq!(
+            tokens,
+            vec![
+                "登录",
+                "手机号",
+                "18888888888",
+                "的",
+                "动态",
+                "key",
+                "：",
+                "829889AC8"
+            ]
+        );
+    }
+
+    #[test]
     fn test_valid_ascii_token_lookup_table() {
         // Test all ASCII values in a single loop
         for c in 0u8..=255u8 {

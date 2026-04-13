@@ -2348,6 +2348,7 @@ dependencies = [
  "geohash",
  "h3o",
  "hyperloglogplus",
+ "icu_properties",
  "jsonb",
  "jsonpath-rust 0.7.5",
  "memchr",
