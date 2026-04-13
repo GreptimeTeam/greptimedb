@@ -181,6 +181,8 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
 | physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
+| physical_plan after ReduceAggregateRepartition_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
@@ -327,6 +329,8 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
 | physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
+| physical_plan after ReduceAggregateRepartition_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
