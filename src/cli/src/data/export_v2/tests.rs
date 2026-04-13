@@ -27,11 +27,12 @@ use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::manifest::ChunkStatus;
 use crate::data::import_v2::ImportV2Command;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage};
+use crate::data::sql::escape_sql_identifier;
 use crate::database::DatabaseClient;
 use crate::error::{FileIoSnafu, InvalidArgumentsSnafu, OtherSnafu, Result};
 
 async fn query_count(database_client: &DatabaseClient, schema: &str, table: &str) -> Result<u64> {
-    let sql = format!("SELECT COUNT(*) FROM {table}");
+    let sql = format!("SELECT COUNT(*) FROM {}", escape_sql_identifier(table));
     let rows = database_client.sql(&sql, schema).await?;
     let first_row = rows.as_ref().and_then(|rows| rows.first()).ok_or_else(|| {
         InvalidArgumentsSnafu {
