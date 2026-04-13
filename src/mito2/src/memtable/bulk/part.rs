@@ -59,7 +59,7 @@ use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
 use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
-use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
+use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
@@ -1052,16 +1052,13 @@ impl EncodedBulkPart {
     }
 
     /// Computes whether to skip field columns based on PreFilterMode.
-    fn compute_skip_fields(pre_filter_mode: PreFilterMode, parquet_meta: &ParquetMetaData) -> bool {
+    fn compute_skip_fields(
+        pre_filter_mode: PreFilterMode,
+        _parquet_meta: &ParquetMetaData,
+    ) -> bool {
         match pre_filter_mode {
             PreFilterMode::All => false,
             PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => {
-                // Check if any row group contains delete op
-                (0..parquet_meta.num_row_groups()).any(|rg_idx| {
-                    row_group_contains_delete(parquet_meta, rg_idx, "memtable").unwrap_or(true)
-                })
-            }
         }
     }
 }

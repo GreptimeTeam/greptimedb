@@ -31,7 +31,6 @@ use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 pub(crate) struct MemtableRowGroupReaderBuilder {
     projection: ProjectionMask,
-    parquet_metadata: Arc<ParquetMetaData>,
     arrow_metadata: ArrowReaderMetadata,
     data: Bytes,
 }
@@ -51,7 +50,6 @@ impl MemtableRowGroupReaderBuilder {
                 .context(ReadDataPartSnafu)?;
         Ok(Self {
             projection,
-            parquet_metadata,
             arrow_metadata,
             data,
         })
@@ -84,18 +82,13 @@ impl MemtableRowGroupReaderBuilder {
     pub(crate) fn compute_skip_fields(
         &self,
         context: &BulkIterContextRef,
-        row_group_idx: usize,
+        _row_group_idx: usize,
     ) -> bool {
-        use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
+        use crate::sst::parquet::file_range::PreFilterMode;
 
         match context.pre_filter_mode() {
             PreFilterMode::All => false,
             PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => {
-                // Check if this specific row group contains delete op
-                row_group_contains_delete(&self.parquet_metadata, row_group_idx, "memtable")
-                    .unwrap_or(true)
-            }
         }
     }
 }

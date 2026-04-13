@@ -162,15 +162,6 @@ impl FileRange {
         match self.context.base.pre_filter_mode {
             PreFilterMode::All => false,
             PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => {
-                // Check if this specific row group contains delete op
-                row_group_contains_delete(
-                    self.context.reader_builder.parquet_metadata(),
-                    self.row_group_idx,
-                    self.context.reader_builder.file_path(),
-                )
-                .unwrap_or(true)
-            }
         }
     }
 
@@ -404,15 +395,11 @@ impl FileRangeContext {
         )
     }
 
-    /// Determines whether to skip field filters based on PreFilterMode and row group delete status.
-    pub(crate) fn should_skip_fields(&self, row_group_idx: usize) -> bool {
+    /// Determines whether to skip field filters based on PreFilterMode.
+    pub(crate) fn should_skip_fields(&self, _row_group_idx: usize) -> bool {
         match self.base.pre_filter_mode {
             PreFilterMode::All => false,
             PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => {
-                // Check if this specific row group contains delete op
-                self.contains_delete(row_group_idx).unwrap_or(true)
-            }
         }
     }
 
@@ -451,9 +438,6 @@ impl FileRangeContext {
 pub enum PreFilterMode {
     /// Filters all columns.
     All,
-    /// If the range doesn't contain delete op or doesn't have statistics, filters all columns.
-    /// Otherwise, skips filtering fields.
-    SkipFieldsOnDelete,
     /// Always skip fields.
     SkipFields,
 }
@@ -514,7 +498,7 @@ impl RangeBase {
     ///
     /// # Arguments
     /// * `input` - The batch to filter
-    /// * `skip_fields` - Whether to skip field filters based on PreFilterMode and row group delete status
+    /// * `skip_fields` - Whether to skip field filters based on PreFilterMode
     pub(crate) fn precise_filter(
         &self,
         mut input: Batch,
@@ -626,7 +610,7 @@ impl RangeBase {
     ///
     /// # Arguments
     /// * `input` - The RecordBatch to filter
-    /// * `skip_fields` - Whether to skip field filters based on PreFilterMode and row group delete status
+    /// * `skip_fields` - Whether to skip field filters based on PreFilterMode
     pub(crate) fn precise_filter_flat(
         &self,
         input: RecordBatch,
@@ -679,7 +663,7 @@ impl RangeBase {
     ///
     /// # Arguments
     /// * `input` - The RecordBatch to compute mask for
-    /// * `skip_fields` - Whether to skip field filters based on PreFilterMode and row group delete status
+    /// * `skip_fields` - Whether to skip field filters based on PreFilterMode
     pub(crate) fn compute_filter_mask_flat(
         &self,
         input: &RecordBatch,

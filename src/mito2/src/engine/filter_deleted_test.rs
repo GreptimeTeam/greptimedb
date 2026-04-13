@@ -15,7 +15,7 @@
 use api::v1::value::ValueData;
 use api::v1::{Row, Rows, Value};
 use common_recordbatch::RecordBatches;
-use datafusion_expr::col;
+use datafusion_expr::{col, lit};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
@@ -141,12 +141,12 @@ async fn test_scan_without_filtering_deleted_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
-async fn test_filter_is_null_after_last_row_update() {
-    test_filter_is_null_after_last_row_update_with_format(false).await;
-    test_filter_is_null_after_last_row_update_with_format(true).await;
+async fn test_filter_field_value_after_last_row_update() {
+    test_filter_field_value_after_last_row_update_with_format(false).await;
+    test_filter_field_value_after_last_row_update_with_format(true).await;
 }
 
-async fn test_filter_is_null_after_last_row_update_with_format(flat_format: bool) {
+async fn test_filter_field_value_after_last_row_update_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
@@ -182,7 +182,7 @@ async fn test_filter_is_null_after_last_row_update_with_format(flat_format: bool
         region_id,
         Rows {
             schema: column_schemas.clone(),
-            rows: vec![build_row_with_nullable_field("a", None, 0)],
+            rows: vec![build_row_with_nullable_field("a", Some(10.0), 0)],
         },
     )
     .await;
@@ -193,23 +193,30 @@ async fn test_filter_is_null_after_last_row_update_with_format(flat_format: bool
         region_id,
         Rows {
             schema: column_schemas,
-            rows: vec![build_row_with_nullable_field("a", Some(10.0), 0)],
+            rows: vec![build_row_with_nullable_field("a", Some(20.0), 0)],
         },
     )
     .await;
     flush_region(&engine, region_id, None).await;
 
+    // We skip field filters under merge mode because the flushed field values may be stale before
+    // the last-row update is merged.
     let stream = engine
         .scan_to_stream(
             region_id,
             ScanRequest {
-                filters: vec![col("field_0").is_null()],
+                filters: vec![col("field_0").eq(lit(10.0))],
                 ..Default::default()
             },
         )
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
-    let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
-    assert_eq!(0, total_rows);
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 20.0    | 1970-01-01T00:00:00 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }
