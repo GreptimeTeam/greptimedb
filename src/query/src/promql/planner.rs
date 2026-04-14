@@ -768,12 +768,7 @@ impl PromPlanner {
                             }
                             _ => (&left_table_ref, &left_context),
                         };
-                    self.project_binary_join_side(
-                        filtered,
-                        project_table_ref,
-                        project_context,
-                        false,
-                    )
+                    self.project_binary_join_side(filtered, project_table_ref, project_context)
                 } else {
                     self.projection_for_each_field_column(join_plan, bin_expr_builder)
                 }
@@ -786,7 +781,6 @@ impl PromPlanner {
         input: LogicalPlan,
         table_ref: &TableReference,
         context: &PromPlannerContext,
-        keep_tsid: bool,
     ) -> Result<LogicalPlan> {
         let schema = input.schema();
 
@@ -823,7 +817,7 @@ impl PromPlanner {
         // Preserve `__tsid` if present, so it can still be used internally downstream. It's
         // stripped from the final output anyway.
         if let Some(tsid_col) =
-            Self::optional_tsid_projection(schema, Some(table_ref), keep_tsid && context.use_tsid)
+            Self::optional_tsid_projection(schema, Some(table_ref), context.use_tsid)
         {
             project_exprs.push(tsid_col);
         }
@@ -837,7 +831,6 @@ impl PromPlanner {
         // Update context to reflect the projected schema. Don't keep a table qualifier since
         // the result is a derived expression.
         self.ctx = context.clone();
-        self.ctx.use_tsid = keep_tsid && context.use_tsid;
         self.ctx.table_name = None;
         self.ctx.schema_name = None;
 
@@ -5046,7 +5039,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn comparison_binary_join_uses_tsid_but_filtered_result_drops_it() {
+    async fn comparison_binary_join_uses_tsid_and_keeps_it_in_filtered_result() {
         let eval_stmt = build_eval_stmt("some_metric > some_alt_metric");
 
         let table_provider = build_test_table_provider_with_tsid(
@@ -5076,14 +5069,13 @@ mod test {
             "{plan_str}"
         );
         assert!(
-            !plan
-                .schema()
+            plan.schema()
                 .fields()
                 .iter()
                 .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME),
             "{plan_str}"
         );
-        assert!(!planner.ctx.use_tsid, "{plan_str}");
+        assert!(planner.ctx.use_tsid, "{plan_str}");
     }
 
     #[tokio::test]
