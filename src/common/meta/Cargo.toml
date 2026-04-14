@@ -59,7 +59,7 @@ hex.workspace = true
 humantime-serde.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
-moka.workspace = true
+moka = { workspace = true, features = ["future"] }
 object-store.workspace = true
 prometheus.workspace = true
 prost.workspace = true
