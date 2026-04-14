@@ -5256,6 +5256,7 @@ dependencies = [
  "meta-srv",
  "num_cpus",
  "opentelemetry-proto 0.31.0",
+ "opentelemetry-semantic-conventions",
  "operator",
  "otel-arrow-rust",
  "partition",
