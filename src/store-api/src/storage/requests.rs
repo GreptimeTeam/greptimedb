@@ -290,6 +290,20 @@ mod tests {
             "ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [] }, limit: 10 }"
         );
 
+        let projection_input = Some(ProjectionInput::new(vec![1, 2]).with_nested_paths(vec![
+            vec!["j".to_string(), "a".to_string(), "b".to_string()],
+            vec!["s".to_string(), "x".to_string()],
+        ]));
+        let request = ScanRequest {
+            projection_input,
+            limit: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(
+            request.to_string(),
+            r#"ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [["j", "a", "b"], ["s", "x"]] }, limit: 10 }"#
+        );
+
         let request = ScanRequest {
             snapshot_on_scan: true,
             ..Default::default()
