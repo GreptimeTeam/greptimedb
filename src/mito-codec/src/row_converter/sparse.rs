@@ -120,6 +120,37 @@ const TSID_VALUE_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SI
 /// Byte offset where tag columns start (after 9-byte table_id + 13-byte tsid entries).
 const TAGS_START_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SIZE + 9;
 
+/// A lazily populated cache of tag column offsets inside a sparse primary key.
+///
+/// Keeps a cursor into the pk so repeated `has_column` lookups for the same
+/// pk only advance the decoder as far as they must. Reuse across pks by
+/// calling [`SparseOffsetsCache::clear`].
+#[derive(Debug, Default, Clone)]
+pub struct SparseOffsetsCache {
+    offsets: HashMap<ColumnId, usize>,
+    /// Next byte position in the pk to resume parsing from.
+    cursor: usize,
+    /// True once the decoder has walked past the last tag column (or stopped
+    /// on an unknown column id); no further offsets can be discovered.
+    finished: bool,
+}
+
+impl SparseOffsetsCache {
+    pub fn new() -> Self {
+        Self {
+            offsets: HashMap::new(),
+            cursor: TAGS_START_OFFSET,
+            finished: false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.offsets.clear();
+        self.cursor = TAGS_START_OFFSET;
+        self.finished = false;
+    }
+}
+
 impl SparsePrimaryKeyCodec {
     /// Creates a new [`SparsePrimaryKeyCodec`] instance.
     pub fn from_columns(columns_ids: impl Iterator<Item = ColumnId>) -> Self {
@@ -285,11 +316,20 @@ impl SparsePrimaryKeyCodec {
 
     /// Returns the offset of the given column id in the given primary key.
     ///
-    /// The pk must start with the table_id + tsid prefix written by `encode_internal`.
+    /// Decoding is lazy: on each call we only advance the cache's cursor as
+    /// far as needed to answer the query. A column that has already been
+    /// seen returns immediately; a column we haven't reached yet causes the
+    /// parser to resume from `cache.cursor` and stop as soon as the column
+    /// is located. Once the cursor walks off the end (or hits an unknown
+    /// column id) the cache is marked finished, so subsequent misses are
+    /// O(1).
+    ///
+    /// The pk must start with the table_id + tsid prefix written by
+    /// `encode_internal`.
     pub fn has_column(
         &self,
         pk: &[u8],
-        offsets_map: &mut HashMap<u32, usize>,
+        cache: &mut SparseOffsetsCache,
         column_id: ColumnId,
     ) -> Option<usize> {
         // table_id and tsid are at fixed offsets.
@@ -299,27 +339,37 @@ impl SparsePrimaryKeyCodec {
             _ => {}
         }
 
-        if !offsets_map.is_empty() {
-            return offsets_map.get(&column_id).copied();
+        if let Some(offset) = cache.offsets.get(&column_id) {
+            return Some(*offset);
+        }
+        if cache.finished {
+            return None;
         }
 
-        // Skip the fixed table_id + tsid prefix, parse only tag columns.
         let mut deserializer = Deserializer::new(pk);
-        deserializer.advance(TAGS_START_OFFSET);
-        let mut offset = TAGS_START_OFFSET;
+        deserializer.advance(cache.cursor);
+        let mut offset = cache.cursor;
         while deserializer.has_remaining() {
             let col = u32::deserialize(&mut deserializer).unwrap();
             offset += COLUMN_ID_ENCODE_SIZE;
-            offsets_map.insert(col, offset);
+            let value_offset = offset;
+            cache.offsets.insert(col, value_offset);
             let Some(field) = self.get_field(col) else {
-                break;
+                cache.finished = true;
+                cache.cursor = offset;
+                return None;
             };
 
             let skip = field.skip_deserialize(pk, &mut deserializer).unwrap();
             offset += skip;
+            cache.cursor = offset;
+            if col == column_id {
+                return Some(value_offset);
+            }
         }
 
-        offsets_map.get(&column_id).copied()
+        cache.finished = true;
+        None
     }
 
     /// Decode value at `offset` in `pk`.
@@ -337,10 +387,10 @@ impl SparsePrimaryKeyCodec {
     pub fn encoded_value_for_column<'a>(
         &self,
         pk: &'a [u8],
-        offsets_map: &mut HashMap<u32, usize>,
+        cache: &mut SparseOffsetsCache,
         column_id: ColumnId,
     ) -> Result<Option<&'a [u8]>> {
-        let Some(offset) = self.has_column(pk, offsets_map, column_id) else {
+        let Some(offset) = self.has_column(pk, cache, column_id) else {
             return Ok(None);
         };
 
@@ -701,7 +751,7 @@ mod tests {
         codec.encode_to_vec(row.into_iter(), &mut buffer).unwrap();
         assert!(!buffer.is_empty());
 
-        let mut offsets_map = HashMap::new();
+        let mut offsets_map = SparseOffsetsCache::new();
         for column_id in [
             RESERVED_COLUMN_ID_TABLE_ID,
             RESERVED_COLUMN_ID_TSID,
@@ -720,6 +770,36 @@ mod tests {
     }
 
     #[test]
+    fn test_has_column_lazy_resume() {
+        let region_metadata = test_region_metadata();
+        let codec = SparsePrimaryKeyCodec::new(&region_metadata);
+        let mut buffer = Vec::new();
+        codec
+            .encode_to_vec(test_row().into_iter(), &mut buffer)
+            .unwrap();
+
+        let mut cache = SparseOffsetsCache::new();
+        // Look up an early column: only a prefix of tags is decoded.
+        assert!(codec.has_column(&buffer, &mut cache, 1).is_some());
+        assert!(!cache.finished);
+        assert!(cache.offsets.contains_key(&1));
+        assert!(!cache.offsets.contains_key(&5));
+
+        // A later column resumes from the cursor.
+        assert!(codec.has_column(&buffer, &mut cache, 5).is_some());
+        assert!(cache.offsets.contains_key(&5));
+
+        // An earlier column that was already cached still resolves.
+        assert!(codec.has_column(&buffer, &mut cache, 2).is_some());
+
+        // A non-existent column walks off the end and marks the cache finished.
+        assert!(codec.has_column(&buffer, &mut cache, 999).is_none());
+        assert!(cache.finished);
+        // Further misses are O(1).
+        assert!(codec.has_column(&buffer, &mut cache, 998).is_none());
+    }
+
+    #[test]
     fn test_decode_value_at() {
         let region_metadata = test_region_metadata();
         let codec = SparsePrimaryKeyCodec::new(&region_metadata);
@@ -729,7 +809,7 @@ mod tests {
         assert!(!buffer.is_empty());
 
         let row = test_row();
-        let mut offsets_map = HashMap::new();
+        let mut offsets_map = SparseOffsetsCache::new();
         for column_id in [
             RESERVED_COLUMN_ID_TABLE_ID,
             RESERVED_COLUMN_ID_TSID,
@@ -764,7 +844,7 @@ mod tests {
             .unwrap();
         assert!(!buffer.is_empty());
 
-        let mut offsets_map = HashMap::new();
+        let mut offsets_map = SparseOffsetsCache::new();
         for column_id in [
             RESERVED_COLUMN_ID_TABLE_ID,
             RESERVED_COLUMN_ID_TSID,

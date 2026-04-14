@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
@@ -27,7 +26,7 @@ use store_api::storage::ColumnId;
 
 use crate::error::{EvaluateFilterSnafu, Result};
 use crate::row_converter::{
-    DensePrimaryKeyCodec, PrimaryKeyFilter, SortField, SparsePrimaryKeyCodec,
+    DensePrimaryKeyCodec, PrimaryKeyFilter, SortField, SparseOffsetsCache, SparsePrimaryKeyCodec,
 };
 
 /// Returns true if this is a partition column for metrics in the memtable.
@@ -303,7 +302,7 @@ impl<'a> PrimaryKeyValueAccessor<'a> for DensePrimaryKeyValueAccessor<'a, '_> {
 pub struct SparsePrimaryKeyFilter {
     inner: PrimaryKeyFilterInner,
     codec: SparsePrimaryKeyCodec,
-    offsets_map: HashMap<ColumnId, usize>,
+    offsets_cache: SparseOffsetsCache,
 }
 
 impl SparsePrimaryKeyFilter {
@@ -316,18 +315,18 @@ impl SparsePrimaryKeyFilter {
         Self {
             inner: PrimaryKeyFilterInner::new(metadata, filters, skip_partition_column),
             codec,
-            offsets_map: HashMap::new(),
+            offsets_cache: SparseOffsetsCache::new(),
         }
     }
 }
 
 impl PrimaryKeyFilter for SparsePrimaryKeyFilter {
     fn matches(&mut self, pk: &[u8]) -> Result<bool> {
-        self.offsets_map.clear();
+        self.offsets_cache.clear();
         let mut accessor = SparsePrimaryKeyValueAccessor {
             pk,
             codec: &self.codec,
-            offsets_map: &mut self.offsets_map,
+            offsets_cache: &mut self.offsets_cache,
         };
         self.inner.evaluate_filters(&mut accessor)
     }
@@ -336,19 +335,19 @@ impl PrimaryKeyFilter for SparsePrimaryKeyFilter {
 struct SparsePrimaryKeyValueAccessor<'a, 'b> {
     pk: &'a [u8],
     codec: &'b SparsePrimaryKeyCodec,
-    offsets_map: &'b mut HashMap<ColumnId, usize>,
+    offsets_cache: &'b mut SparseOffsetsCache,
 }
 
 impl<'a> PrimaryKeyValueAccessor<'a> for SparsePrimaryKeyValueAccessor<'a, '_> {
     fn encoded_value(&mut self, filter: &CompiledPrimaryKeyFilter) -> Result<Option<&'a [u8]>> {
         self.codec
-            .encoded_value_for_column(self.pk, self.offsets_map, filter.column_id)
+            .encoded_value_for_column(self.pk, self.offsets_cache, filter.column_id)
     }
 
     fn decode_value(&mut self, filter: &CompiledPrimaryKeyFilter) -> Result<Value> {
         if let Some(offset) = self
             .codec
-            .has_column(self.pk, self.offsets_map, filter.column_id)
+            .has_column(self.pk, self.offsets_cache, filter.column_id)
         {
             self.codec
                 .decode_value_at(self.pk, offset, filter.column_id)

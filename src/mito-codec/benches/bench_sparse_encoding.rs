@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::hint::black_box;
 
 use bytes::Bytes;
 use criterion::{Criterion, criterion_group, criterion_main};
 use datatypes::prelude::ValueRef;
-use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use mito_codec::row_converter::sparse::{RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID};
+use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
 
 fn encode_sparse(c: &mut Criterion) {
     let num_tags = 10;
@@ -115,35 +114,35 @@ fn bench_has_column(c: &mut Criterion) {
 
         group.bench_function("table_id", |b| {
             b.iter(|| {
-                let mut offsets_map = HashMap::new();
+                let mut offsets_map = SparseOffsetsCache::new();
                 black_box(codec.has_column(&pk, &mut offsets_map, RESERVED_COLUMN_ID_TABLE_ID));
             });
         });
 
         group.bench_function("tsid", |b| {
             b.iter(|| {
-                let mut offsets_map = HashMap::new();
+                let mut offsets_map = SparseOffsetsCache::new();
                 black_box(codec.has_column(&pk, &mut offsets_map, RESERVED_COLUMN_ID_TSID));
             });
         });
 
         group.bench_function("first_tag", |b| {
             b.iter(|| {
-                let mut offsets_map = HashMap::new();
+                let mut offsets_map = SparseOffsetsCache::new();
                 black_box(codec.has_column(&pk, &mut offsets_map, 0));
             });
         });
 
         group.bench_function("middle_tag", |b| {
             b.iter(|| {
-                let mut offsets_map = HashMap::new();
+                let mut offsets_map = SparseOffsetsCache::new();
                 black_box(codec.has_column(&pk, &mut offsets_map, num_tags / 2));
             });
         });
 
         group.bench_function("last_tag", |b| {
             b.iter(|| {
-                let mut offsets_map = HashMap::new();
+                let mut offsets_map = SparseOffsetsCache::new();
                 black_box(codec.has_column(&pk, &mut offsets_map, num_tags - 1));
             });
         });
