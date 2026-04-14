@@ -481,7 +481,7 @@ fn apply_filters_to_batch(
         let (idx, _) = batch
             .schema()
             .column_with_name(filter.column_name())
-            .context(UnexpectedSnafu {
+            .with_context(|| UnexpectedSnafu {
                 reason: format!(
                     "Prefilter column '{}' (id {}) not found in batch for file {}",
                     filter.column_name(),
@@ -500,7 +500,7 @@ fn apply_filters_to_batch(
         let (idx, _) = batch
             .schema()
             .column_with_name(filter_ctx.column_name())
-            .context(UnexpectedSnafu {
+            .with_context(|| UnexpectedSnafu {
                 reason: format!(
                     "Prefilter physical column '{}' (id {}) not found in batch for file {}",
                     filter_ctx.column_name(),
