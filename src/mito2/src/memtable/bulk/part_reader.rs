@@ -29,7 +29,7 @@ use crate::memtable::bulk::part::EncodedBulkPart;
 use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
 use crate::memtable::{MemScanMetrics, MemScanMetricsData};
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
-use crate::sst::parquet::file_range::{PreFilterMode, TagDecodeState};
+use crate::sst::parquet::file_range::TagDecodeState;
 use crate::sst::parquet::flat_format::{primary_key_column_index, sequence_column_index};
 use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, prefilter_flat_batch_by_primary_key};
 
@@ -78,7 +78,7 @@ impl EncodedBulkPartIter {
 
         let (init_reader, current_skip_fields) = match row_groups_to_read.pop_front() {
             Some(first_row_group) => {
-                let skip_fields = builder.compute_skip_fields(&context, first_row_group);
+                let skip_fields = context.pre_filter_mode().skip_fields();
                 let reader = builder.build_row_group_reader(first_row_group, None)?;
                 (Some(reader), skip_fields)
             }
@@ -140,9 +140,7 @@ impl EncodedBulkPartIter {
         // Previous row group exhausted, read next row group
         while let Some(next_row_group) = self.row_groups_to_read.pop_front() {
             // Compute skip_fields for this row group
-            self.current_skip_fields = self
-                .builder
-                .compute_skip_fields(&self.context, next_row_group);
+            self.current_skip_fields = self.context.pre_filter_mode().skip_fields();
 
             let next_reader = self.builder.build_row_group_reader(next_row_group, None)?;
             let current = self.current_reader.insert(next_reader);
@@ -299,11 +297,7 @@ impl BulkPartBatchIter {
         let projected_batch = self.apply_projection(record_batch)?;
 
         // Apply combined filtering (both predicate and sequence filters)
-        let skip_fields = match self.context.pre_filter_mode() {
-            PreFilterMode::All => false,
-            PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => true,
-        };
+        let skip_fields = self.context.pre_filter_mode().skip_fields();
 
         let Some(filtered_batch) = apply_combined_filters(
             &self.context,
