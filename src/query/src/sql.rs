@@ -33,6 +33,7 @@ use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
 use common_meta::SchemaOptions;
+use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::Output;
 use common_query::prelude::greptime_timestamp;
@@ -78,6 +79,15 @@ const VIEWS_COLUMN: &str = "Views";
 const FLOWS_COLUMN: &str = "Flows";
 const FIELD_COLUMN: &str = "Field";
 const TABLE_TYPE_COLUMN: &str = "Table_type";
+
+fn user_visible_flow_options(options: &HashMap<String, String>) -> OptionMap {
+    OptionMap::from(
+        options
+            .iter()
+            .filter(|(key, _)| key.as_str() != FlowType::FLOW_TYPE_KEY)
+            .map(|(key, value)| (key.clone(), value.clone())),
+    )
+}
 const COLUMN_NAME_COLUMN: &str = "Column";
 const COLUMN_GREPTIME_TYPE_COLUMN: &str = "Greptime_type";
 const COLUMN_TYPE_COLUMN: &str = "Type";
@@ -1056,6 +1066,7 @@ pub fn show_create_flow(
         expire_after: flow_val.expire_after(),
         eval_interval: flow_val.eval_interval(),
         comment,
+        flow_options: user_visible_flow_options(flow_val.options()),
         query,
     };
 
