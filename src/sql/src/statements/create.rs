@@ -612,6 +612,8 @@ pub struct CreateFlow {
     pub eval_interval: Option<i64>,
     /// Comment string
     pub comment: Option<String>,
+    /// Flow creation options from `WITH (...)`
+    pub flow_options: OptionMap,
     /// SQL statement
     pub query: Box<SqlOrTql>,
 }
@@ -668,6 +670,10 @@ impl Display for CreateFlow {
         }
         if let Some(comment) = &self.comment {
             writeln!(f, "COMMENT '{}'", comment)?;
+        }
+        if !self.flow_options.is_empty() {
+            let options = self.flow_options.kv_pairs();
+            writeln!(f, "WITH ({})", format_list_comma!(options))?;
         }
         write!(f, "AS {}", &self.query)
     }

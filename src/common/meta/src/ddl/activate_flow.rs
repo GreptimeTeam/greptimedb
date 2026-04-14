@@ -151,21 +151,20 @@ impl ActivatePendingFlowProcedure {
             return Ok(Status::done());
         }
 
-        if get_flow_type(current_flow_info.get_inner_ref()) == FlowType::Batching {
-            if let Some(reason) =
+        if get_flow_type(current_flow_info.get_inner_ref()) == FlowType::Batching
+            && let Some(reason) =
                 validate_batching_activation(&self.context, &resolution.resolved_table_ids).await?
-            {
-                update_pending_flow_metadata(
-                    &self.context,
-                    self.data.flow_id,
-                    &current_flow_info,
-                    resolution.resolved_table_ids,
-                    vec![],
-                    Some(reason),
-                )
-                .await?;
-                return Ok(Status::done());
-            }
+        {
+            update_pending_flow_metadata(
+                &self.context,
+                self.data.flow_id,
+                &current_flow_info,
+                resolution.resolved_table_ids,
+                vec![],
+                Some(reason),
+            )
+            .await?;
+            return Ok(Status::done());
         }
 
         self.data.peers = self.context.flow_metadata_allocator.alloc_peers(1).await?;

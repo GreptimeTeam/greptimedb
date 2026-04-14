@@ -339,6 +339,14 @@ impl<'a> ParserContext<'a> {
             None
         };
 
+        let flow_options = self
+            .parser
+            .parse_options(Keyword::WITH)
+            .context(SyntaxSnafu)?
+            .into_iter()
+            .map(parse_option_string)
+            .collect::<Result<HashMap<String, OptionValue>>>()?;
+
         self.parser
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
@@ -353,6 +361,7 @@ impl<'a> ParserContext<'a> {
             expire_after,
             eval_interval,
             comment,
+            flow_options: OptionMap::new(flow_options),
             query,
         }))
     }
@@ -1256,6 +1265,20 @@ mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
 
+    fn string_option_map(
+        entries: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> OptionMap {
+        OptionMap::new(entries.into_iter().map(|(key, value)| {
+            (
+                key.to_string(),
+                OptionValue::try_new(Expr::Value(
+                    Value::SingleQuotedString(value.to_string()).into(),
+                ))
+                .unwrap(),
+            )
+        }))
+    }
+
     #[test]
     fn test_parse_create_table_like() {
         let sql = "CREATE TABLE t1 LIKE t2";
@@ -1498,6 +1521,8 @@ mod tests {
             pub expire_after: Option<i64>,
             /// Comment string
             pub comment: Option<String>,
+            /// Flow creation options
+            pub flow_options: OptionMap,
         }
         let testcases = vec![
             (
@@ -1518,6 +1543,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     comment: Some("test comment".to_string()),
+                    flow_options: OptionMap::default(),
                 },
             ),
             (
@@ -1538,6 +1564,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     comment: Some("test comment".to_string()),
+                    flow_options: OptionMap::default(),
                 },
             ),
             (
@@ -1558,6 +1585,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     comment: Some("test comment".to_string()),
+                    flow_options: OptionMap::default(),
                 },
             ),
             (
@@ -1578,6 +1606,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     comment: Some("test comment".to_string()),
+                    flow_options: OptionMap::default(),
                 },
             ),
             (
@@ -1597,6 +1626,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: false,
                     expire_after: Some(2 * 86400 + 3600 + 2 * 60),
                     comment: None,
+                    flow_options: OptionMap::default(),
                 },
             ),
             (
@@ -1616,6 +1646,7 @@ select max(c1), min(c2) from schema_2.table_2;",
                     if_not_exists: false,
                     expire_after: Some(600), // 10 minutes in seconds
                     comment: None,
+                    flow_options: OptionMap::default(),
                 },
             ),
             (
@@ -1636,6 +1667,27 @@ select max(c1), min(c2) from schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(7200), // 2 hours in seconds
                     comment: Some("lowercase test".to_string()),
+                    flow_options: OptionMap::default(),
+                },
+            ),
+            (
+                r"
+CREATE FLOW task_5
+SINK TO schema_1.table_1
+WITH (defer_on_missing_source = 'true')
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;",
+                CreateFlowWoutQuery {
+                    flow_name: ObjectName::from(vec![Ident::new("task_5")]),
+                    sink_table_name: ObjectName::from(vec![
+                        Ident::new("schema_1"),
+                        Ident::new("table_1"),
+                    ]),
+                    or_replace: false,
+                    if_not_exists: false,
+                    expire_after: None,
+                    comment: None,
+                    flow_options: string_option_map([("defer_on_missing_source", "true")]),
                 },
             ),
         ];
@@ -1651,6 +1703,7 @@ select max(c1), min(c2) from schema_2.table_2;",
                 expire_after: expected.expire_after,
                 eval_interval: None,
                 comment: expected.comment,
+                flow_options: expected.flow_options,
                 // ignore query parse result
                 query: create_task.query.clone(),
             };
@@ -1696,6 +1749,8 @@ select max(c1), min(c2) from schema_2.table_2;",
             pub eval_interval: Option<i64>,
             /// Comment string
             pub comment: Option<String>,
+            /// Flow creation options
+            pub flow_options: OptionMap,
         }
 
         // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE AFTER` and `COMMENT`
@@ -1719,6 +1774,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     expire_after: Some(300),
                     eval_interval: None,
                     comment: Some("test comment".to_string()),
+                    flow_options: OptionMap::default(),
                 },
             ),
             (
@@ -1740,6 +1796,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     expire_after: Some(300),
                     eval_interval: None,
                     comment: Some("test comment".to_string()),
+                    flow_options: OptionMap::default(),
                 },
             ),
             (
@@ -1762,6 +1819,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     expire_after: Some(300),
                     eval_interval: Some(10),
                     comment: Some("test comment".to_string()),
+                    flow_options: OptionMap::default(),
                 },
             ),
             (
@@ -1784,6 +1842,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     expire_after: Some(300),
                     eval_interval: Some(10),
                     comment: Some("test comment".to_string()),
+                    flow_options: OptionMap::default(),
                 },
             ),
             (
@@ -1806,6 +1865,32 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     expire_after: Some(2 * 86400 + 3600 + 2 * 60),
                     eval_interval: None,
                     comment: None,
+                    flow_options: OptionMap::default(),
+                },
+            ),
+            (
+                r"
+CREATE FLOW task_3
+SINK TO schema_1.table_1
+EVAL INTERVAL '10 seconds'
+WITH (defer_on_missing_source = 'true', foo = 'bar')
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;",
+                CreateFlowWoutQuery {
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("task_3"))]),
+                    sink_table_name: ObjectName(vec![
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
+                    ]),
+                    or_replace: false,
+                    if_not_exists: false,
+                    expire_after: None,
+                    eval_interval: Some(10),
+                    comment: None,
+                    flow_options: string_option_map([
+                        ("defer_on_missing_source", "true"),
+                        ("foo", "bar"),
+                    ]),
                 },
             ),
         ];
@@ -1821,6 +1906,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 expire_after: expected.expire_after,
                 eval_interval: expected.eval_interval,
                 comment: expected.comment,
+                flow_options: expected.flow_options,
                 // ignore query parse result
                 query: create_task.query.clone(),
             };

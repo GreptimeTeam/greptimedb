@@ -16,6 +16,7 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_FLOW_TABLE_ID;
 use common_error::ext::BoxedError;
+use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::FlowId;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_info::FlowInfoValue;
@@ -53,6 +54,17 @@ use crate::system_schema::information_schema::InformationTable;
 use crate::system_schema::utils;
 
 const INIT_CAPACITY: usize = 42;
+
+fn user_visible_flow_options(
+    options: &std::collections::HashMap<String, String>,
+) -> sql::statements::OptionMap {
+    sql::statements::OptionMap::from(
+        options
+            .iter()
+            .filter(|(key, _)| key.as_str() != FlowType::FLOW_TYPE_KEY)
+            .map(|(key, value)| (key.clone(), value.clone())),
+    )
+}
 
 // rows of information_schema.flows
 // pk is (flow_name, flow_id, table_catalog)
@@ -165,6 +177,7 @@ impl InformationSchemaFlows {
             expire_after: flow_info.expire_after(),
             eval_interval: flow_info.eval_interval(),
             comment,
+            flow_options: user_visible_flow_options(flow_info.options()),
             query,
         };
 
