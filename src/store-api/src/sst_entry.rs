@@ -384,7 +384,7 @@ fn build_plan_helper(
 ) -> Result<LogicalPlan, DataFusionError> {
     let table_source = LogicalTableSource::new(schema.arrow_schema().clone());
 
-    let projection = scan_request.projection_indices_owned();
+    let projection = scan_request.projection_input.map(|input| input.projection);
     let mut builder = LogicalPlanBuilder::scan(table_name, Arc::new(table_source), projection)?;
 
     for filter in scan_request.filters {
