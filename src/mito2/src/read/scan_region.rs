@@ -390,7 +390,7 @@ impl ScanRegion {
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
-        let read_column_ids = match &self.request.projection {
+        let read_column_ids = match self.request.projection_indices() {
             Some(p) => self.build_read_column_ids(p, &predicate)?,
             None => self
                 .version
@@ -402,7 +402,7 @@ impl ScanRegion {
         };
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
-        let mapper = match &self.request.projection {
+        let mapper = match self.request.projection_indices() {
             Some(p) => ProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
                 p.iter().copied(),
@@ -1756,7 +1756,9 @@ mod tests {
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
     use store_api::metadata::RegionMetadataBuilder;
-    use store_api::storage::{ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+    use store_api::storage::{
+        ProjectionInput, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
+    };
 
     use super::*;
     use crate::cache::CacheManager;
@@ -1801,7 +1803,7 @@ mod tests {
         let version = new_version(metadata.clone());
         let env = SchedulerEnv::new().await;
         let request = ScanRequest {
-            projection: Some(vec![4]),
+            projection_input: Some(vec![4].into()),
             filters: vec![
                 col("v0").gt(lit(1)),
                 col("ts").gt(lit(0)),
@@ -1817,7 +1819,7 @@ mod tests {
         );
         let predicate =
             PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = scan_region.request.projection.as_ref().unwrap();
+        let projection = &scan_region.request.projection_indices().unwrap();
         let read_ids = scan_region
             .build_read_column_ids(projection, &predicate)
             .unwrap();
@@ -1830,7 +1832,7 @@ mod tests {
         let version = new_version(metadata.clone());
         let env = SchedulerEnv::new().await;
         let request = ScanRequest {
-            projection: Some(vec![]),
+            projection_input: Some(ProjectionInput::default()),
             ..Default::default()
         };
         let scan_region = ScanRegion::new(
@@ -1841,7 +1843,7 @@ mod tests {
         );
         let predicate =
             PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = scan_region.request.projection.as_ref().unwrap();
+        let projection = &scan_region.request.projection_indices().unwrap();
         let read_ids = scan_region
             .build_read_column_ids(projection, &predicate)
             .unwrap();
@@ -1855,7 +1857,7 @@ mod tests {
         let version = new_version(metadata.clone());
         let env = SchedulerEnv::new().await;
         let request = ScanRequest {
-            projection: Some(vec![4, 1]),
+            projection_input: Some(vec![4, 1].into()),
             filters: vec![col("v0").gt(lit(1))],
             ..Default::default()
         };
@@ -1867,7 +1869,7 @@ mod tests {
         );
         let predicate =
             PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = scan_region.request.projection.as_ref().unwrap();
+        let projection = &scan_region.request.projection_indices().unwrap();
         let read_ids = scan_region
             .build_read_column_ids(projection, &predicate)
             .unwrap();
