@@ -24,8 +24,7 @@ mod twcs;
 mod window;
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use api::v1::region::compact_request;
@@ -645,7 +644,7 @@ impl CompactionScheduler {
 #[derive(Debug, Clone)]
 pub(crate) struct LocalCompactionState {
     cancel_handle: Arc<CancellationHandle>,
-    commit_started: Arc<AtomicBool>,
+    commit_started: Arc<Mutex<bool>>,
 }
 
 #[derive(Debug)]
@@ -658,7 +657,7 @@ impl LocalCompactionState {
     fn new(cancel_handle: Arc<CancellationHandle>) -> Self {
         Self {
             cancel_handle,
-            commit_started: Arc::new(AtomicBool::new(false)),
+            commit_started: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -671,13 +670,14 @@ impl LocalCompactionState {
     /// which means the compaction task is in the final stage and is about to update region version and manifest.
     /// It will reject cancellation request after this method is called.
     pub(crate) fn mark_commit_started(&self) {
-        self.commit_started
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *self.commit_started.lock().unwrap() = true;
     }
 
     /// Request cancellation for this compaction task.
     pub(crate) fn request_cancel(&self) -> RequestCancelResult {
-        if self.commit_started.load(Ordering::Relaxed) {
+        // The cancel handle must under the lock of `commit_started` to avoid racing between cancellation and commit.
+        let commit_started = *self.commit_started.lock().unwrap();
+        if commit_started {
             return RequestCancelResult::TooLateToCancel;
         }
         if self.cancel_handle.is_cancelled() {
@@ -894,6 +894,7 @@ impl CompactionStatus {
         }
     }
 
+    #[must_use]
     fn on_cancel(mut self) -> Vec<SenderDdlRequest> {
         for waiter in self.waiters.drain(..) {
             waiter.send(CompactionCancelledSnafu.fail());
@@ -1772,13 +1773,13 @@ mod tests {
         let state = status.start_local_task();
 
         assert_eq!(status.request_cancel(), RequestCancelResult::CancelIssued);
-        assert!(LocalCompactionState::cancel_handle(&state).is_cancelled());
+        assert!(state.cancel_handle().is_cancelled());
         assert_eq!(
             status.request_cancel(),
             RequestCancelResult::AlreadyCancelling
         );
 
-        LocalCompactionState::mark_commit_started(&state);
+        state.mark_commit_started();
         assert_eq!(
             status.request_cancel(),
             RequestCancelResult::TooLateToCancel

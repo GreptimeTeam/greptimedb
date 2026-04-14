@@ -251,7 +251,7 @@ impl CompactionTaskImpl {
         compaction_result: crate::compaction::compactor::MergeOutput,
     ) -> error::Result<RegionEdit> {
         // Stop accepting cancellation once we are about to publish the compaction edit.
-        LocalCompactionState::mark_commit_started(&self.state);
+        self.state.mark_commit_started();
 
         let _manifest_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])
@@ -314,7 +314,7 @@ impl CompactionTask for CompactionTaskImpl {
         self.mark_files_compacting(true);
         self.handle_expiration().await;
 
-        let cancel_handle = crate::compaction::LocalCompactionState::cancel_handle(&self.state);
+        let cancel_handle = self.state.cancel_handle();
         // Run compaction with cooperative cancellation.
         let notify = match CancellableFuture::new(
             async { self.handle_compaction().await },
