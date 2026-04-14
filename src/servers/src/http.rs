@@ -1327,7 +1327,6 @@ mod test {
     use query::parser::PromQuery;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
-    use sql::statements::statement::Statement;
     use tokio::sync::mpsc;
     use tokio::time::Instant;
 
@@ -1352,8 +1351,8 @@ mod test {
 
         async fn do_exec_plan(
             &self,
-            _stmt: Option<Statement>,
             _plan: LogicalPlan,
+            _query: String,
             _query_ctx: QueryContextRef,
         ) -> Result<Output> {
             unimplemented!()

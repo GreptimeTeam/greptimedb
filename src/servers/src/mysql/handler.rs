@@ -28,6 +28,7 @@ use common_telemetry::{debug, error, tracing, warn};
 use datafusion_common::ParamValues;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::Schema;
 use itertools::Itertools;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
@@ -138,23 +139,6 @@ impl MysqlInstanceShim {
         }
     }
 
-    /// Execute the logical plan and return the output
-    async fn do_exec_plan(
-        &self,
-        query: &str,
-        stmt: Option<Statement>,
-        plan: LogicalPlan,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        if let Some(output) =
-            crate::mysql::federated::check(query, query_ctx.clone(), self.session.clone())
-        {
-            Ok(output)
-        } else {
-            self.query_handler.do_exec_plan(stmt, plan, query_ctx).await
-        }
-    }
-
     /// Describe the statement
     async fn do_describe(
         &self,
@@ -209,15 +193,7 @@ impl MysqlInstanceShim {
         let describe_result = self
             .do_describe(statement.clone(), query_ctx.clone())
             .await?;
-        let (plan, schema) = if let Some(DescribeResult {
-            logical_plan,
-            schema,
-        }) = describe_result
-        {
-            (Some(logical_plan), Some(schema))
-        } else {
-            (None, None)
-        };
+        let plan = describe_result.map(|DescribeResult { logical_plan }| logical_plan);
 
         let params = if let Some(plan) = &plan {
             let param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
@@ -230,49 +206,43 @@ impl MysqlInstanceShim {
             dummy_params(param_num)?
         };
 
-        let columns = schema
-            .as_ref()
-            .map(|schema| {
-                schema
-                    .column_schemas()
-                    .iter()
-                    .map(|column_schema| {
-                        create_mysql_column(&column_schema.data_type, &column_schema.name)
-                    })
-                    .collect::<Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
+        let columns =
+            plan.as_ref()
+                .map(|plan| {
+                    let schema: Schema = plan.schema().clone().try_into().map_err(
+                        |e: datatypes::error::Error| {
+                            error::InternalSnafu {
+                                err_msg: e.to_string(),
+                            }
+                            .build()
+                        },
+                    )?;
+                    schema
+                        .column_schemas()
+                        .iter()
+                        .map(|column_schema| {
+                            create_mysql_column(&column_schema.data_type, &column_schema.name)
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
 
-        // DataFusion may optimize the plan so that some parameters are not used.
-        if params.len() != param_num - 1 {
-            self.save_plan(
-                SqlPlan {
-                    query: query.clone(),
-                    statement: Some(statement),
-                    plan: None,
-                    schema: None,
-                },
-                stmt_key,
-            )
-            .map_err(|e| {
-                error!(e; "Failed to save prepared statement");
-                e
-            })?;
-        } else {
-            self.save_plan(
-                SqlPlan {
-                    query: query.clone(),
-                    statement: Some(statement),
-                    plan,
-                    schema,
-                },
-                stmt_key,
-            )
-            .map_err(|e| {
-                error!(e; "Failed to save prepared statement");
-                e
-            })?;
+        match plan {
+            Some(plan) if params.len() == param_num - 1 => {
+                self.save_plan(SqlPlan::Plan(plan, query.clone()), stmt_key)
+                    .map_err(|e| {
+                        error!(e; "Failed to save prepared statement");
+                        e
+                    })?;
+            }
+            _ => {
+                self.save_plan(SqlPlan::Statement(statement, query), stmt_key)
+                    .map_err(|e| {
+                        error!(e; "Failed to save prepared statement");
+                        e
+                    })?;
+            }
         }
 
         Ok((params, columns))
@@ -291,8 +261,8 @@ impl MysqlInstanceShim {
             Some(sql_plan) => sql_plan,
         };
 
-        let outputs = match sql_plan.plan {
-            Some(plan) => {
+        let outputs = match sql_plan {
+            SqlPlan::Plan(plan, query) => {
                 let param_types = DfLogicalPlanner::get_inferred_parameter_types(&plan)
                     .context(InferParameterTypesSnafu)?
                     .into_iter()
@@ -306,7 +276,7 @@ impl MysqlInstanceShim {
                     .fail();
                 }
 
-                let plan = match params {
+                let replaced_plan = match params {
                     Params::ProtocolParams(params) => {
                         replace_params_with_values(&plan, param_types, &params)
                     }
@@ -315,18 +285,17 @@ impl MysqlInstanceShim {
                     }
                 }?;
 
-                debug!("Mysql execute prepared plan: {}", plan.display_indent());
+                debug!(
+                    "Mysql execute prepared plan: {}",
+                    replaced_plan.display_indent()
+                );
                 vec![
-                    self.do_exec_plan(
-                        &sql_plan.query,
-                        sql_plan.statement.clone(),
-                        plan,
-                        query_ctx.clone(),
-                    )
-                    .await,
+                    self.query_handler
+                        .do_exec_plan(replaced_plan, query, query_ctx.clone())
+                        .await,
                 ]
             }
-            None => {
+            SqlPlan::Statement(_stmt, query) => {
                 let param_strs = match params {
                     Params::ProtocolParams(params) => {
                         params.iter().map(convert_param_value_to_string).collect()
@@ -335,11 +304,14 @@ impl MysqlInstanceShim {
                 };
                 debug!(
                     "do_execute Replacing with Params: {:?}, Original Query: {}",
-                    param_strs, sql_plan.query
+                    param_strs, query
                 );
-                let query = replace_params(param_strs, sql_plan.query);
+                let query = replace_params(param_strs, query);
                 debug!("Mysql execute replaced query: {}", query);
                 self.do_query(&query, query_ctx.clone()).await
+            }
+            _ => {
+                return error::PrepareStatementNotFoundSnafu { name: stmt_key }.fail();
             }
         };
 

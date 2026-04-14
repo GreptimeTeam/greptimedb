@@ -16,7 +16,6 @@
 #![feature(exclusive_wrapper)]
 
 use datafusion_expr::LogicalPlan;
-use datatypes::schema::Schema;
 use sql::statements::statement::Statement;
 // Re-export for use in add_service! macro
 #[doc(hidden)]
@@ -54,14 +53,19 @@ mod row_writer;
 pub mod server;
 pub mod tls;
 
-/// Cached SQL and logical plan for database interfaces
+/// Cached sql plan or statement for database interfaces
 #[derive(Clone, Debug)]
-pub struct SqlPlan {
-    query: String,
-    // Store the parsed statement to determine if it is a query and whether to track it.
-    statement: Option<Statement>,
-    plan: Option<LogicalPlan>,
-    schema: Option<Schema>,
+pub enum SqlPlan {
+    /// Empty Query
+    Empty,
+    /// Hardcoded SQL shortcuts
+    Shortcut(String),
+    /// Datafusion parsed execution plan with the original query string
+    Plan(LogicalPlan, String),
+    /// Parsed statement when execution is not managed by datafusion
+    /// eg. CREATE TABLE
+    /// The String is the original query string to avoid AST round-trip issues
+    Statement(Statement, String),
 }
 
 /// Install the ring crypto provider for rustls process-wide. see:

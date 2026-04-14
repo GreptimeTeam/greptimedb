@@ -58,6 +58,8 @@ pub enum QueryStatement {
     Sql(Statement),
     // The optional string is the alias of the PromQL query.
     Promql(EvalStmt, Option<String>),
+    /// Logical plan with original query string
+    Plan(String),
 }
 
 impl Display for QueryStatement {
@@ -71,6 +73,7 @@ impl Display for QueryStatement {
                     write!(f, "{}", eval_stmt)
                 }
             }
+            QueryStatement::Plan(query) => write!(f, "{}", query),
         }
     }
 }
@@ -368,6 +371,9 @@ impl SlowQueryTimer {
             }
             QueryStatement::Sql(stmt) => {
                 slow_query_event.query = stmt.to_string();
+            }
+            QueryStatement::Plan(query) => {
+                slow_query_event.query = query.clone();
             }
         }
 
