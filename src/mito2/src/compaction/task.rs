@@ -250,9 +250,6 @@ impl CompactionTaskImpl {
         &self,
         compaction_result: crate::compaction::compactor::MergeOutput,
     ) -> error::Result<RegionEdit> {
-        // Stop accepting cancellation once we are about to publish the compaction edit.
-        self.state.mark_commit_started();
-
         let _manifest_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])
             .start_timer();
@@ -322,26 +319,37 @@ impl CompactionTask for CompactionTaskImpl {
         )
         .await
         {
-            Ok(Ok(merge_output)) => match self.update_manifest(merge_output).await {
-                Ok(edit) => {
+            Ok(Ok(merge_output)) => {
+                // Stop accepting cancellation once we are about to publish the compaction edit.
+                if !self.state.mark_commit_started() {
                     let senders = std::mem::take(&mut self.waiters);
-                    BackgroundNotify::CompactionFinished(CompactionFinished {
+                    BackgroundNotify::CompactionCancelled(CompactionCancelled {
                         region_id: self.compaction_region.region_id,
                         senders,
-                        start_time: self.start_time,
-                        edit,
                     })
+                } else {
+                    match self.update_manifest(merge_output).await {
+                        Ok(edit) => {
+                            let senders = std::mem::take(&mut self.waiters);
+                            BackgroundNotify::CompactionFinished(CompactionFinished {
+                                region_id: self.compaction_region.region_id,
+                                senders,
+                                start_time: self.start_time,
+                                edit,
+                            })
+                        }
+                        Err(e) => {
+                            error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
+                            let err = Arc::new(e);
+                            self.on_failure(err.clone());
+                            BackgroundNotify::CompactionFailed(CompactionFailed {
+                                region_id: self.compaction_region.region_id,
+                                err,
+                            })
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
-                    let err = Arc::new(e);
-                    self.on_failure(err.clone());
-                    BackgroundNotify::CompactionFailed(CompactionFailed {
-                        region_id: self.compaction_region.region_id,
-                        err,
-                    })
-                }
-            },
+            }
             Err(_) => {
                 info!(
                     "Compaction cancelled, region id: {}",

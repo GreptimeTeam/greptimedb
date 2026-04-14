@@ -669,8 +669,15 @@ impl LocalCompactionState {
     /// Marks the compaction task as started to commit,
     /// which means the compaction task is in the final stage and is about to update region version and manifest.
     /// It will reject cancellation request after this method is called.
-    pub(crate) fn mark_commit_started(&self) {
-        *self.commit_started.lock().unwrap() = true;
+    ///
+    /// Returns true if this is the first time to mark commit started, false otherwise.
+    pub(crate) fn mark_commit_started(&self) -> bool {
+        let commit_started = *self.commit_started.lock().unwrap();
+        if !commit_started {
+            *self.commit_started.lock().unwrap() = true;
+            return true;
+        }
+        false
     }
 
     /// Request cancellation for this compaction task.
@@ -1779,7 +1786,8 @@ mod tests {
             RequestCancelResult::AlreadyCancelling
         );
 
-        state.mark_commit_started();
+        assert!(state.mark_commit_started());
+        assert!(!state.mark_commit_started());
         assert_eq!(
             status.request_cancel(),
             RequestCancelResult::TooLateToCancel
