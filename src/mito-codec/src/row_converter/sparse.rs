@@ -120,14 +120,28 @@ const TSID_VALUE_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SI
 /// Byte offset where tag columns start (after 9-byte table_id + 13-byte tsid entries).
 const TAGS_START_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SIZE + 9;
 
+/// Inline capacity for the small-vec fast path of [`SparseOffsetsCache`].
+///
+/// Most sparse primary keys carry only a handful of tags; a linear scan over
+/// a small pre-reserved `Vec` beats a `HashMap` lookup in that regime (no
+/// hash, better cache behavior). Primary keys with more than this many tags
+/// spill the remainder into a `HashMap`.
+const SPARSE_OFFSETS_INLINE_CAP: usize = 16;
+
 /// A lazily populated cache of tag column offsets inside a sparse primary key.
 ///
 /// Keeps a cursor into the pk so repeated `has_column` lookups for the same
-/// pk only advance the decoder as far as they must. Reuse across pks by
+/// pk only advance the decoder as far as they must. Storage is a hybrid of a
+/// pre-reserved `Vec` (fast path for small pks) and an overflow `HashMap` for
+/// pks with more than [`SPARSE_OFFSETS_INLINE_CAP`] tags. Reuse across pks by
 /// calling [`SparseOffsetsCache::clear`].
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct SparseOffsetsCache {
-    offsets: HashMap<ColumnId, usize>,
+    /// Small-vec fast path, pre-reserved to [`SPARSE_OFFSETS_INLINE_CAP`] so
+    /// the common case never reallocates.
+    inline: Vec<(ColumnId, usize)>,
+    /// Overflow for columns beyond the inline capacity. Lazily allocated.
+    overflow: HashMap<ColumnId, usize>,
     /// Next byte position in the pk to resume parsing from.
     cursor: usize,
     /// True once the decoder has walked past the last tag column (or stopped
@@ -135,19 +149,57 @@ pub struct SparseOffsetsCache {
     finished: bool,
 }
 
+impl Default for SparseOffsetsCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SparseOffsetsCache {
     pub fn new() -> Self {
         Self {
-            offsets: HashMap::new(),
+            inline: Vec::new(),
+            overflow: HashMap::new(),
             cursor: TAGS_START_OFFSET,
             finished: false,
         }
     }
 
     pub fn clear(&mut self) {
-        self.offsets.clear();
+        self.inline.clear();
+        self.overflow.clear();
         self.cursor = TAGS_START_OFFSET;
         self.finished = false;
+    }
+
+    /// Returns the cached offset for `column_id`, if any.
+    fn get(&self, column_id: ColumnId) -> Option<usize> {
+        for entry in &self.inline {
+            if entry.0 == column_id {
+                return Some(entry.1);
+            }
+        }
+        if self.overflow.is_empty() {
+            return None;
+        }
+        self.overflow.get(&column_id).copied()
+    }
+
+    /// Records a new `(column_id, offset)` entry.
+    fn insert(&mut self, column_id: ColumnId, offset: usize) {
+        if self.inline.len() < SPARSE_OFFSETS_INLINE_CAP {
+            if self.inline.capacity() == 0 {
+                self.inline.reserve_exact(SPARSE_OFFSETS_INLINE_CAP);
+            }
+            self.inline.push((column_id, offset));
+        } else {
+            self.overflow.insert(column_id, offset);
+        }
+    }
+
+    #[cfg(test)]
+    fn contains(&self, column_id: ColumnId) -> bool {
+        self.get(column_id).is_some()
     }
 }
 
@@ -339,8 +391,8 @@ impl SparsePrimaryKeyCodec {
             _ => {}
         }
 
-        if let Some(offset) = cache.offsets.get(&column_id) {
-            return Some(*offset);
+        if let Some(offset) = cache.get(column_id) {
+            return Some(offset);
         }
         if cache.finished {
             return None;
@@ -353,7 +405,7 @@ impl SparsePrimaryKeyCodec {
             let col = u32::deserialize(&mut deserializer).unwrap();
             offset += COLUMN_ID_ENCODE_SIZE;
             let value_offset = offset;
-            cache.offsets.insert(col, value_offset);
+            cache.insert(col, value_offset);
             let Some(field) = self.get_field(col) else {
                 cache.finished = true;
                 cache.cursor = offset;
@@ -782,12 +834,12 @@ mod tests {
         // Look up an early column: only a prefix of tags is decoded.
         assert!(codec.has_column(&buffer, &mut cache, 1).is_some());
         assert!(!cache.finished);
-        assert!(cache.offsets.contains_key(&1));
-        assert!(!cache.offsets.contains_key(&5));
+        assert!(cache.contains(1));
+        assert!(!cache.contains(5));
 
         // A later column resumes from the cursor.
         assert!(codec.has_column(&buffer, &mut cache, 5).is_some());
-        assert!(cache.offsets.contains_key(&5));
+        assert!(cache.contains(5));
 
         // An earlier column that was already cached still resolves.
         assert!(codec.has_column(&buffer, &mut cache, 2).is_some());
