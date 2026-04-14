@@ -113,6 +113,9 @@ struct DdlSubmitOptions {
     timeout: Duration,
 }
 
+const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
+const ALLOWED_FLOW_OPTIONS: [&str; 1] = [DEFER_ON_MISSING_SOURCE_KEY];
+
 fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
     let procedure_id = String::from_utf8_lossy(&procedure_id).to_string();
     let vector: VectorRef = Arc::new(StringVector::from(vec![procedure_id]));
@@ -150,6 +153,55 @@ fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
     };
 
     Ok(DdlSubmitOptions { wait, timeout })
+}
+
+fn supported_flow_options() -> String {
+    ALLOWED_FLOW_OPTIONS.join(", ")
+}
+
+fn normalize_flow_bool_option(key: &str, value: &str) -> Result<String> {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .parse::<bool>()
+        .map(|value| value.to_string())
+        .map_err(|_| {
+            InvalidSqlSnafu {
+                err_msg: format!("invalid flow option '{key}': '{value}'"),
+            }
+            .build()
+        })
+}
+
+fn validate_and_normalize_flow_options(
+    options: HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    options
+        .into_iter()
+        .map(|(key, value)| {
+            if key == FlowType::FLOW_TYPE_KEY {
+                return InvalidSqlSnafu {
+                    err_msg: format!("flow option '{key}' is reserved for internal use"),
+                }
+                .fail();
+            }
+
+            let normalized_value = match key.as_str() {
+                DEFER_ON_MISSING_SOURCE_KEY => normalize_flow_bool_option(&key, &value)?,
+                _ => {
+                    return InvalidSqlSnafu {
+                        err_msg: format!(
+                            "unknown flow option '{key}', supported options: {}",
+                            supported_flow_options()
+                        ),
+                    }
+                    .fail();
+                }
+            };
+
+            Ok((key, normalized_value))
+        })
+        .collect()
 }
 
 impl StatementExecutor {
@@ -629,17 +681,16 @@ impl StatementExecutor {
         expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
+        let mut expr = expr;
+        expr.flow_options = validate_and_normalize_flow_options(expr.flow_options)?;
+
         let flow_type = self
             .determine_flow_type(&expr, query_context.clone())
             .await?;
         info!("determined flow={} type: {:#?}", expr.flow_name, flow_type);
 
-        let expr = {
-            let mut expr = expr;
-            expr.flow_options
-                .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type.to_string());
-            expr
-        };
+        expr.flow_options
+            .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type.to_string());
 
         let task = CreateFlowTask::try_from(PbCreateFlowTask {
             create_flow: Some(expr),
@@ -2332,6 +2383,68 @@ mod test {
         let ddl_options = parse_ddl_options(&options).unwrap();
         assert!(!ddl_options.wait);
         assert_eq!(Duration::from_secs(300), ddl_options.timeout);
+    }
+
+    #[test]
+    fn test_validate_and_normalize_flow_options_empty() {
+        assert!(
+            validate_and_normalize_flow_options(HashMap::new())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_validate_and_normalize_flow_options_valid() {
+        let options =
+            HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "TRUE".to_string())]);
+
+        assert_eq!(
+            validate_and_normalize_flow_options(options).unwrap(),
+            HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string(),)])
+        );
+    }
+
+    #[test]
+    fn test_validate_and_normalize_flow_options_unknown_option() {
+        let err = validate_and_normalize_flow_options(HashMap::from([(
+            "foo".to_string(),
+            "bar".to_string(),
+        )]))
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'foo', supported options: defer_on_missing_source")
+        );
+    }
+
+    #[test]
+    fn test_validate_and_normalize_flow_options_reserved_option() {
+        let err = validate_and_normalize_flow_options(HashMap::from([(
+            FlowType::FLOW_TYPE_KEY.to_string(),
+            FlowType::BATCHING.to_string(),
+        )]))
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("flow option 'flow_type' is reserved for internal use")
+        );
+    }
+
+    #[test]
+    fn test_validate_and_normalize_flow_options_invalid_bool() {
+        let err = validate_and_normalize_flow_options(HashMap::from([(
+            DEFER_ON_MISSING_SOURCE_KEY.to_string(),
+            "not-a-bool".to_string(),
+        )]))
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("invalid flow option 'defer_on_missing_source': 'not-a-bool'")
+        );
     }
 
     #[test]
