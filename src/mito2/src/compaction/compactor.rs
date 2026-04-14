@@ -321,7 +321,7 @@ pub trait SstMerger: Send + Sync + 'static {
         compaction_region: CompactionRegion,
         output: CompactionOutput,
         write_opts: WriteOptions,
-    ) -> Result<Vec<FileMeta>>;
+    ) -> Result<(Vec<FileMeta>, HashMap<FileId, (Bytes, Bytes)>)>;
 }
 
 /// The production [`SstMerger`] that reads, merges, and writes SST files.
@@ -543,7 +543,7 @@ where
 
             for (inputs, handle) in spawned {
                 match handle.await {
-                    Ok(Ok(files)) => {
+                    Ok(Ok((files, ranges))) => {
                         output_files.extend(files);
                         primary_key_ranges.extend(ranges);
                         compacted_inputs.extend(inputs);
@@ -738,10 +738,10 @@ mod tests {
             _compaction_region: CompactionRegion,
             _output: CompactionOutput,
             _write_opts: WriteOptions,
-        ) -> Result<Vec<FileMeta>> {
+        ) -> Result<(Vec<FileMeta>, HashMap<FileId, (Bytes, Bytes)>)> {
             let idx = self.call_idx.fetch_add(1, Ordering::SeqCst);
             match self.results.lock().unwrap().get(idx) {
-                Some(Ok(files)) => Ok(files.clone()),
+                Some(Ok(files)) => Ok((files.clone(), HashMap::new())),
                 Some(Err(_)) => error::InvalidMetaSnafu {
                     reason: format!("simulated failure at index {idx}"),
                 }
