@@ -1169,10 +1169,13 @@ pub(crate) struct CopyRegionFromRequest {
 mod tests {
     use api::v1::value::ValueData;
     use api::v1::{Row, SemanticType};
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnDefaultConstraint;
     use mito_codec::test_util::i64_value;
     use store_api::metadata::RegionMetadataBuilder;
+    use tokio::sync::oneshot;
 
     use super::*;
     use crate::error::Error;
@@ -1234,6 +1237,21 @@ mod tests {
         assert_eq!(0, request.column_index_by_name("c0").unwrap());
         assert_eq!(1, request.column_index_by_name("c1").unwrap());
         assert_eq!(None, request.column_index_by_name("c2"));
+    }
+
+    #[test]
+    fn test_compaction_cancelled_sends_cancelled_error() {
+        let (tx, rx) = oneshot::channel();
+        let request = CompactionCancelled {
+            region_id: RegionId::new(1, 1),
+            senders: vec![OutputTx::new(tx)],
+        };
+
+        request.on_success();
+
+        let err = rx.blocking_recv().unwrap().unwrap_err();
+        assert!(matches!(err, Error::CompactionCancelled { .. }));
+        assert_eq!(err.status_code(), StatusCode::Cancelled);
     }
 
     #[test]
