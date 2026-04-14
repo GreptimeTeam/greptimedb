@@ -62,7 +62,6 @@ loki-proto.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 mito2.workspace = true
-moka.workspace = true
 object-store.workspace = true
 operator = { workspace = true, features = ["testing"] }
 prost.workspace = true
