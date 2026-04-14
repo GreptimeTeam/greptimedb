@@ -759,7 +759,7 @@ mod tests {
         names
             .iter()
             .enumerate()
-            .map(|(index, name)| Arc::new(Column::new(*name, index)) as Arc<dyn PhysicalExpr>)
+            .map(|(index, name)| Arc::new(Column::new(name, index)) as Arc<dyn PhysicalExpr>)
             .collect()
     }
 
