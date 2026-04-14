@@ -1150,31 +1150,7 @@ fn validate_database(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<(
 }
 
 fn is_readonly_plan(plan: &LogicalPlan) -> bool {
-    use datafusion_expr::LogicalPlan as P;
-    matches!(
-        plan,
-        P::Projection(_)
-            | P::Filter(_)
-            | P::Window(_)
-            | P::Aggregate(_)
-            | P::Sort(_)
-            | P::Join(_)
-            | P::Repartition(_)
-            | P::Union(_)
-            | P::TableScan(_)
-            | P::EmptyRelation(_)
-            | P::Subquery(_)
-            | P::SubqueryAlias(_)
-            | P::Limit(_)
-            | P::Values(_)
-            | P::Explain(_)
-            | P::Analyze(_)
-            | P::Extension(_)
-            | P::Distinct(_)
-            | P::DescribeTable(_)
-            | P::Unnest(_)
-            | P::RecursiveQuery(_)
-    )
+    !matches!(plan, LogicalPlan::Dml(_) | LogicalPlan::Ddl(_))
 }
 
 #[cfg(test)]
