@@ -137,6 +137,13 @@ impl ScanRequest {
             .as_ref()
             .map(|projection_input| projection_input.projection.as_slice())
     }
+
+    /// Returns the top-level projected column indices as an owned vector.
+    pub fn projection_indices_owned(&self) -> Option<Vec<usize>> {
+        self.projection_input
+            .as_ref()
+            .map(|projection_input| projection_input.projection.clone())
+    }
 }
 
 impl Display for ScanRequest {
