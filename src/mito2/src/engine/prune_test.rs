@@ -138,7 +138,10 @@ async fn test_prune_tag_and_field() {
 
 async fn test_prune_tag_and_field_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
-    // prune result: only row group 1
+    // Tag filter prunes to row group 1 (tags "5".."9"). The field filter is
+    // intentionally not applied inside the mito reader (see `PreFilterMode::SkipFields`
+    // for non-append merge modes — DataFusion re-applies it above the engine), so all
+    // rows in the surviving row group are returned.
     check_prune_row_groups(
         vec![
             col("tag_0").gt(lit(ScalarValue::Utf8(Some("4".to_string())))),
@@ -151,6 +154,8 @@ async fn test_prune_tag_and_field_with_format(flat_format: bool) {
 | 5     | 5.0     | 1970-01-01T00:00:05 |
 | 6     | 6.0     | 1970-01-01T00:00:06 |
 | 7     | 7.0     | 1970-01-01T00:00:07 |
+| 8     | 8.0     | 1970-01-01T00:00:08 |
+| 9     | 9.0     | 1970-01-01T00:00:09 |
 +-------+---------+---------------------+",
         flat_format,
     )
@@ -443,7 +448,10 @@ async fn test_scan_filter_field_after_delete_with_format(flat_format: bool) {
     )
     .await;
 
-    // Scans and filter fields, the field should be deleted.
+    // Scans and filters by a field value. The mito reader skips field filters under
+    // `PreFilterMode::SkipFields` (DataFusion re-applies them above the engine), so
+    // the returned batches still contain all non-deleted rows — the reader's job here
+    // is only to ensure the delete op is honored.
     let request = ScanRequest {
         filters: vec![col("field_0").eq(lit(3.0f64))],
         ..Default::default()
@@ -454,10 +462,12 @@ async fn test_scan_filter_field_after_delete_with_format(flat_format: bool) {
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
-+-------+---------+----+
-| tag_0 | field_0 | ts |
-+-------+---------+----+
-+-------+---------+----+";
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
++-------+---------+---------------------+";
     assert_eq!(
         expected,
         sort_batches_and_print(&batches, &["tag_0", "field_0", "ts"])
