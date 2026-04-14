@@ -24,7 +24,8 @@ mod twcs;
 mod window;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use api::v1::region::compact_request;
@@ -54,9 +55,9 @@ use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
-    CompactRegionSnafu, Error, GetSchemaMetadataSnafu, ManualCompactionOverrideSnafu,
-    RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, RemoteCompactionSnafu, Result,
-    TimeRangePredicateOverflowSnafu, TimeoutSnafu,
+    CompactRegionSnafu, CompactionCancelledSnafu, Error, GetSchemaMetadataSnafu,
+    ManualCompactionOverrideSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu,
+    RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::BoxedRecordBatchStream;
@@ -313,7 +314,9 @@ impl CompactionScheduler {
             return Vec::new();
         };
 
-        finish_compaction_waiters(std::mem::take(&mut status.waiters));
+        for waiter in std::mem::take(&mut status.waiters) {
+            waiter.send(Ok(0));
+        }
 
         // If there are pending DDL requests, run them.
         let pending_ddl_requests = std::mem::take(&mut status.pending_ddl_requests);
@@ -374,18 +377,7 @@ impl CompactionScheduler {
         &mut self,
         region_id: RegionId,
     ) -> Vec<SenderDdlRequest> {
-        let Some(status) = self.region_status.get_mut(&region_id) else {
-            return Vec::new();
-        };
-        status.clear_running_task();
-
-        finish_compaction_waiters(std::mem::take(&mut status.waiters));
-        // Cancellation stops the current region-level compaction pipeline: drop any pending
-        // follow-up compaction request and hand pending DDLs back to the worker to resume.
-        status.finish_pending_request_with_error(Arc::new(ManualCompactionOverrideSnafu.build()));
-        let pending_ddl_requests = std::mem::take(&mut status.pending_ddl_requests);
-        self.region_status.remove(&region_id);
-        pending_ddl_requests
+        self.remove_region_on_cancel(region_id)
     }
 
     /// Notifies the scheduler that the compaction job is failed.
@@ -596,11 +588,9 @@ impl CompactionScheduler {
         let estimated_bytes = estimate_compaction_bytes(&picker_output);
 
         let cancel_handle = Arc::new(CancellationHandle::default());
-        let local_compaction = Arc::new(Mutex::new(RunningLocalCompaction::new(
-            cancel_handle.clone(),
-        )));
+        let state = LocalCompactionState::new(cancel_handle.clone());
         let local_compaction_task = Box::new(CompactionTaskImpl {
-            local_compaction: local_compaction.clone(),
+            state: state.clone(),
             request_sender,
             waiters,
             start_time,
@@ -614,7 +604,7 @@ impl CompactionScheduler {
         });
 
         self.submit_compaction_task(local_compaction_task, region_id)
-            .map(|_| Some(ActiveCompaction::Local { local_compaction }))
+            .map(|_| Some(ActiveCompaction::Local { state }))
     }
 
     fn submit_compaction_task(
@@ -642,48 +632,60 @@ impl CompactionScheduler {
         // Notifies all pending tasks.
         status.on_failure(err);
     }
-}
 
-fn finish_compaction_waiters(waiters: Vec<OutputTx>) {
-    for waiter in waiters {
-        waiter.send(Ok(0));
+    fn remove_region_on_cancel(&mut self, region_id: RegionId) -> Vec<SenderDdlRequest> {
+        let Some(status) = self.region_status.remove(&region_id) else {
+            return Vec::new();
+        };
+
+        status.on_cancel()
     }
 }
 
-pub(crate) type RunningLocalCompactionRef = Arc<Mutex<RunningLocalCompaction>>;
-
-#[derive(Debug)]
-pub(crate) struct RunningLocalCompaction {
+#[derive(Debug, Clone)]
+pub(crate) struct LocalCompactionState {
     cancel_handle: Arc<CancellationHandle>,
-    commit_started: bool,
+    commit_started: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
 enum ActiveCompaction {
-    Local {
-        local_compaction: RunningLocalCompactionRef,
-    },
+    Local { state: LocalCompactionState },
     Remote,
 }
 
-impl RunningLocalCompaction {
+impl LocalCompactionState {
     fn new(cancel_handle: Arc<CancellationHandle>) -> Self {
         Self {
             cancel_handle,
-            commit_started: false,
+            commit_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub(crate) fn cancel_handle(
-        local_compaction: &RunningLocalCompactionRef,
-    ) -> Arc<CancellationHandle> {
-        let local_compaction = local_compaction.lock().unwrap();
-        local_compaction.cancel_handle.clone()
+    /// Returns the cancellation handle for this compaction task.
+    pub(crate) fn cancel_handle(&self) -> Arc<CancellationHandle> {
+        self.cancel_handle.clone()
     }
 
-    pub(crate) fn mark_commit_started(local_compaction: &RunningLocalCompactionRef) {
-        let mut local_compaction = local_compaction.lock().unwrap();
-        local_compaction.commit_started = true;
+    /// Marks the compaction task as started to commit,
+    /// which means the compaction task is in the final stage and is about to update region version and manifest.
+    /// It will reject cancellation request after this method is called.
+    pub(crate) fn mark_commit_started(&self) {
+        self.commit_started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Request cancellation for this compaction task.
+    pub(crate) fn request_cancel(&self) -> RequestCancelResult {
+        if self.commit_started.load(Ordering::Relaxed) {
+            return RequestCancelResult::TooLateToCancel;
+        }
+        if self.cancel_handle.is_cancelled() {
+            return RequestCancelResult::AlreadyCancelling;
+        }
+
+        self.cancel_handle.cancel();
+        RequestCancelResult::CancelIssued
     }
 }
 
@@ -822,14 +824,12 @@ impl CompactionStatus {
     }
 
     #[cfg(test)]
-    fn start_local_task(&mut self) -> RunningLocalCompactionRef {
-        let local_compaction = Arc::new(Mutex::new(RunningLocalCompaction::new(Arc::new(
-            CancellationHandle::default(),
-        ))));
+    fn start_local_task(&mut self) -> LocalCompactionState {
+        let state = LocalCompactionState::new(Arc::new(CancellationHandle::default()));
         self.active_compaction = Some(ActiveCompaction::Local {
-            local_compaction: local_compaction.clone(),
+            state: state.clone(),
         });
-        local_compaction
+        state
     }
 
     #[cfg(test)]
@@ -843,20 +843,7 @@ impl CompactionStatus {
         };
 
         match active_compaction {
-            ActiveCompaction::Local {
-                local_compaction, ..
-            } => {
-                let local_compaction = local_compaction.lock().unwrap();
-                if local_compaction.commit_started {
-                    return RequestCancelResult::TooLateToCancel;
-                }
-                if local_compaction.cancel_handle.is_cancelled() {
-                    return RequestCancelResult::AlreadyCancelling;
-                }
-
-                local_compaction.cancel_handle.cancel();
-                RequestCancelResult::CancelIssued
-            }
+            ActiveCompaction::Local { state, .. } => state.request_cancel(),
             ActiveCompaction::Remote => RequestCancelResult::TooLateToCancel,
         }
     }
@@ -883,16 +870,6 @@ impl CompactionStatus {
         }
     }
 
-    fn finish_pending_request_with_error(&mut self, err: Arc<Error>) {
-        if let Some(pending_compaction) = self.pending_request.take() {
-            pending_compaction
-                .waiter
-                .send(Err(err).context(CompactRegionSnafu {
-                    region_id: self.region_id,
-                }));
-        }
-    }
-
     fn on_failure(mut self, err: Arc<Error>) {
         for waiter in self.waiters.drain(..) {
             waiter.send(Err(err.clone()).context(CompactRegionSnafu {
@@ -915,6 +892,22 @@ impl CompactionStatus {
                     region_id: self.region_id,
                 }));
         }
+    }
+
+    fn on_cancel(mut self) -> Vec<SenderDdlRequest> {
+        for waiter in self.waiters.drain(..) {
+            waiter.send(CompactionCancelledSnafu.fail());
+        }
+
+        if let Some(pending_compaction) = self.pending_request {
+            pending_compaction.waiter.send(
+                Err(Arc::new(CompactionCancelledSnafu.build())).context(CompactRegionSnafu {
+                    region_id: self.region_id,
+                }),
+            );
+        }
+
+        std::mem::take(&mut self.pending_ddl_requests)
     }
 
     /// Creates a new compaction request for compaction picker.
@@ -1776,16 +1769,16 @@ mod tests {
         let version_control = Arc::new(builder.build());
         let mut status =
             CompactionStatus::new(region_id, version_control, env.access_layer.clone());
-        let local_compaction = status.start_local_task();
+        let state = status.start_local_task();
 
         assert_eq!(status.request_cancel(), RequestCancelResult::CancelIssued);
-        assert!(RunningLocalCompaction::cancel_handle(&local_compaction).is_cancelled());
+        assert!(LocalCompactionState::cancel_handle(&state).is_cancelled());
         assert_eq!(
             status.request_cancel(),
             RequestCancelResult::AlreadyCancelling
         );
 
-        RunningLocalCompaction::mark_commit_started(&local_compaction);
+        LocalCompactionState::mark_commit_started(&state);
         assert_eq!(
             status.request_cancel(),
             RequestCancelResult::TooLateToCancel

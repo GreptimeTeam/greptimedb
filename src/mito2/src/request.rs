@@ -46,9 +46,9 @@ use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
-    CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
-    FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, MissingPartitionExprSnafu,
-    Result, UnexpectedSnafu,
+    CompactRegionSnafu, CompactionCancelledSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu,
+    Error, FillDefaultSnafu, FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
+    MissingPartitionExprSnafu, Result, UnexpectedSnafu,
 };
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionEdit, TruncateKind};
@@ -1005,7 +1005,7 @@ pub(crate) struct CompactionCancelled {
 impl CompactionCancelled {
     pub(crate) fn on_success(self) {
         for sender in self.senders {
-            sender.send(Ok(0));
+            sender.send(CompactionCancelledSnafu {}.fail());
         }
         info!("Compaction cancelled for region: {}", self.region_id);
     }

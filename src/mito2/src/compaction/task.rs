@@ -23,10 +23,10 @@ use itertools::Itertools;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 
+use crate::compaction::LocalCompactionState;
 use crate::compaction::compactor::{CompactionRegion, Compactor, MergeOutput};
 use crate::compaction::memory_manager::{CompactionMemoryGuard, CompactionMemoryManager};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
-use crate::compaction::{RunningLocalCompaction, RunningLocalCompactionRef};
 use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
@@ -44,7 +44,7 @@ pub const MAX_PARALLEL_COMPACTION: usize = 1;
 
 pub(crate) struct CompactionTaskImpl {
     /// Shared local-compaction state for cooperative cancellation.
-    pub(crate) local_compaction: RunningLocalCompactionRef,
+    pub(crate) state: LocalCompactionState,
     pub compaction_region: CompactionRegion,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
@@ -251,7 +251,7 @@ impl CompactionTaskImpl {
         compaction_result: crate::compaction::compactor::MergeOutput,
     ) -> error::Result<RegionEdit> {
         // Stop accepting cancellation once we are about to publish the compaction edit.
-        RunningLocalCompaction::mark_commit_started(&self.local_compaction);
+        LocalCompactionState::mark_commit_started(&self.state);
 
         let _manifest_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])
@@ -314,8 +314,7 @@ impl CompactionTask for CompactionTaskImpl {
         self.mark_files_compacting(true);
         self.handle_expiration().await;
 
-        let cancel_handle =
-            crate::compaction::RunningLocalCompaction::cancel_handle(&self.local_compaction);
+        let cancel_handle = crate::compaction::LocalCompactionState::cancel_handle(&self.state);
         // Run compaction with cooperative cancellation.
         let notify = match CancellableFuture::new(
             async { self.handle_compaction().await },
