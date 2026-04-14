@@ -46,15 +46,16 @@ use snafu::{IntoError, ResultExt};
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::instance::Instance;
+use crate::instance::otlp::trace_semconv::trace_semconv_fixed_type;
 use crate::instance::otlp::trace_types::{
     PendingTraceColumnRewrite, choose_trace_reconcile_decision, enrich_trace_reconcile_error,
-    is_trace_reconcile_candidate_type, push_observed_trace_type, trace_semconv_fixed_type,
-    validate_trace_column_rewrites,
+    is_trace_reconcile_candidate_type, push_observed_trace_type, validate_trace_column_rewrites,
 };
 use crate::metrics::{
     OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_TRACES_FAILURE_COUNT, OTLP_TRACES_ROWS,
 };
 
+pub mod trace_semconv;
 pub mod trace_types;
 
 const TRACE_INGEST_CHUNK_SIZE: usize = 64;

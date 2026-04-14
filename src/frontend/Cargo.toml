@@ -58,7 +58,7 @@ log-query.workspace = true
 meta-client.workspace = true
 num_cpus.workspace = true
 opentelemetry-proto.workspace = true
-opentelemetry-semantic-conventions = { version = "0.30.0", features = ["semconv_experimental"] }
+opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
 operator.workspace = true
 otel-arrow-rust.workspace = true
 partition.workspace = true

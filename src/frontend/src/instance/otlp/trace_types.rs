@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use api::v1::{ColumnDataType, Row};
-use opentelemetry_semantic_conventions::{attribute, resource};
 use servers::error::{self, Result as ServerResult};
 use servers::otlp::trace::coerce::{
     coerce_value_data, is_supported_trace_coercion, resolve_new_trace_column_type,
     trace_value_datatype,
 };
+
+use crate::instance::otlp::trace_semconv::trace_semconv_fixed_type;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TraceReconcileDecision {
@@ -45,40 +46,6 @@ pub(super) struct PendingTraceColumnRewrite {
     pub(super) col_idx: usize,
     pub(super) target_type: ColumnDataType,
     pub(super) column_name: String,
-}
-
-/// Returns the canonical scalar type for flattened trace semconv columns whose
-/// types are stable in the current OpenTelemetry semantic conventions.
-/// See https://opentelemetry.io/docs/specs/semconv/general/trace/ for reference.
-pub(super) fn trace_semconv_fixed_type(column_name: &str) -> Option<ColumnDataType> {
-    if let Some(resource_attribute) = column_name.strip_prefix("resource_attributes.") {
-        return match resource_attribute {
-            resource::SERVICE_NAME | resource::SERVICE_INSTANCE_ID => Some(ColumnDataType::String),
-            _ => None,
-        };
-    }
-
-    if let Some(span_attribute) = column_name.strip_prefix("span_attributes.") {
-        return match span_attribute {
-            attribute::HTTP_REQUEST_METHOD
-            | attribute::SERVER_ADDRESS
-            | attribute::RPC_SYSTEM
-            | attribute::RPC_SERVICE
-            | attribute::RPC_METHOD
-            | attribute::DB_SYSTEM_NAME
-            | attribute::DB_NAMESPACE
-            | attribute::MESSAGING_SYSTEM
-            | attribute::ERROR_TYPE => Some(ColumnDataType::String),
-            attribute::HTTP_RESPONSE_STATUS_CODE
-            | attribute::SERVER_PORT
-            | attribute::NETWORK_PEER_PORT => Some(ColumnDataType::Int64),
-            attribute::MESSAGING_DESTINATION_ANONYMOUS
-            | attribute::MESSAGING_DESTINATION_TEMPORARY => Some(ColumnDataType::Boolean),
-            _ => None,
-        };
-    }
-
-    None
 }
 
 /// Picks the reconciliation action for one trace column.
@@ -268,36 +235,8 @@ mod tests {
     use super::{
         PendingTraceColumnRewrite, TraceReconcileDecision, choose_trace_reconcile_decision,
         enrich_trace_reconcile_error, is_trace_reconcile_candidate_type, push_observed_trace_type,
-        trace_semconv_fixed_type, validate_trace_column_rewrites,
+        validate_trace_column_rewrites,
     };
-
-    #[test]
-    fn test_trace_semconv_fixed_type_known_key() {
-        assert_eq!(
-            trace_semconv_fixed_type("span_attributes.http.response.status_code"),
-            Some(ColumnDataType::Int64)
-        );
-    }
-
-    #[test]
-    fn test_trace_semconv_fixed_type_uses_semconv_renamed_key() {
-        assert_eq!(
-            trace_semconv_fixed_type("span_attributes.rpc.system"),
-            Some(ColumnDataType::String)
-        );
-        assert_eq!(
-            trace_semconv_fixed_type("span_attributes.rpc.system.name"),
-            None
-        );
-    }
-
-    #[test]
-    fn test_trace_semconv_fixed_type_unknown_key() {
-        assert_eq!(
-            trace_semconv_fixed_type("span_attributes.custom.attr"),
-            None
-        );
-    }
 
     #[test]
     fn test_choose_trace_reconcile_decision_existing_int64_keeps_int64() {
@@ -382,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn test_choose_trace_reconcile_decision_whitelisted_new_boolean_column_uses_fixed_type() {
+    fn test_choose_trace_reconcile_decision_new_boolean_column_uses_dynamic_resolution() {
         assert_eq!(
             choose_trace_reconcile_decision(
                 "span_attributes.messaging.destination.temporary",

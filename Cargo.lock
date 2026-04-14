@@ -2755,7 +2755,7 @@ dependencies = [
  "once_cell",
  "opentelemetry 0.30.0",
  "opentelemetry-otlp",
- "opentelemetry-semantic-conventions",
+ "opentelemetry-semantic-conventions 0.30.0",
  "opentelemetry_sdk 0.30.0",
  "parking_lot 0.12.4",
  "prometheus 0.14.0",
@@ -5256,7 +5256,7 @@ dependencies = [
  "meta-srv",
  "num_cpus",
  "opentelemetry-proto 0.31.0",
- "opentelemetry-semantic-conventions",
+ "opentelemetry-semantic-conventions 0.31.0",
  "operator",
  "otel-arrow-rust",
  "partition",
@@ -7291,7 +7291,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -8997,6 +8997,12 @@ name = "opentelemetry-semantic-conventions"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83d059a296a47436748557a353c5e6c5705b9470ef6c95cfc52c21a8814ddac2"
+
+[[package]]
+name = "opentelemetry-semantic-conventions"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e62e29dfe041afb8ed2a6c9737ab57db4907285d999ef8ad3a59092a36bdc846"
 
 [[package]]
 name = "opentelemetry_sdk"
