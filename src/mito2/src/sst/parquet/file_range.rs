@@ -753,7 +753,7 @@ mod tests {
             &metadata,
             None,
             &read_format,
-            &((col("field_0") + lit(1_u64)).gt(lit(2_u64))),
+            &col("field_0").in_list(vec![lit(1_u64), lit(2_u64)], false),
         );
         assert!(physical_filter.is_some());
         let base = new_test_range_base(vec![]);

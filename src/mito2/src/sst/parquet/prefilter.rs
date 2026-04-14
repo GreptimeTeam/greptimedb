@@ -902,7 +902,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let expr = (col("field_0") + lit(1_u64)).gt(lit(11_u64));
+        let expr = col("field_0").in_list(vec![lit(11_u64)], false);
         let physical_filters = new_physical_filter_contexts(&metadata, &read_format, &[expr]);
         let pk = new_primary_key(&["a", "x"]);
         let batch = new_raw_batch(&[pk.as_slice(), pk.as_slice(), pk.as_slice()], &[9, 10, 11]);

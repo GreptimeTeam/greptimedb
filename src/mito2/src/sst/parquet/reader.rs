@@ -1982,6 +1982,9 @@ impl PhysicalFilterContext {
         read_format: &FlatReadFormat,
         expr: &Expr,
     ) -> Option<Self> {
+        if !Self::is_prefilter_candidate(expr) {
+            return None;
+        }
         let column_name = Self::single_column_name(expr)?;
         let column_metadata = match expected_meta {
             Some(meta) => {
@@ -2030,6 +2033,18 @@ impl PhysicalFilterContext {
             semantic_type: column_metadata.semantic_type,
             schema,
         })
+    }
+
+    /// Returns true if the expression is a variant we want to evaluate as a
+    /// physical prefilter. Binary exprs are intentionally excluded because
+    /// [`SimpleFilterEvaluator`] already handles them.
+    // TODO: extend to a small allowlist of cheap scalar functions
+    // (e.g. `lower`, `length`, date truncations) when we have a use case.
+    fn is_prefilter_candidate(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::InList(_) | Expr::IsNull(_) | Expr::IsNotNull(_) | Expr::Between(_)
+        )
     }
 
     fn single_column_name(expr: &Expr) -> Option<String> {
@@ -2437,9 +2452,46 @@ mod tests {
             &metadata,
             Some(expected_metadata.as_ref()),
             &read_format,
-            &col("tag_0").eq(lit("a")),
+            &col("tag_0").in_list(vec![lit("a"), lit("b")], false),
         );
 
         assert!(ctx.is_none());
+    }
+
+    #[test]
+    fn test_physical_filter_context_only_accepts_prefilter_candidates() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        // InList is on the allowlist — should build a context.
+        let in_list = col("tag_0").in_list(vec![lit("a"), lit("b")], false);
+        assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &in_list).is_some());
+
+        // NOT IN uses the same variant with `negated: true` — also accepted.
+        let not_in = col("tag_0").in_list(vec![lit("a"), lit("b")], true);
+        assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &not_in).is_some());
+
+        // IS NULL / IS NOT NULL are accepted.
+        let is_null = col("tag_0").is_null();
+        assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &is_null).is_some());
+        let is_not_null = col("tag_0").is_not_null();
+        assert!(
+            PhysicalFilterContext::new_opt(&metadata, None, &read_format, &is_not_null).is_some()
+        );
+
+        // BETWEEN is accepted.
+        let between = col("field_0").between(lit(1_u64), lit(10_u64));
+        assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &between).is_some());
+
+        // Binary expr is handled by SimpleFilterEvaluator — rejected here.
+        let binary = col("tag_0").eq(lit("a"));
+        assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &binary).is_none());
     }
 }
