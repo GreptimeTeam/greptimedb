@@ -49,6 +49,7 @@ pub(super) struct PendingTraceColumnRewrite {
 
 /// Returns the canonical scalar type for flattened trace semconv columns whose
 /// types are stable in the current OpenTelemetry semantic conventions.
+/// See https://opentelemetry.io/docs/specs/semconv/general/trace/ for reference.
 pub(super) fn trace_semconv_fixed_type(column_name: &str) -> Option<ColumnDataType> {
     if let Some(resource_attribute) = column_name.strip_prefix("resource_attributes.") {
         return match resource_attribute {
