@@ -303,9 +303,6 @@ mod tests {
 
     #[test]
     fn test_trace_semconv_fixed_type_unknown_key() {
-        assert_eq!(
-            trace_semconv_fixed_type(&span_column("custom.attr")),
-            None
-        );
+        assert_eq!(trace_semconv_fixed_type(&span_column("custom.attr")), None);
     }
 }
