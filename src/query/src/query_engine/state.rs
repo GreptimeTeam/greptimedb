@@ -50,12 +50,14 @@ use datafusion_optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManagerRef;
 use promql::extension_plan::PromExtensionPlanner;
+use session::context::QueryContextRef;
 use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::QueryEngineContext;
 use crate::dist_plan::{
-    DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, MergeSortExtensionPlanner,
+    DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, DynFilterRegistryManager,
+    MergeSortExtensionPlanner, QueryDynFilterRegistry,
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -81,6 +83,7 @@ use crate::region_query::RegionQueryHandlerRef;
 pub struct QueryEngineState {
     df_context: SessionContext,
     catalog_manager: CatalogManagerRef,
+    dyn_filter_registry_manager: Arc<DynFilterRegistryManager>,
     function_state: Arc<FunctionState>,
     scalar_functions: Arc<RwLock<HashMap<String, ScalarFunctionFactory>>>,
     aggr_functions: Arc<RwLock<HashMap<String, AggregateUDF>>>,
@@ -231,6 +234,7 @@ impl QueryEngineState {
         Self {
             df_context,
             catalog_manager: catalog_list,
+            dyn_filter_registry_manager: Arc::new(DynFilterRegistryManager::default()),
             function_state: Arc::new(FunctionState {
                 table_mutation_handler,
                 procedure_service_handler,
@@ -385,6 +389,37 @@ impl QueryEngineState {
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+
+    pub fn dyn_filter_registry_manager(&self) -> Arc<DynFilterRegistryManager> {
+        self.dyn_filter_registry_manager.clone()
+    }
+
+    pub fn get_or_init_remote_dyn_filter_registry(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> Option<Arc<QueryDynFilterRegistry>> {
+        let query_id = query_ctx.remote_query_id_value()?;
+        Some(self.dyn_filter_registry_manager.get_or_init(query_id))
+    }
+
+    pub fn begin_closing_remote_dyn_filter_registry(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> Option<Arc<QueryDynFilterRegistry>> {
+        // TODO(remote-dyn-filter): Wire query finish/cancel hooks through this helper once the
+        // distributed query lifecycle exposes a single cleanup callback for the query runtime.
+        let query_id = query_ctx.remote_query_id_value()?;
+        self.dyn_filter_registry_manager.begin_closing(&query_id)
+    }
+
+    pub fn reap_closed_remote_dyn_filter_registry(&self, query_ctx: &QueryContextRef) -> bool {
+        // TODO(remote-dyn-filter): Call this after the Closing cleanup tail marks the registry
+        // closed. Subtask 04 only exposes the runtime ownership path; later subtasks should decide
+        // the exact lifecycle hook that invokes this.
+        query_ctx
+            .remote_query_id_value()
+            .is_some_and(|query_id| self.dyn_filter_registry_manager.reap_closed(&query_id))
     }
 
     pub fn function_state(&self) -> Arc<FunctionState> {
@@ -566,5 +601,112 @@ impl MemoryPool for MetricsMemoryPool {
 
     fn memory_limit(&self) -> MemoryLimit {
         self.inner.memory_limit()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_base::Plugins;
+    use session::context::QueryContext;
+
+    use super::*;
+    use crate::options::QueryOptions;
+
+    fn new_query_engine_state() -> QueryEngineState {
+        QueryEngineState::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Plugins::default(),
+            QueryOptions::default(),
+        )
+    }
+
+    #[test]
+    fn query_engine_state_reuses_query_scoped_dyn_filter_registry() {
+        let state = new_query_engine_state();
+        let query_ctx = QueryContext::arc();
+
+        let first = state
+            .get_or_init_remote_dyn_filter_registry(&query_ctx)
+            .unwrap();
+        let second = state
+            .get_or_init_remote_dyn_filter_registry(&query_ctx)
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(state.dyn_filter_registry_manager().registry_count(), 1);
+        assert_eq!(first.query_id(), query_ctx.remote_query_id_value().unwrap());
+    }
+
+    #[test]
+    fn query_engine_state_exposes_closing_and_reap_helpers() {
+        let state = new_query_engine_state();
+        let query_ctx = QueryContext::arc();
+        let registry = state
+            .get_or_init_remote_dyn_filter_registry(&query_ctx)
+            .unwrap();
+
+        let closing = state
+            .begin_closing_remote_dyn_filter_registry(&query_ctx)
+            .unwrap();
+        assert!(Arc::ptr_eq(&registry, &closing));
+        assert_eq!(closing.state(), crate::dist_plan::RegistryState::Closing);
+
+        closing.mark_closed();
+        assert!(state.reap_closed_remote_dyn_filter_registry(&query_ctx));
+        assert!(
+            state
+                .dyn_filter_registry_manager()
+                .get(&query_ctx.remote_query_id_value().unwrap())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn query_engine_state_relies_on_query_context_remote_query_id_contract() {
+        let state = new_query_engine_state();
+        let query_ctx = QueryContext::arc();
+
+        assert!(query_ctx.remote_query_id_value().is_some());
+
+        let registry = state
+            .get_or_init_remote_dyn_filter_registry(&query_ctx)
+            .unwrap();
+
+        assert_eq!(
+            registry.query_id(),
+            query_ctx.remote_query_id_value().unwrap()
+        );
+        assert_eq!(state.dyn_filter_registry_manager().registry_count(), 1);
+    }
+
+    #[test]
+    fn query_engine_state_separates_registries_for_different_query_contexts() {
+        let state = new_query_engine_state();
+        let first_query_ctx = QueryContext::arc();
+        let second_query_ctx = QueryContext::arc();
+
+        let first = state
+            .get_or_init_remote_dyn_filter_registry(&first_query_ctx)
+            .unwrap();
+        let second = state
+            .get_or_init_remote_dyn_filter_registry(&second_query_ctx)
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(state.dyn_filter_registry_manager().registry_count(), 2);
+        assert_eq!(
+            first.query_id(),
+            first_query_ctx.remote_query_id_value().unwrap()
+        );
+        assert_eq!(
+            second.query_id(),
+            second_query_ctx.remote_query_id_value().unwrap()
+        );
     }
 }

@@ -31,9 +31,9 @@ use common_time::timezone::parse_timezone;
 use datafusion_common::config::ConfigOptions;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
-use uuid::Uuid;
 
 use crate::protocol_ctx::ProtocolCtx;
+use crate::query_id::QueryId;
 use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
 use crate::{MutableInner, ReadPreference};
 
@@ -44,7 +44,11 @@ const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 pub const REMOTE_QUERY_ID_EXTENSION_KEY: &str = "remote_query_id";
 
 pub fn generate_remote_query_id() -> String {
-    Uuid::now_v7().to_string()
+    generate_remote_query_id_value().to_string()
+}
+
+pub fn generate_remote_query_id_value() -> QueryId {
+    QueryId::new()
 }
 
 #[derive(Debug, Builder, Clone)]
@@ -352,6 +356,11 @@ impl QueryContext {
 
     pub fn remote_query_id(&self) -> Option<&str> {
         self.extension(REMOTE_QUERY_ID_EXTENSION_KEY)
+    }
+
+    pub fn remote_query_id_value(&self) -> Option<QueryId> {
+        self.remote_query_id()
+            .and_then(|query_id| query_id.parse().ok())
     }
 
     pub fn extensions(&self) -> HashMap<String, String> {
@@ -798,9 +807,14 @@ mod test {
             .build();
 
         assert_eq!(ctx.remote_query_id(), Some(query_id));
+        assert_eq!(ctx.remote_query_id_value().unwrap().to_string(), query_id);
 
         let proto: api::v1::QueryContext = (&ctx).into();
         let restored = QueryContext::from(proto);
         assert_eq!(restored.remote_query_id(), Some(query_id));
+        assert_eq!(
+            restored.remote_query_id_value().unwrap().to_string(),
+            query_id
+        );
     }
 }
