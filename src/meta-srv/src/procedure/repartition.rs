@@ -42,7 +42,7 @@ use common_meta::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::region_registry::LeaderRegionRegistryRef;
-use common_meta::rpc::router::{RegionRoute, operating_leader_regions};
+use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
@@ -409,9 +409,9 @@ impl Context {
         region_routes: &[RegionRoute],
     ) -> Result<Vec<OperatingRegionGuard>> {
         let mut operating_guards = Vec::with_capacity(region_routes.len());
-        for (region_id, datanode_id) in operating_leader_regions(region_routes) {
+        for (region_id, datanode_id, role) in operating_leader_region_roles(region_routes) {
             let guard = memory_region_keeper
-                .register(datanode_id, region_id)
+                .register_with_role(datanode_id, region_id, role)
                 .context(error::RegionOperatingRaceSnafu {
                     peer_id: datanode_id,
                     region_id,

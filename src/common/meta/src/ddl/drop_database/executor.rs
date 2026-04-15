@@ -29,7 +29,7 @@ use crate::ddl::utils::get_region_wal_options;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::region_keeper::OperatingRegionGuard;
-use crate::rpc::router::{RegionRoute, operating_leader_regions};
+use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DropDatabaseExecutor {
@@ -69,12 +69,12 @@ impl DropDatabaseExecutor {
         if !self.dropping_regions.is_empty() {
             return Ok(());
         }
-        let dropping_regions = operating_leader_regions(&self.physical_region_routes);
+        let dropping_regions = operating_leader_region_roles(&self.physical_region_routes);
         let mut dropping_region_guards = Vec::with_capacity(dropping_regions.len());
-        for (region_id, datanode_id) in dropping_regions {
+        for (region_id, datanode_id, role) in dropping_regions {
             let guard = ddl_ctx
                 .memory_region_keeper
-                .register(datanode_id, region_id)
+                .register_with_role(datanode_id, region_id, role)
                 .context(error::RegionOperatingRaceSnafu {
                     region_id,
                     peer_id: datanode_id,
