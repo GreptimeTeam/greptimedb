@@ -27,7 +27,7 @@ use table::predicate::Predicate;
 use crate::error::Result;
 use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
 use crate::sst::parquet::flat_format::FlatReadFormat;
-use crate::sst::parquet::prefilter::CachedPrimaryKeyFilter;
+use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, is_usable_primary_key_filter};
 use crate::sst::parquet::reader::SimpleFilterContext;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 
@@ -168,7 +168,10 @@ impl BulkIterContext {
 
         let pk_filters: Vec<_> = filters
             .iter()
-            .filter_map(|f| f.primary_key_prefilter())
+            .filter_map(|filter_ctx| {
+                let filter = filter_ctx.filter().as_filter()?;
+                is_usable_primary_key_filter(metadata, None, filter).then(|| filter.clone())
+            })
             .collect();
         if pk_filters.is_empty() {
             return None;

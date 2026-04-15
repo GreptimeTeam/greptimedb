@@ -34,12 +34,13 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use futures::StreamExt;
-use mito_codec::row_converter::build_primary_key_codec;
+use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use object_store::ObjectStore;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, RowSelection};
 use parquet::arrow::async_reader::{ParquetRecordBatchStream, ParquetRecordBatchStreamBuilder};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
+use parquet::schema::types::SchemaDescriptor;
 use partition::expr::PartitionExpr;
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
@@ -95,6 +96,11 @@ const INDEX_TYPE_FULLTEXT: &str = "fulltext";
 const INDEX_TYPE_INVERTED: &str = "inverted";
 const INDEX_TYPE_BLOOM: &str = "bloom filter";
 const INDEX_TYPE_VECTOR: &str = "vector";
+
+struct ReaderFilterPlan {
+    remaining_simple_filters: Vec<SimpleFilterContext>,
+    prefilter_builder: Option<PrefilterContextBuilder>,
+}
 
 macro_rules! handle_index_error {
     ($err:expr, $file_handle:expr, $index_type:expr) => {
@@ -452,43 +458,6 @@ impl ParquetReaderBuilder {
             ArrowReaderMetadata::try_new(parquet_meta.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;
 
-        let (filters, physical_filters) = if let Some(predicate) = &self.predicate {
-            let mut simple_filters = Vec::new();
-            let mut physical_filters = Vec::new();
-            let field_prefilter_enabled = self.pre_filter_mode == PreFilterMode::All;
-            for expr in predicate.exprs() {
-                if let Some(mut filter) = SimpleFilterContext::new_opt(
-                    &region_meta,
-                    self.expected_metadata.as_deref(),
-                    expr,
-                ) {
-                    let prefilter_uses_column = filter.filter().as_filter().is_some_and(|filter| {
-                        read_format
-                            .arrow_schema()
-                            .column_with_name(filter.column_name())
-                            .is_some()
-                    });
-                    let usable_prefilter = (field_prefilter_enabled
-                        || filter.semantic_type() != SemanticType::Field)
-                        && (prefilter_uses_column || filter.usable_primary_key_filter());
-                    filter.set_usable_prefilter(usable_prefilter);
-                    simple_filters.push(filter);
-                    continue;
-                }
-                if let Some(filter) = PhysicalFilterContext::new_opt(
-                    &region_meta,
-                    self.expected_metadata.as_deref(),
-                    &read_format,
-                    expr,
-                ) {
-                    physical_filters.push(filter);
-                }
-            }
-            (simple_filters, physical_filters)
-        } else {
-            (vec![], vec![])
-        };
-
         let dyn_filters = if let Some(predicate) = &self.predicate {
             predicate.dyn_filters().as_ref().clone()
         } else {
@@ -497,23 +466,11 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
-        // Extract primary key filters from precomputed filter contexts for prefiltering.
-        let primary_key_filters = {
-            let pk_filters = filters
-                .iter()
-                .filter_map(SimpleFilterContext::primary_key_prefilter)
-                .collect::<Vec<_>>();
-            (!pk_filters.is_empty()).then_some(Arc::new(pk_filters))
-        };
-
-        let prefilter_builder = PrefilterContextBuilder::new(
+        let filter_plan = self.build_filter_plan(
+            &region_meta,
             &read_format,
-            &codec,
-            primary_key_filters.as_ref(),
-            &filters,
-            &physical_filters,
             parquet_meta.file_metadata().schema_descr(),
-            self.pre_filter_mode == PreFilterMode::All,
+            &codec,
         );
 
         let output_schema = read_format.output_arrow_schema()?;
@@ -527,7 +484,7 @@ impl ParquetReaderBuilder {
             object_store: self.object_store.clone(),
             projection: projection_plan,
             cache_strategy: self.cache_strategy.clone(),
-            prefilter_builder,
+            prefilter_builder: filter_plan.prefilter_builder,
         };
 
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
@@ -535,7 +492,7 @@ impl ParquetReaderBuilder {
         let context = FileRangeContext::new(
             reader_builder,
             RangeBase {
-                filters,
+                filters: filter_plan.remaining_simple_filters,
                 dyn_filters,
                 read_format,
                 expected_metadata: self.expected_metadata.clone(),
@@ -551,6 +508,112 @@ impl ParquetReaderBuilder {
         metrics.build_cost += start.elapsed();
 
         Ok(Some((context, selection)))
+    }
+
+    fn build_filter_plan(
+        &self,
+        region_meta: &RegionMetadataRef,
+        read_format: &ReadFormat,
+        parquet_schema: &SchemaDescriptor,
+        codec: &Arc<dyn PrimaryKeyCodec>,
+    ) -> ReaderFilterPlan {
+        let Some(predicate) = &self.predicate else {
+            return ReaderFilterPlan {
+                remaining_simple_filters: Vec::new(),
+                prefilter_builder: None,
+            };
+        };
+
+        let mut simple_filters = Vec::new();
+        let mut prefilter_simple_filters = Vec::new();
+        let mut remaining_simple_filters = Vec::new();
+        let mut prefilter_physical_filters = Vec::new();
+        let mut primary_key_filters = Vec::new();
+
+        let field_prefilter_enabled = self.pre_filter_mode == PreFilterMode::All;
+        let supports_pk_prefilter = read_format
+            .as_flat()
+            .is_some_and(|flat_format| !flat_format.batch_has_raw_pk_columns());
+
+        for expr in predicate.exprs() {
+            if let Some(filter) =
+                SimpleFilterContext::new_opt(region_meta, self.expected_metadata.as_deref(), expr)
+            {
+                simple_filters.push(filter);
+                continue;
+            }
+
+            if let Some(filter) = PhysicalFilterContext::new_opt(
+                region_meta,
+                self.expected_metadata.as_deref(),
+                read_format,
+                expr,
+            ) {
+                let usable_prefilter = (field_prefilter_enabled
+                    || filter.semantic_type() != SemanticType::Field)
+                    && read_format
+                        .arrow_schema()
+                        .column_with_name(filter.column_name())
+                        .is_some();
+                if usable_prefilter {
+                    prefilter_physical_filters.push(filter);
+                }
+            }
+        }
+
+        for filter_ctx in simple_filters.iter().cloned() {
+            let Some(filter) = filter_ctx.filter().as_filter() else {
+                remaining_simple_filters.push(filter_ctx);
+                continue;
+            };
+
+            let direct_prefilter = (field_prefilter_enabled
+                || filter_ctx.semantic_type() != SemanticType::Field)
+                && read_format
+                    .arrow_schema()
+                    .column_with_name(filter.column_name())
+                    .is_some();
+            if direct_prefilter {
+                prefilter_simple_filters.push(filter_ctx);
+                continue;
+            }
+
+            let pk_prefilter = supports_pk_prefilter
+                && is_usable_primary_key_filter(
+                    region_meta,
+                    self.expected_metadata.as_deref(),
+                    filter,
+                );
+            if pk_prefilter {
+                primary_key_filters.push(filter.clone());
+                prefilter_simple_filters.push(filter_ctx);
+            } else {
+                remaining_simple_filters.push(filter_ctx);
+            }
+        }
+
+        let primary_key_filters =
+            (!primary_key_filters.is_empty()).then_some(Arc::new(primary_key_filters));
+        let prefilter_builder = PrefilterContextBuilder::new(
+            read_format,
+            codec,
+            primary_key_filters,
+            prefilter_simple_filters,
+            prefilter_physical_filters,
+            parquet_schema,
+        );
+
+        if prefilter_builder.is_some() {
+            ReaderFilterPlan {
+                remaining_simple_filters,
+                prefilter_builder,
+            }
+        } else {
+            ReaderFilterPlan {
+                remaining_simple_filters: simple_filters,
+                prefilter_builder: None,
+            }
+        }
     }
 
     fn is_same_region_partition(
@@ -1844,10 +1907,6 @@ pub(crate) struct SimpleFilterContext {
     semantic_type: SemanticType,
     /// The data type of the column.
     data_type: ConcreteDataType,
-    /// Whether this filter can be applied by parquet prefiltering in the current read path.
-    usable_prefilter: bool,
-    /// Whether this filter can be applied by flat parquet primary-key prefiltering.
-    usable_primary_key_filter: bool,
 }
 
 impl SimpleFilterContext {
@@ -1861,10 +1920,6 @@ impl SimpleFilterContext {
         expr: &Expr,
     ) -> Option<Self> {
         let filter = SimpleFilterEvaluator::try_new(expr)?;
-        // Parquet PK prefilter always supports the partition column. Only
-        // PartitionTreeMemtable skips it after partition pruning.
-        let usable_primary_key_filter =
-            is_usable_primary_key_filter(sst_meta, expected_meta, &filter);
         let (column_metadata, maybe_filter) = match expected_meta {
             Some(meta) => {
                 // Gets the column metadata from the expected metadata.
@@ -1895,16 +1950,11 @@ impl SimpleFilterContext {
             }
         };
 
-        let usable_primary_key_filter =
-            matches!(maybe_filter, MaybeFilter::Filter(_)) && usable_primary_key_filter;
-
         Some(Self {
             filter: maybe_filter,
             column_id: column_metadata.column_id,
             semantic_type: column_metadata.semantic_type,
             data_type: column_metadata.column_schema.data_type.clone(),
-            usable_prefilter: false,
-            usable_primary_key_filter,
         })
     }
 
@@ -1926,33 +1976,6 @@ impl SimpleFilterContext {
     /// Returns the data type of the column.
     pub(crate) fn data_type(&self) -> &ConcreteDataType {
         &self.data_type
-    }
-
-    /// Returns whether this filter can be applied by parquet prefiltering.
-    pub(crate) fn usable_prefilter(&self) -> bool {
-        self.usable_prefilter
-    }
-
-    /// Updates whether this filter can be applied by parquet prefiltering.
-    pub(crate) fn set_usable_prefilter(&mut self, usable_prefilter: bool) {
-        self.usable_prefilter = usable_prefilter;
-    }
-
-    /// Returns whether this filter is eligible for flat parquet PK prefiltering.
-    pub(crate) fn usable_primary_key_filter(&self) -> bool {
-        self.usable_primary_key_filter
-    }
-
-    /// Returns the filter evaluator when it is eligible for PK prefiltering.
-    pub(crate) fn primary_key_prefilter(&self) -> Option<SimpleFilterEvaluator> {
-        if !self.usable_primary_key_filter {
-            return None;
-        }
-
-        match &self.filter {
-            MaybeFilter::Filter(filter) => Some(filter.clone()),
-            MaybeFilter::Matched | MaybeFilter::Pruned => None,
-        }
     }
 }
 
@@ -2405,34 +2428,99 @@ mod tests {
         Arc::new(builder.build().unwrap())
     }
 
-    #[test]
-    fn test_simple_filter_context_marks_usable_primary_key_filter() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let ctx =
-            SimpleFilterContext::new_opt(&metadata, None, &col("tag_0").eq(lit("a"))).unwrap();
+    fn new_test_parquet_reader_builder(
+        predicate: Predicate,
+        pre_filter_mode: PreFilterMode,
+    ) -> ParquetReaderBuilder {
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let file_handle = sst_file_handle(0, 1);
 
-        assert!(ctx.usable_primary_key_filter());
-        assert!(ctx.primary_key_prefilter().is_some());
+        ParquetReaderBuilder::new(
+            "test_table".to_string(),
+            PathType::Bare,
+            file_handle,
+            object_store,
+        )
+        .predicate(Some(predicate))
+        .pre_filter_mode(pre_filter_mode)
     }
 
     #[test]
-    fn test_simple_filter_context_skips_non_usable_primary_key_filter() {
+    fn test_build_filter_plan_keeps_field_filters_for_prune_reader_in_skip_fields_mode() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let parquet_schema = parquet::arrow::ArrowSchemaConverter::new()
+            .convert(read_format.arrow_schema())
+            .unwrap();
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let builder = new_test_parquet_reader_builder(
+            Predicate::new(vec![
+                col("tag_0").eq(lit("a")),
+                col("field_0").gt(lit(1_u64)),
+            ]),
+            PreFilterMode::SkipFields,
+        );
 
-        let field_ctx =
-            SimpleFilterContext::new_opt(&metadata, None, &col("field_0").eq(lit(1_u64))).unwrap();
-        assert!(!field_ctx.usable_primary_key_filter());
-        assert!(field_ctx.primary_key_prefilter().is_none());
+        let plan = builder.build_filter_plan(&metadata, &read_format, &parquet_schema, &codec);
 
+        assert!(plan.prefilter_builder.is_some());
+        assert_eq!(plan.remaining_simple_filters.len(), 1);
+        let remaining_filter = plan.remaining_simple_filters[0]
+            .filter()
+            .as_filter()
+            .unwrap();
+        assert_eq!(remaining_filter.column_name(), "field_0");
+    }
+
+    #[test]
+    fn test_build_filter_plan_uses_pk_prefilter_for_unprojected_tag_filters() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let field_0 = metadata.column_by_name("field_0").unwrap().column_id;
+        let ts = metadata.time_index_column().column_id;
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            [field_0, ts].into_iter(),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let parquet_schema = parquet::arrow::ArrowSchemaConverter::new()
+            .convert(read_format.arrow_schema())
+            .unwrap();
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let builder = new_test_parquet_reader_builder(
+            Predicate::new(vec![col("tag_0").eq(lit("a"))]),
+            PreFilterMode::All,
+        );
+
+        let plan = builder.build_filter_plan(&metadata, &read_format, &parquet_schema, &codec);
+
+        assert!(plan.prefilter_builder.is_some());
+        assert!(plan.remaining_simple_filters.is_empty());
+    }
+
+    #[test]
+    fn test_simple_filter_context_uses_default_value_for_mismatched_expected_metadata() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
-        let mismatched_ctx = SimpleFilterContext::new_opt(
+        let ctx = SimpleFilterContext::new_opt(
             &metadata,
             Some(expected_metadata.as_ref()),
             &col("tag_0").eq(lit("a")),
         )
         .unwrap();
-        assert!(!mismatched_ctx.usable_primary_key_filter());
-        assert!(mismatched_ctx.primary_key_prefilter().is_none());
+        assert!(matches!(
+            ctx.filter(),
+            MaybeFilter::Matched | MaybeFilter::Pruned
+        ));
     }
 
     #[test]

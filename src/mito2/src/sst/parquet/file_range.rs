@@ -303,11 +303,7 @@ impl FileRangeContext {
         input: RecordBatch,
         skip_fields: bool,
     ) -> Result<Option<RecordBatch>> {
-        self.base.precise_filter_flat(
-            input,
-            skip_fields,
-            self.reader_builder.has_predicate_prefilter(),
-        )
+        self.base.precise_filter_flat(input, skip_fields)
     }
 
     pub(crate) fn pre_filter_mode(&self) -> PreFilterMode {
@@ -415,15 +411,9 @@ impl RangeBase {
         &self,
         input: RecordBatch,
         skip_fields: bool,
-        has_prefilter: bool,
     ) -> Result<Option<RecordBatch>> {
         let mut tag_decode_state = TagDecodeState::new();
-        let mask = self.compute_filter_mask_flat(
-            &input,
-            skip_fields,
-            has_prefilter,
-            &mut tag_decode_state,
-        )?;
+        let mask = self.compute_filter_mask_flat(&input, skip_fields, &mut tag_decode_state)?;
 
         // If mask is None, the entire batch is filtered out
         let Some(mut mask) = mask else {
@@ -469,7 +459,6 @@ impl RangeBase {
         &self,
         input: &RecordBatch,
         skip_fields: bool,
-        has_prefilter: bool,
         tag_decode_state: &mut TagDecodeState,
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
@@ -488,12 +477,6 @@ impl RangeBase {
 
             // Skip field filters if skip_fields is true
             if skip_fields && filter_ctx.semantic_type() == SemanticType::Field {
-                continue;
-            }
-
-            // Skip simple filters only when parquet prefilter already evaluated the same
-            // condition while refining row selection.
-            if should_skip_simple_filter_after_prefilter(has_prefilter, filter_ctx) {
                 continue;
             }
 
@@ -668,17 +651,6 @@ impl RangeBase {
     }
 }
 
-fn should_skip_simple_filter_after_prefilter(
-    has_prefilter: bool,
-    filter_ctx: &SimpleFilterContext,
-) -> bool {
-    if !has_prefilter {
-        return false;
-    }
-
-    filter_ctx.usable_prefilter()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -715,27 +687,20 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_filter_mask_flat_skips_prefiltered_pk_filters() {
+    fn test_compute_filter_mask_flat_applies_remaining_simple_filters() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let mut filters = vec![
+        let filters = vec![
             SimpleFilterContext::new_opt(&metadata, None, &col("tag_0").eq(lit("a"))).unwrap(),
             SimpleFilterContext::new_opt(&metadata, None, &col("field_0").gt(lit(1_u64))).unwrap(),
         ];
-        filters[0].set_usable_prefilter(true);
         let base = new_test_range_base(filters);
         let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
 
-        let mask_without_skip = base
-            .compute_filter_mask_flat(&batch, false, false, &mut TagDecodeState::new())
+        let mask = base
+            .compute_filter_mask_flat(&batch, false, &mut TagDecodeState::new())
             .unwrap()
             .unwrap();
-        assert_eq!(mask_without_skip.count_set_bits(), 0);
-
-        let mask_with_skip = base
-            .compute_filter_mask_flat(&batch, false, true, &mut TagDecodeState::new())
-            .unwrap()
-            .unwrap();
-        assert_eq!(mask_with_skip.count_set_bits(), 2);
+        assert_eq!(mask.count_set_bits(), 0);
     }
 
     #[test]
@@ -759,16 +724,10 @@ mod tests {
         let base = new_test_range_base(vec![]);
         let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
 
-        let mask_without_skip = base
-            .compute_filter_mask_flat(&batch, false, false, &mut TagDecodeState::new())
+        let mask = base
+            .compute_filter_mask_flat(&batch, false, &mut TagDecodeState::new())
             .unwrap()
             .unwrap();
-        assert_eq!(mask_without_skip.count_set_bits(), 4);
-
-        let mask_with_skip = base
-            .compute_filter_mask_flat(&batch, false, true, &mut TagDecodeState::new())
-            .unwrap()
-            .unwrap();
-        assert_eq!(mask_with_skip.count_set_bits(), 4);
+        assert_eq!(mask.count_set_bits(), 4);
     }
 }

@@ -255,64 +255,37 @@ impl PrefilterContextBuilder {
     /// Creates a builder if prefiltering is applicable.
     ///
     /// Returns `None` if:
-    /// - No primary key filters are available
-    /// - The read format doesn't use flat layout with dictionary-encoded PKs
-    /// - The primary key is empty
+    /// - The read format doesn't use flat layout
+    /// - No prefilter columns are selected
+    /// - Prefilter would read the full projection without any PK filter
     pub(crate) fn new(
         read_format: &FlatReadFormat,
         codec: &Arc<dyn PrimaryKeyCodec>,
-        primary_key_filters: Option<&Arc<Vec<SimpleFilterEvaluator>>>,
-        filters: &[SimpleFilterContext],
-        physical_filters: &[PhysicalFilterContext],
+        primary_key_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
+        filters: Vec<SimpleFilterContext>,
+        physical_filters: Vec<PhysicalFilterContext>,
         parquet_schema: &SchemaDescriptor,
-        field_prefilter_enabled: bool,
     ) -> Option<Self> {
         let metadata = read_format.metadata();
         let use_raw_tag_columns = read_format.batch_has_raw_pk_columns();
         let pk_filters = (!use_raw_tag_columns)
-            .then(|| {
-                primary_key_filters
-                    .filter(|filters| !filters.is_empty())
-                    .cloned()
-            })
-            .flatten();
+            .then_some(primary_key_filters)
+            .flatten()
+            .filter(|filters| !filters.is_empty());
 
         let mut prefilter_column_names = HashSet::new();
-        let mut prefilter_filters = Vec::new();
-        let mut prefilter_physical_filters = Vec::new();
-
-        for filter_ctx in filters {
-            let filter = match filter_ctx.filter() {
-                MaybeFilter::Filter(filter) => filter,
-                MaybeFilter::Matched | MaybeFilter::Pruned => continue,
-            };
-
-            if filter_ctx.usable_prefilter()
-                && read_format
-                    .arrow_schema()
-                    .column_with_name(filter.column_name())
-                    .is_some()
-            {
+        for filter_ctx in &filters {
+            if let MaybeFilter::Filter(filter) = filter_ctx.filter() {
                 prefilter_column_names.insert(filter.column_name().to_string());
-                prefilter_filters.push(filter_ctx.clone());
-            } else if filter_ctx.usable_primary_key_filter() && pk_filters.is_some() {
-                prefilter_column_names.insert(PRIMARY_KEY_COLUMN_NAME.to_string());
             }
         }
 
-        for filter_ctx in physical_filters {
-            if !field_prefilter_enabled && filter_ctx.semantic_type() == SemanticType::Field {
-                continue;
-            }
+        if pk_filters.is_some() {
+            prefilter_column_names.insert(PRIMARY_KEY_COLUMN_NAME.to_string());
+        }
 
-            if read_format
-                .arrow_schema()
-                .column_with_name(filter_ctx.column_name())
-                .is_some()
-            {
-                prefilter_column_names.insert(filter_ctx.column_name().to_string());
-                prefilter_physical_filters.push(filter_ctx.clone());
-            }
+        for filter_ctx in &physical_filters {
+            prefilter_column_names.insert(filter_ctx.column_name().to_string());
         }
 
         let (projection, prefilter_count) = compute_projection_mask(
@@ -332,8 +305,8 @@ impl PrefilterContextBuilder {
         Some(Self {
             projection,
             pk_filters,
-            filters: prefilter_filters,
-            physical_filters: prefilter_physical_filters,
+            filters,
+            physical_filters,
             codec: Arc::clone(codec),
             metadata: metadata.clone(),
         })
@@ -635,11 +608,7 @@ mod tests {
     ) -> Vec<SimpleFilterContext> {
         exprs
             .iter()
-            .filter_map(|expr| {
-                let mut filter = SimpleFilterContext::new_opt(metadata, None, expr)?;
-                filter.set_usable_prefilter(true);
-                Some(filter)
-            })
+            .filter_map(|expr| SimpleFilterContext::new_opt(metadata, None, expr))
             .collect()
     }
 
@@ -822,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prefilter_builder_restricts_field_filters_to_append_mode() {
+    fn test_prefilter_builder_returns_none_without_selected_filters() {
         let metadata: RegionMetadataRef =
             Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         let read_format = FlatReadFormat::new(
@@ -834,32 +803,17 @@ mod tests {
         )
         .unwrap();
         let codec = build_primary_key_codec(metadata.as_ref());
-        let mut filters = new_simple_filter_contexts(&metadata, &[col("field_0").gt(lit(1_u64))]);
-        filters[0].set_usable_prefilter(false);
         let parquet_schema = parquet_schema(&read_format);
 
         let builder = PrefilterContextBuilder::new(
             &read_format,
             &codec,
             None,
-            &filters,
-            &[],
+            Vec::new(),
+            Vec::new(),
             &parquet_schema,
-            false,
         );
         assert!(builder.is_none());
-
-        filters[0].set_usable_prefilter(true);
-        let builder = PrefilterContextBuilder::new(
-            &read_format,
-            &codec,
-            None,
-            &filters,
-            &[],
-            &parquet_schema,
-            true,
-        );
-        assert!(builder.is_some());
     }
 
     #[test]
