@@ -916,6 +916,13 @@ mod tests {
             .to_vec()
     }
 
+    fn remaining_simple_filter_columns(filters: &[SimpleFilterContext]) -> Vec<&str> {
+        filters
+            .iter()
+            .map(|filter_ctx| filter_ctx.filter().as_filter().unwrap().column_name())
+            .collect()
+    }
+
     #[test]
     fn test_prefilter_primary_key_drops_single_dictionary_batch() {
         let metadata = Arc::new(sst_region_metadata());
@@ -996,71 +1003,72 @@ mod tests {
     }
 
     #[test]
-    fn test_build_bulk_filter_plan_splits_pk_prefiltered_simple_filters_on_legacy_path() {
+    fn test_build_bulk_filter_plan_classifies_filters_across_read_paths() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         ));
-        let read_format =
-            FlatReadFormat::new(metadata.clone(), metadata.column_metadatas.iter().map(|c| c.column_id), None, "memtable", false).unwrap();
-        assert!(!read_format.batch_has_raw_pk_columns());
-        let predicate = Predicate::new(vec![
-            col("tag_0").eq(lit("a")),
-            col("field_0").gt(lit(1_u64)),
-        ]);
+        let legacy_read_format = FlatReadFormat::new(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "memtable",
+            false,
+        )
+        .unwrap();
+        assert!(!legacy_read_format.batch_has_raw_pk_columns());
 
-        let plan = build_bulk_filter_plan(&read_format, Some(&predicate));
+        let plan = build_bulk_filter_plan(
+            &legacy_read_format,
+            Some(&Predicate::new(vec![
+                col("tag_0").eq(lit("a")),
+                col("field_0").gt(lit(1_u64)),
+            ])),
+        );
+        assert_eq!(
+            plan.pk_filters.as_ref().map(|filters| filters.len()),
+            Some(1)
+        );
+        assert_eq!(
+            remaining_simple_filter_columns(&plan.remaining_simple_filters),
+            vec!["field_0"]
+        );
 
-        assert!(plan.pk_filters.is_some());
-        assert_eq!(plan.pk_filters.as_ref().unwrap().len(), 1);
-        assert_eq!(plan.remaining_simple_filters.len(), 1);
-        let remaining_filter = plan.remaining_simple_filters[0]
-            .filter()
-            .as_filter()
-            .unwrap();
-        assert_eq!(remaining_filter.column_name(), "field_0");
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let raw_pk_read_format = FlatReadFormat::new(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "memtable",
+            true,
+        )
+        .unwrap();
+        assert!(raw_pk_read_format.batch_has_raw_pk_columns());
+
+        let tag_only_plan = build_bulk_filter_plan(
+            &raw_pk_read_format,
+            Some(&Predicate::new(vec![col("tag_0").eq(lit("a"))])),
+        );
+        assert!(tag_only_plan.pk_filters.is_none());
+        assert_eq!(
+            remaining_simple_filter_columns(&tag_only_plan.remaining_simple_filters),
+            vec!["tag_0"]
+        );
+
+        let field_only_plan = build_bulk_filter_plan(
+            &raw_pk_read_format,
+            Some(&Predicate::new(vec![col("field_0").gt(lit(1_u64))])),
+        );
+        assert!(field_only_plan.pk_filters.is_none());
+        assert_eq!(
+            remaining_simple_filter_columns(&field_only_plan.remaining_simple_filters),
+            vec!["field_0"]
+        );
     }
 
     #[test]
-    fn test_build_bulk_filter_plan_keeps_tag_filters_without_pk_prefilter_support() {
+    fn test_build_reader_filter_plan_classifies_filters_for_prefilter_modes() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format =
-            FlatReadFormat::new(metadata.clone(), metadata.column_metadatas.iter().map(|c| c.column_id), None, "memtable", true).unwrap();
-        assert!(read_format.batch_has_raw_pk_columns());
-        let predicate = Predicate::new(vec![col("tag_0").eq(lit("a"))]);
-
-        let plan = build_bulk_filter_plan(&read_format, Some(&predicate));
-
-        assert!(plan.pk_filters.is_none());
-        assert_eq!(plan.remaining_simple_filters.len(), 1);
-        let remaining_filter = plan.remaining_simple_filters[0]
-            .filter()
-            .as_filter()
-            .unwrap();
-        assert_eq!(remaining_filter.column_name(), "tag_0");
-    }
-
-    #[test]
-    fn test_build_bulk_filter_plan_keeps_non_pk_filters_in_range_base() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format =
-            FlatReadFormat::new(metadata.clone(), metadata.column_metadatas.iter().map(|c| c.column_id), None, "memtable", true).unwrap();
-        let predicate = Predicate::new(vec![col("field_0").gt(lit(1_u64))]);
-
-        let plan = build_bulk_filter_plan(&read_format, Some(&predicate));
-
-        assert!(plan.pk_filters.is_none());
-        assert_eq!(plan.remaining_simple_filters.len(), 1);
-        let remaining_filter = plan.remaining_simple_filters[0]
-            .filter()
-            .as_filter()
-            .unwrap();
-        assert_eq!(remaining_filter.column_name(), "field_0");
-    }
-
-    #[test]
-    fn test_build_reader_filter_plan_keeps_field_filters_for_prune_reader_in_skip_fields_mode() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = FlatReadFormat::new(
+        let full_read_format = FlatReadFormat::new(
             metadata.clone(),
             metadata.column_metadatas.iter().map(|c| c.column_id),
             None,
@@ -1068,37 +1076,29 @@ mod tests {
             true,
         )
         .unwrap();
-        let parquet_schema = parquet_schema(&read_format);
+        let full_parquet_schema = parquet_schema(&full_read_format);
         let codec = build_primary_key_codec(metadata.as_ref());
-        let predicate = Predicate::new(vec![
-            col("tag_0").eq(lit("a")),
-            col("field_0").gt(lit(1_u64)),
-        ]);
 
-        let plan = build_reader_filter_plan(
-            Some(&predicate),
+        let skip_fields_plan = build_reader_filter_plan(
+            Some(&Predicate::new(vec![
+                col("tag_0").eq(lit("a")),
+                col("field_0").gt(lit(1_u64)),
+            ])),
             None,
             PreFilterMode::SkipFields,
-            &read_format,
-            &parquet_schema,
+            &full_read_format,
+            &full_parquet_schema,
             &codec,
         );
+        assert!(skip_fields_plan.prefilter_builder.is_some());
+        assert_eq!(
+            remaining_simple_filter_columns(&skip_fields_plan.remaining_simple_filters),
+            vec!["field_0"]
+        );
 
-        assert!(plan.prefilter_builder.is_some());
-        assert_eq!(plan.remaining_simple_filters.len(), 1);
-        let remaining_filter = plan.remaining_simple_filters[0]
-            .filter()
-            .as_filter()
-            .unwrap();
-        assert_eq!(remaining_filter.column_name(), "field_0");
-    }
-
-    #[test]
-    fn test_build_reader_filter_plan_uses_pk_prefilter_for_unprojected_tag_filters() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let field_0 = metadata.column_by_name("field_0").unwrap().column_id;
         let ts = metadata.time_index_column().column_id;
-        let read_format = FlatReadFormat::new(
+        let projected_read_format = FlatReadFormat::new(
             metadata.clone(),
             [field_0, ts].into_iter(),
             None,
@@ -1106,21 +1106,17 @@ mod tests {
             true,
         )
         .unwrap();
-        let parquet_schema = parquet_schema(&read_format);
-        let codec = build_primary_key_codec(metadata.as_ref());
-        let predicate = Predicate::new(vec![col("tag_0").eq(lit("a"))]);
-
-        let plan = build_reader_filter_plan(
-            Some(&predicate),
+        let projected_parquet_schema = parquet_schema(&projected_read_format);
+        let pk_prefilter_plan = build_reader_filter_plan(
+            Some(&Predicate::new(vec![col("tag_0").eq(lit("a"))])),
             None,
             PreFilterMode::All,
-            &read_format,
-            &parquet_schema,
+            &projected_read_format,
+            &projected_parquet_schema,
             &codec,
         );
-
-        assert!(plan.prefilter_builder.is_some());
-        assert!(plan.remaining_simple_filters.is_empty());
+        assert!(pk_prefilter_plan.prefilter_builder.is_some());
+        assert!(pk_prefilter_plan.remaining_simple_filters.is_empty());
     }
 
     #[test]
