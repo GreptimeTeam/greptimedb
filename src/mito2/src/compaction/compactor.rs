@@ -538,6 +538,13 @@ where
                             inputs.iter().map(|f| f.file_id.to_string()).join(","),
                             e
                         );
+                        // If the cancel handle is cancelled,
+                        // cancel the remaining tasks before returns the error.
+                        if self.cancel_handle.is_cancelled() {
+                            for (_, handle) in spawned {
+                                handle.abort();
+                            }
+                        }
                         return Err(e).context(error::JoinSnafu);
                     }
                     Err(_) => {
