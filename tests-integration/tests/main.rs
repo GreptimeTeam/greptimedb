@@ -27,6 +27,7 @@ mod region_migration;
 mod repartition;
 #[macro_use]
 mod repartition_expr_version;
+mod mysql;
 
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 
