@@ -107,11 +107,13 @@ pub fn operating_leader_region_roles(
     region_routes
         .iter()
         .filter_map(|route| {
-            route
-                .leader_peer
-                .as_ref()
-                .zip(route.leader_region_role())
-                .map(|(leader, role)| (route.region.id, leader.id, role))
+            route.leader_region_role().map(|role| {
+                (
+                    route.region.id,
+                    route.leader_peer.as_ref().unwrap().id,
+                    role,
+                )
+            })
         })
         .collect::<Vec<_>>()
 }
