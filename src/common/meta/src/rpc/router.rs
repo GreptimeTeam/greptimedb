@@ -23,6 +23,7 @@ use derive_builder::Builder;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
+use store_api::region_engine::RegionRole;
 use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::table_name::TableName;
@@ -95,6 +96,22 @@ pub fn operating_leader_regions(region_routes: &[RegionRoute]) -> Vec<(RegionId,
                 .leader_peer
                 .as_ref()
                 .map(|leader| (route.region.id, leader.id))
+        })
+        .collect::<Vec<_>>()
+}
+
+/// Returns the operating leader regions with corresponding [DatanodeId] and [RegionRole].
+pub fn operating_leader_region_roles(
+    region_routes: &[RegionRoute],
+) -> Vec<(RegionId, DatanodeId, RegionRole)> {
+    region_routes
+        .iter()
+        .filter_map(|route| {
+            route
+                .leader_peer
+                .as_ref()
+                .zip(route.leader_region_role())
+                .map(|(leader, role)| (route.region.id, leader.id, role))
         })
         .collect::<Vec<_>>()
 }
@@ -340,6 +357,19 @@ impl RegionRoute {
     /// Returns true if the Leader [`Region`] is in staging mode.
     pub fn is_leader_staging(&self) -> bool {
         matches!(self.leader_state, Some(LeaderState::Staging))
+    }
+
+    /// Returns the role of the leader region.
+    pub fn leader_region_role(&self) -> Option<RegionRole> {
+        self.leader_peer.as_ref().map(|_| {
+            if self.is_leader_staging() {
+                RegionRole::StagingLeader
+            } else if self.is_leader_downgrading() {
+                RegionRole::DowngradingLeader
+            } else {
+                RegionRole::Leader
+            }
+        })
     }
 
     /// Marks the Leader [`Region`] as [`RegionState::Downgrading`].
