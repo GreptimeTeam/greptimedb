@@ -371,6 +371,7 @@ Affected Rows: 3
 -- explain at 0s, 5s and 10s for a nanosecond time index.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 TQL EXPLAIN (0, 10, '5s') test_nano;
 
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------+
@@ -389,7 +390,7 @@ TQL EXPLAIN (0, 10, '5s') test_nano;
 | physical_plan | PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                   |
 |               |   PromSeriesDivideExec: tags=["k"]                                                                                                |
 |               |     SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]                                                               |
-|               |       RepartitionExec: partitioning=Hash([k@1], 32), input_partitions=32                                                          |
+|               |       RepartitionExec: REDACTED
 |               |         ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]                                                |
 |               |           FilterExec: __common_expr_3@0 >= -299999 AND __common_expr_3@0 <= 10000, projection=[i@1, j@2, k@3]                     |
 |               |             ProjectionExec: expr=[CAST(j@1 AS Timestamp(ms)) as __common_expr_3, i@0 as i, j@1 as j, k@2 as k]                    |

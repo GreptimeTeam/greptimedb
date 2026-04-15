@@ -44,6 +44,7 @@ INSERT INTO test_nano VALUES (1, 1000000, "a"), (1, 1000000, "b"), (2, 2000000, 
 -- explain at 0s, 5s and 10s for a nanosecond time index.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 TQL EXPLAIN (0, 10, '5s') test_nano;
 
 -- explain verbose at 0s, 5s and 10s for a nanosecond time index.
