@@ -27,3 +27,9 @@ pub type PluginOptionsSerializerRef = Arc<dyn PluginOptionsSerializer>;
 pub trait PluginOptionsDeserializer<T: DeserializeOwned>: Send + Sync {
     fn deserialize(&self, payload: &str) -> Result<T, serde_json::Error>;
 }
+
+/// A flag for stating the standalone mode in the plugins.
+///
+/// The standalone build and start process calls `setup_frontend_plugins` and `setup_datanode_plugins`,
+/// so we add a flag to the plugins to indicate that the plugins are running in the standalone mode.
+pub struct StandaloneFlag;
