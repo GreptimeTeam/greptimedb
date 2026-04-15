@@ -23,6 +23,7 @@ use common_recordbatch::error::Result as RecordBatchResult;
 use common_telemetry::{debug, info, tracing};
 use datafusion::sql::sqlparser::ast::{CopyOption, CopyTarget, Statement as SqlParserStatement};
 use datafusion_common::ParamValues;
+use datafusion_expr::LogicalPlan;
 use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{Schema, SchemaRef};
@@ -553,7 +554,8 @@ fn describe_fields(
     session: &Arc<Session>,
 ) -> PgWireResult<Vec<FieldInfo>> {
     match sql_plan {
-        SqlPlan::Plan(plan, _) => {
+        // query
+        SqlPlan::Plan(plan, _) if !matches!(plan, LogicalPlan::Dml(_) | LogicalPlan::Ddl(_)) => {
             let schema: Schema = plan.schema().clone().try_into().map_err(convert_err)?;
             schema_to_pg(&schema, format, None).map_err(convert_err)
         }
