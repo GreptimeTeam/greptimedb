@@ -477,7 +477,13 @@ impl PrefilterContextBuilder {
             return None;
         }
 
-        if pk_filters.is_none() && prefilter_count >= read_format.projection_indices().len() {
+        let total_count = read_format.projection_indices().len();
+        let remaining_count = total_count.saturating_sub(prefilter_count);
+        if pk_filters.is_none() && prefilter_count >= total_count {
+            return None;
+        }
+
+        if !should_use_prefilter(prefilter_count, remaining_count, total_count) {
             return None;
         }
 
@@ -508,6 +514,9 @@ impl PrefilterContextBuilder {
     }
 }
 
+const PREFILTER_COLUMN_RATIO_THRESHOLD: f64 = 0.5;
+const PREFILTER_MIN_REMAINING_COLUMNS: usize = 2;
+
 /// Result of prefiltering a row group.
 pub(crate) struct PrefilterResult {
     /// Refined row selection after prefiltering.
@@ -536,6 +545,23 @@ fn compute_projection_mask(
         ProjectionMask::roots(parquet_schema, projection_indices.iter().copied()),
         count,
     )
+}
+
+fn should_use_prefilter(
+    prefilter_count: usize,
+    remaining_count: usize,
+    total_count: usize,
+) -> bool {
+    if remaining_count == 0 {
+        return false;
+    }
+
+    if remaining_count < PREFILTER_MIN_REMAINING_COLUMNS {
+        return false;
+    }
+
+    let ratio = prefilter_count as f64 / total_count as f64;
+    ratio <= PREFILTER_COLUMN_RATIO_THRESHOLD
 }
 
 pub(crate) async fn execute_prefilter(
@@ -1000,6 +1026,15 @@ mod tests {
             &parquet_schema,
         );
         assert!(builder.is_none());
+    }
+
+    #[test]
+    fn test_should_use_prefilter() {
+        assert!(should_use_prefilter(1, 5, 6));
+        assert!(!should_use_prefilter(1, 0, 1));
+        assert!(!should_use_prefilter(1, 1, 2));
+        assert!(!should_use_prefilter(4, 3, 7));
+        assert!(should_use_prefilter(3, 3, 6));
     }
 
     #[test]
