@@ -337,6 +337,7 @@ fn mask_secrets(sql: &str, secrets: &[Option<String>]) -> String {
 #[cfg(test)]
 mod tests {
     use common_base::secrets::SecretString;
+    use common_test_util::temp_dir::create_temp_dir;
 
     use super::*;
     use crate::common::{PrefixedAzblobConnection, PrefixedGcsConnection, PrefixedOssConnection};
@@ -432,9 +433,21 @@ mod tests {
     #[test]
     fn test_build_copy_target_decodes_file_uri_path() {
         let storage = ObjectStoreConfig::default();
-        let target = build_copy_target("file:///tmp/my%20backup", &storage, "public", 7)
+        let snapshot_root = create_temp_dir("my backup");
+        let snapshot_uri = Url::from_file_path(snapshot_root.path())
+            .expect("absolute platform path should convert to file:// URI")
+            .to_string();
+        let expected = normalize_path(&format!(
+            "{}/{}",
+            snapshot_root.path().to_string_lossy(),
+            data_dir_for_schema_chunk("public", 7)
+        ));
+        let target = build_copy_target(&snapshot_uri, &storage, "public", 7)
             .expect("file:// copy target should be built");
 
-        assert_eq!(target.location, "/tmp/my backup/data/public/7/");
+        assert!(snapshot_uri.contains("%20"));
+        assert!(!target.location.contains("%20"));
+        assert!(target.location.contains("my backup"));
+        assert_eq!(target.location, expected);
     }
 }

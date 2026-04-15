@@ -69,6 +69,11 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
+| `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
+| `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
+| `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
+| `prom_store.worker_channel_capacity` | Integer | `65526` | Capacity of the pending batch worker channel. |
+| `prom_store.max_inflight_requests` | Integer | `3000` | Max inflight write requests before backpressure. |
 | `wal` | -- | -- | The WAL options. |
 | `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka. |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -139,7 +144,7 @@
 | `region_engine.mito.max_background_flushes` | Integer | Auto | Max number of running background flush jobs (default: 1/2 of cpu cores). |
 | `region_engine.mito.max_background_compactions` | Integer | Auto | Max number of running background compaction jobs (default: 1/4 of cpu cores). |
 | `region_engine.mito.max_background_purges` | Integer | Auto | Max number of running background purge jobs (default: number of cpu cores). |
-| `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit. |
+| `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks.<br/>Supports absolute size (e.g., "2GiB", "512MB") or percentage of system memory (e.g., "50%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.experimental_compaction_on_exhausted` | String | wait | Behavior when compaction cannot acquire memory from the budget.<br/>Options: "wait" (default, 10s), "wait(<duration>)", "fail" |
 | `region_engine.mito.auto_flush_interval` | String | `1h` | Interval to auto flush a region if it has not flushed yet. |
 | `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
@@ -157,13 +162,12 @@
 | `region_engine.mito.enable_refill_cache_on_read` | Bool | `true` | Enable refilling cache on read operations (default: true).<br/>When disabled, cache refilling on read won't happen. |
 | `region_engine.mito.manifest_cache_size` | String | `256MB` | Capacity for manifest cache (default: 256MB). |
 | `region_engine.mito.sst_write_buffer_size` | String | `8MB` | Buffer size for SST writing. |
-| `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
 | `region_engine.mito.max_concurrent_scan_files` | Integer | `384` | Maximum number of SST files to scan concurrently. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.scan_memory_limit` | String | `50%` | Memory limit for table scans across all queries.<br/>Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. |
 | `region_engine.mito.scan_memory_on_exhausted` | String | `fail` | Controls what happens when a scan cannot get memory immediately.<br/>"fail" (default) fails fast and is the recommended option for most users.<br/>"wait" / "wait(<duration>)" waits for memory to become available. This is mainly<br/>for advanced tuning in bursty workloads where temporary contention is common and<br/>higher latency is acceptable.<br/>"wait" means "wait(10s)", not unlimited waiting. |
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
-| `region_engine.mito.default_experimental_flat_format` | Bool | `false` | Whether to enable experimental flat format as the default format. |
+| `region_engine.mito.default_flat_format` | Bool | `true` | Whether to enable flat format as the default SST format. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
 | `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
@@ -293,6 +297,11 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
+| `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
+| `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
+| `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
+| `prom_store.worker_channel_capacity` | Integer | `65526` | Capacity of the pending batch worker channel. |
+| `prom_store.max_inflight_requests` | Integer | `3000` | Max inflight write requests before backpressure. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
@@ -532,7 +541,7 @@
 | `region_engine.mito.max_background_flushes` | Integer | Auto | Max number of running background flush jobs (default: 1/2 of cpu cores). |
 | `region_engine.mito.max_background_compactions` | Integer | Auto | Max number of running background compaction jobs (default: 1/4 of cpu cores). |
 | `region_engine.mito.max_background_purges` | Integer | Auto | Max number of running background purge jobs (default: number of cpu cores). |
-| `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit. |
+| `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks.<br/>Supports absolute size (e.g., "2GiB", "512MB") or percentage of system memory (e.g., "50%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.experimental_compaction_on_exhausted` | String | wait | Behavior when compaction cannot acquire memory from the budget.<br/>Options: "wait" (default, 10s), "wait(<duration>)", "fail" |
 | `region_engine.mito.auto_flush_interval` | String | `1h` | Interval to auto flush a region if it has not flushed yet. |
 | `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
@@ -550,13 +559,12 @@
 | `region_engine.mito.enable_refill_cache_on_read` | Bool | `true` | Enable refilling cache on read operations (default: true).<br/>When disabled, cache refilling on read won't happen. |
 | `region_engine.mito.manifest_cache_size` | String | `256MB` | Capacity for manifest cache (default: 256MB). |
 | `region_engine.mito.sst_write_buffer_size` | String | `8MB` | Buffer size for SST writing. |
-| `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
 | `region_engine.mito.max_concurrent_scan_files` | Integer | `384` | Maximum number of SST files to scan concurrently. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.scan_memory_limit` | String | `50%` | Memory limit for table scans across all queries.<br/>Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. |
 | `region_engine.mito.scan_memory_on_exhausted` | String | `fail` | Controls what happens when a scan cannot get memory immediately.<br/>"fail" (default) fails fast and is the recommended option for most users.<br/>"wait" / "wait(<duration>)" waits for memory to become available. This is mainly<br/>for advanced tuning in bursty workloads where temporary contention is common and<br/>higher latency is acceptable.<br/>"wait" means "wait(10s)", not unlimited waiting. |
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
-| `region_engine.mito.default_experimental_flat_format` | Bool | `false` | Whether to enable experimental flat format as the default format. |
+| `region_engine.mito.default_flat_format` | Bool | `true` | Whether to enable flat format as the default SST format. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
 | `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |

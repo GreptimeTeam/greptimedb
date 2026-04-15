@@ -421,7 +421,7 @@ impl MemtableBuilderProvider {
         let flat_format = options
             .sst_format
             .map(|format| format == FormatType::Flat)
-            .unwrap_or(self.config.default_experimental_flat_format);
+            .unwrap_or(self.config.default_flat_format);
         if flat_format {
             if options.memtable.is_some() {
                 common_telemetry::info!(

@@ -49,7 +49,7 @@ async fn test_batch_open_with_format(factory: Option<LogStoreFactory>, flat_form
         .with_log_store_factory(factory.clone());
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -157,7 +157,7 @@ async fn test_batch_open_with_format(factory: Option<LogStoreFactory>, flat_form
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -193,7 +193,7 @@ async fn test_batch_open_err_with_format(factory: Option<LogStoreFactory>, flat_
         .with_log_store_factory(factory.clone());
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;

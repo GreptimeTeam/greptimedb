@@ -103,7 +103,7 @@ pub struct BareCommand {
     #[clap(long)]
     extra_args: Vec<String>,
 
-    /// Enable flat format for storage engine (sets default_experimental_flat_format = true).
+    /// Enable flat format for storage engine (sets default_flat_format = true).
     #[clap(long, default_value = "false")]
     enable_flat_format: bool,
 }

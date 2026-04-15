@@ -1176,6 +1176,20 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
+    // query non-exist label in metric table
+    let res = client
+        .get("/v1/prometheus/api/v1/label/not_exist_label/values?match[]=demo&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none() && prom_resp.error_type.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([])).unwrap()
+    );
+
     // query `__name__` without match[]
     // create a physical table and a logical table
     let res = client
@@ -1552,12 +1566,11 @@ index_cache_percent = 20
 enable_refill_cache_on_read = true
 manifest_cache_size = "256MiB"
 sst_write_buffer_size = "8MiB"
-parallel_scan_channel_size = 32
 max_concurrent_scan_files = 384
 allow_stale_entries = false
 scan_memory_on_exhausted = "fail"
 min_compaction_interval = "0s"
-default_experimental_flat_format = false
+default_flat_format = true
 
 [region_engine.mito.index]
 aux_path = ""
@@ -5505,6 +5518,202 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         "otlp_traces_v1_existing_float_prefers_schema_type",
         &client,
         "select column_name, lower(data_type), semantic_type from information_schema.columns where table_name = 'trace_type_existing_float_prefers_schema' and column_name = 'span_attributes.attr_num';",
+        r#"[["span_attributes.attr_num","double","FIELD"]]"#,
+    )
+    .await;
+
+    let existing_int_table_name = "trace_type_existing_int_widens_to_float";
+    let existing_int_seed_req = make_trace_v1_request(
+        "type-existing-int",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000051",
+            "0000000000000051",
+            "existing-int-seed",
+            1_736_480_942_445_490_000,
+            1_736_480_942_445_590_000,
+            vec![make_int_attr("attr_num", 1)],
+        )],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        existing_int_table_name,
+        existing_int_seed_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let existing_int_req = make_trace_v1_request(
+        "type-existing-int",
+        vec![
+            make_trace_v1_span(
+                "00000000000000000000000000000052",
+                "0000000000000052",
+                "existing-int-upcast-int",
+                1_736_480_942_445_600_000,
+                1_736_480_942_445_700_000,
+                vec![make_int_attr("attr_num", 2)],
+            ),
+            make_trace_v1_span(
+                "00000000000000000000000000000053",
+                "0000000000000053",
+                "existing-int-upcast-float",
+                1_736_480_942_445_710_000,
+                1_736_480_942_445_810_000,
+                vec![make_double_attr("attr_num", 3.5)],
+            ),
+        ],
+    );
+    let res = send_trace_v1_req(&client, existing_int_table_name, existing_int_req, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "otlp_traces_v1_existing_int_widens_rows",
+        &client,
+        &format!(
+            "select trace_id, \"span_attributes.attr_num\" from {} order by trace_id;",
+            existing_int_table_name
+        ),
+        r#"[["00000000000000000000000000000051",1.0],["00000000000000000000000000000052",2.0],["00000000000000000000000000000053",3.5]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v1_existing_int_widens_type",
+        &client,
+        "select column_name, lower(data_type), semantic_type from information_schema.columns where table_name = 'trace_type_existing_int_widens_to_float' and column_name = 'span_attributes.attr_num';",
+        r#"[["span_attributes.attr_num","double","FIELD"]]"#,
+    )
+    .await;
+
+    let existing_int_atomic_table_name = "trace_type_existing_int_widen_atomic";
+    let existing_int_atomic_seed_req = make_trace_v1_request(
+        "type-existing-int-atomic",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000054",
+            "0000000000000054",
+            "existing-int-atomic-seed",
+            1_736_480_942_445_720_000,
+            1_736_480_942_445_820_000,
+            vec![
+                make_int_attr("attr_num", 1),
+                make_int_attr("attr_parse", 10),
+            ],
+        )],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        existing_int_atomic_table_name,
+        existing_int_atomic_seed_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let existing_int_atomic_req = make_trace_v1_request(
+        "type-existing-int-atomic",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000055",
+            "0000000000000055",
+            "existing-int-atomic-invalid",
+            1_736_480_942_445_830_000,
+            1_736_480_942_445_930_000,
+            vec![
+                make_double_attr("attr_num", 3.5),
+                make_string_attr("attr_parse", "not_a_number"),
+            ],
+        )],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        existing_int_atomic_table_name,
+        existing_int_atomic_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportTraceServiceResponse::decode(res.bytes().await).unwrap();
+    let partial_success = body.partial_success.as_ref().unwrap();
+    assert_eq!(partial_success.rejected_spans, 1);
+    assert!(
+        partial_success
+            .error_message
+            .contains("Accepted 0 spans, rejected 1 spans"),
+        "unexpected partial success body: {body:?}"
+    );
+
+    validate_data(
+        "otlp_traces_v1_existing_int_widen_atomic_rows",
+        &client,
+        &format!(
+            "select trace_id, \"span_attributes.attr_num\", \"span_attributes.attr_parse\" from {} order by trace_id;",
+            existing_int_atomic_table_name
+        ),
+        r#"[["00000000000000000000000000000054",1,10]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v1_existing_int_widen_atomic_types",
+        &client,
+        "select column_name, lower(data_type), semantic_type from information_schema.columns where table_name = 'trace_type_existing_int_widen_atomic' and column_name in ('span_attributes.attr_num', 'span_attributes.attr_parse') order by column_name;",
+        r#"[["span_attributes.attr_num","bigint","FIELD"],["span_attributes.attr_parse","bigint","FIELD"]]"#,
+    )
+    .await;
+
+    let existing_int_float_only_table_name = "trace_type_existing_int_float_only";
+    let existing_int_float_only_seed_req = make_trace_v1_request(
+        "type-existing-int-float-only",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000061",
+            "0000000000000061",
+            "existing-int-float-only-seed",
+            1_736_480_942_445_820_000,
+            1_736_480_942_445_920_000,
+            vec![make_int_attr("attr_num", 1)],
+        )],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        existing_int_float_only_table_name,
+        existing_int_float_only_seed_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let existing_int_float_only_req = make_trace_v1_request(
+        "type-existing-int-float-only",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000062",
+            "0000000000000062",
+            "existing-int-float-only-apply",
+            1_736_480_942_445_930_000,
+            1_736_480_942_446_030_000,
+            vec![make_double_attr("attr_num", 2.5)],
+        )],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        existing_int_float_only_table_name,
+        existing_int_float_only_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "otlp_traces_v1_existing_int_float_only_rows",
+        &client,
+        &format!(
+            "select trace_id, \"span_attributes.attr_num\" from {} order by trace_id;",
+            existing_int_float_only_table_name
+        ),
+        r#"[["00000000000000000000000000000061",1.0],["00000000000000000000000000000062",2.5]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v1_existing_int_float_only_type",
+        &client,
+        "select column_name, lower(data_type), semantic_type from information_schema.columns where table_name = 'trace_type_existing_int_float_only' and column_name = 'span_attributes.attr_num';",
         r#"[["span_attributes.attr_num","double","FIELD"]]"#,
     )
     .await;

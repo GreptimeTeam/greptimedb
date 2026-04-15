@@ -31,7 +31,7 @@ use crate::procedure::repartition::{self, Context, State};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dispatch;
 
-fn build_region_mapping(
+pub(crate) fn build_region_mapping(
     source_regions: &[RegionDescriptor],
     target_regions: &[RegionDescriptor],
     transition_map: &[Vec<usize>],
@@ -106,7 +106,11 @@ impl State for Dispatch {
 
         Ok((
             Box::new(Collect::new(procedure_metas)),
-            Status::suspended(procedures, true),
+            // The state is not persisted after sub-procedures are spawned.
+            // If metasrv restarts before all sub-procedures complete,
+            // it restores from the `Dispatch` state and re-dispatches them.
+            // This is safe because the sub-procedures are idempotent.
+            Status::suspended(procedures, false),
         ))
     }
 

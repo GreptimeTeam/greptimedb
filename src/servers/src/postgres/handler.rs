@@ -529,7 +529,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
             .collect::<Vec<_>>();
 
         if let Some(schema) = &sql_plan.schema {
-            schema_to_pg(schema, &Format::UnifiedBinary, None)
+            schema_to_pg(schema, &Format::UnifiedText, None)
                 .map(|fields| DescribeStatementResponse::new(param_types, fields))
                 .map_err(convert_err)
         } else {

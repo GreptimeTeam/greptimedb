@@ -70,7 +70,7 @@ async fn test_set_role_state_gracefully_with_format(flat_format: bool) {
         let mut env = TestEnv::new().await;
         let engine = env
             .create_engine(MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             })
             .await;
@@ -141,7 +141,7 @@ async fn test_set_role_state_gracefully_not_exist_with_format(flat_format: bool)
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -166,7 +166,7 @@ async fn test_write_downgrading_region_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("write-to-downgrading-region").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -220,7 +220,7 @@ async fn test_unified_state_transitions_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -329,7 +329,7 @@ async fn test_restricted_state_transitions_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;

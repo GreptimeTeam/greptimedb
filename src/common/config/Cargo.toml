@@ -18,7 +18,6 @@ notify.workspace = true
 object-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_with.workspace = true
 snafu.workspace = true
 toml.workspace = true
 
