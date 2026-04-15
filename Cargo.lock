@@ -8884,7 +8884,7 @@ dependencies = [
 [[package]]
 name = "opensrv-mysql"
 version = "0.8.0"
-source = "git+https://github.com/datafuselabs/opensrv?tag=v0.10.0#074bd8fb81da3c9e6d6a098a482f3380478b9c0b"
+source = "git+https://github.com/GreptimeTeam/opensrv?rev=6c5a451544194b7bb60a8318d155d4f892b49f2c#6c5a451544194b7bb60a8318d155d4f892b49f2c"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -12041,6 +12041,7 @@ dependencies = [
  "datafusion-pg-catalog",
  "datatypes",
  "derive_builder 0.20.2",
+ "either",
  "futures",
  "futures-util",
  "headers",
@@ -13509,6 +13510,7 @@ dependencies = [
  "datanode",
  "datatypes",
  "dotenv",
+ "either",
  "flate2",
  "flow",
  "frontend",
