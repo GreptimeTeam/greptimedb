@@ -1260,9 +1260,7 @@ impl ScanInput {
             return PreFilterMode::All;
         }
 
-        match self.merge_mode {
-            MergeMode::LastRow | MergeMode::LastNonNull => PreFilterMode::SkipFields,
-        }
+        pre_filter_mode(self.append_mode, self.merge_mode)
     }
 }
 
@@ -1765,7 +1763,6 @@ impl PredicateGroup {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
     use std::sync::Arc;
 
     use datafusion::physical_plan::expressions::lit as physical_lit;
@@ -2047,7 +2044,7 @@ mod tests {
             (true, MergeMode::LastRow, 1, PreFilterMode::All),
             (false, MergeMode::LastNonNull, 1, PreFilterMode::All),
             (false, MergeMode::LastRow, 2, PreFilterMode::SkipFields),
-            (true, MergeMode::LastRow, 2, PreFilterMode::SkipFields),
+            (true, MergeMode::LastRow, 2, PreFilterMode::All),
         ];
 
         for (append_mode, merge_mode, source_count, expected_mode) in cases {
