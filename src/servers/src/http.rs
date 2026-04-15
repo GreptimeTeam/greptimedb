@@ -764,6 +764,7 @@ impl HttpServer {
         };
 
         router = router
+            .route("/", routing::get(handler::index))
             .route(
                 "/health",
                 routing::get(handler::health).post(handler::health),
