@@ -42,8 +42,9 @@ use table::test_util::EmptyTable;
 use super::StatsAgg;
 use super::check::{RejectReason, RewriteCheck, is_supported_aggregate_name};
 use super::split::{
-    FileStatsRequirement, StatsAggExt, has_partition_expr_mismatch, partial_state_from_stats,
-    split_count_field_files, split_count_star_files, split_min_max_field_files, split_time_files,
+    FileStatsRequirement, StatsAggExt, common_stats_file_ordinals, has_partition_expr_mismatch,
+    partial_state_from_stats, split_count_field_files, split_count_star_files,
+    split_min_max_field_files, split_time_files,
 };
 use crate::parser::QueryLanguageParser;
 use crate::tests::new_query_engine_with_table;
@@ -554,6 +555,81 @@ fn test_split_min_max_field_files() {
     assert_eq!(split.scan_file_ordinals, vec![1]);
     assert_eq!(split.stats.min, Some(Value::Int64(1)));
     assert_eq!(split.stats.max, Some(Value::Int64(9)));
+}
+
+#[test]
+fn test_common_stats_file_ordinals_intersects_supported_aggregates() {
+    let stats = RegionScanInputStats {
+        files: vec![
+            RegionScanFileInputStats {
+                file_ordinal: 0,
+                exact_num_rows: Some(3),
+                time_range: Some((test_timestamp(10), test_timestamp(20))),
+                field_stats: field_stats(Some(2), Some(Value::Int64(4)), Some(Value::Int64(9))),
+                partition_expr_matches_region: true,
+            },
+            RegionScanFileInputStats {
+                file_ordinal: 1,
+                exact_num_rows: Some(4),
+                time_range: Some((test_timestamp(30), test_timestamp(40))),
+                field_stats: HashMap::new(),
+                partition_expr_matches_region: true,
+            },
+            RegionScanFileInputStats {
+                file_ordinal: 2,
+                exact_num_rows: Some(5),
+                time_range: Some((test_timestamp(50), test_timestamp(60))),
+                field_stats: field_stats(Some(4), Some(Value::Int64(1)), Some(Value::Int64(7))),
+                partition_expr_matches_region: true,
+            },
+        ],
+    };
+
+    let aggregates = vec![
+        StatsAgg::CountStar,
+        StatsAgg::CountField {
+            column_name: "value".to_string(),
+            arg_type: DataType::Int64,
+        },
+        StatsAgg::MaxField {
+            column_name: "value".to_string(),
+            arg_type: DataType::Int64,
+        },
+    ];
+
+    assert_eq!(common_stats_file_ordinals(&aggregates, &stats), vec![0, 2]);
+}
+
+#[test]
+fn test_common_stats_file_ordinals_returns_only_shared_stats_eligible_files() {
+    let stats = RegionScanInputStats {
+        files: vec![
+            RegionScanFileInputStats {
+                file_ordinal: 0,
+                exact_num_rows: Some(3),
+                time_range: Some((test_timestamp(10), test_timestamp(20))),
+                field_stats: field_stats(Some(2), Some(Value::Int64(4)), Some(Value::Int64(9))),
+                partition_expr_matches_region: true,
+            },
+            RegionScanFileInputStats {
+                file_ordinal: 1,
+                exact_num_rows: Some(4),
+                time_range: Some((test_timestamp(30), test_timestamp(40))),
+                field_stats: HashMap::new(),
+                partition_expr_matches_region: true,
+            },
+        ],
+    };
+
+    let aggregates = vec![
+        StatsAgg::CountStar,
+        StatsAgg::CountField {
+            column_name: "value".to_string(),
+            arg_type: DataType::Int64,
+        },
+    ];
+
+    assert_eq!(common_stats_file_ordinals(&aggregates, &stats), vec![0]);
 }
 
 #[test]

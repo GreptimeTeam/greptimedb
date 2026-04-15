@@ -39,7 +39,7 @@ use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 
-pub(crate) fn build_scan_input_stats(
+pub fn build_scan_input_stats(
     input: &ScanInput,
     metadata: &RegionMetadata,
 ) -> std::result::Result<RegionScanInputStats, BoxedError> {

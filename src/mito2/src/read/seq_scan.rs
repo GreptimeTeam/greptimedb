@@ -116,6 +116,18 @@ impl SeqScan {
         Ok(Box::pin(aggr_stream))
     }
 
+    fn rebuild_input(&mut self, input: ScanInput) {
+        // IMPORTANT: when `ScanInput.files` changes, all derived state must move together.
+        // `partition_ranges()` identifiers and `Pruner` internals are tied to this exact
+        // `StreamContext`, so reusing the old ones would make them point at stale file/range
+        // layouts.
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
+        self.properties.partitions = vec![stream_ctx.partition_ranges()];
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        self.pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
+        self.stream_ctx = stream_ctx;
+    }
+
     /// Scan [`Batch`] in all partitions one by one.
     pub(crate) fn scan_all_partitions(&self) -> Result<ScanBatchStream> {
         let metrics_set = ExecutionPlanMetricsSet::new();
@@ -655,6 +667,19 @@ impl RegionScanner for SeqScan {
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        request.validate()?;
+
+        if let Some(excluded_file_ordinals) = request.excluded_file_ordinals.clone() {
+            // IMPORTANT: exclusion changes the underlying file set, so rebuild the input-bound
+            // runtime state first, then apply ordinary property updates from `prepare()`.
+            let input = self
+                .stream_ctx
+                .input
+                .clone()
+                .with_excluded_file_ordinals(&excluded_file_ordinals);
+            self.rebuild_input(input);
+        }
+
         self.properties.prepare(request);
 
         self.check_scan_limit().map_err(BoxedError::new)?;

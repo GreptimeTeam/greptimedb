@@ -806,6 +806,7 @@ fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
 }
 
 /// Common input for different scanners.
+#[derive(Clone)]
 pub struct ScanInput {
     /// Region SST access layer.
     access_layer: AccessLayerRef,
@@ -926,6 +927,26 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.files = files;
+        self
+    }
+
+    /// Excludes SST files by their original ordinal in this scan input.
+    #[must_use]
+    pub(crate) fn with_excluded_file_ordinals(mut self, excluded_file_ordinals: &[usize]) -> Self {
+        if excluded_file_ordinals.is_empty() {
+            return self;
+        }
+
+        let excluded = excluded_file_ordinals
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        self.files = self
+            .files
+            .into_iter()
+            .enumerate()
+            .filter_map(|(ordinal, file)| (!excluded.contains(&ordinal)).then_some(file))
+            .collect();
         self
     }
 
@@ -1916,6 +1937,12 @@ mod tests {
             .with_files(vec![file])
     }
 
+    fn new_test_file(file_id: store_api::storage::FileId) -> FileHandle {
+        let mut meta = crate::sst::file::FileMeta::default();
+        meta.file_id = file_id;
+        FileHandle::new(meta, Arc::new(crate::sst::file_purger::NoopFilePurger))
+    }
+
     #[tokio::test]
     async fn test_build_read_column_ids_includes_filters() {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
@@ -2120,6 +2147,27 @@ mod tests {
         // No files to read.
         let no_files = new_scan_input(metadata, filters).await.with_files(vec![]);
         assert!(build_scan_fingerprint(&no_files).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_scan_input_excludes_file_ordinals_only_from_ssts() {
+        use store_api::storage::FileId;
+
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let input = new_scan_input(metadata, vec![]).await.with_files(vec![
+            new_test_file(FileId::random()),
+            new_test_file(FileId::random()),
+            new_test_file(FileId::random()),
+        ]);
+
+        let remaining = input.clone().with_excluded_file_ordinals(&[1]);
+
+        assert_eq!(input.num_memtables(), remaining.num_memtables());
+        assert_eq!(remaining.num_files(), 2);
+        assert_eq!(
+            remaining.file_ids(),
+            vec![input.file_ids()[0], input.file_ids()[2]]
+        );
     }
 
     #[tokio::test]

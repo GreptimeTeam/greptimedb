@@ -304,6 +304,32 @@ impl RegionScanExec {
         })
     }
 
+    pub fn with_excluded_file_ordinals(
+        &self,
+        excluded_file_ordinals: Vec<usize>,
+    ) -> Result<Self, BoxedError> {
+        {
+            let mut scanner = self.scanner.lock().unwrap();
+            scanner.prepare(
+                PrepareRequest::default().with_excluded_file_ordinals(excluded_file_ordinals),
+            )?;
+        }
+
+        Ok(Self {
+            scanner: self.scanner.clone(),
+            arrow_schema: self.arrow_schema.clone(),
+            output_ordering: self.output_ordering.clone(),
+            metric: self.metric.clone(),
+            properties: self.properties.clone(),
+            append_mode: self.append_mode,
+            total_rows: self.total_rows,
+            is_partition_set: self.is_partition_set,
+            distribution: self.distribution,
+            explain_verbose: self.explain_verbose,
+            query_memory_permit: self.query_memory_permit.clone(),
+        })
+    }
+
     pub fn distribution(&self) -> Option<TimeSeriesDistribution> {
         self.distribution
     }

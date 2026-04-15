@@ -76,6 +76,53 @@ pub(super) type FieldCountFileSplit = FileSplit<usize>;
 pub(super) type TimeFileSplit = FileSplit<TimeBounds>;
 pub(super) type FieldMinMaxFileSplit = FileSplit<ValueBounds>;
 
+fn stats_file_ordinals(aggregate: &StatsAgg, scan_input_stats: &RegionScanStats) -> Vec<usize> {
+    match aggregate {
+        StatsAgg::CountStar => split_count_star_files(scan_input_stats).stats_file_ordinals,
+        StatsAgg::CountField { column_name, .. } => {
+            split_count_field_files(scan_input_stats, column_name).stats_file_ordinals
+        }
+        StatsAgg::CountTimeIndex { .. }
+        | StatsAgg::MinTimeIndex { .. }
+        | StatsAgg::MaxTimeIndex { .. } => split_time_files(scan_input_stats).stats_file_ordinals,
+        StatsAgg::MinField { column_name, .. } | StatsAgg::MaxField { column_name, .. } => {
+            split_min_max_field_files(scan_input_stats, column_name).stats_file_ordinals
+        }
+    }
+}
+
+/// Returns file ordinals that every aggregate in the list can answer from stats.
+#[allow(dead_code)]
+pub(super) fn common_stats_file_ordinals(
+    aggregates: &[StatsAgg],
+    scan_input_stats: &RegionScanStats,
+) -> Vec<usize> {
+    let Some(first) = aggregates.first() else {
+        return Vec::new();
+    };
+
+    let mut common = stats_file_ordinals(first, scan_input_stats)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for aggregate in &aggregates[1..] {
+        let ordinals = stats_file_ordinals(aggregate, scan_input_stats)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        common.retain(|ordinal| ordinals.contains(ordinal));
+    }
+
+    scan_input_stats
+        .files
+        .iter()
+        .filter_map(|file| {
+            common
+                .contains(&file.file_ordinal)
+                .then_some(file.file_ordinal)
+        })
+        .collect()
+}
+
 pub(super) trait StatsAggExt {
     fn has_stats_files(&self, scan_input_stats: &RegionScanStats) -> bool;
 }

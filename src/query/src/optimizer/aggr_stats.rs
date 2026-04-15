@@ -97,6 +97,9 @@ impl AggregateStats {
                     return Ok(Transformed::no(plan));
                 }
 
+                // Subtask 03 only adds the scan-side exclusion plumbing. The optimizer must not
+                // exclude stats-covered files until subtask 04 also materializes their
+                // stats-derived partial state and merges it back into the aggregate result.
                 Ok(Transformed::no(plan))
             })?
             .data;

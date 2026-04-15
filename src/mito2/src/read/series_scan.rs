@@ -310,6 +310,18 @@ impl SeriesScan {
 
         Ok(())
     }
+
+    fn rebuild_input(&mut self, input: ScanInput) {
+        // IMPORTANT: `SeriesScan` keeps extra runtime state (`receivers`) on top of the shared
+        // `StreamContext`/`Pruner` pair. Once the file set changes, all of them must be reset
+        // together so the distributor does not keep using channels from the old partition layout.
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
+        self.properties.partitions = vec![stream_ctx.partition_ranges()];
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        self.pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
+        self.stream_ctx = stream_ctx;
+        self.receivers = Mutex::new(Vec::new());
+    }
 }
 
 fn new_channel_list(num_partitions: usize) -> (SenderList, ReceiverList) {
@@ -350,6 +362,19 @@ impl RegionScanner for SeriesScan {
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        request.validate()?;
+
+        if let Some(excluded_file_ordinals) = request.excluded_file_ordinals.clone() {
+            // IMPORTANT: exclusion is effectively a new scan input for `SeriesScan`, so rebuild
+            // before applying the remaining prepare options.
+            let input = self
+                .stream_ctx
+                .input
+                .clone()
+                .with_excluded_file_ordinals(&excluded_file_ordinals);
+            self.rebuild_input(input);
+        }
+
         self.properties.prepare(request);
 
         self.check_scan_limit().map_err(BoxedError::new)?;

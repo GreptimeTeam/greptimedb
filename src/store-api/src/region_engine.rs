@@ -22,7 +22,8 @@ use std::sync::{Arc, Mutex};
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use common_recordbatch::{EmptyRecordBatchStream, MemoryPermit, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -388,6 +389,13 @@ pub struct PrepareRequest {
     pub distinguish_partition_range: Option<bool>,
     /// The expected number of target partitions.
     pub target_partitions: Option<usize>,
+    /// SST file ordinals to exclude from the current scan input.
+    ///
+    /// IMPORTANT: this is not a lightweight property toggle. Scanner implementations
+    /// may need to rebuild their `ScanInput`-derived runtime state (`StreamContext`,
+    /// `Pruner`, partition ranges, and similar caches) before applying other prepare
+    /// settings.
+    pub excluded_file_ordinals: Option<Vec<usize>>,
 }
 
 impl PrepareRequest {
@@ -407,6 +415,24 @@ impl PrepareRequest {
     pub fn with_target_partitions(mut self, target_partitions: usize) -> Self {
         self.target_partitions = Some(target_partitions);
         self
+    }
+
+    /// Sets SST file ordinals to exclude from the current scan input.
+    pub fn with_excluded_file_ordinals(mut self, excluded_file_ordinals: Vec<usize>) -> Self {
+        self.excluded_file_ordinals = Some(excluded_file_ordinals);
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), BoxedError> {
+        if self.ranges.is_some() && self.excluded_file_ordinals.is_some() {
+            return Err(BoxedError::new(PlainError::new(
+                "PrepareRequest does not allow mixing ranges with excluded_file_ordinals"
+                    .to_string(),
+                StatusCode::InvalidArguments,
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -433,9 +459,11 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Returns the metadata of the region.
     fn metadata(&self) -> RegionMetadataRef;
 
-    /// Prepares the scanner with the given partition ranges.
+    /// Prepares the scanner with planner-side overrides.
     ///
-    /// This method is for the planner to adjust the scanner's behavior based on the partition ranges.
+    /// IMPORTANT: some requests only tweak properties, but others (such as
+    /// `excluded_file_ordinals`) require the scanner to rebuild any runtime state derived
+    /// from the current `ScanInput` before applying the rest of the request.
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError>;
 
     /// Scans the partition and returns a stream of record batches.
@@ -473,6 +501,32 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 pub type RegionScannerRef = Box<dyn RegionScanner>;
 
 pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
+
+#[cfg(test)]
+mod tests {
+    use common_time::Timestamp;
+
+    use super::{PartitionRange, PrepareRequest};
+
+    #[test]
+    fn test_prepare_request_rejects_ranges_and_excluded_file_ordinals_together() {
+        let err = PrepareRequest::default()
+            .with_ranges(vec![vec![PartitionRange {
+                start: Timestamp::new_millisecond(0),
+                end: Timestamp::new_millisecond(1),
+                num_rows: 1,
+                identifier: 0,
+            }]])
+            .with_excluded_file_ordinals(vec![1])
+            .validate()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("does not allow mixing ranges with excluded_file_ordinals")
+        );
+    }
+}
 
 /// Represents the statistics of a region.
 #[derive(Debug, Deserialize, Serialize, Default)]

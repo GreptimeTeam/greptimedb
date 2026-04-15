@@ -452,6 +452,16 @@ impl UnorderedScan {
         };
         Ok(Box::pin(stream))
     }
+
+    fn rebuild_input(&mut self, input: ScanInput) {
+        // IMPORTANT: file exclusion changes the range layout seen by this scanner, so the
+        // `StreamContext`, partition ranges, and `Pruner` must be rebuilt as one snapshot.
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        self.properties.partitions = vec![stream_ctx.partition_ranges()];
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        self.pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
+        self.stream_ctx = stream_ctx;
+    }
 }
 
 impl RegionScanner for UnorderedScan {
@@ -472,6 +482,19 @@ impl RegionScanner for UnorderedScan {
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        request.validate()?;
+
+        if let Some(excluded_file_ordinals) = request.excluded_file_ordinals.clone() {
+            // IMPORTANT: rebuild first so later property updates apply to the new input shape,
+            // not the stale one.
+            let input = self
+                .stream_ctx
+                .input
+                .clone()
+                .with_excluded_file_ordinals(&excluded_file_ordinals);
+            self.rebuild_input(input);
+        }
+
         self.properties.prepare(request);
 
         Ok(())
