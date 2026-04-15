@@ -1068,10 +1068,10 @@ impl ScanInput {
     pub async fn prune_file(
         &self,
         file: &FileHandle,
+        pre_filter_mode: PreFilterMode,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
-        let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
         let decode_pk_values = !self.compaction && self.mapper.has_tags();
         let reader = self
             .access_layer
@@ -1092,7 +1092,7 @@ impl ScanInput {
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .compaction(self.compaction)
-            .pre_filter_mode(filter_mode)
+            .pre_filter_mode(pre_filter_mode)
             .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)
             .await;
@@ -1253,6 +1253,16 @@ impl ScanInput {
 
     pub fn region_metadata(&self) -> &RegionMetadataRef {
         self.mapper.metadata()
+    }
+
+    fn range_pre_filter_mode(&self, source_count: usize) -> PreFilterMode {
+        if source_count <= 1 {
+            return PreFilterMode::All;
+        }
+
+        match self.merge_mode {
+            MergeMode::LastRow | MergeMode::LastNonNull => PreFilterMode::SkipFields,
+        }
     }
 }
 
@@ -1455,6 +1465,13 @@ impl StreamContext {
     pub(crate) fn is_file_range_index(&self, index: RowGroupIndex) -> bool {
         !self.is_mem_range_index(index)
             && index.index < self.input.num_files() + self.input.num_memtables()
+    }
+
+    pub(crate) fn range_pre_filter_mode(&self, part_range: &PartitionRange) -> PreFilterMode {
+        let range_meta = &self.ranges[part_range.identifier];
+        let source_count = range_meta.indices.len();
+
+        self.input.range_pre_filter_mode(source_count)
     }
 
     /// Retrieves the partition ranges.
@@ -1748,6 +1765,7 @@ impl PredicateGroup {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::sync::Arc;
 
     use datafusion::physical_plan::expressions::lit as physical_lit;
@@ -2020,5 +2038,25 @@ mod tests {
         let predicate_without_region = predicate_group.predicate_without_region().unwrap();
         assert!(predicate_without_region.exprs().is_empty());
         assert_eq!(1, predicate_without_region.dyn_filters().len());
+    }
+
+    #[tokio::test]
+    async fn test_range_pre_filter_mode() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let cases = [
+            (true, MergeMode::LastRow, 1, PreFilterMode::All),
+            (false, MergeMode::LastNonNull, 1, PreFilterMode::All),
+            (false, MergeMode::LastRow, 2, PreFilterMode::SkipFields),
+            (true, MergeMode::LastRow, 2, PreFilterMode::SkipFields),
+        ];
+
+        for (append_mode, merge_mode, source_count, expected_mode) in cases {
+            let input = new_scan_input(metadata.clone(), vec![])
+                .await
+                .with_append_mode(append_mode)
+                .with_merge_mode(merge_mode);
+
+            assert_eq!(expected_mode, input.range_pre_filter_mode(source_count));
+        }
     }
 }
