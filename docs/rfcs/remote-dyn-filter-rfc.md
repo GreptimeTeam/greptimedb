@@ -79,6 +79,12 @@ The registry lifecycle has three states:
 
 The registry may outlive the main query execution briefly for cleanup, but it is not intended to be a long-lived global object.
 
+## Propagation policy
+
+Remote dynamic filters should remain a selective optimization, not an automatic fanout for every filter update.
+
+The frontend may skip remote propagation when the encoded filter becomes too large, fanout cost is too high, or the expected pruning benefit is too small. In those cases, execution should continue with local-only dynamic filtering semantics.
+
 ## Responsibilities
 
 On the frontend:
@@ -124,8 +130,7 @@ Rejected for now because it is heavier than necessary. A query-engine runtime ma
 
 # Unresolved questions
 
-1. What is the exact policy for updates that arrive before scan registration?
-2. Should children fingerprint canonicalization become a shared helper?
-3. What is the strict timing relationship between `is_complete` and final unregister?
-4. Does the runtime map need a background sweep task, or is explicit reap enough?
-5. How should large build-side membership evolve beyond `IN` in later work?
+1. Should children fingerprint canonicalization become a shared helper?
+2. What is the strict timing relationship between `is_complete` and final unregister?
+3. Does the runtime map need a background sweep task, or is explicit reap enough?
+4. How should large build-side membership evolve beyond `IN` in later work?
