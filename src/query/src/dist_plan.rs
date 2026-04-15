@@ -14,6 +14,7 @@
 
 mod analyzer;
 mod commutativity;
+mod filter_id;
 mod merge_scan;
 mod merge_sort;
 mod planner;
@@ -22,6 +23,7 @@ mod region_pruner;
 mod remote_dyn_filter_registry;
 
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
+pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
 pub use predicate_extractor::PredicateExtractor;

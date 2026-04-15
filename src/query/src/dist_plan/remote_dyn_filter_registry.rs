@@ -18,7 +18,10 @@ use std::sync::{Arc, RwLock};
 
 use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
+use session::query_id::QueryId;
 use store_api::storage::RegionId;
+
+use crate::dist_plan::FilterId;
 
 /// Lifecycle state for a query-scoped remote dynamic filter registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +75,7 @@ pub enum SubscriberRegistration {
 // the real watcher/fanout loop lands. Some fields may move to query-level shared runtime state.
 #[derive(Debug)]
 pub struct DynFilterEntry {
-    filter_id: String,
+    filter_id: FilterId,
     alive_dyn_filter: Arc<DynamicFilterPhysicalExpr>,
     last_epoch: AtomicU64,
     last_observed_generation: AtomicU64,
@@ -86,20 +89,17 @@ pub struct DynFilterEntry {
 #[derive(Debug)]
 struct QueryDynFilterRegistryInner {
     state: RegistryState,
-    entries: HashMap<String, Arc<DynFilterEntry>>,
+    entries: HashMap<FilterId, Arc<DynFilterEntry>>,
 }
 
 impl DynFilterEntry {
-    pub fn new(
-        filter_id: impl Into<String>,
-        alive_dyn_filter: Arc<DynamicFilterPhysicalExpr>,
-    ) -> Self {
+    pub fn new(filter_id: FilterId, alive_dyn_filter: Arc<DynamicFilterPhysicalExpr>) -> Self {
         // TODO(remote-dyn-filter): When real watcher/update scheduling lands, confirm that seeding
         // the observed generation here is still the right initialization point.
         let last_observed_generation = alive_dyn_filter.snapshot_generation();
 
         Self {
-            filter_id: filter_id.into(),
+            filter_id,
             alive_dyn_filter,
             last_epoch: AtomicU64::new(0),
             last_observed_generation: AtomicU64::new(last_observed_generation),
@@ -108,7 +108,7 @@ impl DynFilterEntry {
         }
     }
 
-    pub fn filter_id(&self) -> &str {
+    pub fn filter_id(&self) -> &FilterId {
         &self.filter_id
     }
 
@@ -174,14 +174,14 @@ impl DynFilterEntry {
 /// Query-scoped registry that owns all remote dynamic filters for one query.
 #[derive(Debug)]
 pub struct QueryDynFilterRegistry {
-    query_id: String,
+    query_id: QueryId,
     inner: RwLock<QueryDynFilterRegistryInner>,
 }
 
 impl QueryDynFilterRegistry {
-    pub fn new(query_id: impl Into<String>) -> Self {
+    pub fn new(query_id: QueryId) -> Self {
         Self {
-            query_id: query_id.into(),
+            query_id,
             inner: RwLock::new(QueryDynFilterRegistryInner {
                 state: RegistryState::Active,
                 entries: HashMap::new(),
@@ -189,8 +189,8 @@ impl QueryDynFilterRegistry {
         }
     }
 
-    pub fn query_id(&self) -> &str {
-        &self.query_id
+    pub fn query_id(&self) -> QueryId {
+        self.query_id
     }
 
     pub fn state(&self) -> RegistryState {
@@ -211,13 +211,13 @@ impl QueryDynFilterRegistry {
             .collect()
     }
 
-    pub fn remote_dyn_filter(&self, filter_id: &str) -> Option<Arc<DynFilterEntry>> {
+    pub fn remote_dyn_filter(&self, filter_id: &FilterId) -> Option<Arc<DynFilterEntry>> {
         self.inner.read().unwrap().entries.get(filter_id).cloned()
     }
 
     pub fn register_remote_dyn_filter(
         &self,
-        filter_id: impl Into<String>,
+        filter_id: FilterId,
         alive_dyn_filter: Arc<DynamicFilterPhysicalExpr>,
     ) -> EntryRegistration {
         // TODO(remote-dyn-filter): Subtask 05 should call this from the MergeScan bridge after it
@@ -227,7 +227,6 @@ impl QueryDynFilterRegistry {
             return EntryRegistration::RejectedByState(inner.state);
         }
 
-        let filter_id = filter_id.into();
         if let Some(existing) = inner.entries.get(&filter_id) {
             return EntryRegistration::Existing(existing.clone());
         }
@@ -239,7 +238,7 @@ impl QueryDynFilterRegistry {
 
     pub fn register_subscriber(
         &self,
-        filter_id: &str,
+        filter_id: &FilterId,
         subscriber: Subscriber,
     ) -> SubscriberRegistration {
         // TODO(remote-dyn-filter): Later subtasks should route remote subscriber metadata into
@@ -301,27 +300,26 @@ impl QueryDynFilterRegistry {
 /// Query-engine manager for query-scoped remote dynamic filter registries.
 #[derive(Debug, Default)]
 pub struct DynFilterRegistryManager {
-    registries: RwLock<HashMap<String, Arc<QueryDynFilterRegistry>>>,
+    registries: RwLock<HashMap<QueryId, Arc<QueryDynFilterRegistry>>>,
 }
 
 impl DynFilterRegistryManager {
-    pub fn get(&self, query_id: &str) -> Option<Arc<QueryDynFilterRegistry>> {
+    pub fn get(&self, query_id: &QueryId) -> Option<Arc<QueryDynFilterRegistry>> {
         self.registries.read().unwrap().get(query_id).cloned()
     }
 
-    pub fn get_or_init(&self, query_id: impl Into<String>) -> Arc<QueryDynFilterRegistry> {
+    pub fn get_or_init(&self, query_id: QueryId) -> Arc<QueryDynFilterRegistry> {
         // TODO(remote-dyn-filter): Subtask 04 should wire query-engine runtime ownership through
         // this entry point so query_id-scoped registries live with distributed query execution.
-        let query_id = query_id.into();
         let mut registries = self.registries.write().unwrap();
 
         registries
-            .entry(query_id.clone())
+            .entry(query_id)
             .or_insert_with(|| Arc::new(QueryDynFilterRegistry::new(query_id)))
             .clone()
     }
 
-    pub fn begin_closing(&self, query_id: &str) -> Option<Arc<QueryDynFilterRegistry>> {
+    pub fn begin_closing(&self, query_id: &QueryId) -> Option<Arc<QueryDynFilterRegistry>> {
         // TODO(remote-dyn-filter): Query finish/cancel hooks should call this to start the cleanup
         // tail, not remove the registry immediately.
         let registry = self.get(query_id)?;
@@ -329,7 +327,7 @@ impl DynFilterRegistryManager {
         Some(registry)
     }
 
-    pub fn reap_closed(&self, query_id: &str) -> bool {
+    pub fn reap_closed(&self, query_id: &QueryId) -> bool {
         // TODO(remote-dyn-filter): Cleanup code should call this only after mark_closed(). If a
         // later implementation needs a retained closed-tail window, expand here instead of adding
         // ad-hoc removal at call sites.
@@ -353,8 +351,18 @@ impl DynFilterRegistryManager {
 #[cfg(test)]
 mod tests {
     use datafusion_physical_expr::expressions::{Column, lit};
+    use uuid::Uuid;
 
     use super::*;
+    use crate::dist_plan::FilterFingerprint;
+
+    fn test_query_id(value: u128) -> QueryId {
+        QueryId::from(Uuid::from_u128(value))
+    }
+
+    fn test_filter_id(region_id: RegionId, producer_ordinal: u32) -> FilterId {
+        FilterId::new(region_id, producer_ordinal, FilterFingerprint::new(0xabc))
+    }
 
     fn test_dyn_filter(names: &[&str]) -> Arc<DynamicFilterPhysicalExpr> {
         let children = names
@@ -369,8 +377,9 @@ mod tests {
     #[test]
     fn registry_manager_returns_same_registry_for_same_query() {
         let manager = DynFilterRegistryManager::default();
-        let first = manager.get_or_init("query-1");
-        let second = manager.get_or_init("query-1");
+        let query_id = test_query_id(1);
+        let first = manager.get_or_init(query_id);
+        let second = manager.get_or_init(query_id);
 
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(manager.registry_count(), 1);
@@ -378,14 +387,15 @@ mod tests {
 
     #[test]
     fn registry_stores_filter_and_deduplicates_subscribers() {
-        let registry = QueryDynFilterRegistry::new("query-1");
+        let registry = QueryDynFilterRegistry::new(test_query_id(1));
         let filter = test_dyn_filter(&["host"]);
-        let entry = match registry.register_remote_dyn_filter("filter-1", filter.clone()) {
+        let filter_id = test_filter_id(RegionId::new(1024, 7), 1);
+        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
             EntryRegistration::Inserted(entry) => entry,
             other => panic!("unexpected registration result: {other:?}"),
         };
 
-        assert_eq!(entry.filter_id(), "filter-1");
+        assert_eq!(entry.filter_id(), &filter_id);
         assert_eq!(
             entry.last_observed_generation(),
             filter.snapshot_generation()
@@ -394,11 +404,11 @@ mod tests {
 
         let subscriber = Subscriber::new(RegionId::new(1024, 1));
         assert_eq!(
-            registry.register_subscriber("filter-1", subscriber.clone()),
+            registry.register_subscriber(&filter_id, subscriber.clone()),
             SubscriberRegistration::Added
         );
         assert_eq!(
-            registry.register_subscriber("filter-1", subscriber),
+            registry.register_subscriber(&filter_id, subscriber),
             SubscriberRegistration::Duplicate
         );
         assert_eq!(entry.subscribers().len(), 1);
@@ -406,15 +416,16 @@ mod tests {
 
     #[test]
     fn registry_lifecycle_rejects_new_work_after_closing() {
-        let registry = QueryDynFilterRegistry::new("query-1");
+        let registry = QueryDynFilterRegistry::new(test_query_id(1));
 
         assert_eq!(registry.state(), RegistryState::Active);
         assert_eq!(registry.begin_closing(), RegistryState::Closing);
         assert_eq!(registry.state(), RegistryState::Closing);
 
         let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(RegionId::new(1024, 7), 1);
         assert!(matches!(
-            registry.register_remote_dyn_filter("filter-1", filter),
+            registry.register_remote_dyn_filter(filter_id, filter),
             EntryRegistration::RejectedByState(RegistryState::Closing)
         ));
 
@@ -424,7 +435,10 @@ mod tests {
 
     #[test]
     fn registered_filter_starts_watcher_once() {
-        let entry = DynFilterEntry::new("filter-1", test_dyn_filter(&["host"]));
+        let entry = DynFilterEntry::new(
+            test_filter_id(RegionId::new(1024, 7), 1),
+            test_dyn_filter(&["host"]),
+        );
 
         assert!(entry.start_watcher_if_needed());
         assert!(entry.watcher_started());
@@ -437,13 +451,17 @@ mod tests {
     #[test]
     fn manager_reaps_closed_registry() {
         let manager = DynFilterRegistryManager::default();
-        let registry = manager.get_or_init("query-1");
-        let _ = registry.register_remote_dyn_filter("filter-1", test_dyn_filter(&["host"]));
+        let query_id = test_query_id(1);
+        let registry = manager.get_or_init(query_id);
+        let _ = registry.register_remote_dyn_filter(
+            test_filter_id(RegionId::new(1024, 7), 1),
+            test_dyn_filter(&["host"]),
+        );
 
         registry.mark_closed();
 
-        assert!(manager.reap_closed("query-1"));
+        assert!(manager.reap_closed(&query_id));
         assert_eq!(manager.registry_count(), 0);
-        assert!(manager.get("query-1").is_none());
+        assert!(manager.get(&query_id).is_none());
     }
 }
