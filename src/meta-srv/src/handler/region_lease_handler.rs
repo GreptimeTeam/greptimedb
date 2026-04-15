@@ -281,7 +281,7 @@ mod test {
 
         let opening_region_id = RegionId::new(table_id, region_number + 2);
         let _guard = opening_region_keeper
-            .register(follower_peer.id, opening_region_id)
+            .register_with_role(follower_peer.id, opening_region_id, RegionRole::Follower)
             .unwrap();
 
         let acc = &mut HeartbeatAccumulator::default();
