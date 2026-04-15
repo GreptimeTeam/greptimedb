@@ -241,6 +241,8 @@ pub(crate) fn build_bulk_filter_plan(
     predicate: Option<&Predicate>,
 ) -> BulkFilterPlan {
     let metadata = read_format.metadata();
+    // Bulk memtable only needs simple binary filters here. Any filter that
+    // cannot be reduced to a SimpleFilterContext stays out of this fast path.
     let simple_filters: Vec<SimpleFilterContext> = predicate
         .into_iter()
         .flat_map(|predicate| {
@@ -251,6 +253,9 @@ pub(crate) fn build_bulk_filter_plan(
         })
         .collect();
 
+    // PK prefilter only works when flat batches still carry the encoded PK
+    // column. If tags have already been expanded to raw columns, the iterator
+    // can apply those filters directly and there is nothing to extract here.
     if read_format.batch_has_raw_pk_columns() || metadata.primary_key.is_empty() {
         return BulkFilterPlan {
             remaining_simple_filters: simple_filters,
@@ -262,6 +267,8 @@ pub(crate) fn build_bulk_filter_plan(
     let mut pk_filters = Vec::new();
 
     for filter_ctx in simple_filters {
+        // Split tag predicates that can be evaluated against the encoded PK
+        // from filters that still need normal row-wise evaluation later.
         let pk_filter = filter_ctx.filter().as_filter().and_then(|filter| {
             is_usable_primary_key_filter(metadata, None, filter).then(|| filter.clone())
         });
@@ -301,10 +308,17 @@ pub(crate) fn build_reader_filter_plan(
     let mut prefilter_physical_filters = Vec::new();
     let mut primary_key_filters = Vec::new();
 
+    // `SkipFields` keeps field predicates in the normal read path to avoid a
+    // second read of projected field columns, while tags/timestamp can still
+    // participate in prefiltering.
     let field_prefilter_enabled = pre_filter_mode == PreFilterMode::All;
+    // PK prefilter requires the encoded primary key column to remain available
+    // in the flat-format batch.
     let supports_pk_prefilter = !read_format.batch_has_raw_pk_columns();
 
     for expr in predicate.exprs() {
+        // Prefer cheap simple filters first. They also preserve `Matched` /
+        // `Pruned` states for columns that only exist in expected metadata.
         if let Some(filter) = SimpleFilterContext::new_opt(metadata, expected_metadata, expr) {
             simple_filters.push(filter);
             continue;
@@ -313,6 +327,9 @@ pub(crate) fn build_reader_filter_plan(
         if let Some(filter) =
             PhysicalFilterContext::new_opt(metadata, expected_metadata, read_format, expr)
         {
+            // Physical filters are only worth running in prefilter if the
+            // needed column is available in the reduced projection and the
+            // mode allows this column class.
             let usable_prefilter = (field_prefilter_enabled
                 || filter.semantic_type() != SemanticType::Field)
                 && read_format
@@ -326,11 +343,16 @@ pub(crate) fn build_reader_filter_plan(
     }
 
     for filter_ctx in simple_filters.iter().cloned() {
+        // `Matched` and `Pruned` come from expected-metadata compatibility and
+        // must stay in the main filter list so later phases keep that outcome.
         let Some(filter) = filter_ctx.filter().as_filter() else {
             remaining_simple_filters.push(filter_ctx);
             continue;
         };
 
+        // If the column is already projected in the main read, we can evaluate
+        // the simple filter directly during prefilter without falling back to
+        // PK decoding.
         let direct_prefilter = (field_prefilter_enabled
             || filter_ctx.semantic_type() != SemanticType::Field)
             && read_format
@@ -342,6 +364,9 @@ pub(crate) fn build_reader_filter_plan(
             continue;
         }
 
+        // Otherwise try to recover tag predicates through encoded-PK matching.
+        // These filters are still added to the prefilter phase so they can
+        // contribute to the refined row selection there.
         let pk_prefilter = supports_pk_prefilter
             && is_usable_primary_key_filter(metadata, expected_metadata, filter);
         if pk_prefilter {
@@ -369,6 +394,8 @@ pub(crate) fn build_reader_filter_plan(
             prefilter_builder,
         }
     } else {
+        // If prefilter setup is not worthwhile, keep the original simple
+        // filters on the normal path so behavior is unchanged.
         ReaderFilterPlan {
             remaining_simple_filters: simple_filters,
             prefilter_builder: None,
