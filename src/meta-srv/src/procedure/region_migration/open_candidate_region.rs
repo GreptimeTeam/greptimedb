@@ -297,7 +297,7 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
         let opening_region_keeper = env.opening_region_keeper();
         let _guard = opening_region_keeper
-            .register(to_peer_id, region_id)
+            .register_with_role(to_peer_id, region_id, RegionRole::Follower)
             .unwrap();
 
         let open_instruction = new_mock_open_instruction(to_peer_id, region_id);

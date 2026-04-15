@@ -376,12 +376,16 @@ mod tests {
         let opening_region_id = RegionId::new(1025, 1);
         let _guard = keeper
             .memory_region_keeper
-            .register(leader_peer_id, opening_region_id)
+            .register_with_role(leader_peer_id, opening_region_id, RegionRole::Leader)
             .unwrap();
         let another_opening_region_id = RegionId::new(1025, 2);
         let _guard2 = keeper
             .memory_region_keeper
-            .register(follower_peer_id, another_opening_region_id)
+            .register_with_role(
+                follower_peer_id,
+                another_opening_region_id,
+                RegionRole::Follower,
+            )
             .unwrap();
 
         let (metadata, regions) = keeper
@@ -481,7 +485,7 @@ mod tests {
         let opening_region_id = RegionId::new(2048, 1);
         let _guard = keeper
             .memory_region_keeper
-            .register(leader_peer_id, opening_region_id)
+            .register_with_role(leader_peer_id, opening_region_id, RegionRole::Leader)
             .unwrap();
 
         // The opening region on the datanode.
@@ -683,7 +687,7 @@ mod tests {
 
         let _guard = keeper
             .memory_region_keeper
-            .register(datanode_id, region_id)
+            .register_with_role(datanode_id, region_id, RegionRole::Leader)
             .unwrap();
 
         let RenewRegionLeasesResponse {

@@ -60,15 +60,6 @@ impl MemoryRegionKeeper {
     }
 
     /// Returns [OperatingRegionGuard] if Region(`region_id`) on Peer(`datanode_id`) does not exist.
-    pub fn register(
-        &self,
-        datanode_id: DatanodeId,
-        region_id: RegionId,
-    ) -> Option<OperatingRegionGuard> {
-        self.register_with_role(datanode_id, region_id, RegionRole::Leader)
-    }
-
-    /// Returns [OperatingRegionGuard] if Region(`region_id`) on Peer(`datanode_id`) does not exist.
     pub fn register_with_role(
         &self,
         datanode_id: DatanodeId,
@@ -159,8 +150,14 @@ mod tests {
     fn test_opening_region_keeper() {
         let keeper = MemoryRegionKeeper::new();
 
-        let guard = keeper.register(1, RegionId::from_u64(1)).unwrap();
-        assert!(keeper.register(1, RegionId::from_u64(1)).is_none());
+        let guard = keeper
+            .register_with_role(1, RegionId::from_u64(1), RegionRole::Leader)
+            .unwrap();
+        assert!(
+            keeper
+                .register_with_role(1, RegionId::from_u64(1), RegionRole::Leader)
+                .is_none()
+        );
         let guard2 = keeper
             .register_with_role(1, RegionId::from_u64(2), RegionRole::Follower)
             .unwrap();
