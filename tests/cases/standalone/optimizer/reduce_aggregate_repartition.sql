@@ -58,6 +58,33 @@ FROM (
 ) s
 GROUP BY b, a;
 
+-- Another grouped SQL reduction case to keep the rule coverage centered on SQL,
+-- not just TQL/PromQL planning.
+SELECT a, count(m)
+FROM (
+  SELECT a, b, c, min(val) AS m
+  FROM reduce_aggregate_repartition
+  GROUP BY a, b, c
+) s
+GROUP BY a
+ORDER BY a;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE
+SELECT a, count(m)
+FROM (
+  SELECT a, b, c, min(val) AS m
+  FROM reduce_aggregate_repartition
+  GROUP BY a, b, c
+) s
+GROUP BY a;
+
 -- Zero-key reduction should rewrite SinglePartitioned to Single.
 SELECT sum(m)
 FROM (
@@ -120,3 +147,44 @@ FROM reduce_aggregate_repartition_non_subset
 GROUP BY b;
 
 DROP TABLE reduce_aggregate_repartition_non_subset;
+
+CREATE TABLE reduce_aggregate_repartition_metric (
+  ts TIMESTAMP(3) TIME INDEX,
+  job STRING,
+  instance STRING,
+  greptime_value DOUBLE,
+  PRIMARY KEY(job, instance),
+);
+
+INSERT INTO reduce_aggregate_repartition_metric VALUES
+  (0, 'job1', 'instance1', 1),
+  (0, 'job1', 'instance2', 2),
+  (0, 'job2', 'instance1', 3),
+  (5000, 'job1', 'instance1', 4),
+  (5000, 'job1', 'instance2', 5),
+  (5000, 'job2', 'instance1', 6),
+  (10000, 'job1', 'instance1', 7),
+  (10000, 'job1', 'instance2', 8),
+  (10000, 'job2', 'instance1', 9);
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+TQL ANALYZE (0, 10, '5s')
+count(count(reduce_aggregate_repartition_metric) by (job));
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+TQL ANALYZE (0, 10, '5s')
+count(count(rate(reduce_aggregate_repartition_metric[5s])) by (job));
+
+DROP TABLE reduce_aggregate_repartition_metric;
