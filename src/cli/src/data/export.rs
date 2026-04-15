@@ -1084,7 +1084,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_export_command_build_with_azblob_empty_account_name() {
-        // Test Azure Blob with empty account_name
+        // account_name is optional for Azure Blob validation
         let cmd = ExportCommand::parse_from([
             "export",
             "--addr",
@@ -1092,30 +1092,19 @@ mod tests {
             "--azblob",
             "--azblob-container",
             "test-container",
-            "--azblob-root",
-            "test-root",
             "--azblob-account-name",
             "", // Empty account name
-            "--azblob-account-key",
-            MOCK_AZBLOB_ACCOUNT_KEY_B64,
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
         ]);
 
         let result = cmd.build().await;
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert!(
-                err.to_string().contains("AzBlob account name must be set"),
-                "Actual error: {}",
-                err
-            );
-        }
+        assert!(result.is_ok(), "Empty account_name should succeed");
     }
 
     #[tokio::test]
     async fn test_export_command_build_with_azblob_missing_account_key() {
-        // Missing account key
+        // account_key is optional for Azure Blob validation
         let cmd = ExportCommand::parse_from([
             "export",
             "--addr",
@@ -1123,24 +1112,12 @@ mod tests {
             "--azblob",
             "--azblob-container",
             "test-container",
-            "--azblob-root",
-            "test-root",
-            "--azblob-account-name",
-            "test-account",
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
         ]);
 
         let result = cmd.build().await;
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert!(
-                err.to_string()
-                    .contains("AzBlob account key (when sas_token is not provided) must be set"),
-                "Actual error: {}",
-                err
-            );
-        }
+        assert!(result.is_ok(), "Missing account_key should succeed");
     }
 
     // ==================== Gap 3: Boundary cases ====================
@@ -1238,19 +1215,56 @@ mod tests {
             "--azblob",
             "--azblob-container",
             "test-container",
-            "--azblob-root",
-            "test-root",
-            "--azblob-account-name",
-            "test-account",
-            "--azblob-account-key",
-            MOCK_AZBLOB_ACCOUNT_KEY_B64,
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
-            // No sas_token
         ]);
 
         let result = cmd.build().await;
         assert!(result.is_ok(), "Minimal AzBlob config should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_export_command_build_with_azblob_missing_endpoint() {
+        let cmd = ExportCommand::parse_from([
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            "--azblob",
+            "--azblob-container",
+            "test-container",
+        ]);
+
+        let result = cmd.build().await;
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(
+                err.to_string().contains("AzBlob endpoint must be set"),
+                "Actual error: {}",
+                err
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_export_command_build_with_azblob_missing_container() {
+        let cmd = ExportCommand::parse_from([
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            "--azblob",
+            "--azblob-endpoint",
+            "https://account.blob.core.windows.net",
+        ]);
+
+        let result = cmd.build().await;
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(
+                err.to_string().contains("AzBlob container must be set"),
+                "Actual error: {}",
+                err
+            );
+        }
     }
 
     #[tokio::test]
@@ -1287,7 +1301,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_export_command_build_with_azblob_only_sas_token() {
-        // Azure Blob with sas_token but no account_key - should succeed
+        // Azure Blob with sas_token but no credentials - should still succeed
         let cmd = ExportCommand::parse_from([
             "export",
             "--addr",
@@ -1295,15 +1309,10 @@ mod tests {
             "--azblob",
             "--azblob-container",
             "test-container",
-            "--azblob-root",
-            "test-root",
-            "--azblob-account-name",
-            "test-account",
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
             "--azblob-sas-token",
             "test-sas-token",
-            // No account_key
         ]);
 
         let result = cmd.build().await;
@@ -1324,10 +1333,6 @@ mod tests {
             "--azblob",
             "--azblob-container",
             "test-container",
-            "--azblob-root",
-            "test-root",
-            "--azblob-account-name",
-            "test-account",
             "--azblob-account-key",
             "", // Empty account_key is OK if sas_token is provided
             "--azblob-endpoint",
