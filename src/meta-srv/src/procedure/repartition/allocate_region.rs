@@ -261,10 +261,9 @@ impl AllocateRegion {
     ///
     /// This method converts allocation intents into concrete repartition plans,
     /// updates `next_region_number` for newly allocated regions, and captures
-    /// each plan's `original_target_routes` during build-plan creation.
+    /// each plan's `original_target_routes` from the current table-route view.
     ///
-    /// Capturing the rollback baseline here keeps the parent-owned recovery data
-    /// aligned with the plan itself instead of reconstructing it later.
+    /// This also persists each plan's pre-staging target routes for rollback.
     fn convert_to_repartition_plans(
         table_id: TableId,
         next_region_number: &mut RegionNumber,
@@ -294,9 +293,9 @@ impl AllocateRegion {
         plan: &mut RepartitionPlanEntry,
         region_routes_map: &HashMap<RegionId, &RegionRoute>,
     ) -> Result<()> {
-        // Persist the pre-staging target-route view on the parent plan so parent
-        // rollback can restore group metadata without depending on subprocedure
-        // runtime state.
+        // Persist the pre-staging target-route view on the parent plan.
+        // Newly allocated targets are skipped because rollback deletes their
+        // route metadata rather than restoring an original target route.
         let mut original_target_routes = Vec::with_capacity(plan.target_regions.len());
         for target in &plan.target_regions {
             if plan.allocated_region_ids.contains(&target.region_id) {

@@ -62,7 +62,7 @@ pub struct RepartitionPlanEntry {
     /// For each `source_regions[k]`, the corresponding vector contains global
     /// `target_regions` that overlap with it.
     pub transition_map: Vec<Vec<usize>>,
-    /// Original target routes captured before group staging starts.
+    /// Pre-staging target routes persisted for parent rollback and recovery.
     #[serde(default)]
     pub original_target_routes: Vec<RegionRoute>,
 }

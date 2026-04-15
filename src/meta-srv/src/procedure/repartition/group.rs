@@ -201,6 +201,7 @@ impl Procedure for RepartitionGroupProcedure {
     }
 
     async fn rollback(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<()> {
+        // Parent repartition owns rollback and recovery.
         Ok(())
     }
 

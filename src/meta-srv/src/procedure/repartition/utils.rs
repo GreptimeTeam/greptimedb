@@ -133,10 +133,9 @@ pub fn merge_and_validate_region_wal_options(
 /// - target-region write-route policies,
 /// - target-region leader staging flags.
 ///
-/// Allocated target regions may already be absent when parent rollback reaches
-/// logical metadata restoration. Those routes are skipped when their ids belong
-/// to `allocated_region_ids`; other missing targets are treated as metadata
-/// inconsistency and return an error.
+/// `original_target_routes` contains only pre-existing target routes.
+/// Newly allocated targets are removed by parent rollback instead of being
+/// restored here.
 pub fn rollback_group_metadata_routes(
     group_id: GroupId,
     source_regions: &[RegionDescriptor],
