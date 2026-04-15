@@ -672,19 +672,19 @@ impl LocalCompactionState {
     ///
     /// Returns true if this is the first time to mark commit started, false otherwise.
     pub(crate) fn mark_commit_started(&self) -> bool {
-        let commit_started = *self.commit_started.lock().unwrap();
-        if !commit_started {
-            *self.commit_started.lock().unwrap() = true;
-            return true;
+        let mut commit_started = self.commit_started.lock().unwrap();
+        if self.cancel_handle.is_cancelled() {
+            return false;
         }
-        false
+        *commit_started = true;
+        true
     }
 
     /// Request cancellation for this compaction task.
     pub(crate) fn request_cancel(&self) -> RequestCancelResult {
         // The cancel handle must under the lock of `commit_started` to avoid racing between cancellation and commit.
-        let commit_started = *self.commit_started.lock().unwrap();
-        if commit_started {
+        let commit_started = self.commit_started.lock().unwrap();
+        if *commit_started {
             return RequestCancelResult::TooLateToCancel;
         }
         if self.cancel_handle.is_cancelled() {
@@ -1786,11 +1786,10 @@ mod tests {
             RequestCancelResult::AlreadyCancelling
         );
 
-        assert!(state.mark_commit_started());
         assert!(!state.mark_commit_started());
         assert_eq!(
             status.request_cancel(),
-            RequestCancelResult::TooLateToCancel
+            RequestCancelResult::AlreadyCancelling
         );
 
         assert!(status.clear_running_task());
