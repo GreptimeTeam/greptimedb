@@ -48,6 +48,7 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
+use store_api::scan_stats::RegionScanStats;
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
@@ -313,6 +314,18 @@ impl RegionScanExec {
 
     pub fn total_rows(&self) -> usize {
         self.total_rows
+    }
+
+    pub fn has_predicate_without_region(&self) -> bool {
+        self.scanner.lock().unwrap().has_predicate_without_region()
+    }
+
+    pub fn scan_input_stats(&self) -> DfResult<Option<RegionScanStats>> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .scan_input_stats()
+            .map_err(|err| DataFusionError::External(err.into()))
     }
 
     pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {

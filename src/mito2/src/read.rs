@@ -28,6 +28,7 @@ pub(crate) mod prune;
 pub(crate) mod pruner;
 pub mod range;
 pub(crate) mod range_cache;
+pub(crate) mod scan_input_stats;
 pub mod scan_region;
 pub mod scan_util;
 pub(crate) mod seq_scan;

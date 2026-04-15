@@ -32,9 +32,11 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
 };
+use store_api::scan_stats::RegionScanStats;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::pruner::{PartitionPruner, Pruner};
+use crate::read::scan_input_stats::build_scan_input_stats;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, scan_file_ranges, scan_flat_file_ranges,
@@ -493,6 +495,14 @@ impl RegionScanner for UnorderedScan {
             .predicate_group()
             .predicate_without_region();
         predicate.is_some()
+    }
+
+    fn scan_input_stats(&self) -> Result<Option<RegionScanStats>, BoxedError> {
+        build_scan_input_stats(
+            &self.stream_ctx.input,
+            self.stream_ctx.input.mapper.metadata(),
+        )
+        .map(Some)
     }
 
     fn add_dyn_filter_to_predicate(

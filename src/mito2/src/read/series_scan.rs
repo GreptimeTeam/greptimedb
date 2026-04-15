@@ -36,6 +36,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
 };
+use store_api::scan_stats::RegionScanStats;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::error::{SendTimeoutError, TrySendError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -45,6 +46,7 @@ use crate::error::{
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
 use crate::read::pruner::{PartitionPruner, Pruner};
+use crate::read::scan_input_stats::build_scan_input_stats;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics};
 use crate::read::seq_scan::{SeqScan, build_flat_sources, build_sources};
@@ -362,6 +364,14 @@ impl RegionScanner for SeriesScan {
             .predicate_group()
             .predicate_without_region();
         predicate.is_some()
+    }
+
+    fn scan_input_stats(&self) -> Result<Option<RegionScanStats>, BoxedError> {
+        build_scan_input_stats(
+            &self.stream_ctx.input,
+            self.stream_ctx.input.mapper.metadata(),
+        )
+        .map(Some)
     }
 
     fn add_dyn_filter_to_predicate(

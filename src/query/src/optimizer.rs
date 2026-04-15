@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod aggregate_stats;
+pub mod aggr_stats;
 pub mod constant_term;
 pub mod count_wildcard;
 pub mod parallelize_scan;

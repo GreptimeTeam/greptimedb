@@ -59,7 +59,7 @@ use crate::dist_plan::{
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
-use crate::optimizer::aggregate_stats::AggregateStats;
+use crate::optimizer::aggr_stats::AggregateStats;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;

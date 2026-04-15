@@ -28,6 +28,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::min_max::max_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
@@ -289,6 +290,50 @@ fn create_avg_state_groups_accumulator() -> Box<dyn GroupsAccumulator> {
 
     assert!(state_wrapper.groups_accumulator_supported(acc_args.clone()));
     state_wrapper.create_groups_accumulator(acc_args).unwrap()
+}
+
+fn test_state_scalar_for_type(data_type: &DataType) -> ScalarValue {
+    match data_type {
+        DataType::Float64 => ScalarValue::Float64(Some(1.5)),
+        DataType::UInt64 => ScalarValue::UInt64(Some(2)),
+        DataType::Int64 => ScalarValue::Int64(Some(3)),
+        _ => panic!("unsupported test data type: {data_type:?}"),
+    }
+}
+
+#[test]
+fn test_value_from_custom_state_fields_single_field() {
+    let wrapper = StateWrapper::new((*max_udaf()).clone()).unwrap();
+    let value = wrapper
+        .value_from_custom_state_fields(&[DataType::Int64], vec![ScalarValue::Int64(Some(7))])
+        .unwrap();
+
+    let ScalarValue::Struct(array) = value else {
+        panic!("expected struct state")
+    };
+    assert_eq!(1, array.columns().len());
+    assert_eq!(DataType::Int64, array.column(0).data_type().clone());
+}
+
+#[test]
+fn test_value_from_custom_state_fields_multi_field() {
+    let wrapper = StateWrapper::new((*avg_udaf()).clone()).unwrap();
+    let DataType::Struct(fields) = wrapper.return_type(&[DataType::Float64]).unwrap() else {
+        panic!("expected struct state type")
+    };
+
+    let values = fields
+        .iter()
+        .map(|field| test_state_scalar_for_type(field.data_type()))
+        .collect::<Vec<_>>();
+    let value = wrapper
+        .value_from_custom_state_fields(&[DataType::Float64], values)
+        .unwrap();
+
+    let ScalarValue::Struct(array) = value else {
+        panic!("expected struct state")
+    };
+    assert_eq!(fields.len(), array.columns().len());
 }
 
 #[tokio::test]

@@ -37,6 +37,7 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
 };
+use crate::scan_stats::RegionScanStats;
 use crate::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
@@ -450,6 +451,11 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
     fn has_predicate_without_region(&self) -> bool;
+
+    /// Returns file-level scan statistics for the current scanner input when available.
+    fn scan_input_stats(&self) -> Result<Option<RegionScanStats>, BoxedError> {
+        Ok(None)
+    }
 
     /// Add the given dynamic filter expressions to the predicate of the scanner.
     /// Returns a vector of booleans indicating which filter expressions were applied.
