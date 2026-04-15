@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
@@ -68,14 +69,16 @@ impl MemoryRegionKeeper {
     ) -> Option<OperatingRegionGuard> {
         let mut inner = self.inner.write().unwrap();
 
-        if inner.insert((datanode_id, region_id), role).is_none() {
-            Some(OperatingRegionGuard {
-                datanode_id,
-                region_id,
-                inner: self.inner.clone(),
-            })
-        } else {
-            None
+        match inner.entry((datanode_id, region_id)) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(role);
+                Some(OperatingRegionGuard {
+                    datanode_id,
+                    region_id,
+                    inner: self.inner.clone(),
+                })
+            }
         }
     }
 
