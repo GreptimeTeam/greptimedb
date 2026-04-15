@@ -27,16 +27,10 @@ use table::predicate::Predicate;
 use crate::error::Result;
 use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
 use crate::sst::parquet::flat_format::FlatReadFormat;
-use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, is_usable_primary_key_filter};
-use crate::sst::parquet::reader::SimpleFilterContext;
+use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, build_bulk_filter_plan};
 use crate::sst::parquet::stats::RowGroupPruningStats;
 
 pub(crate) type BulkIterContextRef = Arc<BulkIterContext>;
-
-struct BulkFilterPlan {
-    remaining_simple_filters: Vec<SimpleFilterContext>,
-    pk_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
-}
 
 pub struct BulkIterContext {
     pub(crate) base: RangeBase,
@@ -97,8 +91,7 @@ impl BulkIterContext {
             .map(|pred| pred.dyn_filters().as_ref().clone())
             .unwrap_or_default();
 
-        let filter_plan =
-            Self::build_filter_plan(&region_metadata, &read_format, predicate.as_ref());
+        let filter_plan = build_bulk_filter_plan(&read_format, predicate.as_ref());
 
         Ok(Self {
             base: RangeBase {
@@ -147,50 +140,6 @@ impl BulkIterContext {
         }
     }
 
-    fn build_filter_plan(
-        region_metadata: &RegionMetadataRef,
-        read_format: &FlatReadFormat,
-        predicate: Option<&Predicate>,
-    ) -> BulkFilterPlan {
-        let simple_filters: Vec<SimpleFilterContext> = predicate
-            .into_iter()
-            .flat_map(|predicate| {
-                predicate
-                    .exprs()
-                    .iter()
-                    .filter_map(|expr| SimpleFilterContext::new_opt(region_metadata, None, expr))
-            })
-            .collect();
-
-        let metadata = read_format.metadata();
-        if read_format.batch_has_raw_pk_columns() || metadata.primary_key.is_empty() {
-            return BulkFilterPlan {
-                remaining_simple_filters: simple_filters,
-                pk_filters: None,
-            };
-        }
-
-        let mut remaining_simple_filters = Vec::new();
-        let mut pk_filters = Vec::new();
-
-        for filter_ctx in simple_filters {
-            let pk_filter = filter_ctx.filter().as_filter().and_then(|filter| {
-                is_usable_primary_key_filter(metadata, None, filter).then(|| filter.clone())
-            });
-
-            if let Some(pk_filter) = pk_filter {
-                pk_filters.push(pk_filter);
-            } else {
-                remaining_simple_filters.push(filter_ctx);
-            }
-        }
-
-        BulkFilterPlan {
-            remaining_simple_filters,
-            pk_filters: (!pk_filters.is_empty()).then_some(Arc::new(pk_filters)),
-        }
-    }
-
     /// Builds a fresh PK filter for a new iterator. Returns `None` if PK
     /// prefiltering is not applicable.
     pub(crate) fn build_pk_filter(&self) -> Option<CachedPrimaryKeyFilter> {
@@ -216,96 +165,5 @@ impl BulkIterContext {
     /// Returns the region id.
     pub(crate) fn region_id(&self) -> store_api::storage::RegionId {
         self.base.read_format.metadata().region_id
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use datafusion_expr::{col, lit};
-    use store_api::codec::PrimaryKeyEncoding;
-
-    use super::*;
-    use crate::test_util::sst_util::{sst_region_metadata, sst_region_metadata_with_encoding};
-
-    #[test]
-    fn test_build_filter_plan_splits_pk_prefiltered_simple_filters_on_legacy_path() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata_with_encoding(
-            PrimaryKeyEncoding::Sparse,
-        ));
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "memtable",
-            false,
-        )
-        .unwrap();
-        assert!(!read_format.batch_has_raw_pk_columns());
-        let predicate = Predicate::new(vec![
-            col("tag_0").eq(lit("a")),
-            col("field_0").gt(lit(1_u64)),
-        ]);
-
-        let plan = BulkIterContext::build_filter_plan(&metadata, &read_format, Some(&predicate));
-
-        assert!(plan.pk_filters.is_some());
-        assert_eq!(plan.pk_filters.as_ref().unwrap().len(), 1);
-        assert_eq!(plan.remaining_simple_filters.len(), 1);
-        let remaining_filter = plan.remaining_simple_filters[0]
-            .filter()
-            .as_filter()
-            .unwrap();
-        assert_eq!(remaining_filter.column_name(), "field_0");
-    }
-
-    #[test]
-    fn test_build_filter_plan_keeps_tag_filters_in_range_base_without_pk_prefilter_support() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "memtable",
-            true,
-        )
-        .unwrap();
-        assert!(read_format.batch_has_raw_pk_columns());
-        let predicate = Predicate::new(vec![col("tag_0").eq(lit("a"))]);
-
-        let plan = BulkIterContext::build_filter_plan(&metadata, &read_format, Some(&predicate));
-
-        assert!(plan.pk_filters.is_none());
-        assert_eq!(plan.remaining_simple_filters.len(), 1);
-        let remaining_filter = plan.remaining_simple_filters[0]
-            .filter()
-            .as_filter()
-            .unwrap();
-        assert_eq!(remaining_filter.column_name(), "tag_0");
-    }
-
-    #[test]
-    fn test_build_filter_plan_keeps_non_pk_filters_in_range_base() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "memtable",
-            true,
-        )
-        .unwrap();
-        let predicate = Predicate::new(vec![col("field_0").gt(lit(1_u64))]);
-
-        let plan = BulkIterContext::build_filter_plan(&metadata, &read_format, Some(&predicate));
-
-        assert!(plan.pk_filters.is_none());
-        assert_eq!(plan.remaining_simple_filters.len(), 1);
-        let remaining_filter = plan.remaining_simple_filters[0]
-            .filter()
-            .as_filter()
-            .unwrap();
-        assert_eq!(remaining_filter.column_name(), "field_0");
     }
 }

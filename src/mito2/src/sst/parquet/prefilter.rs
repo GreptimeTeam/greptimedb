@@ -35,11 +35,13 @@ use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+use table::predicate::Predicate;
 
 use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu,
     ReadParquetSnafu, RecordBatchSnafu, Result, UnexpectedSnafu,
 };
+use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::reader::{
@@ -221,6 +223,156 @@ impl PrimaryKeyFilter for CachedPrimaryKeyFilter {
         self.last_primary_key.extend_from_slice(pk);
         self.last_match = Some(matched);
         Ok(matched)
+    }
+}
+
+pub(crate) struct BulkFilterPlan {
+    pub(crate) remaining_simple_filters: Vec<SimpleFilterContext>,
+    pub(crate) pk_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
+}
+
+pub(crate) struct ReaderFilterPlan {
+    pub(crate) remaining_simple_filters: Vec<SimpleFilterContext>,
+    pub(crate) prefilter_builder: Option<PrefilterContextBuilder>,
+}
+
+pub(crate) fn build_bulk_filter_plan(
+    read_format: &FlatReadFormat,
+    predicate: Option<&Predicate>,
+) -> BulkFilterPlan {
+    let metadata = read_format.metadata();
+    let simple_filters: Vec<SimpleFilterContext> = predicate
+        .into_iter()
+        .flat_map(|predicate| {
+            predicate
+                .exprs()
+                .iter()
+                .filter_map(|expr| SimpleFilterContext::new_opt(metadata, None, expr))
+        })
+        .collect();
+
+    if read_format.batch_has_raw_pk_columns() || metadata.primary_key.is_empty() {
+        return BulkFilterPlan {
+            remaining_simple_filters: simple_filters,
+            pk_filters: None,
+        };
+    }
+
+    let mut remaining_simple_filters = Vec::new();
+    let mut pk_filters = Vec::new();
+
+    for filter_ctx in simple_filters {
+        let pk_filter = filter_ctx.filter().as_filter().and_then(|filter| {
+            is_usable_primary_key_filter(metadata, None, filter).then(|| filter.clone())
+        });
+
+        if let Some(pk_filter) = pk_filter {
+            pk_filters.push(pk_filter);
+        } else {
+            remaining_simple_filters.push(filter_ctx);
+        }
+    }
+
+    BulkFilterPlan {
+        remaining_simple_filters,
+        pk_filters: (!pk_filters.is_empty()).then_some(Arc::new(pk_filters)),
+    }
+}
+
+pub(crate) fn build_reader_filter_plan(
+    predicate: Option<&Predicate>,
+    expected_metadata: Option<&RegionMetadata>,
+    pre_filter_mode: PreFilterMode,
+    read_format: &FlatReadFormat,
+    parquet_schema: &SchemaDescriptor,
+    codec: &Arc<dyn PrimaryKeyCodec>,
+) -> ReaderFilterPlan {
+    let Some(predicate) = predicate else {
+        return ReaderFilterPlan {
+            remaining_simple_filters: Vec::new(),
+            prefilter_builder: None,
+        };
+    };
+
+    let metadata = read_format.metadata();
+    let mut simple_filters = Vec::new();
+    let mut prefilter_simple_filters = Vec::new();
+    let mut remaining_simple_filters = Vec::new();
+    let mut prefilter_physical_filters = Vec::new();
+    let mut primary_key_filters = Vec::new();
+
+    let field_prefilter_enabled = pre_filter_mode == PreFilterMode::All;
+    let supports_pk_prefilter = !read_format.batch_has_raw_pk_columns();
+
+    for expr in predicate.exprs() {
+        if let Some(filter) = SimpleFilterContext::new_opt(metadata, expected_metadata, expr) {
+            simple_filters.push(filter);
+            continue;
+        }
+
+        if let Some(filter) =
+            PhysicalFilterContext::new_opt(metadata, expected_metadata, read_format, expr)
+        {
+            let usable_prefilter = (field_prefilter_enabled
+                || filter.semantic_type() != SemanticType::Field)
+                && read_format
+                    .arrow_schema()
+                    .column_with_name(filter.column_name())
+                    .is_some();
+            if usable_prefilter {
+                prefilter_physical_filters.push(filter);
+            }
+        }
+    }
+
+    for filter_ctx in simple_filters.iter().cloned() {
+        let Some(filter) = filter_ctx.filter().as_filter() else {
+            remaining_simple_filters.push(filter_ctx);
+            continue;
+        };
+
+        let direct_prefilter = (field_prefilter_enabled
+            || filter_ctx.semantic_type() != SemanticType::Field)
+            && read_format
+                .arrow_schema()
+                .column_with_name(filter.column_name())
+                .is_some();
+        if direct_prefilter {
+            prefilter_simple_filters.push(filter_ctx);
+            continue;
+        }
+
+        let pk_prefilter = supports_pk_prefilter
+            && is_usable_primary_key_filter(metadata, expected_metadata, filter);
+        if pk_prefilter {
+            primary_key_filters.push(filter.clone());
+            prefilter_simple_filters.push(filter_ctx);
+        } else {
+            remaining_simple_filters.push(filter_ctx);
+        }
+    }
+
+    let primary_key_filters =
+        (!primary_key_filters.is_empty()).then_some(Arc::new(primary_key_filters));
+    let prefilter_builder = PrefilterContextBuilder::new(
+        read_format,
+        codec,
+        primary_key_filters,
+        prefilter_simple_filters,
+        prefilter_physical_filters,
+        parquet_schema,
+    );
+
+    if prefilter_builder.is_some() {
+        ReaderFilterPlan {
+            remaining_simple_filters,
+            prefilter_builder,
+        }
+    } else {
+        ReaderFilterPlan {
+            remaining_simple_filters: simple_filters,
+            prefilter_builder: None,
+        }
     }
 }
 
@@ -814,6 +966,134 @@ mod tests {
             &parquet_schema,
         );
         assert!(builder.is_none());
+    }
+
+    #[test]
+    fn test_build_bulk_filter_plan_splits_pk_prefiltered_simple_filters_on_legacy_path() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), metadata.column_metadatas.iter().map(|c| c.column_id), None, "memtable", false).unwrap();
+        assert!(!read_format.batch_has_raw_pk_columns());
+        let predicate = Predicate::new(vec![
+            col("tag_0").eq(lit("a")),
+            col("field_0").gt(lit(1_u64)),
+        ]);
+
+        let plan = build_bulk_filter_plan(&read_format, Some(&predicate));
+
+        assert!(plan.pk_filters.is_some());
+        assert_eq!(plan.pk_filters.as_ref().unwrap().len(), 1);
+        assert_eq!(plan.remaining_simple_filters.len(), 1);
+        let remaining_filter = plan.remaining_simple_filters[0]
+            .filter()
+            .as_filter()
+            .unwrap();
+        assert_eq!(remaining_filter.column_name(), "field_0");
+    }
+
+    #[test]
+    fn test_build_bulk_filter_plan_keeps_tag_filters_without_pk_prefilter_support() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), metadata.column_metadatas.iter().map(|c| c.column_id), None, "memtable", true).unwrap();
+        assert!(read_format.batch_has_raw_pk_columns());
+        let predicate = Predicate::new(vec![col("tag_0").eq(lit("a"))]);
+
+        let plan = build_bulk_filter_plan(&read_format, Some(&predicate));
+
+        assert!(plan.pk_filters.is_none());
+        assert_eq!(plan.remaining_simple_filters.len(), 1);
+        let remaining_filter = plan.remaining_simple_filters[0]
+            .filter()
+            .as_filter()
+            .unwrap();
+        assert_eq!(remaining_filter.column_name(), "tag_0");
+    }
+
+    #[test]
+    fn test_build_bulk_filter_plan_keeps_non_pk_filters_in_range_base() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), metadata.column_metadatas.iter().map(|c| c.column_id), None, "memtable", true).unwrap();
+        let predicate = Predicate::new(vec![col("field_0").gt(lit(1_u64))]);
+
+        let plan = build_bulk_filter_plan(&read_format, Some(&predicate));
+
+        assert!(plan.pk_filters.is_none());
+        assert_eq!(plan.remaining_simple_filters.len(), 1);
+        let remaining_filter = plan.remaining_simple_filters[0]
+            .filter()
+            .as_filter()
+            .unwrap();
+        assert_eq!(remaining_filter.column_name(), "field_0");
+    }
+
+    #[test]
+    fn test_build_reader_filter_plan_keeps_field_filters_for_prune_reader_in_skip_fields_mode() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let parquet_schema = parquet_schema(&read_format);
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let predicate = Predicate::new(vec![
+            col("tag_0").eq(lit("a")),
+            col("field_0").gt(lit(1_u64)),
+        ]);
+
+        let plan = build_reader_filter_plan(
+            Some(&predicate),
+            None,
+            PreFilterMode::SkipFields,
+            &read_format,
+            &parquet_schema,
+            &codec,
+        );
+
+        assert!(plan.prefilter_builder.is_some());
+        assert_eq!(plan.remaining_simple_filters.len(), 1);
+        let remaining_filter = plan.remaining_simple_filters[0]
+            .filter()
+            .as_filter()
+            .unwrap();
+        assert_eq!(remaining_filter.column_name(), "field_0");
+    }
+
+    #[test]
+    fn test_build_reader_filter_plan_uses_pk_prefilter_for_unprojected_tag_filters() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let field_0 = metadata.column_by_name("field_0").unwrap().column_id;
+        let ts = metadata.time_index_column().column_id;
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            [field_0, ts].into_iter(),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let parquet_schema = parquet_schema(&read_format);
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let predicate = Predicate::new(vec![col("tag_0").eq(lit("a"))]);
+
+        let plan = build_reader_filter_plan(
+            Some(&predicate),
+            None,
+            PreFilterMode::All,
+            &read_format,
+            &parquet_schema,
+            &codec,
+        );
+
+        assert!(plan.prefilter_builder.is_some());
+        assert!(plan.remaining_simple_filters.is_empty());
     }
 
     #[test]
