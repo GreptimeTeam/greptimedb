@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::region::RegionResponse;
@@ -30,6 +30,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
+use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
@@ -351,6 +352,10 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
             .memory_region_keeper
             .contains(datanode_id, region_id)
     );
+    let roles = ddl_context
+        .memory_region_keeper
+        .extract_operating_region_roles(datanode_id, &mut HashSet::from([region_id]));
+    assert_eq!(roles.get(&region_id), Some(&RegionRole::Leader));
 
     execute_procedure_until_done(&mut procedure).await;
 

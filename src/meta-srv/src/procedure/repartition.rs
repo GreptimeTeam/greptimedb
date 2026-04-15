@@ -837,9 +837,11 @@ mod tests {
     };
     use common_meta::error;
     use common_meta::peer::Peer;
-    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::region_keeper::MemoryRegionKeeper;
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use common_meta::test_util::MockDatanodeManager;
     use common_procedure::{Error as ProcedureError, Procedure, ProcedureId, ProcedureState};
+    use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use table::table_name::TableName;
     use tokio::sync::mpsc;
@@ -991,6 +993,59 @@ mod tests {
 
         let procedure = test_procedure(Box::new(RepartitionEnd), test_context(&env, table_id));
         assert!(!procedure.should_rollback_allocated_regions());
+    }
+
+    #[test]
+    fn test_register_operating_regions_preserves_route_roles() {
+        let keeper = Arc::new(MemoryRegionKeeper::new());
+        let region_routes = vec![
+            RegionRoute {
+                region: Region::new_test(RegionId::new(1024, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            },
+            RegionRoute {
+                region: Region::new_test(RegionId::new(1024, 2)),
+                leader_peer: Some(Peer::empty(2)),
+                follower_peers: vec![],
+                leader_state: Some(LeaderState::Staging),
+                leader_down_since: None,
+                write_route_policy: None,
+            },
+            RegionRoute {
+                region: Region::new_test(RegionId::new(1024, 3)),
+                leader_peer: Some(Peer::empty(3)),
+                follower_peers: vec![],
+                leader_state: Some(LeaderState::Downgrading),
+                leader_down_since: None,
+                write_route_policy: None,
+            },
+        ];
+
+        let _guards = Context::register_operating_regions(&keeper, &region_routes).unwrap();
+
+        let leader_roles =
+            keeper.extract_operating_region_roles(1, &mut HashSet::from([RegionId::new(1024, 1)]));
+        let staging_roles =
+            keeper.extract_operating_region_roles(2, &mut HashSet::from([RegionId::new(1024, 2)]));
+        let downgrading_roles =
+            keeper.extract_operating_region_roles(3, &mut HashSet::from([RegionId::new(1024, 3)]));
+
+        assert_eq!(
+            leader_roles.get(&RegionId::new(1024, 1)),
+            Some(&RegionRole::Leader)
+        );
+        assert_eq!(
+            staging_roles.get(&RegionId::new(1024, 2)),
+            Some(&RegionRole::StagingLeader)
+        );
+        assert_eq!(
+            downgrading_roles.get(&RegionId::new(1024, 3)),
+            Some(&RegionRole::DowngradingLeader)
+        );
     }
 
     #[tokio::test]

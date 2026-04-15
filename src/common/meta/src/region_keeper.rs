@@ -85,18 +85,6 @@ impl MemoryRegionKeeper {
         inner.contains_key(&(datanode_id, region_id))
     }
 
-    /// Extracts all operating regions from `region_ids` and returns operating regions.
-    pub fn extract_operating_regions(
-        &self,
-        datanode_id: DatanodeId,
-        region_ids: &mut HashSet<RegionId>,
-    ) -> HashSet<RegionId> {
-        let inner = self.inner.read().unwrap();
-        region_ids
-            .extract_if(|region_id| inner.contains_key(&(datanode_id, *region_id)))
-            .collect()
-    }
-
     /// Extracts all operating regions with roles from `region_ids`.
     pub fn extract_operating_region_roles(
         &self,
@@ -104,12 +92,8 @@ impl MemoryRegionKeeper {
         region_ids: &mut HashSet<RegionId>,
     ) -> HashMap<RegionId, RegionRole> {
         let inner = self.inner.read().unwrap();
-        let operating_regions = region_ids
+        region_ids
             .extract_if(|region_id| inner.contains_key(&(datanode_id, *region_id)))
-            .collect::<Vec<_>>();
-
-        operating_regions
-            .into_iter()
             .map(|region_id| {
                 let role = *inner
                     .get(&(datanode_id, region_id))
@@ -167,11 +151,11 @@ mod tests {
             RegionId::from_u64(2),
             RegionId::from_u64(3),
         ]);
-        let output = keeper.extract_operating_regions(1, &mut regions);
+        let output = keeper.extract_operating_region_roles(1, &mut regions);
         assert_eq!(output.len(), 2);
 
-        assert!(output.contains(&RegionId::from_u64(1)));
-        assert!(output.contains(&RegionId::from_u64(2)));
+        assert!(output.contains_key(&RegionId::from_u64(1)));
+        assert!(output.contains_key(&RegionId::from_u64(2)));
         assert_eq!(regions, HashSet::from([RegionId::from_u64(3)]));
         assert_eq!(keeper.len(), 2);
 

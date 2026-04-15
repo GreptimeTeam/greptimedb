@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::region::{RegionRequest, region_request};
@@ -23,6 +23,7 @@ use common_procedure::Procedure;
 use common_procedure_test::{
     execute_procedure_until, execute_procedure_until_done, new_test_procedure_context,
 };
+use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::mpsc;
@@ -328,6 +329,10 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
                 .memory_region_keeper
                 .contains(datanode_id, region_id)
         );
+        let roles = ddl_context
+            .memory_region_keeper
+            .extract_operating_region_roles(datanode_id, &mut HashSet::from([region_id]));
+        assert_eq!(roles.get(&region_id), Some(&RegionRole::Leader));
 
         execute_procedure_until_done(&mut procedure).await;
 

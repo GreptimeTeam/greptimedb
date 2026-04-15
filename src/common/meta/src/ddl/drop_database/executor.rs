@@ -159,6 +159,7 @@ impl State for DropDatabaseExecutor {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use api::region::RegionResponse;
@@ -167,6 +168,8 @@ mod tests {
     use common_error::ext::BoxedError;
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
+    use store_api::region_engine::RegionRole;
+    use store_api::storage::RegionId;
     use table::table_name::TableName;
 
     use crate::ddl::drop_database::cursor::DropDatabaseCursor;
@@ -179,7 +182,7 @@ mod tests {
     use crate::error::{self, Error, Result};
     use crate::key::datanode_table::DatanodeTableKey;
     use crate::peer::Peer;
-    use crate::rpc::router::region_distribution;
+    use crate::rpc::router::{LeaderState, Region, RegionRoute, region_distribution};
     use crate::test_util::{MockDatanodeHandler, MockDatanodeManager, new_ddl_context};
 
     #[derive(Clone)]
@@ -421,6 +424,34 @@ mod tests {
             let cursor = state.as_any().downcast_ref::<DropDatabaseCursor>().unwrap();
             assert_eq!(cursor.target, DropTableTarget::Physical);
         }
+    }
+
+    #[tokio::test]
+    async fn test_recover_registers_region_role_from_routes() {
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let ddl_context = new_ddl_context(node_manager);
+        let region_id = RegionId::new(1024, 1);
+        let mut state = DropDatabaseExecutor::new(
+            1024,
+            1024,
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy"),
+            vec![RegionRoute {
+                region: Region::new_test(region_id),
+                leader_peer: Some(Peer::empty(7)),
+                follower_peers: vec![],
+                leader_state: Some(LeaderState::Downgrading),
+                leader_down_since: None,
+                write_route_policy: None,
+            }],
+            DropTableTarget::Physical,
+        );
+
+        state.recover(&ddl_context).unwrap();
+
+        let roles = ddl_context
+            .memory_region_keeper
+            .extract_operating_region_roles(7, &mut HashSet::from([region_id]));
+        assert_eq!(roles.get(&region_id), Some(&RegionRole::DowngradingLeader));
     }
 
     #[tokio::test]
