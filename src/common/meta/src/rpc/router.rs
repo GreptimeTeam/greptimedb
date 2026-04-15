@@ -607,6 +607,17 @@ mod tests {
     use super::*;
     use crate::key::RegionRoleSet;
 
+    fn new_test_region_route(region_id: RegionId) -> RegionRoute {
+        RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![Peer::new(2, "a2")],
+            leader_state: None,
+            leader_down_since: None,
+            write_route_policy: None,
+        }
+    }
+
     #[test]
     fn test_leader_is_downgraded() {
         let mut region_route = RegionRoute {
@@ -768,6 +779,65 @@ mod tests {
         assert!(region_route.is_ignore_all_writes());
         region_route.clear_ignore_all_writes();
         assert!(!region_route.is_ignore_all_writes());
+    }
+
+    #[test]
+    fn test_leader_region_role_without_leader_peer_returns_none() {
+        let region_route = RegionRoute {
+            leader_peer: None,
+            ..new_test_region_route(RegionId::new(1, 1))
+        };
+
+        assert_eq!(region_route.leader_region_role(), None);
+    }
+
+    #[test]
+    fn test_leader_region_role_variants() {
+        let normal = new_test_region_route(RegionId::new(1, 1));
+        let mut downgrading = new_test_region_route(RegionId::new(1, 2));
+        downgrading.leader_state = Some(LeaderState::Downgrading);
+        let mut staging = new_test_region_route(RegionId::new(1, 3));
+        staging.leader_state = Some(LeaderState::Staging);
+
+        assert_eq!(normal.leader_region_role(), Some(RegionRole::Leader));
+        assert_eq!(
+            downgrading.leader_region_role(),
+            Some(RegionRole::DowngradingLeader)
+        );
+        assert_eq!(
+            staging.leader_region_role(),
+            Some(RegionRole::StagingLeader)
+        );
+    }
+
+    #[test]
+    fn test_operating_leader_region_roles_returns_expected_roles() {
+        let no_leader_region = RegionRoute {
+            leader_peer: None,
+            ..new_test_region_route(RegionId::new(1, 4))
+        };
+        let mut downgrading = new_test_region_route(RegionId::new(1, 2));
+        downgrading.leader_peer = Some(Peer::new(2, "a2"));
+        downgrading.leader_state = Some(LeaderState::Downgrading);
+        let mut staging = new_test_region_route(RegionId::new(1, 3));
+        staging.leader_peer = Some(Peer::new(3, "a3"));
+        staging.leader_state = Some(LeaderState::Staging);
+
+        let roles = operating_leader_region_roles(&[
+            new_test_region_route(RegionId::new(1, 1)),
+            downgrading,
+            staging,
+            no_leader_region,
+        ]);
+
+        assert_eq!(
+            roles,
+            vec![
+                (RegionId::new(1, 1), 1, RegionRole::Leader),
+                (RegionId::new(1, 2), 2, RegionRole::DowngradingLeader),
+                (RegionId::new(1, 3), 3, RegionRole::StagingLeader),
+            ]
+        );
     }
 
     #[test]
