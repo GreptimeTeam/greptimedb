@@ -44,7 +44,7 @@ use crate::error::{
     UnexpectedSnafu,
 };
 use crate::read::Batch;
-use crate::read::compat::CompatBatch;
+use crate::read::compat::FlatCompatBatch;
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::last_row::{FlatRowGroupLastRowCachedReader, RowGroupLastRowCachedReader};
 use crate::read::prune::{FlatPruneReader, PruneReader};
@@ -293,7 +293,7 @@ impl FileRange {
     }
 
     /// Returns the helper to compat batches.
-    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
+    pub(crate) fn compat_batch(&self) -> Option<&FlatCompatBatch> {
         self.context.compat_batch()
     }
 
@@ -353,7 +353,7 @@ impl FileRangeContext {
     }
 
     /// Returns the helper to compat batches.
-    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
+    pub(crate) fn compat_batch(&self) -> Option<&FlatCompatBatch> {
         self.base.compat_batch.as_ref()
     }
 
@@ -362,8 +362,8 @@ impl FileRangeContext {
         self.base.compaction_projection_mapper.as_ref()
     }
 
-    /// Sets the `CompatBatch` to the context.
-    pub(crate) fn set_compat_batch(&mut self, compat: Option<CompatBatch>) {
+    /// Sets the compat helper to the context.
+    pub(crate) fn set_compat_batch(&mut self, compat: Option<FlatCompatBatch>) {
         self.base.compat_batch = compat;
     }
 
@@ -459,7 +459,7 @@ pub(crate) struct RangeBase {
     /// Decoder for primary keys
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
-    pub(crate) compat_batch: Option<CompatBatch>,
+    pub(crate) compat_batch: Option<FlatCompatBatch>,
     /// Optional helper to project batches.
     pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,
     /// Mode to pre-filter columns.

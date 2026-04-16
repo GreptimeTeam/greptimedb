@@ -29,10 +29,9 @@ use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::Stream;
 use prometheus::IntGauge;
 use smallvec::SmallVec;
-use snafu::OptionExt;
 use store_api::storage::RegionId;
 
-use crate::error::{Result, UnexpectedSnafu};
+use crate::error::Result;
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROW_GROUPS_TOTAL,
@@ -1520,14 +1519,7 @@ pub fn build_flat_file_range_scan_stream(
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
-            let may_compat = range
-                .compat_batch()
-                .map(|compat| {
-                    compat.as_flat().context(UnexpectedSnafu {
-                        reason: "Invalid compat for flat format",
-                    })
-                })
-                .transpose()?;
+            let may_compat = range.compat_batch();
 
             let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch().await? {
