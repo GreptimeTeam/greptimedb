@@ -1124,11 +1124,10 @@ impl ScanInput {
         if need_compat {
             // They have different schema. We need to adapt the batch first so the
             // mapper can convert it.
-            let flat_format = file_range_ctx.read_format().as_flat().unwrap();
             let compat = FlatCompatBatch::try_new(
                 &self.mapper,
-                flat_format.metadata(),
-                flat_format.format_projection(),
+                file_range_ctx.read_format().metadata(),
+                file_range_ctx.read_format().format_projection(),
                 self.compaction,
             )?;
             file_range_ctx.set_compat_batch(compat);

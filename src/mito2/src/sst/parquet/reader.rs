@@ -16,7 +16,7 @@
 
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -55,7 +55,6 @@ use crate::metrics::{
 };
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
-use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierRef, BloomFilterIndexApplyMetrics,
@@ -73,7 +72,8 @@ use crate::sst::parquet::async_reader::SstAsyncFileReader;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
-use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
+use crate::sst::parquet::flat_format::FlatReadFormat;
+use crate::sst::parquet::format::need_override_sequence;
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, execute_prefilter, is_usable_primary_key_filter,
@@ -371,10 +371,9 @@ impl ParquetReaderBuilder {
         };
 
         let mut read_format = if let Some(column_ids) = &self.projection {
-            ReadFormat::new(
+            FlatReadFormat::new(
                 region_meta.clone(),
-                Some(column_ids),
-                true, // Always reads as flat format.
+                column_ids.iter().copied(),
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
                 skip_auto_convert,
@@ -387,18 +386,14 @@ impl ParquetReaderBuilder {
                 .iter()
                 .map(|col| col.column_id)
                 .collect();
-            ReadFormat::new(
+            FlatReadFormat::new(
                 region_meta.clone(),
-                Some(&column_ids),
-                true, // Always reads as flat format.
+                column_ids.iter().copied(),
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
                 skip_auto_convert,
             )?
         };
-        if self.decode_primary_key_values {
-            read_format.set_decode_primary_key_values(true);
-        }
         if need_override_sequence(&parquet_meta) {
             read_format
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
@@ -540,7 +535,7 @@ impl ParquetReaderBuilder {
     /// and build a partition filter if they differ.
     fn build_partition_filter(
         &self,
-        read_format: &ReadFormat,
+        read_format: &FlatReadFormat,
         prune_schema: &Arc<datatypes::schema::Schema>,
     ) -> Result<Option<PartitionFilterContext>> {
         let region_partition_expr_str = self
@@ -567,15 +562,13 @@ impl ParquetReaderBuilder {
         region_partition_expr.collect_column_names(&mut referenced_columns);
 
         // Build a partition_schema containing only referenced columns.
-        let is_flat = read_format.as_flat().is_some();
         let partition_schema = Arc::new(datatypes::schema::Schema::new(
             prune_schema
                 .column_schemas()
                 .iter()
                 .filter(|col| referenced_columns.contains(&col.name))
                 .map(|col| {
-                    if is_flat
-                        && let Some(column_meta) = read_format.metadata().column_by_name(&col.name)
+                    if let Some(column_meta) = read_format.metadata().column_by_name(&col.name)
                         && column_meta.semantic_type == SemanticType::Tag
                         && col.data_type.is_string()
                     {
@@ -656,7 +649,7 @@ impl ParquetReaderBuilder {
     )]
     async fn row_groups_to_read(
         &self,
-        read_format: &ReadFormat,
+        read_format: &FlatReadFormat,
         parquet_meta: &ParquetMetaData,
         metrics: &mut ReaderFilterMetrics,
     ) -> RowGroupSelection {
@@ -1116,7 +1109,7 @@ impl ParquetReaderBuilder {
     /// Computes row groups selection after min-max pruning.
     fn row_groups_by_minmax(
         &self,
-        read_format: &ReadFormat,
+        read_format: &FlatReadFormat,
         parquet_meta: &ParquetMetaData,
         row_group_size: usize,
         total_row_count: usize,
@@ -1791,8 +1784,6 @@ pub(crate) struct SimpleFilterContext {
     column_id: ColumnId,
     /// Semantic type of the column.
     semantic_type: SemanticType,
-    /// The data type of the column.
-    data_type: ConcreteDataType,
     /// Whether this filter can be applied by flat parquet primary-key prefiltering.
     usable_primary_key_filter: bool,
 }
@@ -1849,7 +1840,6 @@ impl SimpleFilterContext {
             filter: maybe_filter,
             column_id: column_metadata.column_id,
             semantic_type: column_metadata.semantic_type,
-            data_type: column_metadata.column_schema.data_type.clone(),
             usable_primary_key_filter,
         })
     }
@@ -1867,11 +1857,6 @@ impl SimpleFilterContext {
     /// Returns the semantic type of the column.
     pub(crate) fn semantic_type(&self) -> SemanticType {
         self.semantic_type
-    }
-
-    /// Returns the data type of the column.
-    pub(crate) fn data_type(&self) -> &ConcreteDataType {
-        &self.data_type
     }
 
     /// Returns whether this filter is eligible for flat parquet PK prefiltering.
@@ -1967,7 +1952,6 @@ impl ParquetReader {
         context: FileRangeContextRef,
         mut selection: RowGroupSelection,
     ) -> Result<Self> {
-        debug_assert!(context.read_format().as_flat().is_some());
         let fetch_metrics = ParquetFetchMetrics::default();
         let reader = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
             let skip_fields = context.pre_filter_mode().skip_fields();
@@ -2007,140 +1991,6 @@ impl ParquetReader {
     }
 }
 
-/// RowGroupReaderContext represents the fields that cannot be shared
-/// between different `RowGroupReader`s.
-pub(crate) trait RowGroupReaderContext: Send {
-    fn read_format(&self) -> &ReadFormat;
-
-    fn file_path(&self) -> &str;
-}
-
-impl RowGroupReaderContext for FileRangeContextRef {
-    fn read_format(&self) -> &ReadFormat {
-        self.as_ref().read_format()
-    }
-
-    fn file_path(&self) -> &str {
-        self.as_ref().file_path()
-    }
-}
-
-/// [RowGroupReader] that reads from [FileRange].
-pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeContextRef>;
-
-#[allow(dead_code)]
-impl RowGroupReader {
-    /// Creates a new reader from file range.
-    pub(crate) fn new(
-        context: FileRangeContextRef,
-        stream: ParquetRecordBatchStream<SstAsyncFileReader>,
-    ) -> Self {
-        Self::create(context, stream)
-    }
-}
-
-/// Reader to read a row group of a parquet file.
-pub(crate) struct RowGroupReaderBase<T> {
-    /// Context of [RowGroupReader] so adapts to different underlying implementation.
-    context: T,
-    /// Inner parquet record batch stream.
-    stream: ParquetRecordBatchStream<SstAsyncFileReader>,
-    /// Buffered batches to return.
-    batches: VecDeque<Batch>,
-    /// Local scan metrics.
-    metrics: ReaderMetrics,
-    /// Cached sequence array to override sequences.
-    override_sequence: Option<ArrayRef>,
-}
-
-#[allow(dead_code)]
-impl<T> RowGroupReaderBase<T>
-where
-    T: RowGroupReaderContext,
-{
-    /// Creates a new reader to read the primary key format.
-    pub(crate) fn create(context: T, stream: ParquetRecordBatchStream<SstAsyncFileReader>) -> Self {
-        // The batch length from the reader should be less than or equal to DEFAULT_READ_BATCH_SIZE.
-        let override_sequence = context
-            .read_format()
-            .new_override_sequence_array(DEFAULT_READ_BATCH_SIZE);
-        assert!(context.read_format().as_primary_key().is_some());
-
-        Self {
-            context,
-            stream,
-            batches: VecDeque::new(),
-            metrics: ReaderMetrics::default(),
-            override_sequence,
-        }
-    }
-
-    /// Gets the metrics.
-    pub(crate) fn metrics(&self) -> &ReaderMetrics {
-        &self.metrics
-    }
-
-    /// Gets [ReadFormat] of underlying reader.
-    pub(crate) fn read_format(&self) -> &ReadFormat {
-        self.context.read_format()
-    }
-
-    /// Tries to fetch next [RecordBatch] from the stream asynchronously.
-    async fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
-        match self.stream.next().await.transpose() {
-            Ok(batch) => Ok(batch),
-            Err(e) => Err(e).context(ReadParquetSnafu {
-                path: self.context.file_path(),
-            }),
-        }
-    }
-
-    /// Returns the next [Batch].
-    pub(crate) async fn next_inner(&mut self) -> Result<Option<Batch>> {
-        let scan_start = Instant::now();
-        if let Some(batch) = self.batches.pop_front() {
-            self.metrics.num_rows += batch.num_rows();
-            self.metrics.scan_cost += scan_start.elapsed();
-            return Ok(Some(batch));
-        }
-
-        // We need to fetch next record batch and convert it to batches.
-        while self.batches.is_empty() {
-            let Some(record_batch) = self.fetch_next_record_batch().await? else {
-                self.metrics.scan_cost += scan_start.elapsed();
-                return Ok(None);
-            };
-            self.metrics.num_record_batches += 1;
-
-            // Safety: We ensures the format is primary key in the RowGroupReaderBase::create().
-            self.context
-                .read_format()
-                .as_primary_key()
-                .unwrap()
-                .convert_record_batch(
-                    &record_batch,
-                    self.override_sequence.as_ref(),
-                    &mut self.batches,
-                )?;
-            self.metrics.num_batches += self.batches.len();
-        }
-        let batch = self.batches.pop_front();
-        self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
-        self.metrics.scan_cost += scan_start.elapsed();
-        Ok(batch)
-    }
-}
-
-#[async_trait::async_trait]
-impl<T> BatchReader for RowGroupReaderBase<T>
-where
-    T: RowGroupReaderContext + Send + Sync,
-{
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        self.next_inner().await
-    }
-}
-
 /// Reader to read a row group of a parquet file in flat format, returning RecordBatch.
 pub(crate) struct FlatRowGroupReader {
     /// Context for file ranges.
@@ -2177,10 +2027,10 @@ impl FlatRowGroupReader {
                     path: self.context.file_path(),
                 })?;
 
-                // Safety: Only flat format use FlatRowGroupReader.
-                let flat_format = self.context.read_format().as_flat().unwrap();
-                let record_batch =
-                    flat_format.convert_batch(record_batch, self.override_sequence.as_ref())?;
+                let record_batch = self
+                    .context
+                    .read_format()
+                    .convert_batch(record_batch, self.override_sequence.as_ref())?;
                 Ok(Some(record_batch))
             }
             None => Ok(None),
@@ -2269,8 +2119,17 @@ mod tests {
         object_store.write(&file_path, parquet_bytes).await.unwrap();
 
         let region_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format =
-            ReadFormat::new(region_metadata, None, false, None, &file_path, false).unwrap();
+        let read_format = FlatReadFormat::new(
+            region_metadata.clone(),
+            region_metadata
+                .column_metadatas
+                .iter()
+                .map(|column| column.column_id),
+            None,
+            &file_path,
+            false,
+        )
+        .unwrap();
 
         let mut cache_metrics = MetadataCacheMetrics::default();
         let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);

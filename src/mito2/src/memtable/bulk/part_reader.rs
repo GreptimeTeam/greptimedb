@@ -60,8 +60,6 @@ impl EncodedBulkPartIter {
         sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> error::Result<Self> {
-        assert!(context.read_format().as_flat().is_some());
-
         let parquet_meta = encoded_part.metadata().parquet_metadata.clone();
         let data = encoded_part.data().clone();
         let series_count = encoded_part.metadata().num_series as usize;
@@ -238,8 +236,6 @@ impl BulkPartBatchIter {
         series_count: usize,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Self {
-        assert!(context.read_format().as_flat().is_some());
-
         let pk_filter = context.build_pk_filter();
 
         Self {
@@ -406,8 +402,7 @@ fn apply_combined_filters(
     };
 
     // Converts the format to the flat format.
-    let format = context.read_format().as_flat().unwrap();
-    let record_batch = format.convert_batch(record_batch, None)?;
+    let record_batch = context.read_format().convert_batch(record_batch, None)?;
 
     let num_rows = record_batch.num_rows();
     let mut combined_filter = None;

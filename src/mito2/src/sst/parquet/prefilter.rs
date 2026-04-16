@@ -34,8 +34,8 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
 use crate::error::{ComputeArrowSnafu, DecodeSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
-use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
+use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
+use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::reader::{RowGroupBuildContext, RowGroupReaderBuilder};
 use crate::sst::parquet::row_selection::row_selection_from_row_ranges_exact;
 
@@ -251,7 +251,7 @@ impl PrefilterContextBuilder {
     /// - The read format doesn't use flat layout with dictionary-encoded PKs
     /// - The primary key is empty
     pub(crate) fn new(
-        read_format: &ReadFormat,
+        read_format: &FlatReadFormat,
         codec: &Arc<dyn PrimaryKeyCodec>,
         primary_key_filters: Option<&Arc<Vec<SimpleFilterEvaluator>>>,
         parquet_schema: &SchemaDescriptor,
@@ -267,8 +267,7 @@ impl PrefilterContextBuilder {
         }
 
         // Only perform PK prefiltering for primary-key-to-flat conversion path.
-        let flat_format = read_format.as_flat()?;
-        if flat_format.batch_has_raw_pk_columns() {
+        if read_format.batch_has_raw_pk_columns() {
             return None;
         }
 
@@ -404,7 +403,7 @@ mod tests {
 
     use super::*;
     use crate::sst::internal_fields;
-    use crate::sst::parquet::format::ReadFormat;
+    use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::test_util::sst_util::{
         new_primary_key, sst_region_metadata, sst_region_metadata_with_encoding,
     };
@@ -414,7 +413,7 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         ));
-        let read_format = ReadFormat::new_flat(
+        let read_format = FlatReadFormat::new(
             metadata.clone(),
             metadata.column_metadatas.iter().map(|c| c.column_id),
             None,
@@ -422,7 +421,7 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(read_format.as_flat().is_some());
+        assert!(!read_format.batch_has_raw_pk_columns());
 
         let filter = SimpleFilterEvaluator::try_new(&col("tag_0").eq(lit("b"))).unwrap();
         assert!(is_usable_primary_key_filter(&metadata, None, &filter));
