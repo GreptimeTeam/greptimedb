@@ -76,8 +76,10 @@ impl ConvertBatchStream {
                 let SeriesBatch::Flat(flat_batch) = series;
                 // Safety: Only flat format returns this batch.
                 for batch in flat_batch.batches {
-                    self.pending
-                        .push_back(self.projection_mapper.convert(&batch, &self.cache_strategy)?);
+                    self.pending.push_back(
+                        self.projection_mapper
+                            .convert(&batch, &self.cache_strategy)?,
+                    );
                 }
 
                 let output_schema = self.projection_mapper.output_schema();
