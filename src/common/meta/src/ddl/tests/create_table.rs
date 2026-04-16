@@ -354,7 +354,7 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
     );
     let roles = ddl_context
         .memory_region_keeper
-        .extract_operating_region_roles(datanode_id, &mut HashSet::from([region_id]));
+        .extract_operating_region_roles(datanode_id, &HashSet::from([region_id]));
     assert_eq!(roles.get(&region_id), Some(&RegionRole::Leader));
 
     execute_procedure_until_done(&mut procedure).await;
