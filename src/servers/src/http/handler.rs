@@ -491,7 +491,7 @@ pub async fn index() -> axum::response::Html<String> {
 <p>Version: {version}</p>
 <ul>
 <li><a href="/dashboard">Dashboard UI</a></li>
-<li><a href="/health">Health</a> (JSON)</li>
+<li><a href="/v1/health">Health</a> (JSON)</li>
 <li><a href="/status">Status</a> (JSON)</li>
 <li><a href="/metrics">Metrics</a> (For Prometheus Scrape)</li>
 <li><a href="/config">Config</a> (TXT)</li>
