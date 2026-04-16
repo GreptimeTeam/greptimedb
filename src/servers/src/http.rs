@@ -129,12 +129,7 @@ const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
-pub static PUBLIC_APIS: [&str; 4] = [
-    "/",
-    "/v1/influxdb/ping",
-    "/v1/influxdb/health",
-    "/v1/health",
-];
+pub static PUBLIC_APIS: [&str; 3] = ["/v1/influxdb/ping", "/v1/influxdb/health", "/v1/health"];
 
 #[derive(Default)]
 pub struct HttpServer {
