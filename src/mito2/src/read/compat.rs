@@ -180,7 +180,6 @@ impl FlatCompatBatch {
                         ),
                     })?;
                 index_or_defaults.push(IndexOrDefault::DefaultValue {
-                    column_id: expect_column.column_id,
                     default_vector,
                     semantic_type: expect_column.semantic_type,
                 });
@@ -254,7 +253,6 @@ impl FlatCompatBatch {
                     }
                 }
                 IndexOrDefault::DefaultValue {
-                    column_id: _,
                     default_vector,
                     semantic_type,
                 } => repeat_vector(default_vector, len, *semantic_type == SemanticType::Tag),
@@ -339,8 +337,6 @@ enum IndexOrDefault {
     },
     /// Default value for the column.
     DefaultValue {
-        /// Id of the column.
-        column_id: ColumnId,
         /// Default value. The vector has only 1 element.
         default_vector: VectorRef,
         /// Semantic type of the column.

@@ -41,8 +41,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use datatypes::vectors::Helper;
 use mito_codec::row_converter::{
-    CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
-    build_primary_key_codec_with_fields,
+    CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields,
 };
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
@@ -216,8 +215,6 @@ pub struct PrimaryKeyReadFormat {
     /// Field column id to their index in the projected schema (
     /// the schema of [Batch]).
     field_id_to_projected_index: HashMap<ColumnId, usize>,
-    /// Sequence number to override the sequence read from the SST.
-    override_sequence: Option<SequenceNumber>,
     /// Codec used to decode primary key values if eager decoding is enabled.
     primary_key_codec: Option<Arc<dyn PrimaryKeyCodec>>,
 }
@@ -247,23 +244,8 @@ impl PrimaryKeyReadFormat {
             field_id_to_index,
             projection_indices: format_projection.projection_indices,
             field_id_to_projected_index: format_projection.column_id_to_projected_index,
-            override_sequence: None,
             primary_key_codec: None,
         }
-    }
-
-    /// Sets the sequence number to override.
-    pub(crate) fn set_override_sequence(&mut self, sequence: Option<SequenceNumber>) {
-        self.override_sequence = sequence;
-    }
-
-    /// Enables or disables eager decoding of primary key values into batches.
-    pub(crate) fn set_decode_primary_key_values(&mut self, decode: bool) {
-        self.primary_key_codec = if decode {
-            Some(build_primary_key_codec(&self.metadata))
-        } else {
-            None
-        };
     }
 
     /// Gets the arrow schema of the SST file.
@@ -287,12 +269,6 @@ impl PrimaryKeyReadFormat {
     /// Gets the field id to projected index.
     pub(crate) fn field_id_to_projected_index(&self) -> &HashMap<ColumnId, usize> {
         &self.field_id_to_projected_index
-    }
-
-    /// Creates a sequence array to override.
-    pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
-        self.override_sequence
-            .map(|seq| Arc::new(UInt64Array::from_value(seq, length)) as ArrayRef)
     }
 
     /// Convert a arrow record batch into `batches`.
