@@ -152,48 +152,6 @@ pub(crate) fn prefilter_flat_batch_by_primary_key(
     }
 }
 
-/// Returns whether a filter can be applied by parquet primary-key prefiltering.
-///
-/// Unlike `PartitionTreeMemtable`, parquet prefilter always supports predicates
-/// on the partition column.
-pub(crate) fn is_usable_primary_key_filter(
-    sst_metadata: &RegionMetadataRef,
-    expected_metadata: Option<&RegionMetadata>,
-    filter: &SimpleFilterEvaluator,
-) -> bool {
-    let sst_column = match expected_metadata {
-        Some(expected_metadata) => {
-            let Some(expected_column) = expected_metadata.column_by_name(filter.column_name())
-            else {
-                return false;
-            };
-            let Some(sst_column) = sst_metadata.column_by_id(expected_column.column_id) else {
-                return false;
-            };
-
-            if sst_column.column_schema.name != expected_column.column_schema.name
-                || sst_column.semantic_type != expected_column.semantic_type
-                || sst_column.column_schema.data_type != expected_column.column_schema.data_type
-            {
-                return false;
-            }
-
-            sst_column
-        }
-        None => {
-            let Some(sst_column) = sst_metadata.column_by_name(filter.column_name()) else {
-                return false;
-            };
-            sst_column
-        }
-    };
-
-    sst_column.semantic_type == SemanticType::Tag
-        && sst_metadata
-            .primary_key_index(sst_column.column_id)
-            .is_some()
-}
-
 pub(crate) struct CachedPrimaryKeyFilter {
     inner: Box<dyn PrimaryKeyFilter>,
     last_primary_key: Vec<u8>,
@@ -270,7 +228,7 @@ pub(crate) fn build_bulk_filter_plan(
         // Split tag predicates that can be evaluated against the encoded PK
         // from filters that still need normal row-wise evaluation later.
         let pk_filter = filter_ctx.filter().as_filter().and_then(|filter| {
-            is_usable_primary_key_filter(metadata, None, filter).then(|| filter.clone())
+            (filter_ctx.semantic_type() == SemanticType::Tag).then(|| filter.clone())
         });
 
         if let Some(pk_filter) = pk_filter {
@@ -302,88 +260,88 @@ pub(crate) fn build_reader_filter_plan(
     };
 
     let metadata = read_format.metadata();
-    let mut simple_filters = Vec::new();
     let mut prefilter_simple_filters = Vec::new();
     let mut remaining_simple_filters = Vec::new();
     let mut prefilter_physical_filters = Vec::new();
     let mut primary_key_filters = Vec::new();
+    let mut pk_filter_contexts = Vec::new();
 
     // `SkipFields` keeps field predicates in the normal read path to avoid a
     // second read of projected field columns, while tags/timestamp can still
     // participate in prefiltering.
     let field_prefilter_enabled = pre_filter_mode == PreFilterMode::All;
-    // PK prefilter requires the encoded primary key column to remain available
-    // in the flat-format batch.
-    let supports_pk_prefilter = !read_format.batch_has_raw_pk_columns();
+    // When true, tag columns are encoded in the primary key column and are NOT
+    // stored as separate parquet columns. Tag predicates must go through PK
+    // decoding rather than direct column reads.
+    let need_pk_prefilter = !read_format.batch_has_raw_pk_columns();
+
+    // Whether a column can be read directly from parquet for prefiltering,
+    // based on its semantic type and the current mode/format.
+    let can_direct_prefilter = |semantic_type: SemanticType| -> bool {
+        match semantic_type {
+            SemanticType::Tag => !need_pk_prefilter,
+            SemanticType::Field => field_prefilter_enabled,
+            SemanticType::Timestamp => true,
+        }
+    };
 
     for expr in predicate.exprs() {
         // Prefer cheap simple filters first. They also preserve `Matched` /
         // `Pruned` states for columns that only exist in expected metadata.
-        if let Some(filter) = SimpleFilterContext::new_opt(metadata, expected_metadata, expr) {
-            simple_filters.push(filter);
+        if let Some(filter_ctx) = SimpleFilterContext::new_opt(metadata, expected_metadata, expr) {
+            // `Matched` and `Pruned` come from expected-metadata compatibility
+            // and must stay in the main filter list so later phases keep that
+            // outcome.
+            let Some(filter) = filter_ctx.filter().as_filter() else {
+                remaining_simple_filters.push(filter_ctx);
+                continue;
+            };
+
+            // If the column is stored as a separate parquet column and is already projected in the main read,
+            // we can evaluate the simple filter directly during prefilter.
+            let direct_prefilter = can_direct_prefilter(filter_ctx.semantic_type());
+            if direct_prefilter {
+                assert!(
+                    read_format
+                        .arrow_schema()
+                        .column_with_name(filter.column_name())
+                        .is_some(),
+                    "Column '{}' is not present in the arrow schema {:?}",
+                    filter.column_name(),
+                    read_format.arrow_schema(),
+                );
+                prefilter_simple_filters.push(filter_ctx);
+                continue;
+            }
+
+            // Otherwise try to filter through encoded-PK matching.
+            if need_pk_prefilter && filter_ctx.semantic_type() == SemanticType::Tag {
+                primary_key_filters.push(filter.clone());
+                pk_filter_contexts.push(filter_ctx);
+            } else {
+                remaining_simple_filters.push(filter_ctx);
+            }
             continue;
         }
 
+        // `PhysicalFilterContext::new_opt` returns `None` when the column is
+        // not in the projected arrow schema, so no extra `column_with_name`
+        // check is needed here.
         if let Some(filter) =
             PhysicalFilterContext::new_opt(metadata, expected_metadata, read_format, expr)
+            && can_direct_prefilter(filter.semantic_type())
         {
-            // Physical filters are only worth running in prefilter if the
-            // needed column is available in the reduced projection and the
-            // mode allows this column class.
-            let usable_prefilter = (field_prefilter_enabled
-                || filter.semantic_type() != SemanticType::Field)
-                && read_format
-                    .arrow_schema()
-                    .column_with_name(filter.column_name())
-                    .is_some();
-            if usable_prefilter {
-                prefilter_physical_filters.push(filter);
-            }
+            prefilter_physical_filters.push(filter);
         }
     }
 
-    for filter_ctx in simple_filters.iter().cloned() {
-        // `Matched` and `Pruned` come from expected-metadata compatibility and
-        // must stay in the main filter list so later phases keep that outcome.
-        let Some(filter) = filter_ctx.filter().as_filter() else {
-            remaining_simple_filters.push(filter_ctx);
-            continue;
-        };
-
-        // If the column is already projected in the main read, we can evaluate
-        // the simple filter directly during prefilter without falling back to
-        // PK decoding.
-        let direct_prefilter = (field_prefilter_enabled
-            || filter_ctx.semantic_type() != SemanticType::Field)
-            && read_format
-                .arrow_schema()
-                .column_with_name(filter.column_name())
-                .is_some();
-        if direct_prefilter {
-            prefilter_simple_filters.push(filter_ctx);
-            continue;
-        }
-
-        // Otherwise try to recover tag predicates through encoded-PK matching.
-        // These filters are still added to the prefilter phase so they can
-        // contribute to the refined row selection there.
-        let pk_prefilter = supports_pk_prefilter
-            && is_usable_primary_key_filter(metadata, expected_metadata, filter);
-        if pk_prefilter {
-            primary_key_filters.push(filter.clone());
-            prefilter_simple_filters.push(filter_ctx);
-        } else {
-            remaining_simple_filters.push(filter_ctx);
-        }
-    }
-
-    let primary_key_filters =
+    let pk_filter_exprs =
         (!primary_key_filters.is_empty()).then_some(Arc::new(primary_key_filters));
     let prefilter_builder = PrefilterContextBuilder::new(
         read_format,
         codec,
-        primary_key_filters,
-        prefilter_simple_filters,
+        pk_filter_exprs,
+        prefilter_simple_filters.clone(),
         prefilter_physical_filters,
         parquet_schema,
     );
@@ -396,8 +354,10 @@ pub(crate) fn build_reader_filter_plan(
     } else {
         // If prefilter setup is not worthwhile, keep the original simple
         // filters on the normal path so behavior is unchanged.
+        remaining_simple_filters.extend(prefilter_simple_filters);
+        remaining_simple_filters.extend(pk_filter_contexts);
         ReaderFilterPlan {
-            remaining_simple_filters: simple_filters,
+            remaining_simple_filters,
             prefilter_builder: None,
         }
     }
@@ -483,7 +443,9 @@ impl PrefilterContextBuilder {
             return None;
         }
 
-        if !should_use_prefilter(prefilter_count, remaining_count, total_count) {
+        if pk_filters.is_none()
+            && !should_use_prefilter(prefilter_count, remaining_count, total_count)
+        {
             return None;
         }
 
@@ -735,38 +697,6 @@ mod tests {
         new_primary_key, new_record_batch_with_custom_sequence, sst_region_metadata,
         sst_region_metadata_with_encoding,
     };
-
-    #[test]
-    fn test_is_usable_primary_key_filter_skips_legacy_primary_key_batches() {
-        let metadata = Arc::new(sst_region_metadata_with_encoding(
-            PrimaryKeyEncoding::Sparse,
-        ));
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
-        assert!(!read_format.batch_has_raw_pk_columns());
-
-        let filter = SimpleFilterEvaluator::try_new(&col("tag_0").eq(lit("b"))).unwrap();
-        assert!(is_usable_primary_key_filter(&metadata, None, &filter));
-    }
-
-    #[test]
-    fn test_is_usable_primary_key_filter_supports_partition_column_by_default() {
-        let metadata = Arc::new(sst_region_metadata_with_encoding(
-            PrimaryKeyEncoding::Sparse,
-        ));
-        let filter = SimpleFilterEvaluator::try_new(
-            &col(store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(1_u32)),
-        )
-        .unwrap();
-
-        assert!(is_usable_primary_key_filter(&metadata, None, &filter));
-    }
 
     struct CountingPrimaryKeyFilter {
         hits: Arc<AtomicUsize>,

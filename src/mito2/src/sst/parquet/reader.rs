@@ -1909,29 +1909,14 @@ impl PhysicalFilterContext {
                 column
             }
             None => {
-                let column = sst_meta.column_by_name(&column_name)?;
-                column
+                sst_meta.column_by_name(&column_name)?
             }
         };
 
-        let field =
-            if let Some((_, field)) = read_format.arrow_schema().column_with_name(&column_name) {
-                field.clone()
-            } else {
-                let field = Field::try_from(&column_metadata.column_schema).ok()?;
-                if column_metadata.semantic_type == SemanticType::Tag
-                    && column_metadata.column_schema.data_type.is_string()
-                {
-                    tag_maybe_to_dictionary_field(
-                        &column_metadata.column_schema.data_type,
-                        &Arc::new(field),
-                    )
-                    .as_ref()
-                    .clone()
-                } else {
-                    field
-                }
-            };
+        // The column must be present in the projected arrow schema for the
+        // prefilter to be able to read it.
+        let (_, field) = read_format.arrow_schema().column_with_name(&column_name)?;
+        let field = field.clone();
         let schema = Arc::new(ArrowSchema::new(vec![field]));
         let physical_expr = Predicate::to_physical_expr(expr, &schema)
             .inspect_err(|e| {
