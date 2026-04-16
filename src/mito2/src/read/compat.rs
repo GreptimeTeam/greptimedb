@@ -88,33 +88,6 @@ impl<R: BatchReader> BatchReader for CompatReader<R> {
     }
 }
 
-/// Helper to adapt schema of the batch to an expected schema.
-pub(crate) enum CompatBatch {
-    /// Adapter for primary key format.
-    PrimaryKey(PrimaryKeyCompatBatch),
-    /// Adapter for flat format.
-    Flat(FlatCompatBatch),
-}
-
-impl CompatBatch {
-    /// Returns the inner primary key batch adapter if this is a PrimaryKey format.
-    #[allow(dead_code)]
-    pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyCompatBatch> {
-        match self {
-            CompatBatch::PrimaryKey(batch) => Some(batch),
-            _ => None,
-        }
-    }
-
-    /// Returns the inner flat batch adapter if this is a Flat format.
-    pub(crate) fn as_flat(&self) -> Option<&FlatCompatBatch> {
-        match self {
-            CompatBatch::Flat(batch) => Some(batch),
-            _ => None,
-        }
-    }
-}
-
 /// A helper struct to adapt schema of the batch to an expected schema.
 pub(crate) struct PrimaryKeyCompatBatch {
     /// Optional primary key adapter.
