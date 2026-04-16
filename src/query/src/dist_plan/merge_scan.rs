@@ -433,14 +433,15 @@ impl MergeScanExec {
             .values()
             .flat_map(|aliases| aliases.iter().map(|c| c.name()))
             .collect();
-        let mut overlaps = vec![];
-        for expr in &hash_exprs {
-            if let Some(col_expr) = expr.as_any().downcast_ref::<Column>()
-                && all_partition_col_aliases.contains(col_expr.name())
-            {
-                overlaps.push(expr.clone());
-            }
-        }
+        let overlaps: Vec<_> = hash_exprs
+            .iter()
+            .filter(|expr| {
+                expr.as_any()
+                    .downcast_ref::<Column>()
+                    .is_some_and(|col_expr| all_partition_col_aliases.contains(col_expr.name()))
+            })
+            .cloned()
+            .collect();
 
         if overlaps.is_empty() {
             return None;

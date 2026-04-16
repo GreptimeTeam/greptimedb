@@ -444,7 +444,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                         JsonFormat::Jsonb => Some(ColumnDataTypeExtension {
                             type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
                         }),
-                        JsonFormat::Native(native_type) => {
+                        JsonFormat::Json2(native_type) => {
                             if native_type.is_null() {
                                 None
                             } else {

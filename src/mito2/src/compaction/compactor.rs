@@ -36,9 +36,10 @@ use crate::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
 };
 use crate::cache::{CacheManager, CacheManagerRef};
-use crate::compaction::picker::{PickerOutput, new_picker};
+use crate::compaction::picker::PickerOutput;
 use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
 use crate::config::MitoConfig;
+use crate::error;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, ObjectStoreNotFoundSnafu, Result,
 };
@@ -58,7 +59,6 @@ use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::version::{SstVersion, SstVersionRef};
-use crate::{error, metrics};
 
 /// Region version for compaction that does not hold memtables.
 #[derive(Clone)]
@@ -301,13 +301,6 @@ pub trait Compactor: Send + Sync + 'static {
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
     ) -> Result<RegionEdit>;
-
-    /// Execute compaction for a region.
-    async fn compact(
-        &self,
-        compaction_region: &CompactionRegion,
-        compact_request_options: compact_request::Options,
-    ) -> Result<()>;
 }
 
 /// Trait for merging a single compaction output into SST files.
@@ -611,50 +604,6 @@ where
             .await?;
 
         Ok(edit)
-    }
-
-    // The default implementation of compact combines the merge_ssts and update_manifest functions.
-    // Note: It's local compaction and only used for testing purpose.
-    async fn compact(
-        &self,
-        compaction_region: &CompactionRegion,
-        compact_request_options: compact_request::Options,
-    ) -> Result<()> {
-        let picker_output = {
-            let picker_output = new_picker(
-                &compact_request_options,
-                &compaction_region.region_options.compaction,
-                compaction_region.region_options.append_mode,
-                None,
-            )
-            .pick(compaction_region);
-
-            if let Some(picker_output) = picker_output {
-                picker_output
-            } else {
-                info!(
-                    "No files to compact for region_id: {}",
-                    compaction_region.region_id
-                );
-                return Ok(());
-            }
-        };
-
-        let merge_output = self.merge_ssts(compaction_region, picker_output).await?;
-        if merge_output.is_empty() {
-            info!(
-                "No files to compact for region_id: {}",
-                compaction_region.region_id
-            );
-            return Ok(());
-        }
-
-        metrics::COMPACTION_INPUT_BYTES.inc_by(merge_output.input_file_size() as f64);
-        metrics::COMPACTION_OUTPUT_BYTES.inc_by(merge_output.output_file_size() as f64);
-        self.update_manifest(compaction_region, merge_output)
-            .await?;
-
-        Ok(())
     }
 }
 
