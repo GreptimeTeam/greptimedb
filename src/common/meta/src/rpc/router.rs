@@ -107,15 +107,11 @@ pub fn operating_leader_region_roles(
     region_routes
         .iter()
         .filter_map(|route| {
-            route.leader_region_role().map(|role| {
-                (
-                    route.region.id,
-                    route.leader_peer.as_ref().unwrap().id,
-                    role,
-                )
-            })
+            let role = route.leader_region_role()?;
+            let leader = route.leader_peer.as_ref()?;
+            Some((route.region.id, leader.id, role))
         })
-        .collect::<Vec<_>>()
+        .collect()
 }
 
 /// Returns the HashMap<[RegionNumber], &[Peer]>;

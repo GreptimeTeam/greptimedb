@@ -945,11 +945,11 @@ mod tests {
         let _guards = Context::register_operating_regions(&keeper, &region_routes).unwrap();
 
         let leader_roles =
-            keeper.extract_operating_region_roles(1, &mut HashSet::from([RegionId::new(1024, 1)]));
+            keeper.extract_operating_region_roles(1, &HashSet::from([RegionId::new(1024, 1)]));
         let staging_roles =
-            keeper.extract_operating_region_roles(2, &mut HashSet::from([RegionId::new(1024, 2)]));
+            keeper.extract_operating_region_roles(2, &HashSet::from([RegionId::new(1024, 2)]));
         let downgrading_roles =
-            keeper.extract_operating_region_roles(3, &mut HashSet::from([RegionId::new(1024, 3)]));
+            keeper.extract_operating_region_roles(3, &HashSet::from([RegionId::new(1024, 3)]));
 
         assert_eq!(
             leader_roles.get(&RegionId::new(1024, 1)),

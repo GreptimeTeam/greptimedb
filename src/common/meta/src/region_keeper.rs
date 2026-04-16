@@ -92,16 +92,15 @@ impl MemoryRegionKeeper {
     pub fn extract_operating_region_roles(
         &self,
         datanode_id: DatanodeId,
-        region_ids: &mut HashSet<RegionId>,
+        region_ids: &HashSet<RegionId>,
     ) -> HashMap<RegionId, RegionRole> {
         let inner = self.inner.read().unwrap();
         region_ids
-            .extract_if(|region_id| inner.contains_key(&(datanode_id, *region_id)))
-            .map(|region_id| {
-                let role = *inner
-                    .get(&(datanode_id, region_id))
-                    .expect("operating region role must exist");
-                (region_id, role)
+            .iter()
+            .filter_map(|region_id| {
+                inner
+                    .get(&(datanode_id, *region_id))
+                    .map(|role| (*region_id, *role))
             })
             .collect()
     }
@@ -149,25 +148,24 @@ mod tests {
             .register_with_role(1, RegionId::from_u64(2), RegionRole::Follower)
             .unwrap();
 
-        let mut regions = HashSet::from([
+        let regions = HashSet::from([
             RegionId::from_u64(1),
             RegionId::from_u64(2),
             RegionId::from_u64(3),
         ]);
-        let output = keeper.extract_operating_region_roles(1, &mut regions);
+        let output = keeper.extract_operating_region_roles(1, &regions);
         assert_eq!(output.len(), 2);
 
         assert!(output.contains_key(&RegionId::from_u64(1)));
         assert!(output.contains_key(&RegionId::from_u64(2)));
-        assert_eq!(regions, HashSet::from([RegionId::from_u64(3)]));
         assert_eq!(keeper.len(), 2);
 
-        let mut regions = HashSet::from([
+        let regions = HashSet::from([
             RegionId::from_u64(1),
             RegionId::from_u64(2),
             RegionId::from_u64(3),
         ]);
-        let output = keeper.extract_operating_region_roles(1, &mut regions);
+        let output = keeper.extract_operating_region_roles(1, &regions);
         assert_eq!(
             output,
             HashMap::from([
@@ -175,7 +173,6 @@ mod tests {
                 (RegionId::from_u64(2), RegionRole::Follower),
             ])
         );
-        assert_eq!(regions, HashSet::from([RegionId::from_u64(3)]));
         assert_eq!(keeper.len(), 2);
 
         drop(guard);

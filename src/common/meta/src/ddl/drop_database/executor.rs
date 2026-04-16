@@ -450,7 +450,7 @@ mod tests {
 
         let roles = ddl_context
             .memory_region_keeper
-            .extract_operating_region_roles(7, &mut HashSet::from([region_id]));
+            .extract_operating_region_roles(7, &HashSet::from([region_id]));
         assert_eq!(roles.get(&region_id), Some(&RegionRole::DowngradingLeader));
     }
 
