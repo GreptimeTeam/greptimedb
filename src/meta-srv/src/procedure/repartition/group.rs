@@ -201,7 +201,8 @@ impl Procedure for RepartitionGroupProcedure {
     }
 
     async fn rollback(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<()> {
-        // Parent repartition owns rollback and recovery.
+        // The parent repartition procedure is responsible for rollback and recovery.
+        // Subprocedures are not recovered after metasrv restarts, so implementing rollback for them is meaningless.
         Ok(())
     }
 

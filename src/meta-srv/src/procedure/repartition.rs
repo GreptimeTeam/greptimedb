@@ -597,9 +597,8 @@ impl RepartitionProcedure {
         let table_lock = TableLock::Write(table_id).into();
         let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
         let table_route_value = self.context.get_table_route_value().await?;
-        let mut current_region_routes =
-            region_routes(table_id, table_route_value.get_inner_ref())?.clone();
-        let original_region_routes = current_region_routes.clone();
+        let original_region_routes = region_routes(table_id, table_route_value.get_inner_ref())?;
+        let mut current_region_routes = original_region_routes.clone();
         self.rollback_group_metadata_for_selected_plans(&mut current_region_routes)
             .await?;
         let allocated_region_routes = DeallocateRegion::filter_deallocatable_region_routes(
@@ -631,7 +630,7 @@ impl RepartitionProcedure {
         let new_region_routes =
             DeallocateRegion::generate_region_routes(&current_region_routes, &allocated_region_ids);
 
-        if new_region_routes != original_region_routes {
+        if new_region_routes != *original_region_routes {
             self.context
                 .update_table_route(&table_route_value, new_region_routes, HashMap::new())
                 .await

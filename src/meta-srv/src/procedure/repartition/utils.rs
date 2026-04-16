@@ -159,6 +159,8 @@ pub fn rollback_group_metadata_routes(
 
     for target in original_target_routes {
         let Some(region_route) = region_routes_map.get_mut(&target.region.id) else {
+            // Ignores newly allocated region routes that do not exist in the current region routes.
+            // They may have already been deleted (to ensure idempotency).
             if allocated_region_ids.contains(&target.region.id) {
                 continue;
             }
