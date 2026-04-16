@@ -60,7 +60,7 @@ use crate::error::{
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::BoxedRecordBatchStream;
-use crate::read::projection::ProjectionMapper;
+use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
 use crate::region::options::{MergeMode, RegionOptions};
@@ -1002,7 +1002,7 @@ impl CompactionSstReaderBuilder<'_> {
     }
 
     fn build_scan_input(self) -> Result<ScanInput> {
-        let mapper = ProjectionMapper::all(&self.metadata)?;
+        let mapper = FlatProjectionMapper::all(&self.metadata)?;
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)

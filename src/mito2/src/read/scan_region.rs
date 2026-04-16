@@ -53,7 +53,7 @@ use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, FlatCompatBatch};
-use crate::read::projection::ProjectionMapper;
+use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::ScanRequestFingerprint;
 use crate::read::seq_scan::SeqScan;
@@ -403,12 +403,12 @@ impl ScanRegion {
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match self.request.projection_indices() {
-            Some(p) => ProjectionMapper::new_with_read_columns(
+            Some(p) => FlatProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
-                p.iter().copied(),
+                p.to_vec(),
                 read_column_ids.clone(),
             )?,
-            None => ProjectionMapper::all(&self.version.metadata)?,
+            None => FlatProjectionMapper::all(&self.version.metadata)?,
         };
 
         let ssts = &self.version.ssts;
@@ -781,7 +781,7 @@ pub struct ScanInput {
     /// Region SST access layer.
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
-    pub(crate) mapper: Arc<ProjectionMapper>,
+    pub(crate) mapper: Arc<FlatProjectionMapper>,
     /// Column ids to read from memtables and SSTs.
     /// Notice this is different from the columns in `mapper` which are projected columns.
     /// But this read columns might also include non-projected columns needed for filtering.
@@ -835,7 +835,7 @@ pub struct ScanInput {
 impl ScanInput {
     /// Creates a new [ScanInput].
     #[must_use]
-    pub(crate) fn new(access_layer: AccessLayerRef, mapper: ProjectionMapper) -> ScanInput {
+    pub(crate) fn new(access_layer: AccessLayerRef, mapper: FlatProjectionMapper) -> ScanInput {
         ScanInput {
             access_layer,
             read_column_ids: mapper.column_ids().to_vec(),
@@ -1072,7 +1072,12 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
-        let decode_pk_values = !self.compaction && self.mapper.has_tags();
+        let decode_pk_values = !self.compaction
+            && self
+                .mapper
+                .column_ids()
+                .iter()
+                .any(|column_id| self.mapper.metadata().primary_key.contains(column_id));
         let reader = self
             .access_layer
             .read_sst(file.clone())
@@ -1120,9 +1125,8 @@ impl ScanInput {
             // They have different schema. We need to adapt the batch first so the
             // mapper can convert it.
             let flat_format = file_range_ctx.read_format().as_flat().unwrap();
-            let mapper = self.mapper.as_flat().unwrap();
             let compat = FlatCompatBatch::try_new(
-                mapper,
+                &self.mapper,
                 flat_format.metadata(),
                 flat_format.format_projection(),
                 self.compaction,
@@ -1791,7 +1795,7 @@ mod tests {
 
     async fn new_scan_input(metadata: RegionMetadataRef, filters: Vec<Expr>) -> ScanInput {
         let env = SchedulerEnv::new().await;
-        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
         let predicate = PredicateGroup::new(metadata.as_ref(), &filters).unwrap();
         let file = FileHandle::new(
             crate::sst::file::FileMeta::default(),
@@ -1959,7 +1963,7 @@ mod tests {
 
         let disabled = ScanInput::new(
             SchedulerEnv::new().await.access_layer.clone(),
-            ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap(),
+            FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap(),
         )
         .with_predicate(PredicateGroup::new(metadata.as_ref(), &filters).unwrap());
         assert!(build_scan_fingerprint(&disabled).is_none());
