@@ -126,7 +126,10 @@ const TAGS_START_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SI
 /// a small pre-reserved `Vec` beats a `HashMap` lookup in that regime (no
 /// hash, better cache behavior). Primary keys with more than this many tags
 /// spill the remainder into a `HashMap`.
-const SPARSE_OFFSETS_INLINE_CAP: usize = 16;
+///
+/// Benchmarked via `bench_inline_threshold`: at 32 entries the worst-case
+/// linear scan (~6.6 ns) is still on par with a `HashMap` lookup (~7.2 ns).
+const SPARSE_OFFSETS_INLINE_CAP: usize = 32;
 
 /// A lazily populated cache of tag column offsets inside a sparse primary key.
 ///
