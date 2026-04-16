@@ -1,10 +1,10 @@
-# How Dynamic Filtering Speeds Up TopK Queries in GreptimeDB
+# From Tens of Seconds to Sub-Second: How GreptimeDB Speeds Up TopK Queries
 
 `ORDER BY ... LIMIT 10` looks cheap because it only returns a few rows. On a large table, it often is not. If the sort key is not the time-index column, the database may still need to read a large amount of data before it can determine which 10 rows belong in the final result.
 
 GreptimeDB improves this path by passing the runtime boundary formed by TopK to the scan as early as possible. Once later data can no longer enter the final result, the scan can skip it. On a real traces dataset, this turns `ORDER BY end_time DESC LIMIT 10` from tens of seconds into a sub-second query.
 
-## Why `LIMIT 10` used to be slow
+## Why `ORDER BY ... LIMIT` can still be expensive
 
 Consider this query:
 
@@ -17,9 +17,9 @@ LIMIT 10;
 
 Under the old path, the scan could not see TopK's runtime state and had to keep reading until the query finished. Even though the query returned only 10 rows, it could still scan a large amount of data first. Only after the query finished was it clear that much of that work had not been necessary.
 
-Here `start_time` is the table's time-index column, while `end_time` is not. GreptimeDB previously had a more complex optimization called window sort, which depended more on time-index data distribution. Now both kinds of TopK queries go through the same dyn filter path.
+Here `start_time` is the table's time-index column, while `end_time` is not. GreptimeDB previously had a more complex optimization called window sort, which depended more on time-index data distribution. Now both kinds of TopK queries go through the same dynamic-filtering path.
 
-## What dyn filter changes
+## How dynamic filtering changes the scan path
 
 The execution path is now straightforward:
 
@@ -30,7 +30,7 @@ The execution path is now straightforward:
 
 For queries like `ORDER BY end_time DESC LIMIT 10`, the win comes from narrowing the scan range earlier, not from returning fewer rows.
 
-## How the runtime threshold prunes data
+## How the runtime threshold becomes a pruning condition
 
 Once TopK has a meaningful boundary, GreptimeDB uses it as part of the dynamic predicate seen by the scan.
 
@@ -49,7 +49,7 @@ flowchart TD
     C --> D[Irrelevant data is skipped]
 ```
 
-## What to look for in the plan
+## How to verify it in the execution plan
 
 `EXPLAIN ANALYZE VERBOSE` shows whether this path is active.
 
@@ -72,9 +72,9 @@ Together, these two fragments show:
 - `SortExec: TopK(..., filter=[...])`: TopK has formed a runtime threshold.
 - scan `dyn_filters`: the scan receives that threshold and uses it for pruning.
 
-If both signals are present, dyn filter is usually active on this query.
+If both signals are present, dynamic filtering is usually active on this query.
 
-## How much faster can it get?
+## What the speedup looks like in practice
 
 On this traces dataset, the clearest example is this query:
 
@@ -87,19 +87,19 @@ LIMIT 10;
 
 | Query | Before | Now | Notes |
 | --- | ---: | ---: | --- |
-| `ORDER BY end_time DESC LIMIT 10` | ~`28.9s` | ~`0.21s` | `end_time` is not the time-index column, and the old unoptimized path effectively scanned the whole table; after switching to dyn filter, later scan work can be pruned much earlier |
-| `ORDER BY start_time DESC LIMIT 10` | `0.334s` / `0.336s` / `0.342s` | `0.336s` / `0.340s` / `0.336s` | `start_time` is the time-index column; window sort was already fast in this case, so switching to dyn filter changes little in practice |
+| `ORDER BY end_time DESC LIMIT 10` | ~`28.9s` | ~`0.21s` | `end_time` is not the time-index column, and the old unoptimized path effectively scanned the whole table; after switching to dynamic filtering, later scan work can be pruned much earlier |
+| `ORDER BY start_time DESC LIMIT 10` | `0.334s` / `0.336s` / `0.342s` | `0.336s` / `0.340s` / `0.336s` | `start_time` is the time-index column; window sort was already fast in this case, so switching to dynamic filtering changes little in practice |
 
 In practice:
 
-- `end_time`-style queries on non-time-index sort keys were slow mainly because the old path scanned the whole table; dyn filter lets TopK's boundary prune later scan work.
-- Both `start_time` and `end_time` TopK queries now go through dyn filter. The older window sort path was more complex and more dependent on time-index data distribution; dyn filter replaces it with a more unified execution path.
+- `end_time`-style queries on non-time-index sort keys were slow mainly because the old path scanned the whole table; dynamic filtering lets TopK's boundary prune later scan work.
+- Both `start_time` and `end_time` TopK queries now go through dynamic filtering. The older window sort path was more complex and more dependent on time-index data distribution; dynamic filtering replaces it with a more unified execution path.
 
 This optimization changes scan volume. The exact speedup still depends on data distribution, row-group statistics, and the size of `LIMIT`.
 
-## Which queries benefit most
+## Which queries benefit the most
 
-dyn filter is strongest when all of the following line up:
+Dynamic filtering is strongest when all of the following line up:
 
 - `k` is small;
 - row-group statistics are selective enough to make pruning useful;
@@ -114,15 +114,17 @@ It is much less dramatic when:
 
 If scan cost dominates and the data distribution is suitable, this path can significantly reduce query cost.
 
-## Current scope
-
-The dyn filter path discussed here is, for now, mainly the local TopK path. Remote dynamic-filter propagation in distributed queries—especially the remote propagation of join-related dynamic filters—is still under active development; for the current design status, see [PR #7931](https://github.com/GreptimeTeam/greptimedb/pull/7931).
-
 ## What to check on your own queries
+
+For now, the dynamic-filtering path discussed here is mainly the local TopK path. Remote dynamic-filter propagation in distributed queries—especially for join-related dynamic filters—is still under active development; for the current design status, see the [remote dyn filter RFC](https://github.com/GreptimeTeam/greptimedb/blob/main/docs/rfcs/remote-dyn-filter-rfc.md).
 
 If you have an `ORDER BY ... LIMIT k` query on a non-indexed sort key that is still slow, start with these two signals in the plan:
 
 - a filter on the TopK node;
 - propagated `dyn_filters` on the scan node.
 
-If both are present, the query is probably on the dyn filter path.
+If both are present, the query is probably on the dynamic-filtering path.
+
+If neither shows up, first check whether the query is even on a path that supports dynamic filtering today.
+
+The key change is not that the result only returns a few rows. It is that the scan can stop much earlier. That is where dynamic filtering changes the cost of TopK queries.
