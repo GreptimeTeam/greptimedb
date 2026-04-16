@@ -231,16 +231,14 @@ impl MysqlInstanceShim {
         match plan {
             Some(plan) if params.len() == param_num - 1 => {
                 self.save_plan(SqlPlan::Plan(plan, query.clone()), stmt_key)
-                    .map_err(|e| {
+                    .inspect_err(|e| {
                         error!(e; "Failed to save prepared statement");
-                        e
                     })?;
             }
             _ => {
                 self.save_plan(SqlPlan::Statement(statement, query), stmt_key)
-                    .map_err(|e| {
+                    .inspect_err(|e| {
                         error!(e; "Failed to save prepared statement");
-                        e
                     })?;
             }
         }
