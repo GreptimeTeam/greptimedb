@@ -1869,8 +1869,8 @@ impl SimpleFilterContext {
     }
 }
 
-#[derive(Clone)]
 /// Context to evaluate a physical expression for a parquet file.
+#[derive(Clone)]
 pub(crate) struct PhysicalFilterContext {
     /// Filter to evaluate.
     filter: Arc<dyn PhysicalExpr>,
@@ -1903,14 +1903,13 @@ impl PhysicalFilterContext {
             Some(meta) => {
                 let column = meta.column_by_name(&column_name)?;
                 let sst_column = sst_meta.column_by_id(column.column_id)?;
+                // Physical expr requires the column name to match the SST column name.
                 if sst_column.column_schema.name != column_name {
                     return None;
                 }
                 column
             }
-            None => {
-                sst_meta.column_by_name(&column_name)?
-            }
+            None => sst_meta.column_by_name(&column_name)?,
         };
 
         // The column must be present in the projected arrow schema for the
@@ -1920,7 +1919,7 @@ impl PhysicalFilterContext {
         let schema = Arc::new(ArrowSchema::new(vec![field]));
         let physical_expr = Predicate::to_physical_expr(expr, &schema)
             .inspect_err(|e| {
-                error!("Unable to build physical filter for {expr}, schema: {schema:?}, err: {e}");
+                error!(e; "Unable to build physical filter for {expr}, schema: {schema:?}");
             })
             .ok()?;
 
@@ -1936,8 +1935,7 @@ impl PhysicalFilterContext {
     /// Returns true if the expression is a variant we want to evaluate as a
     /// physical prefilter. Binary exprs are intentionally excluded because
     /// [`SimpleFilterEvaluator`] already handles them.
-    // TODO: extend to a small allowlist of cheap scalar functions
-    // (e.g. `lower`, `length`, date truncations) when we have a use case.
+    // TODO(yingwen): extend more expressions if necessary. For example, allow some cheap scalar functions (e.g. `lower`, `length`, date truncations)
     fn is_prefilter_candidate(expr: &Expr) -> bool {
         matches!(
             expr,
