@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::hint::black_box;
 
 use bytes::Bytes;
@@ -151,5 +152,70 @@ fn bench_has_column(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, encode_sparse, bench_has_column);
+/// Benchmarks Vec linear scan vs HashMap lookup at various collection sizes
+/// to find the optimal `SPARSE_OFFSETS_INLINE_CAP` threshold.
+fn bench_inline_threshold(c: &mut Criterion) {
+    for size in [4, 8, 12, 16, 20, 24, 32, 48, 64] {
+        let vec: Vec<(u32, usize)> = (0..size).map(|i| (i as u32, i * 8)).collect();
+        let map: HashMap<u32, usize> = vec.iter().copied().collect();
+
+        let last_id = (size - 1) as u32;
+        let missing_id = size as u32;
+
+        let mut group = c.benchmark_group(format!("inline_threshold/{size}"));
+
+        // Vec: best case (first element)
+        group.bench_function("vec_first", |b| {
+            b.iter(|| {
+                let target = black_box(0u32);
+                for entry in &vec {
+                    if entry.0 == target {
+                        return black_box(Some(entry.1));
+                    }
+                }
+                black_box(None)
+            });
+        });
+
+        // Vec: worst case (last element)
+        group.bench_function("vec_last", |b| {
+            b.iter(|| {
+                let target = black_box(last_id);
+                for entry in &vec {
+                    if entry.0 == target {
+                        return black_box(Some(entry.1));
+                    }
+                }
+                black_box(None)
+            });
+        });
+
+        // Vec: miss
+        group.bench_function("vec_miss", |b| {
+            b.iter(|| {
+                let target = black_box(missing_id);
+                for entry in &vec {
+                    if entry.0 == target {
+                        return black_box(Some(entry.1));
+                    }
+                }
+                black_box(None)
+            });
+        });
+
+        // HashMap: hit (last element)
+        group.bench_function("map_hit", |b| {
+            b.iter(|| black_box(map.get(&black_box(last_id)).copied()));
+        });
+
+        // HashMap: miss
+        group.bench_function("map_miss", |b| {
+            b.iter(|| black_box(map.get(&black_box(missing_id)).copied()));
+        });
+
+        group.finish();
+    }
+}
+
+criterion_group!(benches, encode_sparse, bench_has_column, bench_inline_threshold);
 criterion_main!(benches);
