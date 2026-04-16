@@ -17,7 +17,6 @@ use std::num::NonZero;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::region::compact_request;
 use bytes::Bytes;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
