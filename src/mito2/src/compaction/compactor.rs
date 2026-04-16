@@ -519,6 +519,7 @@ where
                 .collect();
 
             while let Some((inputs, handle)) = spawned.pop() {
+                let abort_handle = handle.abort_handle();
                 match CancellableFuture::new(handle, self.cancel_handle.clone()).await {
                     Ok(Ok(Ok(files))) => {
                         output_files.extend(files);
@@ -541,6 +542,7 @@ where
                         // If the cancel handle is cancelled,
                         // cancel the remaining tasks before returns the error.
                         if self.cancel_handle.is_cancelled() {
+                            abort_handle.abort();
                             for (_, handle) in spawned {
                                 handle.abort();
                             }
@@ -553,6 +555,7 @@ where
                             region_id,
                             spawned.len(),
                         );
+                        abort_handle.abort();
                         for (_, handle) in spawned {
                             handle.abort();
                         }
@@ -921,7 +924,7 @@ mod tests {
                 .await
         });
 
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(100)).await;
         cancel_handle.cancel();
 
         let merge_output = task
@@ -933,7 +936,6 @@ mod tests {
 
         assert!(merge_output.files_to_add.is_empty());
         assert!(merge_output.files_to_remove.is_empty());
-        assert!(started >= 1);
-        assert!(started <= 2);
+        assert_eq!(started, 2);
     }
 }
