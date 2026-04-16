@@ -1257,6 +1257,10 @@ impl ScanInput {
 
     fn range_pre_filter_mode(&self, source_count: usize) -> PreFilterMode {
         if source_count <= 1 {
+            // Duplicated rows in the same source is not a normal case and we don't provide
+            // strict dedup semantic (last_row/last_non_null) for it. We expect the duplicated rows
+            // are exactly identical in the same source so we use PreFilterMode::All for
+            // performance reason.
             return PreFilterMode::All;
         }
 
