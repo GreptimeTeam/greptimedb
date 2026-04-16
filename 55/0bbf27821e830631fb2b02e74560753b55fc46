@@ -1,0 +1,18 @@
+src/meta-srv/src/procedure/repartition.rs
+  h_6bf4f2d0301578 600-601,633
+src/meta-srv/src/procedure/repartition/group.rs
+  h_6bf4f2d0301578 204-205
+src/meta-srv/src/procedure/repartition/utils.rs
+  h_6bf4f2d0301578 162-163
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "550bbf27821e830631fb2b02e74560753b55fc46",
+  "prompts": {},
+  "humans": {
+    "h_6bf4f2d0301578": {
+      "author": "WenyXu"
+    }
+  }
+}
