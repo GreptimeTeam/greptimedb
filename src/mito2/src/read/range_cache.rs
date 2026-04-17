@@ -660,23 +660,33 @@ mod tests {
         ))
     }
 
+    fn test_scan_fingerprint(
+        filters: Vec<String>,
+        time_filters: Vec<String>,
+        series_row_selector: Option<TimeSeriesRowSelector>,
+        filter_deleted: bool,
+        partition_expr_version: u64,
+    ) -> ScanRequestFingerprint {
+        ScanRequestFingerprintBuilder {
+            read_column_ids: vec![1, 2],
+            read_column_types: vec![None, None],
+            filters,
+            time_filters,
+            series_row_selector,
+            append_mode: false,
+            filter_deleted,
+            merge_mode: MergeMode::LastRow,
+            partition_expr_version,
+        }
+        .build()
+    }
+
     fn test_cache_context(strategy: &CacheStrategy) -> (RangeScanCacheKey, PartitionMetrics) {
         let region_id = RegionId::new(1, 1);
         let key = RangeScanCacheKey {
             region_id,
             row_groups: vec![],
-            scan: ScanRequestFingerprintBuilder {
-                read_column_ids: vec![],
-                read_column_types: vec![],
-                filters: vec![],
-                time_filters: vec![],
-                series_row_selector: None,
-                append_mode: false,
-                filter_deleted: false,
-                merge_mode: MergeMode::LastRow,
-                partition_expr_version: 0,
-            }
-            .build(),
+            scan: test_scan_fingerprint(vec![], vec![], None, false, 0),
         };
 
         let metrics_set = ExecutionPlanMetricsSet::new();
@@ -747,9 +757,40 @@ mod tests {
         lit(ScalarValue::TimestampMillisecond(Some(val), None))
     }
 
+    fn normalized_exprs(exprs: impl IntoIterator<Item = Expr>) -> Vec<String> {
+        let mut exprs = exprs
+            .into_iter()
+            .map(|expr| expr.to_string())
+            .collect::<Vec<_>>();
+        exprs.sort_unstable();
+        exprs
+    }
+
+    async fn assert_range_cache_filters(
+        filters: Vec<Expr>,
+        query_time_range: Option<TimestampRange>,
+        partition_time_range: FileTimeRange,
+        expected_filters: Vec<Expr>,
+        expected_time_filters: Vec<Expr>,
+    ) {
+        let (stream_ctx, part_range) =
+            new_stream_context(filters, query_time_range, partition_time_range).await;
+
+        let key = build_range_cache_key(&stream_ctx, &part_range).unwrap();
+
+        assert_eq!(
+            key.scan.filters(),
+            normalized_exprs(expected_filters).as_slice()
+        );
+        assert_eq!(
+            key.scan.time_filters(),
+            normalized_exprs(expected_time_filters).as_slice()
+        );
+    }
+
     #[tokio::test]
     async fn strips_time_only_filters_when_query_covers_partition_range() {
-        let (stream_ctx, part_range) = new_stream_context(
+        assert_range_cache_filters(
             vec![
                 col("ts").gt_eq(ts_lit(1000)),
                 col("ts").lt(ts_lit(2001)),
@@ -761,50 +802,30 @@ mod tests {
                 Timestamp::new_millisecond(1000),
                 Timestamp::new_millisecond(2000),
             ),
+            vec![col("k0").eq(lit("foo")), col("ts").is_not_null()],
+            vec![],
         )
         .await;
-
-        let key = build_range_cache_key(&stream_ctx, &part_range).unwrap();
-
-        // Range-reducible time filters should be cleared when query covers partition range.
-        assert!(key.scan.time_filters().is_empty());
-        // Non-range time predicates stay in filters.
-        let mut expected_filters = [
-            col("k0").eq(lit("foo")).to_string(),
-            col("ts").is_not_null().to_string(),
-        ];
-        expected_filters.sort_unstable();
-        assert_eq!(key.scan.filters(), expected_filters.as_slice());
     }
 
     #[tokio::test]
     async fn preserves_time_filters_when_query_does_not_cover_partition_range() {
-        let (stream_ctx, part_range) = new_stream_context(
+        assert_range_cache_filters(
             vec![col("ts").gt_eq(ts_lit(1000)), col("k0").eq(lit("foo"))],
             TimestampRange::with_unit(1000, 1500, TimeUnit::Millisecond),
             (
                 Timestamp::new_millisecond(1000),
                 Timestamp::new_millisecond(2000),
             ),
+            vec![col("k0").eq(lit("foo"))],
+            vec![col("ts").gt_eq(ts_lit(1000))],
         )
         .await;
-
-        let key = build_range_cache_key(&stream_ctx, &part_range).unwrap();
-
-        // Time filters should be preserved when query does not cover partition range.
-        assert_eq!(
-            key.scan.time_filters(),
-            [col("ts").gt_eq(ts_lit(1000)).to_string()].as_slice()
-        );
-        assert_eq!(
-            key.scan.filters(),
-            [col("k0").eq(lit("foo")).to_string()].as_slice()
-        );
     }
 
     #[tokio::test]
     async fn strips_time_only_filters_when_query_has_no_time_range_limit() {
-        let (stream_ctx, part_range) = new_stream_context(
+        assert_range_cache_filters(
             vec![
                 col("ts").gt_eq(ts_lit(1000)),
                 col("ts").is_not_null(),
@@ -815,51 +836,26 @@ mod tests {
                 Timestamp::new_millisecond(1000),
                 Timestamp::new_millisecond(2000),
             ),
+            vec![col("k0").eq(lit("foo")), col("ts").is_not_null()],
+            vec![],
         )
         .await;
-
-        let key = build_range_cache_key(&stream_ctx, &part_range).unwrap();
-
-        // Range-reducible time filters should be cleared when query has no time range limit.
-        assert!(key.scan.time_filters().is_empty());
-        // Non-range time predicates stay in filters.
-        let mut expected_filters = [
-            col("k0").eq(lit("foo")).to_string(),
-            col("ts").is_not_null().to_string(),
-        ];
-        expected_filters.sort_unstable();
-        assert_eq!(key.scan.filters(), expected_filters.as_slice());
     }
 
     #[test]
     fn normalizes_and_clears_time_filters() {
-        let normalized = ScanRequestFingerprintBuilder {
-            read_column_ids: vec![1, 2],
-            read_column_types: vec![None, None],
-            filters: vec!["k0 = 'foo'".to_string()],
-            time_filters: vec![],
-            series_row_selector: None,
-            append_mode: false,
-            filter_deleted: true,
-            merge_mode: MergeMode::LastRow,
-            partition_expr_version: 0,
-        }
-        .build();
+        let normalized =
+            test_scan_fingerprint(vec!["k0 = 'foo'".to_string()], vec![], None, true, 0);
 
         assert!(normalized.time_filters().is_empty());
 
-        let fingerprint = ScanRequestFingerprintBuilder {
-            read_column_ids: vec![1, 2],
-            read_column_types: vec![None, None],
-            filters: vec!["k0 = 'foo'".to_string()],
-            time_filters: vec!["ts >= 1000".to_string()],
-            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
-            append_mode: false,
-            filter_deleted: true,
-            merge_mode: MergeMode::LastRow,
-            partition_expr_version: 7,
-        }
-        .build();
+        let fingerprint = test_scan_fingerprint(
+            vec!["k0 = 'foo'".to_string()],
+            vec!["ts >= 1000".to_string()],
+            Some(TimeSeriesRowSelector::LastRow),
+            true,
+            7,
+        );
 
         let reset = fingerprint.without_time_filters();
 
