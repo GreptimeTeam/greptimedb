@@ -178,14 +178,14 @@ mod tests {
         let tokens = tokenizer.tokenize(text);
         assert_eq!(
             tokens,
-            vec![
+            [
                 "登录",
+                "手机",
                 "手机号",
                 "18888888888",
                 "的",
                 "动态",
                 "key",
-                "：",
                 "829889AC8"
             ]
         );
