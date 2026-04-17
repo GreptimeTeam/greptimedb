@@ -835,14 +835,14 @@ impl IterBuilder for MultiBulkRangeIterBuilder {
         _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
-        self.part
+        match self
+            .part
             .read(self.context.clone(), self.sequence, metrics)?
-            .ok_or_else(|| {
-                UnsupportedOperationSnafu {
-                    err_msg: "Failed to create iterator for multi bulk part",
-                }
-                .build()
-            })
+        {
+            Some(iter) => Ok(iter),
+            // All batches were pruned by the predicate. Return an empty iterator.
+            None => Ok(Box::new(std::iter::empty())),
+        }
     }
 
     fn encoded_range(&self) -> Option<EncodedRange> {
@@ -2214,5 +2214,58 @@ mod tests {
             }
         }
         assert_eq!(expected_rows, total_rows_read);
+    }
+
+    #[test]
+    fn test_multi_bulk_range_iter_builder_all_pruned() {
+        let metadata = metadata_for_test();
+        let merge_threshold = 8;
+        let config = BulkMemtableConfig {
+            merge_threshold,
+            ..Default::default()
+        };
+        let memtable = BulkMemtable::new(
+            2006,
+            config,
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
+        memtable.set_unordered_part_threshold(0);
+
+        // Write enough bulk parts to trigger merge into MultiBulkPart.
+        for i in 0..merge_threshold {
+            let part = create_bulk_part_with_converter(
+                &format!("key_{}", i),
+                i as u32,
+                vec![1000 + i as i64 * 100, 2000 + i as i64 * 100],
+                vec![Some(i as f64 * 10.0), Some(i as f64 * 10.0 + 1.0)],
+                100 + i as u64,
+            )
+            .unwrap();
+            memtable.write_bulk(part).unwrap();
+        }
+        memtable.compact(false).unwrap();
+
+        // Use a predicate that matches no rows so all batches are pruned.
+        let filter = datafusion_expr::col("k0").eq(datafusion_expr::lit("nonexistent"));
+        let predicate_group = PredicateGroup::new(&metadata, &[filter]).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
+
+        // Should return ranges but each range should produce an empty iterator
+        // instead of an error.
+        for (_range_id, range) in ranges.ranges.iter() {
+            assert!(range.is_record_batch());
+            let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
+            let total_rows: usize = record_batch_iter.map(|r| r.unwrap().num_rows()).sum();
+            assert_eq!(0, total_rows);
+        }
     }
 }

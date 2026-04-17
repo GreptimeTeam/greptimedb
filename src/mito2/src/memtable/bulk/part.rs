@@ -27,6 +27,7 @@ use common_recordbatch::DfRecordBatch as RecordBatch;
 use common_time::Timestamp;
 use datafusion_common::Column;
 use datafusion_common::pruning::PruningStatistics;
+use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, StringDictionaryBuilder, UInt8Array, UInt64Array,
@@ -1371,6 +1372,15 @@ impl PruningStatistics for BatchPruningStats<'_> {
     }
 }
 
+/// Returns true if the predicate references the given column name.
+fn predicate_references_column(predicate: &table::predicate::Predicate, column_name: &str) -> bool {
+    let mut columns = HashSet::new();
+    for expr in predicate.exprs() {
+        let _ = expr_to_columns(expr, &mut columns);
+    }
+    columns.iter().any(|col| col.name == column_name)
+}
+
 /// Returns true if the batch should be pruned (skipped) based on the first-tag min/max
 /// statistics and the predicate in the context. Returns false if no pruning is possible
 /// (no primary key, no predicate, or the batch matches the predicate).
@@ -1383,6 +1393,21 @@ pub(crate) fn should_prune_bulk_part(
         Some(p) => p,
         None => return false,
     };
+    // Check if the predicate references the first tag column to avoid computing
+    // expensive batch statistics when they won't help with pruning.
+    let first_tag_id = match metadata.primary_key.first() {
+        Some(id) => *id,
+        None => return false,
+    };
+    // Safety: `first_tag_id` comes from `metadata.primary_key` so the column always exists.
+    let first_tag_name = &metadata
+        .column_by_id(first_tag_id)
+        .unwrap()
+        .column_schema
+        .name;
+    if !predicate_references_column(predicate, first_tag_name) {
+        return false;
+    }
     let stats = match BatchStats::compute(std::slice::from_ref(batch), metadata) {
         Some(s) => s,
         None => return false,
