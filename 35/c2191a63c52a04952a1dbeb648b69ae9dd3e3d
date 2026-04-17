@@ -1,0 +1,36 @@
+src/cli/src/metadata/control/get.rs
+  37ee86a4fe02a164 30-31,121-122,134,146-148,186,190,195-276
+src/cli/src/metadata/control.rs
+  37ee86a4fe02a164 18
+src/cli/src/metadata/control/del/table.rs
+  37ee86a4fe02a164 25,27,32-33,42,45,52,59-64,67-69,133,144,147-220
+src/cli/src/metadata/control/selector.rs
+  37ee86a4fe02a164 26,28,32
+src/cli/src/metadata/control/put/table.rs
+  37ee86a4fe02a164 32,396,400,425-441
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "35c2191a63c52a04952a1dbeb648b69ae9dd3e3d",
+  "prompts": {
+    "37ee86a4fe02a164": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_2655e8402ffeoOTyLjfPt4s47I",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 479,
+      "total_deletions": 509,
+      "accepted_lines": 311,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_6bf4f2d0301578": {
+      "author": "WenyXu"
+    }
+  }
+}
