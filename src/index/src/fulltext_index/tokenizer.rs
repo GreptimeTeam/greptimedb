@@ -82,7 +82,9 @@ impl Tokenizer for EnglishTokenizer {
 
 /// `ChineseTokenizer` tokenizes a Chinese text.
 ///
-/// It uses the Jieba tokenizer to split the text into Chinese words.
+/// It uses Jieba search-mode tokenization to improve recall for Chinese fulltext search.
+/// Enabling HMM also helps merge some unknown fragments into larger tokens, which can reduce
+/// token cardinality versus a fully fragmented output.
 #[derive(Debug, Default)]
 pub struct ChineseTokenizer;
 
@@ -91,7 +93,13 @@ impl Tokenizer for ChineseTokenizer {
         if text.is_ascii() {
             EnglishTokenizer {}.tokenize(text)
         } else {
-            JIEBA.cut(text, false)
+            // Search-mode tokenization emits finer-grained searchable terms, while HMM helps
+            // merge some unknown fragments and avoid excessive token fragmentation.
+            JIEBA
+                .cut_for_search(text, true)
+                .into_iter()
+                .filter(|s| s.chars().any(|c| c.is_alphanumeric() || c == '_'))
+                .collect()
         }
     }
 }
@@ -174,15 +182,218 @@ mod tests {
         let tokens = tokenizer.tokenize(text);
         assert_eq!(
             tokens,
-            vec![
+            [
                 "登录",
+                "手机",
                 "手机号",
                 "18888888888",
                 "的",
                 "动态",
                 "key",
-                "：",
                 "829889AC8"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_chinese_tokenizer_aggressive_tokenization_probe() {
+        let tokenizer = ChineseTokenizer;
+        let text = "哈基米哦南北绿豆，噢马自立曼波。登录手机号。中国农业银行。装电视台，中国中央广播电视台。压不缩，笑不活。";
+
+        let default_tokens = tokenizer.tokenize(text);
+        let cut_hmm_false = JIEBA.cut(text, false);
+        let cut_hmm_true = JIEBA.cut(text, true);
+        let cut_for_search_hmm_false = JIEBA.cut_for_search(text, false);
+        let cut_for_search_hmm_true = JIEBA.cut_for_search(text, true);
+
+        assert_eq!(
+            default_tokens,
+            [
+                "哈基米",
+                "哦",
+                "南北",
+                "绿豆",
+                "噢",
+                "马",
+                "自立",
+                "曼波",
+                "登录",
+                "手机",
+                "手机号",
+                "中国",
+                "农业",
+                "银行",
+                "中国农业银行",
+                "装",
+                "电视",
+                "电视台",
+                "中国",
+                "中央",
+                "广播",
+                "电视",
+                "电视台",
+                "不缩",
+                "压不缩",
+                "笑",
+                "不活",
+            ]
+        );
+        assert_eq!(
+            cut_hmm_false,
+            [
+                "哈",
+                "基",
+                "米",
+                "哦",
+                "南北",
+                "绿豆",
+                "，",
+                "噢",
+                "马",
+                "自立",
+                "曼",
+                "波",
+                "。",
+                "登录",
+                "手机号",
+                "。",
+                "中国农业银行",
+                "。",
+                "装",
+                "电视台",
+                "，",
+                "中国",
+                "中央",
+                "广播",
+                "电视台",
+                "。",
+                "压",
+                "不",
+                "缩",
+                "，",
+                "笑",
+                "不",
+                "活",
+                "。"
+            ]
+        );
+        assert_eq!(
+            cut_hmm_true,
+            [
+                "哈基米",
+                "哦",
+                "南北",
+                "绿豆",
+                "，",
+                "噢",
+                "马",
+                "自立",
+                "曼波",
+                "。",
+                "登录",
+                "手机号",
+                "。",
+                "中国农业银行",
+                "。",
+                "装",
+                "电视台",
+                "，",
+                "中国",
+                "中央",
+                "广播",
+                "电视台",
+                "。",
+                "压不缩",
+                "，",
+                "笑",
+                "不活",
+                "。"
+            ]
+        );
+        assert_eq!(
+            cut_for_search_hmm_false,
+            [
+                "哈",
+                "基",
+                "米",
+                "哦",
+                "南北",
+                "绿豆",
+                "，",
+                "噢",
+                "马",
+                "自立",
+                "曼",
+                "波",
+                "。",
+                "登录",
+                "手机",
+                "手机号",
+                "。",
+                "中国",
+                "农业",
+                "银行",
+                "中国农业银行",
+                "。",
+                "装",
+                "电视",
+                "电视台",
+                "，",
+                "中国",
+                "中央",
+                "广播",
+                "电视",
+                "电视台",
+                "。",
+                "压",
+                "不",
+                "缩",
+                "，",
+                "笑",
+                "不",
+                "活",
+                "。"
+            ]
+        );
+
+        assert_eq!(
+            cut_for_search_hmm_true,
+            [
+                "哈基米",
+                "哦",
+                "南北",
+                "绿豆",
+                "，",
+                "噢",
+                "马",
+                "自立",
+                "曼波",
+                "。",
+                "登录",
+                "手机",
+                "手机号",
+                "。",
+                "中国",
+                "农业",
+                "银行",
+                "中国农业银行",
+                "。",
+                "装",
+                "电视",
+                "电视台",
+                "，",
+                "中国",
+                "中央",
+                "广播",
+                "电视",
+                "电视台",
+                "。",
+                "不缩",
+                "压不缩",
+                "，",
+                "笑",
+                "不活",
+                "。"
             ]
         );
     }
