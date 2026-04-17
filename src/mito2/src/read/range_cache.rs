@@ -38,7 +38,7 @@ use crate::region::options::MergeMode;
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
-const RANGE_CACHE_COMPACT_THRESHOLD_BYTES: usize = 2 * 1024 * 1024;
+const RANGE_CACHE_COMPACT_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;
 
 /// Fingerprint of the scan request fields that affect partition range cache reuse.
 ///
@@ -499,8 +499,9 @@ impl CacheBatchBuffer {
         self.buffered_size += batch_size;
         self.buffered_batches.push(batch);
 
-        if self.buffered_rows > DEFAULT_READ_BATCH_SIZE
-            || self.buffered_size > RANGE_CACHE_COMPACT_THRESHOLD_BYTES
+        if self.buffered_batches.len() > 1
+            && (self.buffered_rows > DEFAULT_READ_BATCH_SIZE
+                || self.buffered_size > RANGE_CACHE_COMPACT_THRESHOLD_BYTES)
         {
             self.notify_compact();
         }
@@ -553,8 +554,8 @@ impl CacheBatchBuffer {
 
 fn estimate_batch_weight(batch: &RecordBatch, num_sources: usize) -> usize {
     let num_rows = batch.num_rows().max(1);
-    batch
-        .get_array_memory_size()
+    let memory_size = batch.get_array_memory_size();
+    memory_size
         .saturating_mul(num_sources.max(1))
         .saturating_mul(num_rows)
         .div_ceil(DEFAULT_READ_BATCH_SIZE)
@@ -994,13 +995,18 @@ mod tests {
         let large_batch = make_large_binary_batch(DEFAULT_READ_BATCH_SIZE, 4096);
         let strategy = CacheStrategy::EnableAll(Arc::new(
             CacheManager::builder()
-                .range_result_cache_size((large_batch.get_array_memory_size() + 1024) as u64)
+                .range_result_cache_size((large_batch.get_array_memory_size() * 3) as u64)
                 .build(),
         ));
         let (key, part_metrics) = test_cache_context(&strategy);
 
         let mut buffer = CacheBatchBuffer::new(&strategy, 1);
         buffer.skip_threshold_bytes = usize::MAX;
+        buffer.push(large_batch.clone()).unwrap();
+
+        assert_eq!(buffer.buffered_rows, large_batch.num_rows());
+        assert_eq!(buffer.buffered_batches.len(), 1);
+
         buffer.push(large_batch.clone()).unwrap();
 
         assert_eq!(buffer.buffered_rows, 0);
@@ -1012,7 +1018,7 @@ mod tests {
         assert_eq!(value.cached_batches.len(), 1);
         assert_eq!(
             value.cached_batches[0].slice_lengths,
-            vec![large_batch.num_rows()]
+            vec![large_batch.num_rows(), large_batch.num_rows()]
         );
     }
 
