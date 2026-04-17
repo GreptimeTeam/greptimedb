@@ -18,7 +18,6 @@ use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 
 use arrow::datatypes::DataType as ArrowDataType;
-use arrow_schema::Fields;
 use common_base::bytes::Bytes;
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
@@ -240,17 +239,6 @@ impl JsonType {
         }
     }
 
-    /// Check if it can merge with `other` json type.
-    pub(crate) fn is_mergeable(&self, other: &JsonType) -> bool {
-        match (&self.format, &other.format) {
-            (JsonFormat::Jsonb, JsonFormat::Jsonb) => true,
-            (JsonFormat::Json2(this), JsonFormat::Json2(that)) => {
-                is_mergeable(this.as_ref(), that.as_ref())
-            }
-            _ => false,
-        }
-    }
-
     /// Check if it includes all fields in `other` json type.
     pub fn is_include(&self, other: &JsonType) -> bool {
         match (&self.format, &other.format) {
@@ -297,31 +285,6 @@ pub(crate) fn plain_json_struct_type(item_type: ConcreteDataType) -> StructType 
     StructType::new(Arc::new(vec![field]))
 }
 
-fn is_mergeable(this: &JsonNativeType, that: &JsonNativeType) -> bool {
-    fn is_mergeable_object(this: &JsonObjectType, that: &JsonObjectType) -> bool {
-        for (type_name, that_type) in that {
-            if let Some(this_type) = this.get(type_name)
-                && !is_mergeable(this_type, that_type)
-            {
-                return false;
-            }
-        }
-        true
-    }
-
-    match (this, that) {
-        (this, that) if this == that => true,
-        (JsonNativeType::Array(this), JsonNativeType::Array(that)) => {
-            is_mergeable(this.as_ref(), that.as_ref())
-        }
-        (JsonNativeType::Object(this), JsonNativeType::Object(that)) => {
-            is_mergeable_object(this, that)
-        }
-        (JsonNativeType::Null, _) | (_, JsonNativeType::Null) => true,
-        _ => false,
-    }
-}
-
 fn merge(this: &JsonNativeType, that: &JsonNativeType) -> JsonNativeType {
     fn merge_object(this: &JsonObjectType, that: &JsonObjectType) -> JsonObjectType {
         let mut this = this.clone();
@@ -354,7 +317,14 @@ impl DataType for JsonType {
     fn name(&self) -> String {
         match &self.format {
             JsonFormat::Jsonb => JSON_TYPE_NAME.to_string(),
-            JsonFormat::Json2(_) => JSON2_TYPE_NAME.to_string(),
+            JsonFormat::Json2(x) => format!(
+                "{JSON2_TYPE_NAME}{}",
+                if x.is_null() {
+                    "".to_string()
+                } else {
+                    x.to_string()
+                }
+            ),
         }
     }
 
@@ -369,12 +339,7 @@ impl DataType for JsonType {
     fn as_arrow_type(&self) -> ArrowDataType {
         match self.format {
             JsonFormat::Jsonb => ArrowDataType::Binary,
-            // "Erase" the JSON struct when converting to Arrow datatype, is a feature (not a bug).
-            // The actual Arrow datatype is deduced from parquet data and query schema (a process
-            // called "JSON type concretization") from time to time, there's no a universal/global
-            // type for JSON2.
-            // Same reason for ignoring the struct in the `name` method above.
-            JsonFormat::Json2(_) => ArrowDataType::Struct(Fields::empty()),
+            JsonFormat::Json2(_) => self.as_struct_type().as_arrow_type(),
         }
     }
 

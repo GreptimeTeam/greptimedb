@@ -932,7 +932,7 @@ impl TryFrom<Value> for serde_json::Value {
                     .collect::<serde_json::Result<Map<String, serde_json::Value>>>()?;
                 serde_json::Value::Object(map)
             }
-            Value::Json(v) => (*v).into(),
+            Value::Json(v) => (*v).try_into()?,
         };
 
         Ok(json_value)

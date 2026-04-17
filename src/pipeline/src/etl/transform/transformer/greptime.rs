@@ -418,7 +418,7 @@ fn resolve_schema(
         match (column_type, value_type) {
             (column_type, value_type) if column_type == value_type => Ok(()),
             (ConcreteDataType::Json(column_type), ConcreteDataType::Json(value_type))
-                if column_type.is_include(value_type) =>
+                if column_type.is_json2() && value_type.is_json2() =>
             {
                 Ok(())
             }
