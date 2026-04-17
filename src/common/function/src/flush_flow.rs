@@ -149,7 +149,7 @@ mod test {
 
         let result = f.invoke_async_with_args(func_args).await.unwrap_err();
         assert_eq!(
-            "Execution error: Handler error: Missing FlowServiceHandler, not expected",
+            "Execution error: Missing FlowServiceHandler, not expected",
             result.to_string()
         );
     }
