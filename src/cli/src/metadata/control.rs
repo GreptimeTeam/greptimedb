@@ -15,6 +15,7 @@
 mod del;
 mod get;
 mod put;
+mod selector;
 #[cfg(test)]
 mod test_utils;
 mod utils;

@@ -14,39 +14,23 @@
 
 use async_trait::async_trait;
 use clap::Parser;
-use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::ddl::utils::get_region_wal_options;
 use common_meta::key::TableMetadataManager;
-use common_meta::key::table_name::TableNameManager;
 use common_meta::kv_backend::KvBackendRef;
 use store_api::storage::TableId;
 
 use crate::Tool;
 use crate::common::StoreConfig;
-use crate::error::{InvalidArgumentsSnafu, TableNotFoundSnafu};
+use crate::error::TableNotFoundSnafu;
 use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
-use crate::metadata::control::utils::get_table_id_by_name;
+use crate::metadata::control::selector::TableSelector;
 
 /// Delete table metadata logically from the metadata store.
 #[derive(Debug, Default, Parser)]
 pub struct DelTableCommand {
-    /// The table id to delete from the metadata store.
-    #[clap(long)]
-    table_id: Option<u32>,
-
-    /// The table name to delete from the metadata store.
-    #[clap(long)]
-    table_name: Option<String>,
-
-    /// The schema name of the table.
-    #[clap(long, default_value = DEFAULT_SCHEMA_NAME)]
-    schema_name: String,
-
-    /// The catalog name of the table.
-    #[clap(long, default_value = DEFAULT_CATALOG_NAME)]
-    catalog_name: String,
+    #[clap(flatten)]
+    selector: TableSelector,
 
     /// The store config.
     #[clap(flatten)]
@@ -54,71 +38,35 @@ pub struct DelTableCommand {
 }
 
 impl DelTableCommand {
-    fn validate(&self) -> Result<(), BoxedError> {
-        if matches!(
-            (&self.table_id, &self.table_name),
-            (Some(_), Some(_)) | (None, None)
-        ) {
-            return Err(BoxedError::new(
-                InvalidArgumentsSnafu {
-                    msg: "You must specify either --table-id or --table-name.",
-                }
-                .build(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl DelTableCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        self.validate()?;
+        self.selector.validate()?;
         let kv_backend = self.store.build().await?;
         Ok(Box::new(DelTableTool {
-            table_id: self.table_id,
-            table_name: self.table_name.clone(),
-            schema_name: self.schema_name.clone(),
-            catalog_name: self.catalog_name.clone(),
-            table_name_manager: TableNameManager::new(kv_backend.clone()),
+            selector: self.selector.clone(),
             table_metadata_deleter: TableMetadataDeleter::new(kv_backend),
         }))
     }
 }
 
 struct DelTableTool {
-    table_id: Option<u32>,
-    table_name: Option<String>,
-    schema_name: String,
-    catalog_name: String,
-    table_name_manager: TableNameManager,
+    selector: TableSelector,
     table_metadata_deleter: TableMetadataDeleter,
 }
 
 #[async_trait]
 impl Tool for DelTableTool {
     async fn do_work(&self) -> Result<(), BoxedError> {
-        let table_id = if let Some(table_name) = &self.table_name {
-            let catalog_name = &self.catalog_name;
-            let schema_name = &self.schema_name;
-
-            let Some(table_id) = get_table_id_by_name(
-                &self.table_name_manager,
-                catalog_name,
-                schema_name,
-                table_name,
+        let Some(table_id) = self
+            .selector
+            .resolve_table_id(
+                self.table_metadata_deleter
+                    .table_metadata_manager
+                    .table_name_manager(),
             )
             .await?
-            else {
-                println!(
-                    "Table({}) not found",
-                    format_full_table_name(catalog_name, schema_name, table_name)
-                );
-                return Ok(());
-            };
-            table_id
-        } else {
-            // Safety: we have validated that table_id or table_name is not None
-            self.table_id.unwrap()
+        else {
+            println!("Table({}) not found", self.selector.formatted_table_name());
+            return Ok(());
         };
         self.table_metadata_deleter.delete(table_id).await?;
         println!("Table({}) deleted", table_id);
@@ -182,6 +130,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use clap::Parser;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use common_meta::key::TableMetadataManager;
@@ -192,8 +141,82 @@ mod tests {
     use common_meta::rpc::store::RangeRequest;
 
     use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
-    use crate::metadata::control::del::table::TableMetadataDeleter;
+    use crate::metadata::control::del::table::{DelTableCommand, TableMetadataDeleter};
     use crate::metadata::control::test_utils::prepare_physical_table_metadata;
+
+    #[tokio::test]
+    async fn test_del_table_selector_requires_single_target() {
+        let command = DelTableCommand::parse_from([
+            "table",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+
+        let err = match command.build().await {
+            Ok(_) => panic!("expected validation failure"),
+            Err(err) => err,
+        };
+        assert!(
+            err.output_msg()
+                .contains("You must specify either --table-id or --table-name.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_del_table_selector_rejects_both_targets() {
+        let command = DelTableCommand::parse_from([
+            "table",
+            "--table-id",
+            "1024",
+            "--table-name",
+            "my_table",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+
+        let err = match command.build().await {
+            Ok(_) => panic!("expected validation failure"),
+            Err(err) => err,
+        };
+        assert!(
+            err.output_msg()
+                .contains("You must specify either --table-id or --table-name.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_del_table_command_builds_tool_with_table_id() {
+        let command = DelTableCommand::parse_from([
+            "table",
+            "--table-id",
+            "1024",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+
+        let _tool = command.build().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_del_table_command_builds_tool_with_table_name() {
+        let command = DelTableCommand::parse_from([
+            "table",
+            "--table-name",
+            "my_table",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+
+        let _tool = command.build().await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_delete_table_not_found() {

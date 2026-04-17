@@ -29,7 +29,7 @@ use table::metadata::TableInfo;
 use crate::Tool;
 use crate::common::StoreConfig;
 use crate::error::{InvalidArgumentsSnafu, TableNotFoundSnafu, UnexpectedSnafu};
-use crate::metadata::control::put::selector::TableSelector;
+use crate::metadata::control::selector::TableSelector;
 
 /// Put table metadata into the metadata store.
 #[derive(Subcommand)]
@@ -393,10 +393,11 @@ mod tests {
 
     use super::{
         PutTableCommand, PutTableInfoCommand, PutTableInfoTool, PutTableRouteCommand,
-        PutTableRouteTool, TableSelector,
+        PutTableRouteTool,
     };
     use crate::Tool;
     use crate::metadata::control::put::PutCommand;
+    use crate::metadata::control::selector::TableSelector;
     use crate::metadata::control::test_utils::prepare_physical_table_metadata;
 
     #[tokio::test]
@@ -419,6 +420,23 @@ mod tests {
             err.output_msg()
                 .contains("You must specify either --table-id or --table-name.")
         );
+    }
+
+    #[tokio::test]
+    async fn test_put_table_command_builds_tool_with_table_name() {
+        let command = PutTableInfoCommand::parse_from([
+            "info",
+            "--table-name",
+            "my_table",
+            "--value",
+            "{}",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+
+        let _tool = command.build().await.unwrap();
     }
 
     #[tokio::test]

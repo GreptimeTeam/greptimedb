@@ -13,7 +13,6 @@
 // limitations under the License.
 
 mod key;
-mod selector;
 mod table;
 
 use clap::Subcommand;

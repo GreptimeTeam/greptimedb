@@ -23,13 +23,13 @@ use crate::error::InvalidArgumentsSnafu;
 use crate::metadata::control::utils::get_table_id_by_name;
 
 /// Selects a table by id or by fully qualified name.
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub(crate) struct TableSelector {
-    /// The table id to update in the metadata store.
+    /// The table id to select from the metadata store.
     #[clap(long)]
     table_id: Option<u32>,
 
-    /// The table name to update in the metadata store.
+    /// The table name to select from the metadata store.
     #[clap(long)]
     table_name: Option<String>,
 
