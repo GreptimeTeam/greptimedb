@@ -42,6 +42,7 @@ use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::{Sequence, SequenceBuilder};
 use common_meta::wal_provider::{WalProviderRef, build_wal_provider};
+use common_options::plugin_options::StandaloneFlag;
 use common_procedure::ProcedureManagerRef;
 use common_query::prelude::set_default_prefix;
 use common_telemetry::info;
@@ -369,6 +370,7 @@ impl StartCommand {
         creator: InstanceCreator,
     ) -> Result<(Instance, InstanceCreatorResult)> {
         let mut plugins = Plugins::new();
+        plugins.insert(StandaloneFlag);
         set_default_prefix(opts.default_column_prefix.as_deref())
             .map_err(BoxedError::new)
             .context(error::BuildCliSnafu)?;

@@ -1073,6 +1073,9 @@ pub enum Error {
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
+    #[snafu(display("Compaction is cancelled."))]
+    CompactionCancelled {},
+
     #[snafu(display("Compaction memory exhausted for region {region_id} (policy: {policy})",))]
     CompactionMemoryExhausted {
         region_id: RegionId,
@@ -1389,7 +1392,7 @@ impl ErrorExt for Error {
             #[cfg(feature = "vector_index")]
             VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
 
-            ManualCompactionOverride {} => StatusCode::Cancelled,
+            ManualCompactionOverride {} | CompactionCancelled {} => StatusCode::Cancelled,
 
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 
