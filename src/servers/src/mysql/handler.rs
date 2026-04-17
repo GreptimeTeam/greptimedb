@@ -182,6 +182,16 @@ impl MysqlInstanceShim {
         query_ctx: QueryContextRef,
         stmt_key: String,
     ) -> Result<(Vec<Column>, Vec<Column>)> {
+        if crate::mysql::federated::check(raw_query, query_ctx.clone(), self.session.clone())
+            .is_some()
+        {
+            self.save_plan(SqlPlan::Shortcut(raw_query.to_string()), stmt_key)
+                .inspect_err(|e| {
+                    error!(e; "Failed to save prepared statement");
+                })?;
+            return Ok((vec![], vec![]));
+        }
+
         let (query, param_num) = replace_placeholders(raw_query);
 
         let statement = validate_query(raw_query).await?;
@@ -292,6 +302,15 @@ impl MysqlInstanceShim {
                         .do_exec_plan(replaced_plan, query, query_ctx.clone())
                         .await,
                 ]
+            }
+            SqlPlan::Shortcut(query) => {
+                if let Some(output) =
+                    crate::mysql::federated::check(&query, query_ctx.clone(), self.session.clone())
+                {
+                    vec![Ok(output)]
+                } else {
+                    self.do_query(&query, query_ctx.clone()).await
+                }
             }
             SqlPlan::Statement(_stmt, query) => {
                 let param_strs = match params {
@@ -771,4 +790,153 @@ fn prepared_params(param_types: &HashMap<String, Option<ConcreteDataType>>) -> R
     }
 
     Ok(params)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use common_query::Output;
+    use datafusion_expr::LogicalPlan;
+    use query::parser::PromQuery;
+    use query::query_engine::DescribeResult;
+    use session::context::QueryContext;
+    use sql::statements::statement::Statement;
+
+    use super::*;
+    use crate::error::Result;
+    use crate::query_handler::sql::SqlQueryHandler;
+
+    struct DummyQueryHandler;
+
+    #[async_trait]
+    impl SqlQueryHandler for DummyQueryHandler {
+        async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_exec_plan(
+            &self,
+            _: LogicalPlan,
+            _: String,
+            _: QueryContextRef,
+        ) -> Result<Output> {
+            unimplemented!()
+        }
+
+        async fn do_describe(
+            &self,
+            _: Statement,
+            _: QueryContextRef,
+        ) -> Result<Option<DescribeResult>> {
+            unimplemented!()
+        }
+
+        async fn is_valid_schema(&self, _: &str, _: &str) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    fn create_shim() -> MysqlInstanceShim {
+        MysqlInstanceShim::create(
+            Arc::new(DummyQueryHandler),
+            None,
+            "127.0.0.1:3306".parse().unwrap(),
+            1,
+            1024,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_prepare_federated_query() {
+        let mut shim = create_shim();
+        let query_ctx = QueryContext::arc();
+        let stmt_key = "test_federated".to_string();
+
+        let (params, columns) = shim
+            .do_prepare(
+                "SELECT @@version_comment",
+                query_ctx.clone(),
+                stmt_key.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert!(params.is_empty());
+        assert!(columns.is_empty());
+
+        let plan = shim.plan(&stmt_key).unwrap();
+        assert!(matches!(plan, SqlPlan::Shortcut(q) if q == "SELECT @@version_comment"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_federated_shortcut() {
+        let mut shim = create_shim();
+        let query_ctx = QueryContext::arc();
+        let stmt_key = "test_federated_exec".to_string();
+
+        shim.do_prepare(
+            "SELECT @@version_comment",
+            query_ctx.clone(),
+            stmt_key.clone(),
+        )
+        .await
+        .unwrap();
+
+        let outputs = shim
+            .do_execute(query_ctx.clone(), stmt_key, Params::CliParams(vec![]))
+            .await
+            .unwrap();
+
+        assert_eq!(outputs.len(), 1);
+        let output = outputs.into_iter().next().unwrap().unwrap();
+        let pretty = output.data.pretty_print().await;
+        assert!(pretty.contains("GreptimeDB"));
+    }
+
+    #[tokio::test]
+    async fn test_prepare_non_federated_query_not_shortcut() {
+        let mut shim = create_shim();
+        let query_ctx = QueryContext::arc();
+        let stmt_key = "test_non_federated".to_string();
+
+        let result = shim
+            .do_prepare("SET NAMES utf8", query_ctx.clone(), stmt_key.clone())
+            .await;
+
+        assert!(result.is_ok());
+        let plan = shim.plan(&stmt_key).unwrap();
+        assert!(matches!(plan, SqlPlan::Shortcut(_)));
+    }
+
+    #[tokio::test]
+    async fn test_execute_set_shortcut() {
+        let mut shim = create_shim();
+        let query_ctx = QueryContext::arc();
+        let stmt_key = "test_set_shortcut".to_string();
+
+        shim.do_prepare("SET NAMES utf8", query_ctx.clone(), stmt_key.clone())
+            .await
+            .unwrap();
+
+        let outputs = shim
+            .do_execute(query_ctx.clone(), stmt_key, Params::CliParams(vec![]))
+            .await
+            .unwrap();
+
+        assert_eq!(outputs.len(), 1);
+        let output = outputs.into_iter().next().unwrap().unwrap();
+        match output.data {
+            common_query::OutputData::RecordBatches(batches) => {
+                let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                assert_eq!(total_rows, 0);
+            }
+            other => panic!("Expected RecordBatches, got {:?}", other),
+        }
+    }
 }
