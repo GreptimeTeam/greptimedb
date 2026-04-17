@@ -105,6 +105,11 @@ impl RangeResultMemoryLimiter {
         self.permit_bytes
     }
 
+    #[cfg(test)]
+    pub(crate) fn available_permits(&self) -> usize {
+        self.semaphore.available_permits()
+    }
+
     pub(crate) async fn acquire(
         &self,
         bytes: usize,
@@ -431,6 +436,15 @@ impl CacheStrategy {
         }
     }
 
+    pub(crate) fn range_result_cache_size(&self) -> Option<usize> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                Some(cache_manager.range_result_cache_size())
+            }
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
     /// Calls [CacheManager::write_cache()].
     /// It returns None if the strategy is [CacheStrategy::Disabled].
     pub fn write_cache(&self) -> Option<&WriteCacheRef> {
@@ -534,6 +548,8 @@ pub struct CacheManager {
     selector_result_cache: Option<SelectorResultCache>,
     /// Cache for range scan outputs in flat format.
     range_result_cache: Option<RangeResultCache>,
+    /// Configured capacity for range scan outputs in flat format.
+    range_result_cache_size: u64,
     /// Shared memory limiter for async range-result cache tasks.
     range_result_memory_limiter: Arc<RangeResultMemoryLimiter>,
     /// Cache for index result.
@@ -804,6 +820,10 @@ impl CacheManager {
         &self.range_result_memory_limiter
     }
 
+    pub(crate) fn range_result_cache_size(&self) -> usize {
+        self.range_result_cache_size as usize
+    }
+
     /// Gets the write cache.
     pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
         self.write_cache.as_ref()
@@ -1038,7 +1058,11 @@ impl CacheManagerBuilder {
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
             range_result_cache,
-            range_result_memory_limiter: Arc::new(RangeResultMemoryLimiter::default()),
+            range_result_cache_size: self.range_result_cache_size,
+            range_result_memory_limiter: Arc::new(RangeResultMemoryLimiter::new(
+                self.range_result_cache_size as usize,
+                RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize,
+            )),
             index_result_cache,
         }
     }
@@ -1446,6 +1470,24 @@ mod tests {
         assert!(disabled.get_range_result(&key).is_none());
         disabled.put_range_result(key.clone(), value);
         assert!(cache.get_range_result(&key).is_some());
+    }
+
+    #[test]
+    fn test_range_result_cache_size_configures_limiter() {
+        let cache_size = 3 * 1024_u64;
+        let cache = CacheManager::builder()
+            .range_result_cache_size(cache_size)
+            .build();
+
+        assert_eq!(cache.range_result_cache_size(), cache_size as usize);
+        assert_eq!(
+            cache.range_result_memory_limiter().permit_bytes(),
+            RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize
+        );
+        assert_eq!(
+            cache.range_result_memory_limiter().available_permits(),
+            (cache_size as usize).div_ceil(RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize)
+        );
     }
 
     #[tokio::test]

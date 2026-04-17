@@ -39,7 +39,6 @@ use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 const RANGE_CACHE_COMPACT_THRESHOLD_BYTES: usize = 2 * 1024 * 1024;
-const RANGE_CACHE_SKIP_BYTES: usize = 512 * 1024 * 1024;
 
 /// Fingerprint of the scan request fields that affect partition range cache reuse.
 ///
@@ -453,6 +452,8 @@ async fn run_cache_concat_task(
 }
 
 struct CacheBatchBuffer {
+    num_sources: usize,
+    skip_threshold_bytes: usize,
     buffered_batches: Vec<RecordBatch>,
     buffered_rows: usize,
     buffered_size: usize,
@@ -461,7 +462,7 @@ struct CacheBatchBuffer {
 }
 
 impl CacheBatchBuffer {
-    fn new(cache_strategy: &CacheStrategy) -> Self {
+    fn new(cache_strategy: &CacheStrategy, num_sources: usize) -> Self {
         let sender = cache_strategy.range_result_memory_limiter().map(|limiter| {
             let (tx, rx) = mpsc::unbounded_channel();
             common_runtime::spawn_global(run_cache_concat_task(rx, limiter.clone()));
@@ -469,6 +470,8 @@ impl CacheBatchBuffer {
         });
 
         Self {
+            num_sources,
+            skip_threshold_bytes: cache_strategy.range_result_cache_size().unwrap_or(0),
             buffered_batches: Vec::new(),
             buffered_rows: 0,
             buffered_size: 0,
@@ -483,8 +486,8 @@ impl CacheBatchBuffer {
         }
 
         let batch_size = batch.get_array_memory_size();
-        self.total_weight += batch_size;
-        if self.total_weight > RANGE_CACHE_SKIP_BYTES {
+        self.total_weight += estimate_batch_weight(&batch, self.num_sources);
+        if self.total_weight > self.skip_threshold_bytes {
             self.buffered_batches.clear();
             self.buffered_rows = 0;
             self.buffered_size = 0;
@@ -548,15 +551,25 @@ impl CacheBatchBuffer {
     }
 }
 
+fn estimate_batch_weight(batch: &RecordBatch, num_sources: usize) -> usize {
+    let num_rows = batch.num_rows().max(1);
+    batch
+        .get_array_memory_size()
+        .saturating_mul(num_sources.max(1))
+        .saturating_mul(num_rows)
+        .div_ceil(DEFAULT_READ_BATCH_SIZE)
+}
+
 /// Wraps a stream to cache its output for future range cache hits.
 pub(crate) fn cache_flat_range_stream(
     mut stream: BoxedRecordBatchStream,
     cache_strategy: CacheStrategy,
     key: RangeScanCacheKey,
     part_metrics: PartitionMetrics,
+    num_sources: usize,
 ) -> BoxedRecordBatchStream {
     Box::pin(try_stream! {
-        let mut buffer = CacheBatchBuffer::new(&cache_strategy);
+        let mut buffer = CacheBatchBuffer::new(&cache_strategy, num_sources);
         while let Some(batch) = stream.try_next().await? {
             buffer.push(batch.clone())?;
             yield batch;
@@ -612,7 +625,7 @@ pub fn bench_cache_flat_range_stream(
     let part_metrics =
         PartitionMetrics::new(region_id, 0, "bench", Instant::now(), false, &metrics_set);
 
-    cache_flat_range_stream(stream, cache_strategy, key, part_metrics)
+    cache_flat_range_stream(stream, cache_strategy, key, part_metrics, 1)
 }
 
 #[cfg(test)]
@@ -641,7 +654,7 @@ mod tests {
     fn test_cache_strategy() -> CacheStrategy {
         CacheStrategy::EnableAll(Arc::new(
             CacheManager::builder()
-                .range_result_cache_size(1024)
+                .range_result_cache_size(1024 * 1024)
                 .build(),
         ))
     }
@@ -935,7 +948,7 @@ mod tests {
         let expected_size = batch.get_array_memory_size();
         let (key, part_metrics) = test_cache_context(&strategy);
 
-        let mut buffer = CacheBatchBuffer::new(&strategy);
+        let mut buffer = CacheBatchBuffer::new(&strategy, 1);
         buffer.push(batch).unwrap();
 
         let value = finish_cache_batch_buffer(buffer, key.clone(), strategy.clone(), part_metrics)
@@ -956,7 +969,7 @@ mod tests {
         let batch = make_batch(&vec![1; DEFAULT_READ_BATCH_SIZE / 2 + 1]);
         let (key, part_metrics) = test_cache_context(&strategy);
 
-        let mut buffer = CacheBatchBuffer::new(&strategy);
+        let mut buffer = CacheBatchBuffer::new(&strategy, 1);
         buffer.push(batch.clone()).unwrap();
         buffer.push(batch).unwrap();
 
@@ -978,11 +991,16 @@ mod tests {
 
     #[tokio::test]
     async fn cache_batch_buffer_compacts_when_buffered_size_exceeds_threshold() {
-        let strategy = test_cache_strategy();
         let large_batch = make_large_binary_batch(DEFAULT_READ_BATCH_SIZE, 4096);
+        let strategy = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder()
+                .range_result_cache_size((large_batch.get_array_memory_size() + 1024) as u64)
+                .build(),
+        ));
         let (key, part_metrics) = test_cache_context(&strategy);
 
-        let mut buffer = CacheBatchBuffer::new(&strategy);
+        let mut buffer = CacheBatchBuffer::new(&strategy, 1);
+        buffer.skip_threshold_bytes = usize::MAX;
         buffer.push(large_batch.clone()).unwrap();
 
         assert_eq!(buffer.buffered_rows, 0);
@@ -998,40 +1016,44 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cache_batch_buffer_uses_compacted_size_for_weight() {
-        let strategy = test_cache_strategy();
-        let batch1 = make_batch(&[1, 2]);
-        let batch2 = make_batch(&[3, 4]);
-        let (key, part_metrics) = test_cache_context(&strategy);
-        let expected = concat_batches(&test_schema(), &[batch1.clone(), batch2.clone()])
-            .unwrap()
-            .get_array_memory_size();
+    #[test]
+    fn estimate_batch_weight_uses_scale_and_num_sources() {
+        let batch = make_batch(&[1, 2]);
+        let expected = batch
+            .get_array_memory_size()
+            .saturating_mul(3)
+            .saturating_mul(batch.num_rows())
+            .div_ceil(DEFAULT_READ_BATCH_SIZE);
 
-        let mut buffer = CacheBatchBuffer::new(&strategy);
-        buffer.push(batch1).unwrap();
-        buffer.push(batch2).unwrap();
-
-        let value = finish_cache_batch_buffer(buffer, key, strategy, part_metrics)
-            .await
-            .unwrap();
-        assert_eq!(value.estimated_batches_size, expected);
+        assert_eq!(estimate_batch_weight(&batch, 3), expected);
     }
 
     #[tokio::test]
     async fn cache_batch_buffer_skips_cache_when_weight_exceeds_limit() {
         let strategy = test_cache_strategy();
         let (key, part_metrics) = test_cache_context(&strategy);
-        let mut buffer = CacheBatchBuffer::new(&strategy);
-        buffer.total_weight = RANGE_CACHE_SKIP_BYTES;
+        let batch = make_batch(&[1]);
+        let mut buffer = CacheBatchBuffer::new(&strategy, 1);
+        buffer.skip_threshold_bytes = 0;
 
-        buffer.push(make_batch(&[1])).unwrap();
+        buffer.push(batch).unwrap();
 
         assert!(buffer.sender.is_none());
         assert!(
             finish_cache_batch_buffer(buffer, key, strategy, part_metrics)
                 .await
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn cache_batch_buffer_uses_configured_skip_threshold() {
+        let strategy = test_cache_strategy();
+        let buffer = CacheBatchBuffer::new(&strategy, 1);
+
+        assert_eq!(
+            buffer.skip_threshold_bytes,
+            strategy.range_result_cache_size().unwrap()
         );
     }
 }
