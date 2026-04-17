@@ -43,7 +43,7 @@ use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
-use crate::rpc::router::{RegionRoute, operating_leader_regions};
+use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
 pub struct DropTableProcedure {
     /// The context of procedure runtime.
@@ -94,7 +94,7 @@ impl DropTableProcedure {
 
     /// Register dropping regions if doesn't exist.
     fn register_dropping_regions(&mut self) -> Result<()> {
-        let dropping_regions = operating_leader_regions(&self.data.physical_region_routes);
+        let dropping_regions = operating_leader_region_roles(&self.data.physical_region_routes);
 
         if !self.dropping_regions.is_empty() {
             return Ok(());
@@ -102,11 +102,11 @@ impl DropTableProcedure {
 
         let mut dropping_region_guards = Vec::with_capacity(dropping_regions.len());
 
-        for (region_id, datanode_id) in dropping_regions {
+        for (region_id, datanode_id, role) in dropping_regions {
             let guard = self
                 .context
                 .memory_region_keeper
-                .register(datanode_id, region_id)
+                .register_with_role(datanode_id, region_id, role)
                 .context(error::RegionOperatingRaceSnafu {
                     region_id,
                     peer_id: datanode_id,

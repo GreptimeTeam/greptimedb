@@ -390,7 +390,7 @@ impl ScanRegion {
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
-        let read_column_ids = match &self.request.projection {
+        let read_column_ids = match self.request.projection_indices() {
             Some(p) => self.build_read_column_ids(p, &predicate)?,
             None => self
                 .version
@@ -402,7 +402,7 @@ impl ScanRegion {
         };
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
-        let mapper = match &self.request.projection {
+        let mapper = match self.request.projection_indices() {
             Some(p) => ProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
                 p.iter().copied(),
@@ -1068,10 +1068,10 @@ impl ScanInput {
     pub async fn prune_file(
         &self,
         file: &FileHandle,
+        pre_filter_mode: PreFilterMode,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
-        let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
         let decode_pk_values = !self.compaction && self.mapper.has_tags();
         let reader = self
             .access_layer
@@ -1092,7 +1092,7 @@ impl ScanInput {
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .compaction(self.compaction)
-            .pre_filter_mode(filter_mode)
+            .pre_filter_mode(pre_filter_mode)
             .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)
             .await;
@@ -1254,6 +1254,18 @@ impl ScanInput {
     pub fn region_metadata(&self) -> &RegionMetadataRef {
         self.mapper.metadata()
     }
+
+    fn range_pre_filter_mode(&self, source_count: usize) -> PreFilterMode {
+        if source_count <= 1 {
+            // Duplicated rows in the same source is not a normal case and we don't provide
+            // strict dedup semantic (last_row/last_non_null) for it. We expect the duplicated rows
+            // are exactly identical in the same source so we use PreFilterMode::All for
+            // performance reason.
+            return PreFilterMode::All;
+        }
+
+        pre_filter_mode(self.append_mode, self.merge_mode)
+    }
 }
 
 #[cfg(feature = "enterprise")]
@@ -1296,7 +1308,7 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 
     match merge_mode {
-        MergeMode::LastRow => PreFilterMode::SkipFieldsOnDelete,
+        MergeMode::LastRow => PreFilterMode::SkipFields,
         MergeMode::LastNonNull => PreFilterMode::SkipFields,
     }
 }
@@ -1455,6 +1467,13 @@ impl StreamContext {
     pub(crate) fn is_file_range_index(&self, index: RowGroupIndex) -> bool {
         !self.is_mem_range_index(index)
             && index.index < self.input.num_files() + self.input.num_memtables()
+    }
+
+    pub(crate) fn range_pre_filter_mode(&self, part_range: &PartitionRange) -> PreFilterMode {
+        let range_meta = &self.ranges[part_range.identifier];
+        let source_count = range_meta.indices.len();
+
+        self.input.range_pre_filter_mode(source_count)
     }
 
     /// Retrieves the partition ranges.
@@ -1756,7 +1775,9 @@ mod tests {
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
     use store_api::metadata::RegionMetadataBuilder;
-    use store_api::storage::{ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+    use store_api::storage::{
+        ProjectionInput, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
+    };
 
     use super::*;
     use crate::cache::CacheManager;
@@ -1801,7 +1822,7 @@ mod tests {
         let version = new_version(metadata.clone());
         let env = SchedulerEnv::new().await;
         let request = ScanRequest {
-            projection: Some(vec![4]),
+            projection_input: Some(vec![4].into()),
             filters: vec![
                 col("v0").gt(lit(1)),
                 col("ts").gt(lit(0)),
@@ -1817,7 +1838,7 @@ mod tests {
         );
         let predicate =
             PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = scan_region.request.projection.as_ref().unwrap();
+        let projection = &scan_region.request.projection_indices().unwrap();
         let read_ids = scan_region
             .build_read_column_ids(projection, &predicate)
             .unwrap();
@@ -1830,7 +1851,7 @@ mod tests {
         let version = new_version(metadata.clone());
         let env = SchedulerEnv::new().await;
         let request = ScanRequest {
-            projection: Some(vec![]),
+            projection_input: Some(ProjectionInput::default()),
             ..Default::default()
         };
         let scan_region = ScanRegion::new(
@@ -1841,7 +1862,7 @@ mod tests {
         );
         let predicate =
             PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = scan_region.request.projection.as_ref().unwrap();
+        let projection = &scan_region.request.projection_indices().unwrap();
         let read_ids = scan_region
             .build_read_column_ids(projection, &predicate)
             .unwrap();
@@ -1855,7 +1876,7 @@ mod tests {
         let version = new_version(metadata.clone());
         let env = SchedulerEnv::new().await;
         let request = ScanRequest {
-            projection: Some(vec![4, 1]),
+            projection_input: Some(vec![4, 1].into()),
             filters: vec![col("v0").gt(lit(1))],
             ..Default::default()
         };
@@ -1867,7 +1888,7 @@ mod tests {
         );
         let predicate =
             PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = scan_region.request.projection.as_ref().unwrap();
+        let projection = &scan_region.request.projection_indices().unwrap();
         let read_ids = scan_region
             .build_read_column_ids(projection, &predicate)
             .unwrap();
@@ -2018,5 +2039,25 @@ mod tests {
         let predicate_without_region = predicate_group.predicate_without_region().unwrap();
         assert!(predicate_without_region.exprs().is_empty());
         assert_eq!(1, predicate_without_region.dyn_filters().len());
+    }
+
+    #[tokio::test]
+    async fn test_range_pre_filter_mode() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let cases = [
+            (true, MergeMode::LastRow, 1, PreFilterMode::All),
+            (false, MergeMode::LastNonNull, 1, PreFilterMode::All),
+            (false, MergeMode::LastRow, 2, PreFilterMode::SkipFields),
+            (true, MergeMode::LastRow, 2, PreFilterMode::All),
+        ];
+
+        for (append_mode, merge_mode, source_count, expected_mode) in cases {
+            let input = new_scan_input(metadata.clone(), vec![])
+                .await
+                .with_append_mode(append_mode)
+                .with_merge_mode(merge_mode);
+
+            assert_eq!(expected_mode, input.range_pre_filter_mode(source_count));
+        }
     }
 }

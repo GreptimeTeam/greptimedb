@@ -55,7 +55,7 @@ pub enum Error {
     #[snafu(display("Failed to build admin function args: {msg}"))]
     BuildAdminFunctionArgs { msg: String },
 
-    #[snafu(display("Failed to execute admin function: {msg}, error: {error}"))]
+    #[snafu(display("Failed to execute admin function {msg}"))]
     ExecuteAdminFunction {
         msg: String,
         #[snafu(source)]

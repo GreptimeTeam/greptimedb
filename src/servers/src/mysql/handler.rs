@@ -425,9 +425,17 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let query_ctx = self.session.new_query_context();
         let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
         let stmt_key = uuid::Uuid::from_u128(stmt_id as u128).to_string();
-        let (params, columns) = self
+        let (params, columns) = match self
             .do_prepare(raw_query, query_ctx.clone(), stmt_key)
-            .await?;
+            .await
+        {
+            Ok(x) => x,
+            Err(e) => {
+                let (kind, msg) = handle_err(e, query_ctx.clone());
+                w.error(kind, msg.as_bytes()).await?;
+                return Ok(());
+            }
+        };
         debug!("on_prepare: Params: {:?}, Columns: {:?}", params, columns);
         w.reply(stmt_id, &params, &columns).await?;
         crate::metrics::METRIC_MYSQL_PREPARED_COUNT

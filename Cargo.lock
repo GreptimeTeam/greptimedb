@@ -2756,7 +2756,7 @@ dependencies = [
  "once_cell",
  "opentelemetry 0.30.0",
  "opentelemetry-otlp",
- "opentelemetry-semantic-conventions",
+ "opentelemetry-semantic-conventions 0.30.0",
  "opentelemetry_sdk 0.30.0",
  "parking_lot 0.12.4",
  "prometheus 0.14.0",
@@ -5257,6 +5257,7 @@ dependencies = [
  "meta-srv",
  "num_cpus",
  "opentelemetry-proto 0.31.0",
+ "opentelemetry-semantic-conventions 0.31.0",
  "operator",
  "otel-arrow-rust",
  "partition",
@@ -8883,7 +8884,7 @@ dependencies = [
 [[package]]
 name = "opensrv-mysql"
 version = "0.8.0"
-source = "git+https://github.com/datafuselabs/opensrv?tag=v0.10.0#074bd8fb81da3c9e6d6a098a482f3380478b9c0b"
+source = "git+https://github.com/GreptimeTeam/opensrv?rev=6c5a451544194b7bb60a8318d155d4f892b49f2c#6c5a451544194b7bb60a8318d155d4f892b49f2c"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -8996,6 +8997,12 @@ name = "opentelemetry-semantic-conventions"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83d059a296a47436748557a353c5e6c5705b9470ef6c95cfc52c21a8814ddac2"
+
+[[package]]
+name = "opentelemetry-semantic-conventions"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e62e29dfe041afb8ed2a6c9737ab57db4907285d999ef8ad3a59092a36bdc846"
 
 [[package]]
 name = "opentelemetry_sdk"
@@ -12034,6 +12041,7 @@ dependencies = [
  "datafusion-pg-catalog",
  "datatypes",
  "derive_builder 0.20.2",
+ "either",
  "futures",
  "futures-util",
  "headers",
@@ -13502,6 +13510,7 @@ dependencies = [
  "datanode",
  "datatypes",
  "dotenv",
+ "either",
  "flate2",
  "flow",
  "frontend",
@@ -13517,7 +13526,6 @@ dependencies = [
  "meta-client",
  "meta-srv",
  "mito2",
- "moka",
  "mysql_async",
  "object-store",
  "opentelemetry-proto 0.31.0",

@@ -63,6 +63,7 @@ pub use crate::statements::option_map::OptionMap;
 pub(crate) use crate::statements::transform::transform_statements;
 
 const VECTOR_TYPE_NAME: &str = "VECTOR";
+const JSON2_TYPE_NAME: &str = "JSON2";
 
 pub fn value_to_sql_value(val: &Value) -> Result<SqlValue> {
     Ok(match val {
@@ -153,7 +154,16 @@ pub fn column_to_schema(
 
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
 
-    if matches!(column.data_type(), SqlDataType::JSON) {
+    let is_json2_column = if let SqlDataType::Custom(object_name, _) = column.data_type() {
+        object_name
+            .0
+            .first()
+            .map(|x| x.to_string_unquoted().eq_ignore_ascii_case(JSON2_TYPE_NAME))
+            .unwrap_or_default()
+    } else {
+        false
+    };
+    if is_json2_column || matches!(column.data_type(), SqlDataType::JSON) {
         let settings = column
             .extensions
             .build_json_structure_settings()?
@@ -273,39 +283,42 @@ pub fn sql_data_type_to_concrete_data_type(
                 Ok(ConcreteDataType::decimal128_datatype(*p as u8, *s as i8))
             }
         },
-        SqlDataType::JSON => {
-            let format = if let Some(x) = column_extensions.build_json_structure_settings()? {
-                if let Some(fields) = match x {
-                    JsonStructureSettings::Structured(fields) => fields,
-                    JsonStructureSettings::UnstructuredRaw => None,
-                    JsonStructureSettings::PartialUnstructuredByKey { fields, .. } => fields,
-                } {
-                    let datatype = &ConcreteDataType::Struct(fields);
-                    JsonFormat::Native(Box::new(datatype.into()))
-                } else {
-                    JsonFormat::Native(Box::new(JsonNativeType::Null))
+        SqlDataType::JSON => Ok(ConcreteDataType::Json(JsonType::new(JsonFormat::Jsonb))),
+        // Vector type and JSON2 type
+        SqlDataType::Custom(name, args) if name.0.len() == 1 => {
+            let name = name.0[0].to_string_unquoted().to_ascii_uppercase();
+            match name.as_str() {
+                VECTOR_TYPE_NAME if args.len() == 1 => {
+                    let dim = &args[0];
+                    let dim = dim.parse().map_err(|e| {
+                        error::ParseSqlValueSnafu {
+                            msg: format!("Failed to parse vector dimension '{}': {}", dim, e),
+                        }
+                        .build()
+                    })?;
+                    Ok(ConcreteDataType::vector_datatype(dim))
                 }
-            } else {
-                JsonFormat::Jsonb
-            };
-            Ok(ConcreteDataType::Json(JsonType::new(format)))
-        }
-        // Vector type
-        SqlDataType::Custom(name, d)
-            if name.0.as_slice().len() == 1
-                && name.0.as_slice()[0]
-                    .to_string_unquoted()
-                    .to_ascii_uppercase()
-                    == VECTOR_TYPE_NAME
-                && d.len() == 1 =>
-        {
-            let dim = d[0].parse().map_err(|e| {
-                error::ParseSqlValueSnafu {
-                    msg: format!("Failed to parse vector dimension: {}", e),
+                JSON2_TYPE_NAME if args.is_empty() => {
+                    let native_type = column_extensions
+                        .build_json_structure_settings()?
+                        .and_then(|x| match x {
+                            JsonStructureSettings::Structured(Some(fields))
+                            | JsonStructureSettings::PartialUnstructuredByKey {
+                                fields: Some(fields),
+                                ..
+                            } => Some(JsonNativeType::from(&ConcreteDataType::Struct(fields))),
+                            JsonStructureSettings::UnstructuredRaw => Some(JsonNativeType::Variant),
+                            _ => None,
+                        })
+                        .unwrap_or(JsonNativeType::Null);
+                    let format = JsonFormat::Json2(Box::new(native_type));
+                    Ok(ConcreteDataType::Json(JsonType::new(format)))
                 }
-                .build()
-            })?;
-            Ok(ConcreteDataType::vector_datatype(dim))
+                _ => error::SqlTypeNotSupportedSnafu {
+                    t: data_type.clone(),
+                }
+                .fail(),
+            }
         }
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),

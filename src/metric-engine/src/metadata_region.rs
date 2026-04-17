@@ -349,8 +349,9 @@ impl MetadataRegion {
                 METADATA_SCHEMA_VALUE_COLUMN_INDEX,
             ]
         };
+        let projection_input = Some(projection.into());
         ScanRequest {
-            projection: Some(projection),
+            projection_input,
             filters: vec![filter_expr],
             ..Default::default()
         }
@@ -361,8 +362,9 @@ impl MetadataRegion {
             METADATA_SCHEMA_KEY_COLUMN_INDEX,
             METADATA_SCHEMA_VALUE_COLUMN_INDEX,
         ];
+        let projection_input = Some(projection.into());
         ScanRequest {
-            projection: Some(projection),
+            projection_input,
             ..Default::default()
         }
     }
@@ -679,8 +681,9 @@ impl MetadataRegion {
         let filter_expr = datafusion::prelude::col(METADATA_SCHEMA_KEY_COLUMN_NAME)
             .eq(datafusion::prelude::lit(key));
 
+        let projection_input = Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX].into());
         let scan_req = ScanRequest {
-            projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
+            projection_input,
             filters: vec![filter_expr],
             ..Default::default()
         };

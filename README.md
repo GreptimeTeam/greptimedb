@@ -175,17 +175,16 @@ cargo run -- standalone start
 
 ## Project Status
 
-> **Status:** RC — marching toward v1.0 GA!
-> **GA (v1.0):** March 2026
+> **Status:** [v1.0 GA](https://github.com/GreptimeTeam/greptimedb/releases/tag/v1.0.0) — generally available and production-ready! 🎉
 
 - Deployed in production handling billions of data points daily
 - Stable APIs, actively maintained, with regular releases ([version info](https://docs.greptime.com/nightly/reference/about-greptimedb-version))
 
-GreptimeDB v1.0 represents a major milestone toward maturity — marking stable APIs, production readiness, and proven performance.
+GreptimeDB v1.0 marks a major milestone — stable APIs, production readiness, and proven performance at scale.
 
-**Roadmap:** [v1.0 highlights and release plan](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) and [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026).
+**Learn more:** [v1.0 highlights](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) and [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026).
 
-For production use, we recommend using the latest stable release.
+For production use, we recommend v1.0 or later.
 
 If you find this project useful, a ⭐ would mean a lot to us!
 

@@ -16,9 +16,9 @@ use std::num::NonZero;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::region::compact_request;
+use common_base::cancellation::{CancellableFuture, CancellationHandle};
 use common_meta::key::SchemaMetadataManagerRef;
-use common_telemetry::{info, warn};
+use common_telemetry::{debug, info, warn};
 use common_time::TimeToLive;
 use either::Either;
 use itertools::Itertools;
@@ -34,9 +34,10 @@ use crate::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
 };
 use crate::cache::{CacheManager, CacheManagerRef};
-use crate::compaction::picker::{PickerOutput, new_picker};
+use crate::compaction::picker::PickerOutput;
 use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
 use crate::config::MitoConfig;
+use crate::error;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, ObjectStoreNotFoundSnafu, Result,
 };
@@ -55,7 +56,6 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::version::{SstVersion, SstVersionRef};
-use crate::{error, metrics};
 
 /// Region version for compaction that does not hold memtables.
 #[derive(Clone)]
@@ -290,13 +290,6 @@ pub trait Compactor: Send + Sync + 'static {
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
     ) -> Result<RegionEdit>;
-
-    /// Execute compaction for a region.
-    async fn compact(
-        &self,
-        compaction_region: &CompactionRegion,
-        compact_request_options: compact_request::Options,
-    ) -> Result<()>;
 }
 
 /// Trait for merging a single compaction output into SST files.
@@ -446,19 +439,25 @@ impl SstMerger for DefaultSstMerger {
 /// implementations in tests.
 pub struct DefaultCompactor<M = DefaultSstMerger> {
     merger: M,
+    cancel_handle: Arc<CancellationHandle>,
 }
 
-impl Default for DefaultCompactor {
-    fn default() -> Self {
+#[cfg(test)]
+impl<M: SstMerger> DefaultCompactor<M> {
+    pub fn with_merger(merger: M) -> Self {
         Self {
-            merger: DefaultSstMerger,
+            merger,
+            cancel_handle: Arc::new(CancellationHandle::default()),
         }
     }
 }
 
-impl<M: SstMerger> DefaultCompactor<M> {
-    pub fn with_merger(merger: M) -> Self {
-        Self { merger }
+impl DefaultCompactor {
+    pub fn with_cancel_handle(cancel_handle: Arc<CancellationHandle>) -> Self {
+        Self {
+            merger: DefaultSstMerger,
+            cancel_handle,
+        }
     }
 }
 
@@ -511,7 +510,7 @@ where
                     chunk.push(task);
                 }
             }
-            let spawned: Vec<_> = chunk
+            let mut spawned: Vec<_> = chunk
                 .into_iter()
                 .map(|(inputs, fut)| {
                     let handle = common_runtime::spawn_compact(fut);
@@ -519,29 +518,55 @@ where
                 })
                 .collect();
 
-            for (inputs, handle) in spawned {
-                match handle.await {
-                    Ok(Ok(files)) => {
+            while let Some((inputs, handle)) = spawned.pop() {
+                let abort_handle = handle.abort_handle();
+                match CancellableFuture::new(handle, self.cancel_handle.clone()).await {
+                    Ok(Ok(Ok(files))) => {
                         output_files.extend(files);
                         compacted_inputs.extend(inputs);
                     }
-                    Ok(Err(e)) => {
+                    Ok(Ok(Err(e))) => {
                         warn!(
-                            e; "Region {} failed to merge compaction output with inputs: [{}], skipping",
+                            e; "Failed to merge compaction output for region: {}, inputs: [{}]",
                             region_id,
                             inputs.iter().map(|f| f.file_id.to_string()).join(",")
                         );
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         warn!(
                             "Region {} compaction task join error for inputs: [{}], skipping: {}",
                             region_id,
                             inputs.iter().map(|f| f.file_id.to_string()).join(","),
                             e
                         );
+                        // If the cancel handle is cancelled,
+                        // cancel the remaining tasks before returns the error.
+                        if self.cancel_handle.is_cancelled() {
+                            abort_handle.abort();
+                            for (_, handle) in spawned {
+                                handle.abort();
+                            }
+                        }
                         return Err(e).context(error::JoinSnafu);
                     }
+                    Err(_) => {
+                        debug!(
+                            "Compaction merge cancelled for region: {}, aborting remaining {} spawned tasks",
+                            region_id,
+                            spawned.len(),
+                        );
+                        abort_handle.abort();
+                        for (_, handle) in spawned {
+                            handle.abort();
+                        }
+                        break;
+                    }
                 }
+            }
+
+            if self.cancel_handle.is_cancelled() {
+                info!("Compaction merge cancelled for region: {}", region_id);
+                break;
             }
         }
 
@@ -588,62 +613,21 @@ where
 
         Ok(edit)
     }
-
-    // The default implementation of compact combines the merge_ssts and update_manifest functions.
-    // Note: It's local compaction and only used for testing purpose.
-    async fn compact(
-        &self,
-        compaction_region: &CompactionRegion,
-        compact_request_options: compact_request::Options,
-    ) -> Result<()> {
-        let picker_output = {
-            let picker_output = new_picker(
-                &compact_request_options,
-                &compaction_region.region_options.compaction,
-                compaction_region.region_options.append_mode,
-                None,
-            )
-            .pick(compaction_region);
-
-            if let Some(picker_output) = picker_output {
-                picker_output
-            } else {
-                info!(
-                    "No files to compact for region_id: {}",
-                    compaction_region.region_id
-                );
-                return Ok(());
-            }
-        };
-
-        let merge_output = self.merge_ssts(compaction_region, picker_output).await?;
-        if merge_output.is_empty() {
-            info!(
-                "No files to compact for region_id: {}",
-                compaction_region.region_id
-            );
-            return Ok(());
-        }
-
-        metrics::COMPACTION_INPUT_BYTES.inc_by(merge_output.input_file_size() as f64);
-        metrics::COMPACTION_OUTPUT_BYTES.inc_by(merge_output.output_file_size() as f64);
-        self.update_manifest(compaction_region, merge_output)
-            .await?;
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use store_api::storage::{FileId, RegionId};
+    use tokio::time::sleep;
 
-    use super::*;
+    use super::{DefaultCompactor, *};
     use crate::cache::CacheManager;
     use crate::compaction::picker::PickerOutput;
+    use crate::error::Result;
     use crate::sst::file::FileHandle;
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::version::SstVersion;
@@ -872,5 +856,86 @@ mod tests {
             merge_output.files_to_remove[0].file_id,
             expired_meta.file_id
         );
+    }
+
+    #[derive(Clone)]
+    struct BlockingMerger {
+        call_idx: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl SstMerger for BlockingMerger {
+        async fn merge_single_output(
+            &self,
+            _compaction_region: CompactionRegion,
+            _output: CompactionOutput,
+            _write_opts: WriteOptions,
+        ) -> Result<Vec<FileMeta>> {
+            self.call_idx.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_merge_ssts_cancels_spawned_tasks() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut compaction_region = new_test_compaction_region().await;
+        compaction_region.max_parallelism = 2;
+
+        let cancel_handle = Arc::new(CancellationHandle::default());
+        let call_idx = Arc::new(AtomicUsize::new(0));
+        let compactor = DefaultCompactor {
+            merger: BlockingMerger {
+                call_idx: call_idx.clone(),
+            },
+            cancel_handle: cancel_handle.clone(),
+        };
+
+        let picker_output = PickerOutput {
+            outputs: vec![
+                CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![new_file_handle(dummy_file_meta())],
+                    filter_deleted: false,
+                    output_time_range: None,
+                },
+                CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![new_file_handle(dummy_file_meta())],
+                    filter_deleted: false,
+                    output_time_range: None,
+                },
+                CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![new_file_handle(dummy_file_meta())],
+                    filter_deleted: false,
+                    output_time_range: None,
+                },
+            ],
+            expired_ssts: vec![],
+            time_window_size: 3600,
+            max_file_size: None,
+        };
+
+        let task = tokio::spawn(async move {
+            compactor
+                .merge_ssts(&compaction_region, picker_output)
+                .await
+        });
+
+        sleep(Duration::from_millis(100)).await;
+        cancel_handle.cancel();
+
+        let merge_output = task
+            .await
+            .expect("merge_ssts should stop after cancellation")
+            .unwrap();
+
+        let started = call_idx.load(Ordering::SeqCst);
+
+        assert!(merge_output.files_to_add.is_empty());
+        assert!(merge_output.files_to_remove.is_empty());
+        assert_eq!(started, 2);
     }
 }
