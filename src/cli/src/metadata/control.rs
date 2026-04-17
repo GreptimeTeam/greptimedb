@@ -14,9 +14,11 @@
 
 mod del;
 mod get;
+mod put;
 #[cfg(test)]
 mod test_utils;
 mod utils;
 
 pub(crate) use del::DelCommand;
 pub(crate) use get::GetCommand;
+pub(crate) use put::PutCommand;

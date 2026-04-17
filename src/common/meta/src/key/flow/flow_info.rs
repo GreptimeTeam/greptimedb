@@ -31,7 +31,7 @@ use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKe
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 
-const FLOW_INFO_KEY_PREFIX: &str = "info";
+pub const FLOW_INFO_KEY_PREFIX: &str = "info";
 
 lazy_static! {
     static ref FLOW_INFO_KEY_PATTERN: Regex =
