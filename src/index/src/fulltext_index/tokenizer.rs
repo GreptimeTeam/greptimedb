@@ -82,7 +82,9 @@ impl Tokenizer for EnglishTokenizer {
 
 /// `ChineseTokenizer` tokenizes a Chinese text.
 ///
-/// It uses the Jieba tokenizer to split the text into Chinese words.
+/// It uses Jieba search-mode tokenization to improve recall for Chinese fulltext search.
+/// Enabling HMM also helps merge some unknown fragments into larger tokens, which can reduce
+/// token cardinality versus a fully fragmented output.
 #[derive(Debug, Default)]
 pub struct ChineseTokenizer;
 
@@ -91,6 +93,8 @@ impl Tokenizer for ChineseTokenizer {
         if text.is_ascii() {
             EnglishTokenizer {}.tokenize(text)
         } else {
+            // Search-mode tokenization emits finer-grained searchable terms, while HMM helps
+            // merge some unknown fragments and avoid excessive token fragmentation.
             JIEBA
                 .cut_for_search(text, true)
                 .into_iter()
