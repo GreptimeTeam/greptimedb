@@ -7989,6 +7989,7 @@ dependencies = [
  "async-channel 1.9.0",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "bytemuck",
  "bytes",
  "chrono",

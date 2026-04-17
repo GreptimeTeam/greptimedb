@@ -81,12 +81,10 @@ impl<S> RegionWorkerLoop<S> {
         };
         region.update_compaction_millis();
 
-        region.version_control.apply_edit_with_cache_manager(
+        region.version_control.apply_edit(
             Some(request.edit.clone()),
             &[],
             region.file_purger.clone(),
-            Some(&self.cache_manager),
-            Some(&request.primary_key_ranges),
         );
 
         let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);

@@ -26,7 +26,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
-use store_api::storage::{FileId, RegionId, SequenceNumber};
+use store_api::storage::{RegionId, SequenceNumber};
 use strum::IntoStaticStr;
 use tokio::sync::{Semaphore, mpsc, watch};
 
@@ -305,7 +305,7 @@ impl RegionFlushTask {
         self.listener.on_flush_begin(self.region_id).await;
 
         let worker_request = match self.flush_memtables(&version_data).await {
-            Ok((edit, primary_key_ranges)) => {
+            Ok(edit) => {
                 let memtables_to_remove = version_data
                     .version
                     .memtables
@@ -323,7 +323,6 @@ impl RegionFlushTask {
                     memtables_to_remove,
                     is_staging: self.is_staging,
                     flush_reason: self.reason,
-                    primary_key_ranges,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -348,10 +347,7 @@ impl RegionFlushTask {
 
     /// Flushes memtables to level 0 SSTs and updates the manifest.
     /// Returns the [RegionEdit] to apply.
-    async fn flush_memtables(
-        &self,
-        version_data: &VersionControlData,
-    ) -> Result<(RegionEdit, HashMap<FileId, (Bytes, Bytes)>)> {
+    async fn flush_memtables(&self, version_data: &VersionControlData) -> Result<RegionEdit> {
         // We must use the immutable memtables list and entry ids from the `version_data`
         // for consistency as others might already modify the version in the `version_control`.
         let version = &version_data.version;
@@ -373,7 +369,6 @@ impl RegionFlushTask {
             series_count,
             encoded_part_count,
             flush_metrics,
-            primary_key_ranges,
         } = self.do_flush_memtables(version, write_opts).await?;
 
         if !file_metas.is_empty() {
@@ -443,7 +438,7 @@ impl RegionFlushTask {
             self.reason.as_str()
         );
 
-        Ok((edit, primary_key_ranges))
+        Ok(edit)
     }
 
     async fn do_flush_memtables(
@@ -453,7 +448,6 @@ impl RegionFlushTask {
     ) -> Result<DoFlushMemtablesResult> {
         let memtables = version.memtables.immutables();
         let mut file_metas = Vec::with_capacity(memtables.len());
-        let mut primary_key_ranges = HashMap::new();
         let mut flushed_bytes = 0;
         let mut series_count = 0;
         let mut encoded_part_count = 0;
@@ -514,17 +508,16 @@ impl RegionFlushTask {
 
                 for sst_info in ssts_written {
                     flushed_bytes += sst_info.file_size;
-                    if let Some(file_metadata) = &sst_info.file_metadata
-                        && let Some(primary_key_range) =
-                            extract_primary_key_range(file_metadata, &version.metadata)
-                    {
-                        primary_key_ranges.insert(sst_info.file_id, primary_key_range);
-                    }
+                    let pk_range = sst_info
+                        .file_metadata
+                        .as_ref()
+                        .and_then(|meta| extract_primary_key_range(meta, &version.metadata));
                     file_metas.push(Self::new_file_meta(
                         self.region_id,
                         max_sequence,
                         sst_info,
                         partition_expr.clone(),
+                        pk_range,
                     ));
                 }
             }
@@ -548,7 +541,6 @@ impl RegionFlushTask {
             series_count,
             encoded_part_count,
             flush_metrics,
-            primary_key_ranges,
         })
     }
 
@@ -619,7 +611,12 @@ impl RegionFlushTask {
         max_sequence: u64,
         sst_info: SstInfo,
         partition_expr: Option<PartitionExpr>,
+        primary_key_range: Option<(Bytes, Bytes)>,
     ) -> FileMeta {
+        let (primary_key_min, primary_key_max) = match primary_key_range {
+            Some((min, max)) => (Some(min), Some(max)),
+            None => (None, None),
+        };
         FileMeta {
             region_id,
             file_id: sst_info.file_id,
@@ -636,6 +633,8 @@ impl RegionFlushTask {
             sequence: NonZeroU64::new(max_sequence),
             partition_expr,
             num_series: sst_info.num_series,
+            primary_key_min,
+            primary_key_max,
         }
     }
 
@@ -706,7 +705,6 @@ struct DoFlushMemtablesResult {
     series_count: usize,
     encoded_part_count: usize,
     flush_metrics: Metrics,
-    primary_key_ranges: HashMap<FileId, (Bytes, Bytes)>,
 }
 
 struct FlatSources {

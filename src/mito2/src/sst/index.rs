@@ -1403,7 +1403,7 @@ mod tests {
             None,
         ));
         let version_builder = VersionBuilder::new(metadata, mutable)
-            .add_files_with_cache_manager(file_purger, files.values().cloned(), None, None)
+            .add_files(file_purger, files.values().cloned())
             .build();
         Arc::new(VersionControl::new(version_builder))
     }

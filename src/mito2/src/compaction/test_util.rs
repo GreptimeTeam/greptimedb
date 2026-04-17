@@ -85,6 +85,7 @@ pub fn new_file_handle_with_size_and_sequence(
             num_series: 0,
             sequence: NonZeroU64::new(sequence),
             partition_expr: None,
+            ..Default::default()
         },
         file_purger,
     )
@@ -121,6 +122,7 @@ pub fn new_file_handle_with_size_sequence_and_primary_key_range(
             num_series: 0,
             sequence: NonZeroU64::new(sequence),
             partition_expr: None,
+            ..Default::default()
         },
         file_purger,
         primary_key_range,

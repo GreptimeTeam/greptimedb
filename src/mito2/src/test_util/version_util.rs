@@ -115,6 +115,7 @@ impl VersionControlBuilder {
                         .expect("partition expression should be valid JSON"),
                     None => None,
                 },
+                ..Default::default()
             },
         );
         self
@@ -129,12 +130,7 @@ impl VersionControlBuilder {
             None,
         ));
         VersionBuilder::new(metadata, mutable)
-            .add_files_with_cache_manager(
-                self.file_purger.clone(),
-                self.files.values().cloned(),
-                None,
-                None,
-            )
+            .add_files(self.file_purger.clone(), self.files.values().cloned())
             .build()
     }
 
@@ -212,6 +208,7 @@ pub(crate) fn apply_edit(
                         .expect("partition expression should be valid JSON"),
                     None => None,
                 },
+                ..Default::default()
             }
         })
         .collect();

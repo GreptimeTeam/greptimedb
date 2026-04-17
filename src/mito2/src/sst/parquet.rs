@@ -832,6 +832,7 @@ mod tests {
                     None => None,
                 },
                 num_series: 0,
+                ..Default::default()
             },
             Arc::new(NoopFilePurger),
         );
@@ -1285,6 +1286,7 @@ mod tests {
                     None => None,
                 },
                 num_series: 0,
+                ..Default::default()
             },
             Arc::new(NoopFilePurger),
         )

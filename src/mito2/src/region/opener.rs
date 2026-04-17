@@ -504,7 +504,6 @@ impl RegionOpener {
             file_purger.clone(),
             mutable,
             region_options,
-            self.cache_manager.as_ref(),
         );
         let version = version_builder.build();
         let flushed_entry_id = version.flushed_entry_id;
@@ -604,15 +603,9 @@ pub(crate) fn version_builder_from_manifest(
     file_purger: FilePurgerRef,
     mutable: TimePartitionsRef,
     region_options: RegionOptions,
-    cache_manager: Option<&CacheManagerRef>,
 ) -> VersionBuilder {
     VersionBuilder::new(metadata, mutable)
-        .add_files_with_cache_manager(
-            file_purger,
-            manifest.files.values().cloned(),
-            cache_manager,
-            None,
-        )
+        .add_files(file_purger, manifest.files.values().cloned())
         .flushed_entry_id(manifest.flushed_entry_id)
         .flushed_sequence(manifest.flushed_sequence)
         .truncated_entry_id(manifest.truncated_entry_id)
@@ -1250,6 +1243,7 @@ mod tests {
             sequence: None,
             partition_expr: None,
             num_series: 0,
+            ..Default::default()
         };
         let file_handle = FileHandle::new(file_meta, Arc::new(NoopFilePurger));
 
@@ -1328,6 +1322,7 @@ mod tests {
             sequence: None,
             partition_expr: None,
             num_series: 0,
+            ..Default::default()
         };
         let file_handle = FileHandle::new(file_meta, Arc::new(NoopFilePurger));
 
@@ -1402,6 +1397,7 @@ mod tests {
             sequence: None,
             partition_expr: None,
             num_series: 0,
+            ..Default::default()
         };
         let file_handle = FileHandle::new(file_meta, Arc::new(NoopFilePurger));
 
