@@ -46,6 +46,7 @@ use snafu::{IntoError, ResultExt};
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::instance::Instance;
+use crate::instance::otlp::trace_semconv::trace_semconv_fixed_type;
 use crate::instance::otlp::trace_types::{
     PendingTraceColumnRewrite, choose_trace_reconcile_decision, enrich_trace_reconcile_error,
     is_trace_reconcile_candidate_type, push_observed_trace_type, validate_trace_column_rewrites,
@@ -54,6 +55,7 @@ use crate::metrics::{
     OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_TRACES_FAILURE_COUNT, OTLP_TRACES_ROWS,
 };
 
+pub mod trace_semconv;
 pub mod trace_types;
 
 const TRACE_INGEST_CHUNK_SIZE: usize = 64;
@@ -678,6 +680,7 @@ impl Instance {
                             .ok()
                             .map(|wrapper| wrapper.datatype())
                     });
+                let fixed_type = trace_semconv_fixed_type(&col_schema.column_name);
 
                 if !observed_types
                     .iter()
@@ -686,23 +689,27 @@ impl Instance {
                     && existing_type
                         .map(|datatype| !is_trace_reconcile_candidate_type(datatype))
                         .unwrap_or(true)
+                    && fixed_type.is_none()
                 {
                     continue;
                 }
 
                 // Decide the final type once per column, then rewrite all affected cells
                 // together in one row pass below.
-                let Some(decision) =
-                    choose_trace_reconcile_decision(&observed_types, existing_type).map_err(
-                        |_| {
-                            enrich_trace_reconcile_error(
-                                &req.table_name,
-                                &col_schema.column_name,
-                                &observed_types,
-                                existing_type,
-                            )
-                        },
-                    )?
+                let Some(decision) = choose_trace_reconcile_decision(
+                    &col_schema.column_name,
+                    &observed_types,
+                    existing_type,
+                )
+                .map_err(|_| {
+                    enrich_trace_reconcile_error(
+                        &req.table_name,
+                        &col_schema.column_name,
+                        &observed_types,
+                        existing_type,
+                        fixed_type,
+                    )
+                })?
                 else {
                     continue;
                 };

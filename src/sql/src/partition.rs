@@ -46,10 +46,13 @@ macro_rules! between_string {
     };
 }
 
-pub fn partition_rule_for_hexstring(ident: &str) -> Result<Partitions> {
+pub fn partition_rule_for_hexstring(ident: &str, partition_num: Option<u32>) -> Result<Partitions> {
     Ok(Partitions {
         column_list: vec![Ident::new(ident)],
-        exprs: partition_rules_for_uuid(DEFAULT_PARTITION_NUM_FOR_TRACES, ident)?,
+        exprs: partition_rules_for_uuid(
+            partition_num.unwrap_or(DEFAULT_PARTITION_NUM_FOR_TRACES),
+            ident,
+        )?,
     })
 }
 
@@ -173,7 +176,30 @@ mod tests {
 
         assert_eq!(
             results,
-            partition_rule_for_hexstring("trace_id").unwrap().exprs
+            partition_rule_for_hexstring("trace_id", None)
+                .unwrap()
+                .exprs
+        );
+
+        // custom partition number
+        let expr = vec![
+            "trace_id < '4'",
+            "trace_id >= '4' AND trace_id < '8'",
+            "trace_id >= '8' AND trace_id < 'c'",
+            "trace_id >= 'c'",
+        ];
+        let results = expr
+            .into_iter()
+            .map(|s| {
+                let mut parser = Parser::new(&dialect).try_with_sql(s).unwrap();
+                parser.parse_expr().unwrap()
+            })
+            .collect::<Vec<Expr>>();
+        assert_eq!(
+            results,
+            partition_rule_for_hexstring("trace_id", Some(4))
+                .unwrap()
+                .exprs
         );
     }
 

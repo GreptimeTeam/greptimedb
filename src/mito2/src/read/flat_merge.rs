@@ -14,8 +14,9 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_telemetry::debug;
@@ -34,7 +35,6 @@ use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::BoxedRecordBatchIterator;
 use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::BoxedRecordBatchStream;
-use crate::read::merge::{MergeMetrics, MergeMetricsReport};
 use crate::sst::parquet::flat_format::{
     primary_key_column_index, sequence_column_index, time_index_column_index,
 };
@@ -103,6 +103,84 @@ struct BatchCursor {
     batch_idx: usize,
     /// The row index within the given batch
     row_idx: usize,
+}
+
+/// Trait for reporting merge metrics.
+pub trait MergeMetricsReport: Send + Sync {
+    /// Reports and resets the metrics.
+    fn report(&self, metrics: &mut MergeMetrics);
+}
+
+/// Metrics for the merge reader.
+#[derive(Default)]
+pub struct MergeMetrics {
+    /// Cost to initialize the reader.
+    pub(crate) init_cost: Duration,
+    /// Total scan cost of the reader.
+    pub(crate) scan_cost: Duration,
+    /// Number of times to fetch batches.
+    pub(crate) num_fetch_by_batches: usize,
+    /// Number of times to fetch rows.
+    pub(crate) num_fetch_by_rows: usize,
+    /// Cost to fetch batches from sources.
+    pub(crate) fetch_cost: Duration,
+}
+
+impl fmt::Debug for MergeMetrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.scan_cost.is_zero() {
+            return write!(f, "{{}}");
+        }
+
+        write!(f, r#"{{"scan_cost":"{:?}""#, self.scan_cost)?;
+
+        if !self.init_cost.is_zero() {
+            write!(f, r#", "init_cost":"{:?}""#, self.init_cost)?;
+        }
+        if self.num_fetch_by_batches > 0 {
+            write!(
+                f,
+                r#", "num_fetch_by_batches":{}"#,
+                self.num_fetch_by_batches
+            )?;
+        }
+        if self.num_fetch_by_rows > 0 {
+            write!(f, r#", "num_fetch_by_rows":{}"#, self.num_fetch_by_rows)?;
+        }
+        if !self.fetch_cost.is_zero() {
+            write!(f, r#", "fetch_cost":"{:?}""#, self.fetch_cost)?;
+        }
+
+        write!(f, "}}")
+    }
+}
+
+impl MergeMetrics {
+    /// Merges metrics from another MergeMetrics instance.
+    pub(crate) fn merge(&mut self, other: &MergeMetrics) {
+        let MergeMetrics {
+            init_cost,
+            scan_cost,
+            num_fetch_by_batches,
+            num_fetch_by_rows,
+            fetch_cost,
+        } = other;
+
+        self.init_cost += *init_cost;
+        self.scan_cost += *scan_cost;
+        self.num_fetch_by_batches += *num_fetch_by_batches;
+        self.num_fetch_by_rows += *num_fetch_by_rows;
+        self.fetch_cost += *fetch_cost;
+    }
+
+    /// Reports the metrics if scan_cost exceeds 10ms and resets them.
+    pub(crate) fn maybe_report(&mut self, reporter: &Option<Arc<dyn MergeMetricsReport>>) {
+        if self.scan_cost.as_millis() > 10
+            && let Some(r) = reporter
+        {
+            r.report(self);
+        }
+    }
 }
 
 /// Provides an API to incrementally build a [`RecordBatch`] from partitioned [`RecordBatch`]

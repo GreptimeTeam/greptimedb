@@ -170,7 +170,7 @@ impl JsonVariant {
     }
 
     fn json_type(&self) -> JsonType {
-        JsonType::new_native(self.native_type())
+        JsonType::new_json2(self.native_type())
     }
 
     fn as_ref(&self) -> JsonVariantRef<'_> {
@@ -526,7 +526,7 @@ impl JsonVariantRef<'_> {
                 ),
             }
         }
-        JsonType::new_native(native_type(self))
+        JsonType::new_json2(native_type(self))
     }
 }
 

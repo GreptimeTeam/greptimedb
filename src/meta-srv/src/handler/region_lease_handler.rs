@@ -281,7 +281,7 @@ mod test {
 
         let opening_region_id = RegionId::new(table_id, region_number + 2);
         let _guard = opening_region_keeper
-            .register(follower_peer.id, opening_region_id)
+            .register_with_role(follower_peer.id, opening_region_id, RegionRole::Follower)
             .unwrap();
 
         let acc = &mut HeartbeatAccumulator::default();
@@ -396,6 +396,65 @@ mod test {
             ],
         );
         assert_eq!(acc.inactive_region_ids, HashSet::from([no_exist_region_id]));
+    }
+
+    #[tokio::test]
+    async fn test_handle_staging_leader() {
+        let datanode_id = 1;
+        let region_number = 1u32;
+        let table_id = 10;
+        let region_id = RegionId::new(table_id, region_number);
+        let peer = Peer::empty(datanode_id);
+        let table_info = new_test_table_info(table_id);
+
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(peer.clone()),
+            leader_state: Some(LeaderState::Staging),
+            ..Default::default()
+        }];
+
+        let keeper = new_test_keeper();
+        let table_metadata_manager = keeper.table_metadata_manager();
+
+        table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+
+        let builder = MetasrvBuilder::new();
+        let metasrv = builder.build().await.unwrap();
+        let ctx = &mut metasrv.new_ctx();
+
+        let req = HeartbeatRequest {
+            duration_since_epoch: 1234,
+            ..Default::default()
+        };
+
+        let acc = &mut HeartbeatAccumulator::default();
+        acc.stat = Some(Stat {
+            id: peer.id,
+            region_stats: vec![new_empty_region_stat(region_id, RegionRole::StagingLeader)],
+            ..Default::default()
+        });
+
+        let handler = RegionLeaseHandler::new(
+            default_distributed_time_constants().region_lease.as_secs(),
+            table_metadata_manager.clone(),
+            Default::default(),
+            None,
+        );
+
+        handler.handle(&req, ctx, acc).await.unwrap();
+
+        assert_region_lease(
+            acc,
+            vec![GrantedRegion::new(region_id, RegionRole::StagingLeader)],
+        );
     }
 
     fn assert_region_lease(acc: &HeartbeatAccumulator, expected: Vec<GrantedRegion>) {

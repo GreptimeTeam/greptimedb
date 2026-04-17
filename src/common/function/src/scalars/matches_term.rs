@@ -20,6 +20,8 @@ use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
+use icu_properties::props::Script;
+use icu_properties::{CodePointMapData, CodePointMapDataBorrowed};
 use memchr::memmem;
 
 use crate::function::Function;
@@ -27,10 +29,11 @@ use crate::function_registry::FunctionRegistry;
 
 /// Exact term/phrase matching function for text columns.
 ///
-/// This function checks if a text column contains exact term/phrase matches
-/// with non-alphanumeric boundaries. Designed for:
-/// - Whole-word matching (e.g. "cat" in "cat!" but not in "category")
+/// This function uses script-aware matching rules:
+/// - ASCII-only terms keep whole-word style boundary matching, like Whole-word matching (e.g. "cat" in "cat!" but not in "category")
 /// - Phrase matching (e.g. "hello world" in "note:hello world!")
+/// - Terms containing Han characters match as contiguous substrings
+/// - Mixed-script identifiers and numeric terms remain searchable in Chinese text
 ///
 /// # Signature
 /// `matches_term(text: String, term: String) -> Boolean`
@@ -43,9 +46,8 @@ use crate::function_registry::FunctionRegistry;
 /// BooleanVector where each element indicates if the corresponding text
 /// contains an exact match of the term, following these rules:
 /// 1. Exact substring match found (case-sensitive)
-/// 2. Match boundaries are either:
-///    - Start/end of text
-///    - Any non-alphanumeric character (including spaces, hyphens, punctuation, etc.)
+/// 2. For ASCII-only terms, adjacent ASCII word characters block the match
+/// 3. For Han-containing terms, contiguous substring match is sufficient
 ///
 /// # Examples
 /// ```
@@ -60,6 +62,9 @@ use crate::function_registry::FunctionRegistry;
 /// SELECT matches_term(column, 'critical error') FROM logs;
 /// -- Match in: "ERROR:critical error!"
 /// -- No match: "critical_errors"
+/// -- Chinese substring examples --
+/// SELECT matches_term(column, '手机') FROM table;
+/// -- Text: "登录手机号18888888888的动态key" => true
 ///
 /// -- Empty string handling --
 /// SELECT matches_term(column, '') FROM table;
@@ -204,9 +209,8 @@ impl Function for MatchesTermFunction {
 ///
 /// A term is considered matched when:
 /// 1. The exact sequence appears in the text
-/// 2. It is either:
-///    - At the start/end of text with adjacent non-alphanumeric character
-///    - Surrounded by non-alphanumeric characters
+/// 2. ASCII-only terms are not adjacent to ASCII word characters
+/// 3. Han-containing terms match as contiguous substrings
 ///
 /// # Examples
 /// ```
@@ -215,28 +219,105 @@ impl Function for MatchesTermFunction {
 /// assert!(finder.find("dog,cat"));   // Term preceded by comma
 /// assert!(!finder.find("category")); // Partial match rejected
 ///
-/// let finder = MatchesTermFinder::new("world");
-/// assert!(finder.find("hello-world")); // Hyphen boundary
+/// let finder = MatchesTermFinder::new("手机");
+/// assert!(finder.find("登录手机号18888888888的动态key"));
 /// ```
 #[derive(Clone, Debug)]
 pub struct MatchesTermFinder {
     finder: memmem::Finder<'static>,
     term: String,
-    starts_with_non_alnum: bool,
-    ends_with_non_alnum: bool,
+    term_kind: TermKind,
+    starts_with_other: bool,
+    ends_with_other: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CharClass {
+    AsciiWord,
+    Han,
+    UnicodeWord,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TermKind {
+    AsciiLike,
+    UnicodeWord,
+    HanContaining,
+}
+
+fn classify_char(c: char) -> CharClass {
+    if c.is_ascii_alphanumeric() {
+        CharClass::AsciiWord
+    } else if is_han(c) {
+        CharClass::Han
+    } else if c.is_alphanumeric() {
+        CharClass::UnicodeWord
+    } else {
+        CharClass::Other
+    }
+}
+
+static HAN_SCRIPT_DATA: CodePointMapDataBorrowed<'static, Script> =
+    CodePointMapData::<Script>::new();
+
+fn is_han(c: char) -> bool {
+    HAN_SCRIPT_DATA.get(c) == Script::Han
+}
+
+fn classify_term(term: &str) -> TermKind {
+    let mut has_han = false;
+    let mut has_unicode_word = false;
+    for c in term.chars() {
+        match classify_char(c) {
+            CharClass::AsciiWord => {}
+            CharClass::Han => has_han = true,
+            CharClass::UnicodeWord => has_unicode_word = true,
+            CharClass::Other => {}
+        }
+    }
+
+    if has_han {
+        TermKind::HanContaining
+    } else if has_unicode_word {
+        TermKind::UnicodeWord
+    } else {
+        TermKind::AsciiLike
+    }
+}
+
+fn boundary_ok(term_kind: TermKind, neighbor: Option<char>, term_has_other_boundary: bool) -> bool {
+    if term_has_other_boundary {
+        return true;
+    }
+
+    match term_kind {
+        TermKind::AsciiLike => !matches!(neighbor.map(classify_char), Some(CharClass::AsciiWord)),
+        TermKind::UnicodeWord => !matches!(
+            neighbor.map(classify_char),
+            Some(CharClass::AsciiWord | CharClass::UnicodeWord | CharClass::Han)
+        ),
+        TermKind::HanContaining => true,
+    }
 }
 
 impl MatchesTermFinder {
     /// Create a new `MatchesTermFinder` for the given term.
     pub fn new(term: &str) -> Self {
-        let starts_with_non_alnum = term.chars().next().is_some_and(|c| !c.is_alphanumeric());
-        let ends_with_non_alnum = term.chars().last().is_some_and(|c| !c.is_alphanumeric());
-
+        let starts_with_other = term
+            .chars()
+            .next()
+            .is_some_and(|c| classify_char(c) == CharClass::Other);
+        let ends_with_other = term
+            .chars()
+            .last()
+            .is_some_and(|c| classify_char(c) == CharClass::Other);
         Self {
             finder: memmem::Finder::new(term).into_owned(),
             term: term.to_string(),
-            starts_with_non_alnum,
-            ends_with_non_alnum,
+            term_kind: classify_term(term),
+            starts_with_other,
+            ends_with_other,
         }
     }
 
@@ -254,21 +335,17 @@ impl MatchesTermFinder {
         while let Some(found_pos) = self.finder.find(&text.as_bytes()[pos..]) {
             let actual_pos = pos + found_pos;
 
-            let prev_ok = self.starts_with_non_alnum
-                || text[..actual_pos]
-                    .chars()
-                    .last()
-                    .map(|c| !c.is_alphanumeric())
-                    .unwrap_or(true);
+            let prev = text[..actual_pos].chars().last();
+            let prev_ok = self.starts_with_other || boundary_ok(self.term_kind, prev, false);
 
             if prev_ok {
+                if self.term_kind == TermKind::HanContaining {
+                    return true;
+                }
+
                 let next_pos = actual_pos + self.finder.needle().len();
-                let next_ok = self.ends_with_non_alnum
-                    || text[next_pos..]
-                        .chars()
-                        .next()
-                        .map(|c| !c.is_alphanumeric())
-                        .unwrap_or(true);
+                let next = text[next_pos..].chars().next();
+                let next_ok = self.ends_with_other || boundary_ok(self.term_kind, next, false);
 
                 if next_ok {
                     return true;
@@ -370,6 +447,25 @@ mod tests {
     }
 
     #[test]
+    fn mixed_script_terms_match_inside_chinese_context() {
+        let text = "登录手机号18888888888的动态key";
+        assert!(MatchesTermFinder::new("手机号").find(text));
+        assert!(MatchesTermFinder::new("18888888888").find(text));
+        assert!(MatchesTermFinder::new("手机").find(text));
+        assert!(MatchesTermFinder::new("机号").find(text));
+        assert!(MatchesTermFinder::new("机号1888").find(text));
+        assert!(MatchesTermFinder::new("农业").find("中国农业银行"));
+        assert!(MatchesTermFinder::new("error").find("错误error日志"));
+    }
+
+    #[test]
+    fn underscore_still_counts_as_boundary_for_ascii_terms() {
+        assert!(MatchesTermFinder::new("world").find("hello_world"));
+        assert!(MatchesTermFinder::new("id").find("trace_id=abc"));
+        assert!(!MatchesTermFinder::new("error").find("criticalerrors"));
+    }
+
+    #[test]
     fn adjacent_alphanumeric_fails() {
         assert!(!MatchesTermFinder::new("cat").find("cat5"));
         assert!(!MatchesTermFinder::new("dog").find("dogcat"));
@@ -405,5 +501,19 @@ mod tests {
 
         assert!(MatchesTermFinder::new("中文").find("这是中文测试，中文！"));
         assert!(MatchesTermFinder::new("error").find("错误errorerror日志_error!"));
+    }
+
+    #[test]
+    fn han_terms_match_as_contiguous_substrings() {
+        assert!(MatchesTermFinder::new("行账号").find("中国农业银行账号"));
+        assert!(MatchesTermFinder::new("登录").find("登录手机号18888888888的动态key"));
+    }
+
+    #[test]
+    fn han_detection_uses_script_not_all_cjk() {
+        assert!(is_han('汉'));
+        assert!(is_han('\u{30000}'));
+        assert!(!is_han('あ'));
+        assert!(!is_han('한'));
     }
 }

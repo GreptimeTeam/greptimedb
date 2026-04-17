@@ -22,6 +22,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::error::{self, Result};
+use crate::procedure::repartition::group::GroupId;
+use crate::procedure::repartition::plan::RegionDescriptor;
 
 /// Returns the `datanode_table_value`
 ///
@@ -118,14 +120,79 @@ pub fn merge_and_validate_region_wal_options(
     Ok(new_region_wal_options)
 }
 
+/// Restores group staging metadata in-place for parent repartition rollback.
+///
+/// This helper lives in repartition utilities instead of the group subprocedure
+/// because parent repartition owns crash recovery and rollback selection.
+///
+/// The function mutates `region_routes` in place to avoid rebuilding the route
+/// vector for each selected plan. It restores:
+/// - source-region leader staging flags,
+/// - merge-source `ignore_all_writes` markers for pending-deallocate sources,
+/// - target-region partition expressions,
+/// - target-region write-route policies,
+/// - target-region leader staging flags.
+///
+/// `original_target_routes` contains only pre-existing target routes.
+/// Newly allocated targets are removed by parent rollback instead of being
+/// restored here.
+pub fn rollback_group_metadata_routes(
+    group_id: GroupId,
+    source_regions: &[RegionDescriptor],
+    original_target_routes: &[RegionRoute],
+    allocated_region_ids: &[RegionId],
+    pending_deallocate_region_ids: &[RegionId],
+    region_routes_map: &mut HashMap<RegionId, &mut RegionRoute>,
+) -> Result<()> {
+    for source in source_regions {
+        let region_route = region_routes_map.get_mut(&source.region_id).context(
+            error::RepartitionSourceRegionMissingSnafu {
+                group_id,
+                region_id: source.region_id,
+            },
+        )?;
+        region_route.clear_leader_staging();
+        if pending_deallocate_region_ids.contains(&source.region_id) {
+            region_route.clear_ignore_all_writes();
+        }
+    }
+
+    for target in original_target_routes {
+        let Some(region_route) = region_routes_map.get_mut(&target.region.id) else {
+            // Ignores newly allocated region routes that do not exist in the current region routes.
+            // They may have already been deleted (to ensure idempotency).
+            if allocated_region_ids.contains(&target.region.id) {
+                continue;
+            }
+
+            return error::RepartitionTargetRegionMissingSnafu {
+                group_id,
+                region_id: target.region.id,
+            }
+            .fail();
+        };
+        region_route.region.partition_expr = target.region.partition_expr.clone();
+        region_route.write_route_policy = target.write_route_policy;
+        region_route.clear_leader_staging();
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use common_meta::peer::Peer;
-    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use common_wal::options::{KafkaWalOptions, WalOptions};
     use store_api::storage::RegionId;
+    use uuid::Uuid;
 
     use super::*;
+    use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
+    use crate::procedure::repartition::plan::RegionDescriptor;
+    use crate::procedure::repartition::test_util::range_expr;
 
     /// Helper function to create a Kafka WAL option string from a topic name.
     fn kafka_wal_option(topic: &str) -> String {
@@ -147,6 +214,45 @@ mod tests {
             leader_down_since: None,
             write_route_policy: None,
         }
+    }
+
+    fn new_staged_region_route(
+        region_id: RegionId,
+        partition_expr: &str,
+        leader_state: Option<LeaderState>,
+        ignore_all_writes: bool,
+    ) -> RegionRoute {
+        let mut route = RegionRoute {
+            region: Region {
+                id: region_id,
+                partition_expr: partition_expr.to_string(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(1)),
+            leader_state,
+            ..Default::default()
+        };
+
+        if ignore_all_writes {
+            route.set_ignore_all_writes();
+        }
+
+        route
+    }
+
+    fn original_target_routes(
+        region_routes: &[RegionRoute],
+        targets: &[RegionDescriptor],
+    ) -> Vec<RegionRoute> {
+        let target_ids = targets
+            .iter()
+            .map(|target| target.region_id)
+            .collect::<HashSet<_>>();
+        region_routes
+            .iter()
+            .filter(|route| target_ids.contains(&route.region.id))
+            .cloned()
+            .collect()
     }
 
     #[test]
@@ -253,5 +359,142 @@ mod tests {
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("Mismatch"));
         assert!(error_msg.contains(&table_id.to_string()));
+    }
+
+    #[test]
+    fn test_rollback_group_metadata_routes_split_case() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let original_region_routes = vec![
+            new_staged_region_route(
+                RegionId::new(table_id, 1),
+                &range_expr("x", 0, 100).as_json_str().unwrap(),
+                None,
+                false,
+            ),
+            new_staged_region_route(
+                RegionId::new(table_id, 2),
+                &range_expr("x", 100, 200).as_json_str().unwrap(),
+                None,
+                false,
+            ),
+            new_staged_region_route(RegionId::new(table_id, 3), "", None, false),
+        ];
+        let sources = vec![RegionDescriptor {
+            region_id: RegionId::new(table_id, 1),
+            partition_expr: range_expr("x", 0, 100),
+        }];
+        let targets = vec![
+            RegionDescriptor {
+                region_id: RegionId::new(table_id, 1),
+                partition_expr: range_expr("x", 0, 50),
+            },
+            RegionDescriptor {
+                region_id: RegionId::new(table_id, 3),
+                partition_expr: range_expr("x", 50, 100),
+            },
+        ];
+        let mut applied_region_routes = UpdateMetadata::apply_staging_region_routes(
+            group_id,
+            &sources,
+            &targets,
+            &[],
+            &original_region_routes,
+        )
+        .unwrap();
+        let target_routes = original_target_routes(&original_region_routes, &targets);
+
+        rollback_group_metadata_routes(
+            group_id,
+            &sources,
+            &target_routes,
+            &[],
+            &[],
+            &mut applied_region_routes
+                .iter_mut()
+                .map(|route| (route.region.id, route))
+                .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(applied_region_routes, original_region_routes);
+    }
+
+    #[test]
+    fn test_rollback_group_metadata_routes_merge_case_is_idempotent() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let original_region_routes = vec![
+            new_staged_region_route(
+                RegionId::new(table_id, 1),
+                &range_expr("x", 0, 100).as_json_str().unwrap(),
+                None,
+                false,
+            ),
+            new_staged_region_route(
+                RegionId::new(table_id, 2),
+                &range_expr("x", 100, 200).as_json_str().unwrap(),
+                None,
+                false,
+            ),
+            new_staged_region_route(
+                RegionId::new(table_id, 3),
+                &range_expr("x", 200, 300).as_json_str().unwrap(),
+                None,
+                false,
+            ),
+        ];
+        let sources = vec![
+            RegionDescriptor {
+                region_id: RegionId::new(table_id, 1),
+                partition_expr: range_expr("x", 0, 100),
+            },
+            RegionDescriptor {
+                region_id: RegionId::new(table_id, 2),
+                partition_expr: range_expr("x", 100, 200),
+            },
+        ];
+        let targets = vec![RegionDescriptor {
+            region_id: RegionId::new(table_id, 1),
+            partition_expr: range_expr("x", 0, 200),
+        }];
+        let target_routes = original_target_routes(&original_region_routes, &targets);
+        let mut once = UpdateMetadata::apply_staging_region_routes(
+            group_id,
+            &sources,
+            &targets,
+            &[RegionId::new(table_id, 2)],
+            &original_region_routes,
+        )
+        .unwrap();
+
+        rollback_group_metadata_routes(
+            group_id,
+            &sources,
+            &target_routes,
+            &[],
+            &[RegionId::new(table_id, 2)],
+            &mut once
+                .iter_mut()
+                .map(|route| (route.region.id, route))
+                .collect(),
+        )
+        .unwrap();
+        let mut twice = once.clone();
+        rollback_group_metadata_routes(
+            group_id,
+            &sources,
+            &target_routes,
+            &[],
+            &[RegionId::new(table_id, 2)],
+            &mut twice
+                .iter_mut()
+                .map(|route| (route.region.id, route))
+                .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(once, original_region_routes);
+        assert_eq!(once, twice);
     }
 }

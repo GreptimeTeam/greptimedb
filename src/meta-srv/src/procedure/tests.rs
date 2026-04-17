@@ -219,7 +219,7 @@ async fn test_on_datanode_create_regions() {
         }
     });
 
-    let status = procedure.on_datanode_create_regions().await.unwrap();
+    let status = procedure.on_datanode_create_regions(false).await.unwrap();
     assert!(matches!(
         status,
         Status::Executing {

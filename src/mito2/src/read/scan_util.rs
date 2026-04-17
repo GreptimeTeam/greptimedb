@@ -39,7 +39,7 @@ use crate::metrics::{
     READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_RETURN, READ_STAGE_ELAPSED,
 };
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
-use crate::read::merge::{MergeMetrics, MergeMetricsReport};
+use crate::read::flat_merge::{MergeMetrics, MergeMetricsReport};
 use crate::read::pruner::PartitionPruner;
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
@@ -1258,13 +1258,25 @@ pub(crate) fn should_split_flat_batches_for_merge(
             // This is a file range.
             let file_index = index.index - stream_ctx.input.num_memtables();
             let file = &stream_ctx.input.files[file_index];
-            if file.meta_ref().num_rows < SPLIT_ROW_THRESHOLD || file.meta_ref().num_series == 0 {
+            let file_meta = file.meta_ref();
+            if file_meta.level == 0 {
+                // Always split level 0 files.
+                num_files_to_split += 1;
+                continue;
+            } else if file_meta.num_rows < SPLIT_ROW_THRESHOLD || file_meta.num_series == 0 {
                 // If the file doesn't have enough rows, or the number of series is unavailable, skips it.
                 continue;
             }
-            debug_assert!(file.meta_ref().num_rows > 0);
-            if !can_split_series(file.meta_ref().num_rows, file.meta_ref().num_series) {
+            debug_assert!(file_meta.num_rows > 0);
+            if !can_split_series(file_meta.num_rows, file_meta.num_series) {
                 // We can't split batches in a file.
+                common_telemetry::trace!(
+                    "Can't split series for file {}, level: {}, num_rows: {}, num_series: {}",
+                    file_meta.file_id,
+                    file_meta.level,
+                    file_meta.num_rows,
+                    file_meta.num_series,
+                );
                 return None;
             } else {
                 num_files_to_split += 1;
@@ -1310,12 +1322,106 @@ pub(crate) fn compute_parallel_channel_size(estimated_rows_per_batch: usize) -> 
     size.clamp(2, 64)
 }
 
+/// Computes the average estimated rows per batch across multiple range readers.
+pub(crate) fn compute_average_batch_size(
+    estimated_rows_per_batch: impl IntoIterator<Item = usize>,
+) -> usize {
+    let mut total = 0usize;
+    let mut count = 0usize;
+    for size in estimated_rows_per_batch {
+        total += size;
+        count += 1;
+    }
+
+    if count == 0 {
+        return DEFAULT_READ_BATCH_SIZE;
+    }
+
+    (total / count).clamp(1, DEFAULT_READ_BATCH_SIZE)
+}
+
 fn can_split_series(num_rows: u64, num_series: u64) -> bool {
-    assert!(num_series > 0);
-    assert!(num_rows > 0);
+    if num_rows == 0 || num_series == 0 {
+        return false;
+    }
 
     // It doesn't have too many series or it will have enough rows for each batch.
     num_series < NUM_SERIES_THRESHOLD || num_rows / num_series >= BATCH_SIZE_THRESHOLD
+}
+
+#[cfg(test)]
+mod split_tests {
+    use std::sync::Arc;
+
+    use common_time::Timestamp;
+    use smallvec::smallvec;
+    use store_api::storage::FileId;
+
+    use super::*;
+    use crate::read::projection::ProjectionMapper;
+    use crate::read::range::{RangeMeta, RowGroupIndex, SourceIndex};
+    use crate::read::scan_region::{ScanInput, StreamContext};
+    use crate::sst::file::FileHandle;
+    use crate::test_util::memtable_util::metadata_with_primary_key;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::sst_util::sst_file_handle_with_file_id;
+
+    async fn new_stream_context_with_files(files: Vec<FileHandle>) -> StreamContext {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let input = ScanInput::new(env.access_layer.clone(), mapper).with_files(files);
+
+        StreamContext {
+            input,
+            ranges: vec![],
+            scan_fingerprint: None,
+            query_start: std::time::Instant::now(),
+        }
+    }
+
+    fn single_file_range_meta() -> RangeMeta {
+        RangeMeta {
+            time_range: (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+            indices: smallvec![SourceIndex {
+                index: 0,
+                num_row_groups: 1,
+            }],
+            row_group_indices: smallvec![RowGroupIndex {
+                index: 0,
+                row_group_index: 0,
+            }],
+            num_rows: 1024,
+        }
+    }
+
+    #[tokio::test]
+    async fn should_split_level_zero_file_even_when_series_stats_are_missing() {
+        let mut file = sst_file_handle_with_file_id(FileId::random(), 0, 1000)
+            .meta_ref()
+            .clone();
+        file.level = 0;
+        file.num_rows = DEFAULT_ROW_GROUP_SIZE as u64;
+        file.num_row_groups = 1;
+        file.num_series = 0;
+
+        let file = FileHandle::new(file, crate::test_util::new_noop_file_purger());
+        let stream_ctx = Arc::new(new_stream_context_with_files(vec![file]).await);
+
+        assert!(
+            should_split_flat_batches_for_merge(&stream_ctx, &single_file_range_meta()).is_some()
+        );
+    }
+
+    #[test]
+    fn can_split_series_returns_false_for_zero_inputs() {
+        assert!(!can_split_series(0, 1));
+        assert!(!can_split_series(1, 0));
+        assert!(!can_split_series(0, 0));
+    }
 }
 
 /// Creates a new [ReaderFilterMetrics] with optional apply metrics initialized
@@ -1653,6 +1759,7 @@ mod tests {
         let meta = FileMeta {
             region_id: RegionId::new(123, 456),
             file_id: Default::default(),
+            level: 1,
             time_range: (
                 Timestamp::new_millisecond(0),
                 Timestamp::new_millisecond(1000),
@@ -1814,6 +1921,28 @@ mod tests {
         assert_eq!(
             2,
             compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE * 2)
+        );
+    }
+
+    #[test]
+    fn test_compute_average_batch_size_uses_arithmetic_mean() {
+        assert_eq!(24, compute_average_batch_size([16, 24, 32]));
+    }
+
+    #[test]
+    fn test_compute_average_batch_size_clamps_values() {
+        assert_eq!(
+            DEFAULT_READ_BATCH_SIZE,
+            compute_average_batch_size([DEFAULT_READ_BATCH_SIZE, DEFAULT_READ_BATCH_SIZE * 2])
+        );
+        assert_eq!(1, compute_average_batch_size([0, 1]));
+    }
+
+    #[test]
+    fn test_compute_average_batch_size_falls_back_when_empty() {
+        assert_eq!(
+            DEFAULT_READ_BATCH_SIZE,
+            compute_average_batch_size(std::iter::empty())
         );
     }
 }

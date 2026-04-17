@@ -505,6 +505,17 @@ async fn test_query_prepared() -> Result<()> {
 
     test_prepare_all_type(column_schemas, columns, &mut connection).await;
 
+    match connection
+        .prep("SELECT `timestamp` FROM t WHERE `timestamp` > NOW() - INTERVAL '1 hour'")
+        .await
+    {
+        Err(mysql_async::Error::Server(e)) => assert_eq!(
+            "ERROR HY000 (1210): (InvalidArguments): Invalid prepare statement: Invalid SQL syntax: sql parser error: INTERVAL requires a unit after the literal value",
+            e.to_string()
+        ),
+        _ => unreachable!(),
+    }
+
     Ok(())
 }
 

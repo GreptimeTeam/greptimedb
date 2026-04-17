@@ -663,7 +663,7 @@ impl TableMetadataManager {
         if let Some(table_route_value) = &mut table_route_value {
             self.table_route_manager()
                 .table_route_storage()
-                .remap_route_address(table_route_value)
+                .remap_table_route(table_route_value)
                 .await?;
         }
         Ok((table_info_value, table_route_value))

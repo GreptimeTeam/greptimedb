@@ -403,3 +403,99 @@ fn collect_and_assert_partition_rows(
     actual_rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
     actual_rows
 }
+
+/// Tests series scan with multiple partition ranges (each with multiple overlapping sources)
+/// and small semaphore permits (controlled by num_partitions).
+#[tokio::test]
+async fn test_series_scan_flat_small_permits() {
+    let mut env = TestEnv::with_prefix("test_series_scan_small_permits").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.time_window", "1h")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Create overlapping SSTs in each time window so partition ranges have multiple sources.
+    let put_flush_rows = async |start, end| {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(start, end),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    };
+    // Window 0 (0s-999s): 3 overlapping SSTs
+    put_flush_rows(0, 3).await;
+    put_flush_rows(1, 5).await;
+    put_flush_rows(3, 7).await;
+    // Window 1 (3600s-4599s): 2 overlapping SSTs
+    put_flush_rows(3600, 3603).await;
+    put_flush_rows(3601, 3605).await;
+    // Window 2 (7200s-8199s): 2 overlapping SSTs
+    put_flush_rows(7200, 7203).await;
+    put_flush_rows(7201, 7204).await;
+
+    let mut expected_rows = Vec::new();
+    for value in [
+        0_i64, 1, 2, 3, 4, 5, 6, 3600, 3601, 3602, 3603, 3604, 7200, 7201, 7202, 7203,
+    ] {
+        expected_rows.push((value.to_string(), value as f64, value * 1000));
+    }
+    expected_rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
+
+    // Test with different semaphore sizes (num_partitions controls Semaphore::new(num_partitions)).
+    for num_partitions in [1, 2] {
+        let request = ScanRequest {
+            distribution: Some(TimeSeriesDistribution::PerSeries),
+            ..Default::default()
+        };
+        let scanner = engine.scanner(region_id, request).await.unwrap();
+        let Scanner::Series(mut scanner) = scanner else {
+            panic!("Scanner should be series scan");
+        };
+
+        // Collect all partition ranges and redistribute into `num_partitions` partitions.
+        let raw_ranges: Vec<_> = scanner
+            .properties()
+            .partitions
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        assert!(
+            raw_ranges.len() >= 3,
+            "expected at least 3 partition ranges, got {}",
+            raw_ranges.len()
+        );
+
+        let mut new_ranges = vec![vec![]; num_partitions];
+        for (i, range) in raw_ranges.into_iter().enumerate() {
+            new_ranges[i % num_partitions].push(range);
+        }
+        scanner
+            .prepare(PrepareRequest {
+                ranges: Some(new_ranges),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let actual_rows = collect_partition_rows_round_robin(&scanner, num_partitions).await;
+        assert_eq!(
+            expected_rows, actual_rows,
+            "mismatch with num_partitions={num_partitions}"
+        );
+    }
+}

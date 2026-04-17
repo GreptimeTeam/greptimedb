@@ -122,6 +122,7 @@ mod tests {
             schema: "bar".to_string(),
             drop_if_exists: true,
             tables: None,
+            retrying: false,
         };
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
         state
@@ -150,6 +151,7 @@ mod tests {
             schema: "bar".to_string(),
             drop_if_exists: true,
             tables: None,
+            retrying: false,
         };
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
         state

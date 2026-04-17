@@ -547,7 +547,7 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
+    let staging_partition_info = region.manifest_ctx.staging_partition_info();
     assert_eq!(
         staging_partition_info
             .unwrap()
