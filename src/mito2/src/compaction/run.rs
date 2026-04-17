@@ -54,7 +54,7 @@ pub(crate) fn primary_key_ranges_overlap(lhs: &(Bytes, Bytes), rhs: &(Bytes, Byt
     lhs.0.chunk().max(rhs.0.chunk()) <= lhs.1.chunk().min(rhs.1.chunk())
 }
 
-fn merge_primary_key_ranges(
+pub(crate) fn merge_primary_key_ranges(
     lhs: Option<(Bytes, Bytes)>,
     rhs: Option<(Bytes, Bytes)>,
 ) -> Option<(Bytes, Bytes)> {

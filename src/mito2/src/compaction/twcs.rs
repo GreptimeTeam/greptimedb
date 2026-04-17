@@ -28,8 +28,8 @@ use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::run::{
-    FileGroup, Item, Ranged, find_sorted_runs, merge_seq_files, primary_key_ranges_overlap,
-    reduce_runs,
+    FileGroup, Item, Ranged, find_sorted_runs, merge_primary_key_ranges, merge_seq_files,
+    primary_key_ranges_overlap, reduce_runs,
 };
 use crate::compaction::{CompactionOutput, get_expired_ssts};
 use crate::sst::file::{FileHandle, Level, overlaps};
@@ -297,12 +297,8 @@ impl Window {
         let (start, end) = file.time_range();
         self.start = self.start.min(start);
         self.end = self.end.max(end);
-        self.primary_key_range = match (self.primary_key_range.take(), file.primary_key_range()) {
-            (Some((lhs_min, lhs_max)), Some((rhs_min, rhs_max))) => {
-                Some((lhs_min.min(rhs_min), lhs_max.max(rhs_max)))
-            }
-            _ => None,
-        };
+        self.primary_key_range =
+            merge_primary_key_ranges(self.primary_key_range.take(), file.primary_key_range());
 
         match self.files.entry(file.meta_ref().sequence) {
             Entry::Occupied(mut o) => {
