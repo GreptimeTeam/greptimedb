@@ -45,7 +45,7 @@ use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::CreateTableTask;
-use crate::rpc::router::{RegionRoute, operating_leader_regions};
+use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -256,17 +256,17 @@ impl CreateTableProcedure {
         context: &DdlContext,
         region_routes: &[RegionRoute],
     ) -> Result<Vec<OperatingRegionGuard>> {
-        let opening_regions = operating_leader_regions(region_routes);
+        let opening_regions = operating_leader_region_roles(region_routes);
         if self.opening_regions.len() == opening_regions.len() {
             return Ok(vec![]);
         }
 
         let mut opening_region_guards = Vec::with_capacity(opening_regions.len());
 
-        for (region_id, datanode_id) in opening_regions {
+        for (region_id, datanode_id, role) in opening_regions {
             let guard = context
                 .memory_region_keeper
-                .register(datanode_id, region_id)
+                .register_with_role(datanode_id, region_id, role)
                 .context(error::RegionOperatingRaceSnafu {
                     region_id,
                     peer_id: datanode_id,
