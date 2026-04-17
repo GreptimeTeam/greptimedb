@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_telemetry::debug;
-use datafusion::physical_plan::aggregates::AggregateExec;
+use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
 use datafusion_common::Result as DfResult;
 use datafusion_common::utils::expr::COUNT_STAR_EXPANSION;
 use datafusion_physical_expr::PhysicalExpr;
@@ -39,9 +39,20 @@ impl<'a> RewriteCheck<'a> {
     }
 
     pub(super) fn skip_reason(&self) -> DfResult<Option<RejectReason>> {
-        // MVP only handles global aggregates over append-mode region scans. Anything
-        // else falls back to the normal execution path.
-        if !self.region_scan.append_mode() || !self.aggregate_exec.group_expr().is_empty() {
+        // MVP only handles global first-stage aggregates over append-mode region
+        // scans. Anything else falls back to the normal execution path.
+        if !self.region_scan.append_mode()
+            || !self.aggregate_exec.group_expr().is_empty()
+            || !matches!(
+                self.aggregate_exec.mode(),
+                AggregateMode::Partial | AggregateMode::Single | AggregateMode::SinglePartitioned
+            )
+            || self
+                .aggregate_exec
+                .filter_expr()
+                .iter()
+                .any(|expr| expr.is_some())
+        {
             return Ok(Some(RejectReason::UnsupportedPlan));
         }
 
@@ -77,7 +88,7 @@ impl<'a> RewriteCheck<'a> {
         }
     }
 
-    fn parse_aggs(&self) -> Result<Vec<StatsAgg>, RejectReason> {
+    pub(super) fn parse_aggs(&self) -> Result<Vec<StatsAgg>, RejectReason> {
         let aggr_exprs = self.aggregate_exec.aggr_expr();
         if aggr_exprs.is_empty() {
             return Err(RejectReason::UnsupportedAggregate);
@@ -95,6 +106,7 @@ impl<'a> RewriteCheck<'a> {
 
         let inputs = expr.expressions();
         let name = expr.fun().name().to_ascii_lowercase();
+
         // COUNT(*) is usually rewrite to COUNT(time-index)
         // before this physical optimizer runs, so CountStar is mostly a defensive fallback
         if name == "count" && is_count_star_expr(&inputs) {
@@ -139,11 +151,7 @@ impl<'a> RewriteCheck<'a> {
     }
 
     pub(super) fn check_agg_shape(expr: &AggregateFunctionExpr) -> Result<(), RejectReason> {
-        if expr.is_distinct()
-            || expr.ignore_nulls()
-            || expr.is_reversed()
-            || !expr.order_bys().is_empty()
-        {
+        if expr.is_distinct() || expr.is_reversed() || !expr.order_bys().is_empty() {
             return Err(RejectReason::UnsupportedAggregate);
         }
 

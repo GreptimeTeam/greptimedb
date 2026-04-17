@@ -123,6 +123,25 @@ pub(super) fn common_stats_file_ordinals(
         .collect()
 }
 
+pub(super) fn filter_stats_by_file_ordinals(
+    scan_input_stats: &RegionScanStats,
+    file_ordinals: &[usize],
+) -> RegionScanStats {
+    let selected = file_ordinals
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    RegionScanStats {
+        files: scan_input_stats
+            .files
+            .iter()
+            .filter(|file| selected.contains(&file.file_ordinal))
+            .cloned()
+            .collect(),
+    }
+}
+
 pub(super) trait StatsAggExt {
     fn has_stats_files(&self, scan_input_stats: &RegionScanStats) -> bool;
 }
