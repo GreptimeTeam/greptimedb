@@ -300,8 +300,8 @@ impl DefaultQueryParser {
 /// A container type of parse result types
 #[derive(Clone, Debug)]
 pub struct PgSqlPlan {
-    plan: SqlPlan,
-    copy_to_stdout_format: Option<String>,
+    pub(crate) plan: SqlPlan,
+    pub(crate) copy_to_stdout_format: Option<String>,
 }
 
 #[async_trait]
