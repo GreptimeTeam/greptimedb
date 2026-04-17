@@ -43,15 +43,17 @@ use common_meta::rpc::store::PutRequest;
 use crate::Tool;
 use crate::common::StoreConfig;
 use crate::error::InvalidArgumentsSnafu;
+use crate::metadata::control::put::read_value;
+
 /// Put a key-value pair into the metadata store.
 #[derive(Debug, Default, Parser)]
 pub struct PutKeyCommand {
     /// The key to put into the metadata store.
     key: String,
 
-    /// The value to put into the metadata store.
-    #[clap(long)]
-    value: String,
+    /// Read the value to put into the metadata store from standard input.
+    #[clap(long, required = true)]
+    value_stdin: bool,
 
     /// Skip metadata validation before writing.
     #[clap(long)]
@@ -64,10 +66,21 @@ pub struct PutKeyCommand {
 impl PutKeyCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kv_backend = self.store.build().await?;
+        self.build_tool(tokio::io::stdin(), kv_backend).await
+    }
+
+    async fn build_tool<R>(
+        &self,
+        reader: R,
+        kv_backend: KvBackendRef,
+    ) -> Result<Box<dyn Tool>, BoxedError>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
         Ok(Box::new(PutKeyTool {
             kv_backend,
             key: self.key.clone(),
-            value: self.value.clone(),
+            value: read_value(reader).await?,
             no_validate: self.no_validate,
         }))
     }
@@ -76,21 +89,20 @@ impl PutKeyCommand {
 struct PutKeyTool {
     kv_backend: KvBackendRef,
     key: String,
-    value: String,
+    value: Vec<u8>,
     no_validate: bool,
 }
 
 #[async_trait]
 impl Tool for PutKeyTool {
     async fn do_work(&self) -> Result<(), BoxedError> {
-        let value = self.value.as_bytes();
         if !self.no_validate {
-            validate_metadata_value(&self.key, value)?;
+            validate_metadata_value(&self.key, &self.value)?;
         }
 
         let request = PutRequest::new()
             .with_key(self.key.as_bytes())
-            .with_value(value);
+            .with_value(self.value.clone());
         self.kv_backend
             .put(request)
             .await
@@ -254,7 +266,7 @@ mod tests {
     use std::sync::Arc;
 
     use clap::Parser;
-    use common_error::ext::ErrorExt;
+    use common_error::ext::{BoxedError, ErrorExt};
     use common_meta::key::flow::flow_state::FlowStateValue;
     use common_meta::key::flow::flow_state_full_key;
     use common_meta::key::schema_name::SchemaNameValue;
@@ -262,13 +274,26 @@ mod tests {
     use common_meta::key::{KAFKA_TOPIC_KEY_PREFIX, MetadataValue, SCHEMA_NAME_KEY_PREFIX};
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use tokio::io::BufReader;
 
     use super::{
         PutKeyCommand, PutKeyTool, TABLE_ROUTE_PREFIX, matches_key_prefix,
         unsupported_direct_put_reason, validate_metadata_value,
     };
     use crate::Tool;
-    use crate::metadata::control::put::PutCommand;
+
+    impl PutKeyCommand {
+        async fn build_for_test<R>(
+            &self,
+            reader: R,
+            kv_backend: KvBackendRef,
+        ) -> Result<Box<dyn Tool>, BoxedError>
+        where
+            R: tokio::io::AsyncRead + Unpin,
+        {
+            self.build_tool(reader, kv_backend).await
+        }
+    }
 
     #[test]
     fn test_validate_supported_key_success() {
@@ -375,7 +400,6 @@ mod tests {
     async fn test_put_key_tool_writes_supported_key() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let value = TopicNameValue::new(42).try_as_raw_value().unwrap();
-        let value = String::from_utf8(value).unwrap();
         let key = format!("{KAFKA_TOPIC_KEY_PREFIX}/test-topic");
         let tool = PutKeyTool {
             kv_backend: kv_backend.clone(),
@@ -387,14 +411,14 @@ mod tests {
         tool.do_work().await.unwrap();
 
         let stored = kv_backend.get(key.as_bytes()).await.unwrap().unwrap();
-        assert_eq!(stored.value, value.into_bytes());
+        assert_eq!(stored.value, value);
     }
 
     #[tokio::test]
     async fn test_put_key_tool_bypasses_validation() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let key = format!("{TABLE_ROUTE_PREFIX}/1024");
-        let value = "not-json".to_string();
+        let value = b"not-json".to_vec();
         let tool = PutKeyTool {
             kv_backend: kv_backend.clone(),
             key: key.clone(),
@@ -405,59 +429,55 @@ mod tests {
         tool.do_work().await.unwrap();
 
         let stored = kv_backend.get(key.as_bytes()).await.unwrap().unwrap();
-        assert_eq!(stored.value, value.into_bytes());
+        assert_eq!(stored.value, value);
+    }
+
+    #[test]
+    fn test_put_key_command_requires_value_stdin() {
+        let err = PutKeyCommand::try_parse_from([
+            "key",
+            "__topic_name/kafka/test-cli-topic",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[tokio::test]
-    async fn test_put_key_command_builds_tool() {
-        let value = String::from_utf8(TopicNameValue::new(7).try_as_raw_value().unwrap()).unwrap();
+    async fn test_put_key_command_builds_tool_with_stdin() {
+        let value = TopicNameValue::new(7).try_as_raw_value().unwrap();
         let command = PutKeyCommand::parse_from([
             "key",
             "__topic_name/kafka/test-cli-topic",
-            "--value",
-            value.as_str(),
+            "--value-stdin",
             "--backend",
             "memory-store",
             "--store-addrs",
             "memory://",
         ]);
 
-        let tool = command.build().await.unwrap();
-        tool.do_work().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_put_command_builds_tool() {
-        let value = String::from_utf8(TopicNameValue::new(9).try_as_raw_value().unwrap()).unwrap();
-        let command = PutCommand::Key(PutKeyCommand::parse_from([
-            "key",
-            "__topic_name/kafka/test-enum-topic",
-            "--value",
-            value.as_str(),
-            "--backend",
-            "memory-store",
-            "--store-addrs",
-            "memory://",
-        ]));
-
-        let tool = command.build().await.unwrap();
+        let tool = command
+            .build_for_test(
+                BufReader::new(value.as_slice()),
+                Arc::new(MemoryKvBackend::new()) as KvBackendRef,
+            )
+            .await
+            .unwrap();
         tool.do_work().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_put_key_command_validate_failure() {
-        let command = PutKeyCommand::parse_from([
-            "key",
-            "__table_route/1024",
-            "--value",
-            "{}",
-            "--backend",
-            "memory-store",
-            "--store-addrs",
-            "memory://",
-        ]);
-
-        let tool = command.build().await.unwrap();
+        let tool = PutKeyTool {
+            kv_backend: Arc::new(MemoryKvBackend::new()) as KvBackendRef,
+            key: "__table_route/1024".to_string(),
+            value: b"{}".to_vec(),
+            no_validate: false,
+        };
         let err = tool.do_work().await.unwrap_err();
 
         assert!(

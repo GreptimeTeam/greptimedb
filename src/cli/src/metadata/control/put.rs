@@ -17,10 +17,26 @@ mod table;
 
 use clap::Subcommand;
 use common_error::ext::BoxedError;
+use snafu::ResultExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::Tool;
+use crate::error::FileIoSnafu;
 use crate::metadata::control::put::key::PutKeyCommand;
 use crate::metadata::control::put::table::PutTableCommand;
+
+pub(crate) async fn read_value<R>(mut reader: R) -> Result<Vec<u8>, BoxedError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut value = Vec::new();
+    reader
+        .read_to_end(&mut value)
+        .await
+        .context(FileIoSnafu)
+        .map_err(BoxedError::new)?;
+    Ok(value)
+}
 
 /// Subcommand for putting metadata into the metadata store.
 #[derive(Subcommand)]

@@ -29,6 +29,7 @@ use table::metadata::TableInfo;
 use crate::Tool;
 use crate::common::StoreConfig;
 use crate::error::{InvalidArgumentsSnafu, TableNotFoundSnafu, UnexpectedSnafu};
+use crate::metadata::control::put::read_value;
 use crate::metadata::control::selector::TableSelector;
 
 /// Put table metadata into the metadata store.
@@ -53,9 +54,9 @@ pub struct PutTableInfoCommand {
     #[clap(flatten)]
     selector: TableSelector,
 
-    /// The JSON-encoded [`TableInfoValue`] to put into the metadata store.
-    #[clap(long)]
-    value: String,
+    /// Read the JSON-encoded [`TableInfoValue`] from standard input.
+    #[clap(long, required = true)]
+    value_stdin: bool,
 
     #[clap(flatten)]
     store: StoreConfig,
@@ -63,12 +64,23 @@ pub struct PutTableInfoCommand {
 
 impl PutTableInfoCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        self.selector.validate()?;
         let kv_backend = self.store.build().await?;
+        self.build_tool(tokio::io::stdin(), kv_backend).await
+    }
+
+    async fn build_tool<R>(
+        &self,
+        reader: R,
+        kv_backend: KvBackendRef,
+    ) -> Result<Box<dyn Tool>, BoxedError>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        self.selector.validate()?;
         Ok(Box::new(PutTableInfoTool {
             kv_backend,
             selector: self.selector.clone(),
-            value: self.value.clone(),
+            value: read_value(reader).await?,
         }))
     }
 }
@@ -76,7 +88,7 @@ impl PutTableInfoCommand {
 struct PutTableInfoTool {
     kv_backend: KvBackendRef,
     selector: TableSelector,
-    value: String,
+    value: Vec<u8>,
 }
 
 #[async_trait]
@@ -94,7 +106,7 @@ impl Tool for PutTableInfoTool {
 
         let (current_table_info, current_table_route) =
             load_table_metadata(&table_metadata_manager, table_id).await?;
-        let new_table_info = TableInfoValue::try_from_raw_value(self.value.as_bytes())
+        let new_table_info = TableInfoValue::try_from_raw_value(&self.value)
             .map_err(|e| {
                 BoxedError::new(
                     InvalidArgumentsSnafu {
@@ -142,9 +154,9 @@ pub struct PutTableRouteCommand {
     #[clap(flatten)]
     selector: TableSelector,
 
-    /// The JSON-encoded [`TableRouteValue`] to put into the metadata store.
-    #[clap(long)]
-    value: String,
+    /// Read the JSON-encoded [`TableRouteValue`] from standard input.
+    #[clap(long, required = true)]
+    value_stdin: bool,
 
     #[clap(flatten)]
     store: StoreConfig,
@@ -152,12 +164,23 @@ pub struct PutTableRouteCommand {
 
 impl PutTableRouteCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        self.selector.validate()?;
         let kv_backend = self.store.build().await?;
+        self.build_tool(tokio::io::stdin(), kv_backend).await
+    }
+
+    async fn build_tool<R>(
+        &self,
+        reader: R,
+        kv_backend: KvBackendRef,
+    ) -> Result<Box<dyn Tool>, BoxedError>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        self.selector.validate()?;
         Ok(Box::new(PutTableRouteTool {
             kv_backend,
             selector: self.selector.clone(),
-            value: self.value.clone(),
+            value: read_value(reader).await?,
         }))
     }
 }
@@ -165,7 +188,7 @@ impl PutTableRouteCommand {
 struct PutTableRouteTool {
     kv_backend: KvBackendRef,
     selector: TableSelector,
-    value: String,
+    value: Vec<u8>,
 }
 
 #[async_trait]
@@ -185,15 +208,14 @@ impl Tool for PutTableRouteTool {
             load_table_metadata(&table_metadata_manager, table_id).await?;
         let current_physical_route =
             current_physical_route(table_id, current_table_route.get_inner_ref())?;
-        let new_table_route =
-            TableRouteValue::try_from_raw_value(self.value.as_bytes()).map_err(|e| {
-                BoxedError::new(
-                    InvalidArgumentsSnafu {
-                        msg: format!("Invalid table route JSON: {e}"),
-                    }
-                    .build(),
-                )
-            })?;
+        let new_table_route = TableRouteValue::try_from_raw_value(&self.value).map_err(|e| {
+            BoxedError::new(
+                InvalidArgumentsSnafu {
+                    msg: format!("Invalid table route JSON: {e}"),
+                }
+                .build(),
+            )
+        })?;
         let new_region_routes = validate_physical_route(table_id, &new_table_route)?;
 
         let region_info =
@@ -381,7 +403,7 @@ mod tests {
 
     use clap::Parser;
     use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_error::ext::ErrorExt;
+    use common_error::ext::{BoxedError, ErrorExt};
     use common_meta::key::TableMetadataManager;
     use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableManager};
     use common_meta::key::table_info::TableInfoValue;
@@ -390,22 +412,44 @@ mod tests {
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
+    use tokio::io::BufReader;
 
-    use super::{
-        PutTableCommand, PutTableInfoCommand, PutTableInfoTool, PutTableRouteCommand,
-        PutTableRouteTool,
-    };
+    use super::{PutTableInfoCommand, PutTableInfoTool, PutTableRouteCommand, PutTableRouteTool};
     use crate::Tool;
-    use crate::metadata::control::put::PutCommand;
     use crate::metadata::control::selector::TableSelector;
     use crate::metadata::control::test_utils::prepare_physical_table_metadata;
+
+    impl PutTableInfoCommand {
+        async fn build_for_test<R>(
+            &self,
+            reader: R,
+            kv_backend: KvBackendRef,
+        ) -> Result<Box<dyn Tool>, BoxedError>
+        where
+            R: tokio::io::AsyncRead + Unpin,
+        {
+            self.build_tool(reader, kv_backend).await
+        }
+    }
+
+    impl PutTableRouteCommand {
+        async fn build_for_test<R>(
+            &self,
+            reader: R,
+            kv_backend: KvBackendRef,
+        ) -> Result<Box<dyn Tool>, BoxedError>
+        where
+            R: tokio::io::AsyncRead + Unpin,
+        {
+            self.build_tool(reader, kv_backend).await
+        }
+    }
 
     #[tokio::test]
     async fn test_put_table_selector_validation() {
         let command = PutTableInfoCommand::parse_from([
             "info",
-            "--value",
-            "{}",
+            "--value-stdin",
             "--backend",
             "memory-store",
             "--store-addrs",
@@ -428,15 +472,20 @@ mod tests {
             "info",
             "--table-name",
             "my_table",
-            "--value",
-            "{}",
+            "--value-stdin",
             "--backend",
             "memory-store",
             "--store-addrs",
             "memory://",
         ]);
 
-        let _tool = command.build().await.unwrap();
+        let _tool = command
+            .build_for_test(
+                BufReader::new(&b"{}"[..]),
+                Arc::new(MemoryKvBackend::new()) as KvBackendRef,
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -460,7 +509,7 @@ mod tests {
         let tool = PutTableInfoTool {
             kv_backend: kv_backend.clone(),
             selector: TableSelector::with_table_id(table_id),
-            value: serde_json::to_string(&TableInfoValue::new(new_table_info)).unwrap(),
+            value: serde_json::to_vec(&TableInfoValue::new(new_table_info)).unwrap(),
         };
 
         tool.do_work().await.unwrap();
@@ -498,7 +547,7 @@ mod tests {
         let tool = PutTableInfoTool {
             kv_backend,
             selector: TableSelector::with_table_id(table_id),
-            value: serde_json::to_string(&TableInfoValue::new(new_table_info)).unwrap(),
+            value: serde_json::to_vec(&TableInfoValue::new(new_table_info)).unwrap(),
         };
 
         let err = tool.do_work().await.unwrap_err();
@@ -529,7 +578,7 @@ mod tests {
         let tool = PutTableRouteTool {
             kv_backend: kv_backend.clone(),
             selector: TableSelector::with_table_id(table_id),
-            value: serde_json::to_string(&new_table_route).unwrap(),
+            value: serde_json::to_vec(&new_table_route).unwrap(),
         };
 
         tool.do_work().await.unwrap();
@@ -570,7 +619,7 @@ mod tests {
         let tool = PutTableRouteTool {
             kv_backend,
             selector: TableSelector::with_table_id(table_id),
-            value: serde_json::to_string(&TableRouteValue::logical(table_id + 1)).unwrap(),
+            value: serde_json::to_vec(&TableRouteValue::logical(table_id + 1)).unwrap(),
         };
 
         let err = tool.do_work().await.unwrap_err();
@@ -582,20 +631,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_table_command_builds_tool() {
-        let value = serde_json::to_string(&TableRouteValue::logical(1025)).unwrap();
-        let command =
-            PutCommand::Table(PutTableCommand::Route(PutTableRouteCommand::parse_from([
-                "route",
-                "--table-id",
-                "1024",
-                "--value",
-                value.as_str(),
-                "--backend",
-                "memory-store",
-                "--store-addrs",
-                "memory://",
-            ])));
+        let value = serde_json::to_vec(&TableRouteValue::logical(1025)).unwrap();
+        let command = PutTableRouteCommand::parse_from([
+            "route",
+            "--table-id",
+            "1024",
+            "--value-stdin",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
 
-        let _tool = command.build().await.unwrap();
+        let _tool = command
+            .build_for_test(
+                BufReader::new(value.as_slice()),
+                Arc::new(MemoryKvBackend::new()) as KvBackendRef,
+            )
+            .await
+            .unwrap();
     }
 }
