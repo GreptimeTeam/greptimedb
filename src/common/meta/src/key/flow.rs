@@ -420,8 +420,8 @@ mod tests {
     use crate::key::flow::table_flow::TableFlowKey;
     use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
     use crate::key::{FlowPartitionId, MetadataValue};
-    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
+    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::rpc::store::PutRequest;
 
