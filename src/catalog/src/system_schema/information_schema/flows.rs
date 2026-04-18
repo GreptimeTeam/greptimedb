@@ -71,6 +71,30 @@ pub const CREATED_TIME: &str = "created_time";
 pub const UPDATED_TIME: &str = "updated_time";
 pub const LAST_EXECUTION_TIME: &str = "last_execution_time";
 pub const SOURCE_TABLE_NAMES: &str = "source_table_names";
+pub const FLOWNODE_ADDRS: &str = "flownode_addrs";
+
+#[derive(Debug, Clone, Copy)]
+struct FlowScanRequirements {
+    include_flownode_addrs: bool,
+}
+
+impl FlowScanRequirements {
+    fn from_scan_request(schema: &SchemaRef, request: &Option<ScanRequest>) -> Self {
+        let include_flownode_addrs = request
+            .as_ref()
+            .and_then(ScanRequest::projection_indices)
+            .map(|projection| {
+                projection
+                    .iter()
+                    .any(|&idx| schema.column_name_by_index(idx) == FLOWNODE_ADDRS)
+            })
+            .unwrap_or(true);
+
+        Self {
+            include_flownode_addrs,
+        }
+    }
+}
 
 /// The `information_schema.flows` to provides information about flows in databases.
 #[derive(Debug)]
@@ -95,7 +119,8 @@ impl InformationSchemaFlows {
         }
     }
 
-    /// for complex fields(including [`SOURCE_TABLE_IDS`], [`FLOWNODE_IDS`] and [`OPTIONS`]), it will be serialized to json string for now
+    /// for complex fields(including [`SOURCE_TABLE_IDS`], [`FLOWNODE_IDS`], [`OPTIONS`] and
+    /// [`FLOWNODE_ADDRS`]), it will be serialized to json string for now
     /// TODO(discord9): use a better way to store complex fields like json type
     pub(crate) fn schema() -> SchemaRef {
         Arc::new(Schema::new(
@@ -119,6 +144,7 @@ impl InformationSchemaFlows {
                     true,
                 ),
                 (SOURCE_TABLE_NAMES, CDT::string_datatype(), true),
+                (FLOWNODE_ADDRS, CDT::string_datatype(), true),
             ]
             .into_iter()
             .map(|(name, ty, nullable)| ColumnSchema::new(name, ty, nullable))
@@ -239,6 +265,7 @@ struct InformationSchemaFlowsBuilder {
     updated_time: TimestampMillisecondVectorBuilder,
     last_execution_time: TimestampMillisecondVectorBuilder,
     source_table_names: StringVectorBuilder,
+    flownode_addr_groups: StringVectorBuilder,
 }
 
 impl InformationSchemaFlowsBuilder {
@@ -269,12 +296,14 @@ impl InformationSchemaFlowsBuilder {
             updated_time: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             last_execution_time: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             source_table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            flownode_addr_groups: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
     /// Construct the `information_schema.flows` virtual table
     async fn make_flows(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
+        let scan_requirements = FlowScanRequirements::from_scan_request(&self.schema, &request);
         let predicates = Predicates::from_scan_request(&request);
 
         let flow_info_manager = self.flow_metadata_manager.clone();
@@ -308,7 +337,13 @@ impl InformationSchemaFlowsBuilder {
                     catalog_name: catalog_name.clone(),
                     flow_name: flow_name.clone(),
                 })?;
-            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat)
+            self.add_flow(
+                &predicates,
+                scan_requirements,
+                flow_id.flow_id(),
+                flow_info,
+                &flow_stat,
+            )
                 .await?;
         }
 
@@ -318,6 +353,7 @@ impl InformationSchemaFlowsBuilder {
     async fn add_flow(
         &mut self,
         predicates: &Predicates,
+        scan_requirements: FlowScanRequirements,
         flow_id: FlowId,
         flow_info: FlowInfoValue,
         flow_stat: &Option<FlowStat>,
@@ -379,6 +415,27 @@ impl InformationSchemaFlowsBuilder {
                     .map(|v| TimestampMillisecond::new(*v))
             }));
 
+        if !scan_requirements.include_flownode_addrs {
+            self.flownode_addr_groups.push(None);
+        } else {
+            let flownode_addrs = self
+                .flow_metadata_manager
+                .flownode_addrs(flow_id)
+                .await
+                .map_err(BoxedError::new)
+                .context(InternalSnafu)?;
+            if flownode_addrs.is_empty() {
+                self.flownode_addr_groups.push(None);
+            } else {
+                self.flownode_addr_groups
+                    .push(Some(&serde_json::to_string(&flownode_addrs).context(
+                        JsonSnafu {
+                            input: format!("{:?}", flownode_addrs),
+                        },
+                    )?));
+            }
+        }
+
         let mut source_table_names = vec![];
         let catalog_manager = self
             .catalog_manager
@@ -413,6 +470,7 @@ impl InformationSchemaFlowsBuilder {
             Arc::new(self.updated_time.finish()),
             Arc::new(self.last_execution_time.finish()),
             Arc::new(self.source_table_names.finish()),
+            Arc::new(self.flownode_addr_groups.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
@@ -436,5 +494,48 @@ impl DfPartitionStream for InformationSchemaFlows {
                     .map_err(Into::into)
             }),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scan_requirements_include_flownode_addrs_without_projection() {
+        let schema = InformationSchemaFlows::schema();
+        let request = Some(ScanRequest::default());
+
+        let requirements = FlowScanRequirements::from_scan_request(&schema, &request);
+
+        assert!(requirements.include_flownode_addrs);
+    }
+
+    #[test]
+    fn test_scan_requirements_skip_flownode_addrs_for_show_flows_projection() {
+        let schema = InformationSchemaFlows::schema();
+        let flow_name_index = schema.column_index_by_name(FLOW_NAME).unwrap();
+        let request = Some(ScanRequest {
+            projection_input: Some(vec![flow_name_index].into()),
+            ..Default::default()
+        });
+
+        let requirements = FlowScanRequirements::from_scan_request(&schema, &request);
+
+        assert!(!requirements.include_flownode_addrs);
+    }
+
+    #[test]
+    fn test_scan_requirements_include_flownode_addrs_when_projected() {
+        let schema = InformationSchemaFlows::schema();
+        let flownode_addrs_index = schema.column_index_by_name(FLOWNODE_ADDRS).unwrap();
+        let request = Some(ScanRequest {
+            projection_input: Some(vec![flownode_addrs_index].into()),
+            ..Default::default()
+        });
+
+        let requirements = FlowScanRequirements::from_scan_request(&schema, &request);
+
+        assert!(requirements.include_flownode_addrs);
     }
 }

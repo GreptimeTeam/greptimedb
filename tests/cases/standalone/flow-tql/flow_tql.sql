@@ -11,6 +11,11 @@ TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_
 
 SELECT source_table_names FROM information_schema.flows WHERE flow_name = 'calc_reqs';
 
+-- SQLNESS REPLACE (127\.0\.0\.1:\d+) Address
+SELECT flow_name, flownode_ids, flownode_addrs
+FROM information_schema.flows
+WHERE flow_name = 'calc_reqs';
+
 SHOW CREATE TABLE cnt_reqs;
 
 -- test if sink table is tql queryable
