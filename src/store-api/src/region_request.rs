@@ -52,8 +52,8 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    APPEND_MODE_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
-    TWCS_TRIGGER_FILE_NUM,
+    APPEND_MODE_KEY, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
+    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1319,6 +1319,8 @@ pub enum SetRegionOption {
     Format(String),
     // Modifying the append mode.
     AppendMode(bool),
+    // Modifying the WAL mode.
+    SkipWal(bool),
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1342,6 +1344,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
                     .parse::<bool>()
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::AppendMode(append_mode))
+            }
+            SKIP_WAL_KEY => {
+                let skip_wal = value
+                    .parse::<bool>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::SkipWal(skip_wal))
             }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
@@ -2147,5 +2155,35 @@ mod tests {
             PathType::try_from(PathType::Metadata as u8).unwrap(),
             PathType::Metadata
         );
+    }
+
+    #[test]
+    fn test_parse_skip_wal_set_region_option_success() {
+        let skip_wal_true: PbOption = PbOption {
+            key: SKIP_WAL_KEY.to_string(),
+            value: "true".to_string(),
+        };
+
+        let skip_wal_false: PbOption = PbOption {
+            key: SKIP_WAL_KEY.to_string(),
+            value: "false".to_string(),
+        };
+        let skip_wal_true_res = SetRegionOption::try_from(&skip_wal_true).unwrap();
+        let skip_wal_false_res = SetRegionOption::try_from(&skip_wal_false).unwrap();
+
+        assert_eq!(SetRegionOption::SkipWal(true), skip_wal_true_res);
+        assert_eq!(SetRegionOption::SkipWal(false), skip_wal_false_res);
+    }
+
+    #[test]
+    fn test_parse_skip_wal_set_region_option_failure() {
+        let invalid_skip_wal_option: PbOption = PbOption {
+            key: SKIP_WAL_KEY.to_string(),
+            value: "invalid".to_string(),
+        };
+
+        let invalid_skip_wal_option_res = SetRegionOption::try_from(&invalid_skip_wal_option);
+
+        assert!(invalid_skip_wal_option_res.is_err());
     }
 }

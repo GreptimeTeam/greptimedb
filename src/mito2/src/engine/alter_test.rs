@@ -36,8 +36,8 @@ use store_api::region_request::{
 use store_api::storage::{ColumnId, RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
-use crate::engine::MitoEngine;
 use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
+use crate::engine::{MitoEngine, WalOptions};
 use crate::error;
 use crate::sst::FormatType;
 use crate::test_util::batch_util::sort_batches_and_print;
@@ -1901,4 +1901,58 @@ async fn test_alter_region_append_mode_invalid() {
 
     // append_mode should still be true
     check_append_mode(&engine, true);
+}
+
+#[tokio::test]
+async fn test_alter_region_skip_wal() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let check_skip_wal = |engine: &MitoEngine, expected: &WalOptions| {
+        let wal_mode = &engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .wal_options;
+        assert_eq!(wal_mode, expected);
+    };
+    check_skip_wal(&engine, &WalOptions::default());
+
+    // Try to alter skip_wal from default to true
+    let alter_request = RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::SkipWal(true)],
+        },
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Alter(alter_request))
+        .await
+        .unwrap();
+
+    // WAL should switch to no op when disabled
+    check_skip_wal(&engine, &WalOptions::Noop);
+
+    // Try to alter skip_wal from true to false
+    let alter_request = RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::SkipWal(false)],
+        },
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Alter(alter_request))
+        .await
+        .unwrap();
+
+    check_skip_wal(&engine, &WalOptions::default());
 }

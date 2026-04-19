@@ -38,7 +38,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_engine::RegionManifestInfo;
 use store_api::storage::RegionId;
-use table::requests::TTL_KEY;
+use table::requests::{SKIP_WAL_KEY, TTL_KEY};
 use tokio::sync::mpsc::{self};
 
 use crate::ddl::alter_table::AlterTableProcedure;
@@ -551,10 +551,16 @@ async fn test_on_update_table_options() {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             kind: Some(Kind::SetTableOptions(SetTableOptions {
-                table_options: vec![api::v1::Option {
-                    key: TTL_KEY.to_string(),
-                    value: "1d".to_string(),
-                }],
+                table_options: vec![
+                    api::v1::Option {
+                        key: TTL_KEY.to_string(),
+                        value: "1d".to_string(),
+                    },
+                    api::v1::Option {
+                        key: SKIP_WAL_KEY.to_string(),
+                        value: "true".to_string(),
+                    },
+                ],
             })),
         },
     };
@@ -592,6 +598,8 @@ async fn test_on_update_table_options() {
         region_info.region_options,
         HashMap::from(&table_info.meta.options)
     );
+
+    assert!(table_info.meta.options.skip_wal);
 }
 
 async fn prepare_alter_table_procedure(

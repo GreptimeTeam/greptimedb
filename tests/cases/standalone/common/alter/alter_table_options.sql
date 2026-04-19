@@ -48,6 +48,12 @@ SHOW CREATE TABLE ato;
 
 ALTER TABLE ato SET 'compaction.twcs.trigger_file_num'='';
 
+ALTER TABLE ato SET 'skip_wal'='true';
+
+SHOW CREATE TABLE ato;
+
+ALTER TABLE ato SET 'skip_wal'='false';
+
 SHOW CREATE TABLE ato;
 
 -- SQLNESS ARG restart=true

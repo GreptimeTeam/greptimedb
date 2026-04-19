@@ -29,7 +29,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, SST_FORMAT_KEY,
+    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, SKIP_WAL_KEY,
+    SST_FORMAT_KEY,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -373,6 +374,12 @@ impl TableMeta {
                     if *value {
                         new_options.extra_options.remove(MERGE_MODE_KEY);
                     }
+                }
+                SetRegionOption::SkipWal(value) => {
+                    new_options
+                        .extra_options
+                        .insert(SKIP_WAL_KEY.to_string(), value.to_string());
+                    new_options.skip_wal = *value;
                 }
             }
         }
@@ -1392,6 +1399,7 @@ mod tests {
 
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
+    use datatypes::arrow::ipc::Bool;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{
         ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SchemaBuilder,
@@ -1590,6 +1598,74 @@ mod tests {
                 .get(MERGE_MODE_KEY)
                 .map(String::as_str)
         );
+    }
+
+    #[test]
+    fn test_set_skip_wal_true_updates_table_options() {
+        let schema = Arc::new(new_test_schema());
+        let table_options = TableOptions::default();
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .options(table_options)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::SkipWal(true)],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            Some("true"),
+            new_meta
+                .options
+                .extra_options
+                .get(SKIP_WAL_KEY)
+                .map(String::as_str)
+        );
+
+        assert!(new_meta.options.skip_wal);
+    }
+
+    #[test]
+    fn test_set_skip_wal_false_updates_table_options() {
+        let schema = Arc::new(new_test_schema());
+        let table_options = TableOptions::default();
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .options(table_options)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::SkipWal(false)],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            Some("false"),
+            new_meta
+                .options
+                .extra_options
+                .get(SKIP_WAL_KEY)
+                .map(String::as_str)
+        );
+
+        assert!(!new_meta.options.skip_wal);
     }
 
     #[test]

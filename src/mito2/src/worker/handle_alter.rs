@@ -20,6 +20,7 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_wal::options::WalOptions;
 use humantime_serde::re::humantime;
 use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -234,6 +235,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         all_options_altered = false;
                     }
                 }
+                SetRegionOption::SkipWal(skip_wal) => {
+                    let new_wal_options = if skip_wal {
+                        WalOptions::Noop
+                    } else {
+                        WalOptions::default()
+                    };
+
+                    if current_options.wal_options != new_wal_options {
+                        current_options.wal_options = new_wal_options;
+                    }
+                }
             }
         }
         region.version_control.alter_options(current_options);
@@ -261,7 +273,7 @@ fn new_region_options_on_empty_memtable(
     let mut current_options = current_options.clone();
     for option in options {
         match option {
-            SetRegionOption::Ttl(_) | SetRegionOption::Twsc(_, _) => (),
+            SetRegionOption::Ttl(_) | SetRegionOption::Twsc(_, _) | SetRegionOption::SkipWal(_) => (),
             SetRegionOption::Format(format_str) => {
                 // Safety: handle_alter_region_options_fast() has validated this.
                 let new_format = format_str.parse::<FormatType>().unwrap();
