@@ -53,10 +53,7 @@ impl SstVersion {
         for file in files_to_add {
             let level = file.level;
             let new_index_version = file.index_version;
-            let build_handle = || {
-                let pk_range = file.primary_key_range();
-                FileHandle::new_with_primary_key_range(file.clone(), file_purger.clone(), pk_range)
-            };
+            let build_handle = || FileHandle::new(file.clone(), file_purger.clone());
             // If the file already exists, then we should only replace the handle when the index is outdated.
             self.levels[level as usize]
                 .files

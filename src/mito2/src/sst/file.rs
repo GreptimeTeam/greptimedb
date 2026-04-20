@@ -389,7 +389,7 @@ impl FileMeta {
         }
     }
 
-    /// Whether the index file is up-to-date comparing to another file meta.    
+    /// Whether the index file is up-to-date comparing to another file meta.
     pub fn is_index_up_to_date(&self, other: &FileMeta) -> bool {
         self.exists_index() && other.exists_index() && self.index_version >= other.index_version
     }
@@ -483,9 +483,13 @@ impl fmt::Debug for FileHandle {
 
 impl FileHandle {
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
-        Self::new_with_primary_key_range(meta, file_purger, None)
+        let pk_range = meta.primary_key_range();
+        FileHandle {
+            inner: Arc::new(FileHandleInner::new(meta, file_purger, pk_range)),
+        }
     }
 
+    #[cfg(test)]
     pub fn new_with_primary_key_range(
         meta: FileMeta,
         file_purger: FilePurgerRef,
