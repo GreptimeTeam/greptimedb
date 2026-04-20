@@ -45,6 +45,11 @@ impl SstVersion {
         &self.levels
     }
 
+    /// Add files to the version. If a file with the same `file_id` already exists,
+    /// it will be overwritten with the new file.
+    ///
+    /// # Panics
+    /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
     pub(crate) fn add_files(
         &mut self,
         file_purger: FilePurgerRef,
@@ -53,7 +58,6 @@ impl SstVersion {
         for file in files_to_add {
             let level = file.level;
             let new_index_version = file.index_version;
-            let build_handle = || FileHandle::new(file.clone(), file_purger.clone());
             // If the file already exists, then we should only replace the handle when the index is outdated.
             self.levels[level as usize]
                 .files
@@ -71,10 +75,12 @@ impl SstVersion {
                         }
                     } else {
                         // include case like old file have no index or index is outdated
-                        *f = build_handle();
+                        *f = FileHandle::new(file.clone(), file_purger.clone());
                     }
                 })
-                .or_insert_with(build_handle);
+                .or_insert_with(||{
+                    FileHandle::new(file.clone(), file_purger.clone())
+                });
         }
     }
 

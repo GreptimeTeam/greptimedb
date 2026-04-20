@@ -474,6 +474,7 @@ impl VersionBuilder {
         self
     }
 
+    /// Add files to the builder.
     pub(crate) fn add_files(
         mut self,
         file_purger: FilePurgerRef,

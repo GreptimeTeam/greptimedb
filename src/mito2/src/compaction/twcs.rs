@@ -104,6 +104,7 @@ impl TwcsPicker {
                 if run.items().len() < self.trigger_file_num {
                     continue;
                 }
+                // no overlapping files, try merge small files
                 merge_seq_files(run.items(), self.max_output_file_size)
             };
 
