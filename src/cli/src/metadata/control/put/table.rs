@@ -101,8 +101,12 @@ impl Tool for PutTableInfoTool {
             .resolve_table_id(table_metadata_manager.table_name_manager())
             .await?
         else {
-            println!("Table({}) not found", self.selector.formatted_table_name());
-            return Ok(());
+            return Err(BoxedError::new(
+                UnexpectedSnafu {
+                    msg: format!("Table({}) not found", self.selector.formatted_table_name()),
+                }
+                .build(),
+            ));
         };
 
         let (current_table_info, current_table_route) =
@@ -187,8 +191,12 @@ impl Tool for PutTableRouteTool {
             .resolve_table_id(table_metadata_manager.table_name_manager())
             .await?
         else {
-            println!("Table({}) not found", self.selector.formatted_table_name());
-            return Ok(());
+            return Err(BoxedError::new(
+                UnexpectedSnafu {
+                    msg: format!("Table({}) not found", self.selector.formatted_table_name()),
+                }
+                .build(),
+            ));
         };
 
         let (current_table_info, current_table_route) =
@@ -205,6 +213,7 @@ impl Tool for PutTableRouteTool {
             )
         })?;
         let new_region_routes = new_table_route.region_routes().map_err(BoxedError::new)?;
+        validate_table_route(table_id, new_region_routes).map_err(BoxedError::new)?;
         let region_info =
             load_region_info(&table_metadata_manager, table_id, current_region_routes).await?;
         let new_region_options = current_table_info.table_info.to_region_options();
@@ -227,6 +236,21 @@ impl Tool for PutTableRouteTool {
 
         Ok(())
     }
+}
+
+fn validate_table_route(table_id: TableId, new_region_routes: &[RegionRoute]) -> Result<(), Error> {
+    for route in new_region_routes {
+        ensure!(
+            route.region.id.table_id() == table_id,
+            InvalidArgumentsSnafu {
+                msg: format!(
+                    "Invalid table route: all region routes must have table id {table_id}, but got {}",
+                    route.region.id.table_id()
+                ),
+            }
+        );
+    }
+    Ok(())
 }
 
 fn validate_table_info(
