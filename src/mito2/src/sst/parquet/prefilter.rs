@@ -42,7 +42,7 @@ use crate::error::{
     ReadParquetSnafu, RecordBatchSnafu, Result, UnexpectedSnafu,
 };
 use crate::sst::parquet::file_range::PreFilterMode;
-use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
+use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::reader::{
     MaybeFilter, PhysicalFilterContext, RowGroupBuildContext, RowGroupReaderBuilder,

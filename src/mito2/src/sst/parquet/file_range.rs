@@ -50,8 +50,8 @@ use crate::sst::parquet::flat_format::{
     DecodedPrimaryKeys, FlatReadFormat, decode_primary_keys, time_index_column_index,
 };
 use crate::sst::parquet::reader::{
-    FlatRowGroupReader, MaybeFilter, MaybePhysicalFilter, PhysicalFilterContext,
-    RowGroupBuildContext, RowGroupReaderBuilder, SimpleFilterContext,
+    FlatRowGroupReader, MaybeFilter, RowGroupBuildContext, RowGroupReaderBuilder,
+    SimpleFilterContext,
 };
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -172,7 +172,6 @@ impl FileRange {
                 self.row_group_idx,
                 self.row_selection.clone(),
                 fetch_metrics,
-                skip_fields,
             ))
             .await?;
 
@@ -322,13 +321,11 @@ impl FileRangeContext {
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
         fetch_metrics: Option<&'a ParquetFetchMetrics>,
-        skip_fields: bool,
     ) -> RowGroupBuildContext<'a> {
         RowGroupBuildContext {
             row_group_idx,
             row_selection,
             fetch_metrics,
-            skip_fields,
         }
     }
 
@@ -706,7 +703,7 @@ mod tests {
     #[test]
     fn test_compute_filter_mask_flat_does_not_postfilter_physical_filters() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = ReadFormat::new_flat(
+        let read_format = FlatReadFormat::new(
             metadata.clone(),
             metadata.column_metadatas.iter().map(|c| c.column_id),
             None,

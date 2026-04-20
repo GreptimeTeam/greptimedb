@@ -2321,7 +2321,7 @@ mod tests {
     fn test_physical_filter_context_skips_renamed_column() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
-        let read_format = ReadFormat::new_flat(
+        let read_format = FlatReadFormat::new(
             metadata.clone(),
             metadata.column_metadatas.iter().map(|c| c.column_id),
             None,
@@ -2343,7 +2343,7 @@ mod tests {
     #[test]
     fn test_physical_filter_context_only_accepts_prefilter_candidates() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = ReadFormat::new_flat(
+        let read_format = FlatReadFormat::new(
             metadata.clone(),
             metadata.column_metadatas.iter().map(|c| c.column_id),
             None,
