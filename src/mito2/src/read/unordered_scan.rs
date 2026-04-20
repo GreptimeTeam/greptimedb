@@ -351,6 +351,10 @@ impl RegionScanner for UnorderedScan {
     fn set_logical_region(&mut self, logical_region: bool) {
         self.properties.set_logical_region(logical_region);
     }
+
+    fn snapshot_sequence(&self) -> Option<u64> {
+        self.stream_ctx.input.snapshot_sequence
+    }
 }
 
 impl DisplayAs for UnorderedScan {
