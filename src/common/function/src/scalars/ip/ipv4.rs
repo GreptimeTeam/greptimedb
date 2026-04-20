@@ -20,7 +20,10 @@ use common_query::error::InvalidFuncArgsSnafu;
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder, UInt32Builder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType, UInt32Type};
-use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, Volatility};
+use datafusion_expr::{
+    Coercion, ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, TypeSignatureClass,
+    Volatility,
+};
 use derive_more::Display;
 
 use crate::function::{Function, extract_args};
@@ -43,13 +46,8 @@ pub struct Ipv4NumToString {
 impl Default for Ipv4NumToString {
     fn default() -> Self {
         Self {
-            signature: Signature::one_of(
-                vec![
-                    TypeSignature::Exact(vec![DataType::UInt32]),
-                    TypeSignature::Exact(vec![DataType::UInt64]),
-                    TypeSignature::Exact(vec![DataType::Int32]),
-                    TypeSignature::Exact(vec![DataType::Int64]),
-                ],
+            signature: Signature::new(
+                TypeSignature::Coercible(vec![Coercion::new_exact(TypeSignatureClass::Integer)]),
                 Volatility::Immutable,
             ),
             aliases: ["inet_ntoa".to_string()],
