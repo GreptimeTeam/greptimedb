@@ -17,18 +17,19 @@ use clap::{Parser, Subcommand};
 use common_error::ext::BoxedError;
 use common_meta::key::datanode_table::{DatanodeTableKey, RegionInfo};
 use common_meta::key::table_info::TableInfoValue;
-use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{
     DeserializedValueWithBytes, MetadataValue, RegionDistribution, TableMetadataManager,
 };
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::rpc::router::{RegionRoute, region_distribution};
+use snafu::ensure;
 use store_api::storage::TableId;
 use table::metadata::TableInfo;
 
 use crate::Tool;
 use crate::common::StoreConfig;
-use crate::error::{InvalidArgumentsSnafu, TableNotFoundSnafu, UnexpectedSnafu};
+use crate::error::{Error, InvalidArgumentsSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 use crate::metadata::control::put::read_value;
 use crate::metadata::control::selector::TableSelector;
 
@@ -116,29 +117,15 @@ impl Tool for PutTableInfoTool {
                 )
             })?
             .table_info;
-        validate_table_info(table_id, &current_table_info.table_info, &new_table_info)?;
+        validate_table_info(table_id, &current_table_info.table_info, &new_table_info)
+            .map_err(BoxedError::new)?;
 
         let region_distribution =
             physical_region_distribution(current_table_route.get_inner_ref())?;
-        let needs_rename = current_table_info.table_info.name != new_table_info.name;
 
-        let mut effective_table_info = current_table_info;
-
-        if needs_rename {
+        if current_table_info.table_info != new_table_info {
             table_metadata_manager
-                .rename_table(&effective_table_info, new_table_info.name.clone())
-                .await
-                .map_err(BoxedError::new)?;
-            println!("Table({table_id}) renamed");
-
-            let (refreshed_table_info, _) =
-                load_table_metadata(&table_metadata_manager, table_id).await?;
-            effective_table_info = refreshed_table_info;
-        }
-
-        if effective_table_info.table_info != new_table_info {
-            table_metadata_manager
-                .update_table_info(&effective_table_info, region_distribution, new_table_info)
+                .update_table_info(&current_table_info, region_distribution, new_table_info)
                 .await
                 .map_err(BoxedError::new)?;
             println!("Table({table_id}) info updated");
@@ -206,8 +193,9 @@ impl Tool for PutTableRouteTool {
 
         let (current_table_info, current_table_route) =
             load_table_metadata(&table_metadata_manager, table_id).await?;
-        let current_physical_route =
-            current_physical_route(table_id, current_table_route.get_inner_ref())?;
+        let current_region_routes = current_table_route
+            .region_routes()
+            .map_err(BoxedError::new)?;
         let new_table_route = TableRouteValue::try_from_raw_value(&self.value).map_err(|e| {
             BoxedError::new(
                 InvalidArgumentsSnafu {
@@ -216,10 +204,9 @@ impl Tool for PutTableRouteTool {
                 .build(),
             )
         })?;
-        let new_region_routes = validate_physical_route(table_id, &new_table_route)?;
-
+        let new_region_routes = new_table_route.region_routes().map_err(BoxedError::new)?;
         let region_info =
-            load_region_info(&table_metadata_manager, table_id, &current_physical_route).await?;
+            load_region_info(&table_metadata_manager, table_id, current_region_routes).await?;
         let new_region_options = current_table_info.table_info.to_region_options();
         let new_region_wal_options = region_info.region_wal_options.clone();
 
@@ -229,7 +216,7 @@ impl Tool for PutTableRouteTool {
                     table_id,
                     region_info,
                     &current_table_route,
-                    new_region_routes,
+                    new_region_routes.clone(),
                     &new_region_options,
                     &new_region_wal_options,
                 )
@@ -246,91 +233,56 @@ fn validate_table_info(
     table_id: TableId,
     current_table_info: &TableInfo,
     new_table_info: &TableInfo,
-) -> Result<(), BoxedError> {
-    if new_table_info.ident.table_id != table_id {
-        return Err(BoxedError::new(
-            InvalidArgumentsSnafu {
-                msg: format!(
-                    "Invalid table info: expected table id {table_id}, got {}",
-                    new_table_info.ident.table_id
-                ),
-            }
-            .build(),
-        ));
-    }
+) -> Result<(), Error> {
+    ensure!(
+        new_table_info.ident.table_id == table_id,
+        InvalidArgumentsSnafu {
+            msg: format!(
+                "Invalid table info: expected table id {table_id}, got {}",
+                new_table_info.ident.table_id
+            ),
+        }
+    );
 
-    if current_table_info.catalog_name != new_table_info.catalog_name {
-        return Err(BoxedError::new(
-            InvalidArgumentsSnafu {
-                msg: format!(
-                    "Invalid table info: catalog name is immutable, expected {}, got {}",
-                    current_table_info.catalog_name, new_table_info.catalog_name
-                ),
-            }
-            .build(),
-        ));
-    }
+    ensure!(
+        current_table_info.catalog_name == new_table_info.catalog_name,
+        InvalidArgumentsSnafu {
+            msg: format!(
+                "Invalid table info: catalog name is immutable, expected {}, got {}",
+                current_table_info.catalog_name, new_table_info.catalog_name
+            ),
+        }
+    );
 
-    if current_table_info.schema_name != new_table_info.schema_name {
-        return Err(BoxedError::new(
-            InvalidArgumentsSnafu {
-                msg: format!(
-                    "Invalid table info: schema name is immutable, expected {}, got {}",
-                    current_table_info.schema_name, new_table_info.schema_name
-                ),
-            }
-            .build(),
-        ));
-    }
+    ensure!(
+        current_table_info.schema_name == new_table_info.schema_name,
+        InvalidArgumentsSnafu {
+            msg: format!(
+                "Invalid table info: schema name is immutable, expected {}, got {}",
+                current_table_info.schema_name, new_table_info.schema_name
+            ),
+        }
+    );
+
+    ensure!(
+        current_table_info.name == new_table_info.name,
+        InvalidArgumentsSnafu {
+            msg: format!(
+                "Invalid table info: table name is immutable, expected {}, got {}",
+                current_table_info.name, new_table_info.name
+            ),
+        }
+    );
 
     Ok(())
-}
-
-fn validate_physical_route(
-    table_id: TableId,
-    table_route: &TableRouteValue,
-) -> Result<Vec<RegionRoute>, BoxedError> {
-    if !table_route.is_physical() {
-        return Err(BoxedError::new(
-            InvalidArgumentsSnafu {
-                msg: format!(
-                    "Invalid table route for table {table_id}: only physical table routes are supported"
-                ),
-            }
-            .build(),
-        ));
-    }
-
-    table_route
-        .region_routes()
-        .cloned()
-        .map_err(BoxedError::new)
-}
-
-fn current_physical_route(
-    table_id: TableId,
-    table_route: &TableRouteValue,
-) -> Result<PhysicalTableRouteValue, BoxedError> {
-    if !table_route.is_physical() {
-        return Err(BoxedError::new(
-            InvalidArgumentsSnafu {
-                msg: format!(
-                    "Invalid table route for table {table_id}: only physical table routes are supported"
-                ),
-            }
-            .build(),
-        ));
-    }
-
-    Ok(table_route.clone().into_physical_table_route())
 }
 
 async fn load_region_info(
     table_metadata_manager: &TableMetadataManager,
     table_id: TableId,
-    table_route: &PhysicalTableRouteValue,
+    region_routes: &[RegionRoute],
 ) -> Result<RegionInfo, BoxedError> {
-    let datanode_id = region_distribution(&table_route.region_routes)
+    let datanode_id = region_distribution(region_routes)
         .into_keys()
         .next()
         .ok_or_else(|| {
@@ -402,12 +354,10 @@ mod tests {
     use std::sync::Arc;
 
     use clap::Parser;
-    use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_error::ext::{BoxedError, ErrorExt};
     use common_meta::key::TableMetadataManager;
     use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableManager};
     use common_meta::key::table_info::TableInfoValue;
-    use common_meta::key::table_name::TableNameKey;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -489,7 +439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_put_table_info_renames_table() {
+    async fn test_put_table_info_rejects_table_name_change() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
         let table_id = 1024;
@@ -512,18 +462,11 @@ mod tests {
             value: serde_json::to_vec(&TableInfoValue::new(new_table_info)).unwrap(),
         };
 
-        tool.do_work().await.unwrap();
-
-        let renamed = table_metadata_manager
-            .table_name_manager()
-            .get(TableNameKey::new(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                "new_table",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(renamed.unwrap().table_id(), table_id);
+        let err = tool.do_work().await.unwrap_err();
+        assert!(
+            err.output_msg()
+                .contains("Invalid table info: table name is immutable")
+        );
     }
 
     #[tokio::test]
@@ -623,10 +566,7 @@ mod tests {
         };
 
         let err = tool.do_work().await.unwrap_err();
-        assert!(
-            err.output_msg()
-                .contains("only physical table routes are supported")
-        );
+        assert!(err.output_msg().contains("non-physical TableRouteValue."));
     }
 
     #[tokio::test]

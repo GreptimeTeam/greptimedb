@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use clap::Parser;
 use common_error::ext::BoxedError;
 use common_meta::key::catalog_name::{CatalogNameKey, CatalogNameValue};
-use common_meta::key::datanode_table::DatanodeTableKey;
 use common_meta::key::flow::flow_state::FlowStateValue;
 use common_meta::key::flow::{
     flow_info_key_prefix, flow_name_key_prefix, flow_route_key_prefix, flow_state_full_key,
@@ -24,10 +23,7 @@ use common_meta::key::flow::{
 };
 use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
-use common_meta::key::table_info::TableInfoKey;
-use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_repart::{TableRepartKey, TableRepartValue};
-use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::topic_name::{TopicNameKey, TopicNameValue};
 use common_meta::key::topic_region::{TopicRegionKey, TopicRegionValue};
 use common_meta::key::view_info::{ViewInfoKey, ViewInfoValue};
@@ -114,27 +110,6 @@ impl Tool for PutKeyTool {
 }
 
 fn validate_metadata_value(key: &str, value: &[u8]) -> Result<(), BoxedError> {
-    if key == flow_state_full_key() {
-        validate_value(key, value, FlowStateValue::try_from_raw_value)?;
-        return Ok(());
-    }
-
-    if matches_key_prefix(key, TABLE_ROUTE_PREFIX) {
-        validate_key(TableRouteKey::from_bytes(key.as_bytes()), key)?;
-    }
-
-    if matches_key_prefix(key, TABLE_INFO_KEY_PREFIX) {
-        validate_key(TableInfoKey::from_bytes(key.as_bytes()), key)?;
-    }
-
-    if matches_key_prefix(key, TABLE_NAME_KEY_PREFIX) {
-        validate_key(TableNameKey::from_bytes(key.as_bytes()), key)?;
-    }
-
-    if matches_key_prefix(key, DATANODE_TABLE_KEY_PREFIX) {
-        validate_key(DatanodeTableKey::from_bytes(key.as_bytes()), key)?;
-    }
-
     if let Some(reason) = unsupported_direct_put_reason(key) {
         return Err(BoxedError::new(
             InvalidArgumentsSnafu {
@@ -144,43 +119,34 @@ fn validate_metadata_value(key: &str, value: &[u8]) -> Result<(), BoxedError> {
         ));
     }
 
-    if matches_key_prefix(key, VIEW_INFO_KEY_PREFIX) {
+    if key == flow_state_full_key() {
+        validate_value(key, value, FlowStateValue::try_from_raw_value)?;
+        return Ok(());
+    } else if matches_key_prefix(key, VIEW_INFO_KEY_PREFIX) {
         validate_key(ViewInfoKey::from_bytes(key.as_bytes()), key)?;
         validate_value(key, value, ViewInfoValue::try_from_raw_value)?;
         return Ok(());
-    }
-
-    if matches_key_prefix(key, CATALOG_NAME_KEY_PREFIX) {
+    } else if matches_key_prefix(key, CATALOG_NAME_KEY_PREFIX) {
         validate_key(CatalogNameKey::from_bytes(key.as_bytes()), key)?;
-        CatalogNameValue::try_from_raw_value(value).map_err(BoxedError::new)?;
+        validate_value(key, value, CatalogNameValue::try_from_raw_value)?;
         return Ok(());
-    }
-
-    if matches_key_prefix(key, SCHEMA_NAME_KEY_PREFIX) {
+    } else if matches_key_prefix(key, SCHEMA_NAME_KEY_PREFIX) {
         validate_key(SchemaNameKey::from_bytes(key.as_bytes()), key)?;
         validate_value(key, value, SchemaNameValue::try_from_raw_value)?;
         return Ok(());
-    }
-
-    if matches_key_prefix(key, TABLE_REPART_PREFIX) {
+    } else if matches_key_prefix(key, TABLE_REPART_PREFIX) {
         validate_key(TableRepartKey::from_bytes(key.as_bytes()), key)?;
         validate_value(key, value, TableRepartValue::try_from_raw_value)?;
         return Ok(());
-    }
-
-    if matches_key_prefix(key, NODE_ADDRESS_PREFIX) {
+    } else if matches_key_prefix(key, NODE_ADDRESS_PREFIX) {
         validate_key(NodeAddressKey::from_bytes(key.as_bytes()), key)?;
         validate_value(key, value, NodeAddressValue::try_from_raw_value)?;
         return Ok(());
-    }
-
-    if matches_key_prefix(key, KAFKA_TOPIC_KEY_PREFIX) {
+    } else if matches_key_prefix(key, KAFKA_TOPIC_KEY_PREFIX) {
         validate_key(TopicNameKey::from_bytes(key.as_bytes()), key)?;
         validate_value(key, value, TopicNameValue::try_from_raw_value)?;
         return Ok(());
-    }
-
-    if matches_key_prefix(key, TOPIC_REGION_PREFIX) {
+    } else if matches_key_prefix(key, TOPIC_REGION_PREFIX) {
         validate_key(TopicRegionKey::from_bytes(key.as_bytes()), key)?;
         validate_value(key, value, TopicRegionValue::try_from_raw_value)?;
         return Ok(());
@@ -344,16 +310,6 @@ mod tests {
         assert!(
             err.output_msg()
                 .contains("Invalid metadata key: __schema_name/greptime")
-        );
-    }
-
-    #[test]
-    fn test_validate_invalid_complex_key_fails_before_unsupported() {
-        let err = validate_metadata_value("__table_route/not-a-number", b"{}").unwrap_err();
-
-        assert!(
-            err.output_msg()
-                .contains("Invalid metadata key: __table_route/not-a-number")
         );
     }
 
