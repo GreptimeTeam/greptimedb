@@ -13,191 +13,46 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
-use std::sync::LazyLock;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{Result, TryFromValueSnafu, UnsupportedOperationSnafu};
-use crate::json::value::JsonValueRef;
+use crate::json::value::{JsonValue, JsonVariant};
 use crate::prelude::{ValueRef, Vector, VectorRef};
+use crate::types::JsonType;
 use crate::types::json_type::JsonNativeType;
-use crate::types::{JsonType, json_type};
-use crate::value::StructValueRef;
 use crate::vectors::{MutableVector, StructVectorBuilder};
 
-struct JsonStructsBuilder {
-    json_type: JsonType,
-    inner: StructVectorBuilder,
-}
-
-impl JsonStructsBuilder {
-    fn new(json_type: JsonType, capacity: usize) -> Self {
-        let struct_type = json_type.as_struct_type();
-        let inner = StructVectorBuilder::with_type_and_capacity(struct_type, capacity);
-        Self { json_type, inner }
-    }
-
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    fn push(&mut self, json: &JsonValueRef) -> Result<()> {
-        let mut value = json.as_value_ref();
-        if !json.is_object() {
-            let fields = json_type::plain_json_struct_type(value.data_type());
-            value = ValueRef::Struct(StructValueRef::RefList {
-                val: vec![value],
-                fields,
-            })
-        }
-        self.inner.try_push_value_ref(&value)
-    }
-
-    /// Try to merge (and consume the data of) other json vector builder into this one.
-    /// Note that the other builder's json type must be able to be merged with this one's
-    /// (this one's json type has all the fields in other one's, and no datatypes conflict).
-    /// Normally this is guaranteed, as long as json values are pushed through [JsonVectorBuilder].
-    fn try_merge(&mut self, other: &mut JsonStructsBuilder) -> Result<()> {
-        debug_assert!(self.json_type.is_mergeable(&other.json_type));
-
-        fn helper(this: &mut StructVectorBuilder, that: &mut StructVectorBuilder) -> Result<()> {
-            let that_len = that.len();
-            if let Some(x) = that.mut_null_buffer().finish() {
-                this.mut_null_buffer().append_buffer(&x)
-            } else {
-                this.mut_null_buffer().append_n_non_nulls(that_len);
-            }
-
-            let that_fields = that.struct_type().fields();
-            let mut that_builders = that_fields
-                .iter()
-                .zip(that.mut_value_builders().iter_mut())
-                .map(|(field, builder)| (field.name(), builder))
-                .collect::<HashMap<_, _>>();
-
-            for (field, this_builder) in this
-                .struct_type()
-                .fields()
-                .iter()
-                .zip(this.mut_value_builders().iter_mut())
-            {
-                if let Some(that_builder) = that_builders.get_mut(field.name()) {
-                    if field.data_type().is_struct() {
-                        let this = this_builder
-                            .as_mut_any()
-                            .downcast_mut::<StructVectorBuilder>()
-                            // Safety: a struct datatype field must be corresponding to a struct vector builder.
-                            .unwrap();
-
-                        let that = that_builder
-                            .as_mut_any()
-                            .downcast_mut::<StructVectorBuilder>()
-                            // Safety: other builder with same field name must have same datatype,
-                            // ensured because the two json types are mergeable.
-                            .unwrap();
-                        helper(this, that)?;
-                    } else {
-                        let vector = that_builder.to_vector();
-                        this_builder.extend_slice_of(vector.as_ref(), 0, vector.len())?;
-                    }
-                } else {
-                    this_builder.push_nulls(that_len);
-                }
-            }
-            Ok(())
-        }
-        helper(&mut self.inner, &mut other.inner)
-    }
-
-    /// Same as [JsonStructsBuilder::try_merge], but does not consume the other builder's data.
-    fn try_merge_cloned(&mut self, other: &JsonStructsBuilder) -> Result<()> {
-        debug_assert!(self.json_type.is_mergeable(&other.json_type));
-
-        fn helper(this: &mut StructVectorBuilder, that: &StructVectorBuilder) -> Result<()> {
-            let that_len = that.len();
-            if let Some(x) = that.null_buffer().finish_cloned() {
-                this.mut_null_buffer().append_buffer(&x)
-            } else {
-                this.mut_null_buffer().append_n_non_nulls(that_len);
-            }
-
-            let that_fields = that.struct_type().fields();
-            let that_builders = that_fields
-                .iter()
-                .zip(that.value_builders().iter())
-                .map(|(field, builder)| (field.name(), builder))
-                .collect::<HashMap<_, _>>();
-
-            for (field, this_builder) in this
-                .struct_type()
-                .fields()
-                .iter()
-                .zip(this.mut_value_builders().iter_mut())
-            {
-                if let Some(that_builder) = that_builders.get(field.name()) {
-                    if field.data_type().is_struct() {
-                        let this = this_builder
-                            .as_mut_any()
-                            .downcast_mut::<StructVectorBuilder>()
-                            // Safety: a struct datatype field must be corresponding to a struct vector builder.
-                            .unwrap();
-
-                        let that = that_builder
-                            .as_any()
-                            .downcast_ref::<StructVectorBuilder>()
-                            // Safety: other builder with same field name must have same datatype,
-                            // ensured because the two json types are mergeable.
-                            .unwrap();
-                        helper(this, that)?;
-                    } else {
-                        let vector = that_builder.to_vector_cloned();
-                        this_builder.extend_slice_of(vector.as_ref(), 0, vector.len())?;
-                    }
-                } else {
-                    this_builder.push_nulls(that_len);
-                }
-            }
-            Ok(())
-        }
-        helper(&mut self.inner, &other.inner)
-    }
-}
-
-/// The vector builder for json type values.
-///
-/// Json type are dynamic, to some degree (as long as they can be merged into each other). So are
-/// json values. Json values are physically stored in struct vectors, which require the types of
-/// struct values to be fixed inside a certain struct vector. So to resolve "dynamic" vs "fixed"
-/// datatype problem, in this builder, each type of json value gets its own struct vector builder.
-/// Once new json type value is pushing into this builder, it creates a new "child" builder for it.
-///
-/// Given the "mixed" nature of the values stored in this builder, to produce the json vector, a
-/// "merge" operation is performed. The "merge" is to iterate over all the "child" builders, and fill
-/// nulls for missing json fields. The final vector's json type is fixed to be the "merge" of all
-/// pushed json types.
+#[derive(Clone)]
 pub(crate) struct JsonVectorBuilder {
     merged_type: JsonType,
-    capacity: usize,
-    builders: Vec<JsonStructsBuilder>,
+    values: Vec<JsonValue>,
 }
 
 impl JsonVectorBuilder {
     pub(crate) fn new(json_type: JsonNativeType, capacity: usize) -> Self {
         Self {
             merged_type: JsonType::new_json2(json_type),
-            capacity,
-            builders: vec![],
+            values: Vec::with_capacity(capacity),
         }
     }
 
-    fn try_create_new_builder(&mut self, json_type: &JsonType) -> Result<&mut JsonStructsBuilder> {
-        self.merged_type.merge(json_type)?;
+    fn try_build(&mut self) -> Result<VectorRef> {
+        let mut builder = StructVectorBuilder::with_type_and_capacity(
+            self.merged_type.as_struct_type(),
+            self.values.len(),
+        );
+        for value in self.values.iter_mut() {
+            value.try_align(&self.merged_type)?;
 
-        let builder = JsonStructsBuilder::new(json_type.clone(), self.capacity);
-        self.builders.push(builder);
+            if value.is_null() {
+                builder.push_null();
+                continue;
+            }
 
-        let len = self.builders.len();
-        Ok(&mut self.builders[len - 1])
+            let value = value.as_ref();
+            builder.try_push_value_ref(&value.as_struct_value())?;
+        }
+        Ok(builder.to_vector())
     }
 }
 
@@ -207,7 +62,7 @@ impl MutableVector for JsonVectorBuilder {
     }
 
     fn len(&self) -> usize {
-        self.builders.iter().map(|x| x.len()).sum()
+        self.values.len()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -219,37 +74,11 @@ impl MutableVector for JsonVectorBuilder {
     }
 
     fn to_vector(&mut self) -> VectorRef {
-        // Fast path:
-        if self.builders.len() == 1 {
-            return self.builders[0].inner.to_vector();
-        }
-
-        let mut unified_jsons = JsonStructsBuilder::new(self.merged_type.clone(), self.capacity);
-        for builder in self.builders.iter_mut() {
-            unified_jsons
-                .try_merge(builder)
-                // Safety: the "unified_jsons" has the merged json type from all the builders,
-                // so it should merge them without errors.
-                .unwrap_or_else(|e| panic!("failed to merge json builders, error: {e}"));
-        }
-        unified_jsons.inner.to_vector()
+        self.try_build().unwrap_or_else(|e| panic!("{}", e))
     }
 
     fn to_vector_cloned(&self) -> VectorRef {
-        // Fast path:
-        if self.builders.len() == 1 {
-            return self.builders[0].inner.to_vector_cloned();
-        }
-
-        let mut unified_jsons = JsonStructsBuilder::new(self.merged_type.clone(), self.capacity);
-        for builder in self.builders.iter() {
-            unified_jsons
-                .try_merge_cloned(builder)
-                // Safety: the "unified_jsons" has the merged json type from all the builders,
-                // so it should merge them without errors.
-                .unwrap_or_else(|e| panic!("failed to merge json builders, error: {e}"));
-        }
-        unified_jsons.inner.to_vector_cloned()
+        self.clone().to_vector()
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
@@ -260,29 +89,15 @@ impl MutableVector for JsonVectorBuilder {
             .fail();
         };
         let json_type = value.json_type();
+        self.merged_type.merge(json_type)?;
 
-        let builder = match self.builders.last_mut() {
-            Some(last) => {
-                // TODO(LFC): use "is_include" and amend json value with nulls
-                if &last.json_type != json_type {
-                    self.try_create_new_builder(json_type)?
-                } else {
-                    last
-                }
-            }
-            None => self.try_create_new_builder(json_type)?,
-        };
-
-        builder.push(value.as_ref())
+        let value = JsonValue::new(JsonVariant::from(value.variant().clone()));
+        self.values.push(value);
+        Ok(())
     }
 
     fn push_null(&mut self) {
-        static NULL_JSON: LazyLock<ValueRef> =
-            LazyLock::new(|| ValueRef::Json(Box::new(JsonValueRef::null())));
-        self.try_push_value_ref(&NULL_JSON)
-            // Safety: learning from the method "try_push_value_ref", a null json value should be
-            // always able to push into any json vectors.
-            .unwrap_or_else(|e| panic!("failed to push null json value, error: {e}"));
+        self.values.push(JsonValue::null())
     }
 
     fn extend_slice_of(&mut self, _: &dyn Vector, _: usize, _: usize) -> Result<()> {
@@ -291,5 +106,109 @@ impl MutableVector for JsonVectorBuilder {
             vector_type: "JsonVector",
         }
         .fail()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_base::bytes::Bytes;
+
+    use super::*;
+    use crate::data_type::ConcreteDataType;
+    use crate::types::json_type::JsonObjectType;
+    use crate::value::{StructValue, Value, ValueRef};
+
+    #[test]
+    fn test_json_vector_builder() -> Result<()> {
+        fn parse_json_value(json: &str) -> Value {
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            Value::Json(Box::new(value.into()))
+        }
+
+        // Object inputs should merge into a superset schema, preserve null rows,
+        // and align conflicting nested values into Variant payloads.
+        let mut builder = JsonVectorBuilder::new(JsonNativeType::Object(Default::default()), 3);
+        let first = parse_json_value(r#"{"id":1,"payload":{"name":"foo"}}"#);
+        let second = parse_json_value(r#"{"id":2,"extra":true,"payload":"raw"}"#);
+        builder.try_push_value_ref(&first.as_value_ref())?;
+        builder.push_null();
+        builder.try_push_value_ref(&second.as_value_ref())?;
+
+        let merged_type = JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([
+            ("extra".to_string(), JsonNativeType::Bool),
+            ("id".to_string(), JsonNativeType::i64()),
+            ("payload".to_string(), JsonNativeType::Variant),
+        ])));
+        assert_eq!(
+            builder.data_type(),
+            ConcreteDataType::Json(merged_type.clone())
+        );
+
+        let merged_struct_type = merged_type.as_struct_type();
+        let vector = builder.to_vector();
+        assert_eq!(vector.len(), 3);
+        assert_eq!(
+            vector.get(0),
+            Value::Struct(StructValue::new(
+                vec![
+                    Value::Null,
+                    Value::Int64(1),
+                    Value::Binary(Bytes::from(br#"{"name":"foo"}"#.to_vec())),
+                ],
+                merged_struct_type.clone(),
+            ))
+        );
+        assert_eq!(vector.get(1), Value::Null);
+        assert_eq!(
+            vector.get(2),
+            Value::Struct(StructValue::new(
+                vec![
+                    Value::Boolean(true),
+                    Value::Int64(2),
+                    Value::Binary(Bytes::from(br#""raw""#.to_vec())),
+                ],
+                merged_struct_type,
+            ))
+        );
+
+        // Root-level conflicts should be lifted to a plain Variant field that preserves
+        // each original JSON payload.
+        let mut variant_builder = JsonVectorBuilder::new(JsonNativeType::Bool, 2);
+        let object = parse_json_value(r#"{"k":1}"#);
+        let boolean = parse_json_value("true");
+        variant_builder.try_push_value_ref(&boolean.as_value_ref())?;
+        variant_builder.try_push_value_ref(&object.as_value_ref())?;
+
+        let variant_type = JsonType::new_json2(JsonNativeType::Variant);
+        assert_eq!(
+            variant_builder.data_type(),
+            ConcreteDataType::Json(variant_type.clone())
+        );
+
+        let variant_struct_type = variant_type.as_struct_type();
+        let vector = variant_builder.to_vector();
+        assert_eq!(
+            vector.get(0),
+            Value::Struct(StructValue::new(
+                vec![Value::Binary(Bytes::from(b"true".to_vec()))],
+                variant_struct_type.clone(),
+            ))
+        );
+        assert_eq!(
+            vector.get(1),
+            Value::Struct(StructValue::new(
+                vec![Value::Binary(Bytes::from(br#"{"k":1}"#.to_vec()))],
+                variant_struct_type,
+            ))
+        );
+
+        // Non-JSON values should be rejected at push time.
+        let mut invalid_builder = JsonVectorBuilder::new(JsonNativeType::Bool, 1);
+        let err = invalid_builder
+            .try_push_value_ref(&ValueRef::Boolean(true))
+            .unwrap_err();
+        assert!(err.to_string().contains("expected json value"));
+
+        Ok(())
     }
 }

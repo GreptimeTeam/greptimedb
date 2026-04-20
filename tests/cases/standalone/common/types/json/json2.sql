@@ -6,4 +6,24 @@ create table json2_table (
     'sst_format' = 'flat',
 );
 
+insert into json2_table (ts, j)
+values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
+       (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
+
+insert into json2_table (ts, j)
+values (3, '{"a": {"b": 3}, "c": "s3"}');
+
+insert into json2_table
+values (4, '{"a": {"b": -4}, "d": [{"e": {"g": -0.4}}]}'),
+       (5, '{"a": {}, "c": "s5"}'),
+       (6, '{"c": "s6"}');
+
+insert into json2_table
+values (7, '{"a": {"b": "s7"}, "c": [1], "d": [{"e": {"g": -0.7}}]}'),
+       (8, '{"a": {"b": 8}, "c": "s8"}');
+
+insert into json2_table
+values (9, '{"a": {"x": true}, "c": "s9", "d": [{"e": {"g": -0.9}}]}'),
+       (10, '{"a": {"b": 10}, "y": false}');
+
 drop table json2_table;
