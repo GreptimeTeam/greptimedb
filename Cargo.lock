@@ -8894,7 +8894,9 @@ name = "object-store"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
+ "chrono",
  "common-base",
  "common-error",
  "common-macro",
@@ -8904,9 +8906,11 @@ dependencies = [
  "futures",
  "humantime-serde",
  "lazy_static",
+ "object_store 0.12.5",
  "opendal",
  "prometheus 0.14.0",
  "reqwest 0.12.28",
+ "reqwest 0.13.2",
  "serde",
  "snafu 0.8.6",
  "tokio",

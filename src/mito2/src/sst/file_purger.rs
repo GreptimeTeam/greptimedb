@@ -72,9 +72,9 @@ impl fmt::Debug for LocalFilePurger {
 /// Whether to enable GC for the file purger.
 pub fn should_enable_gc(
     global_gc_enabled: bool,
-    object_store_scheme: object_store::Scheme,
+    object_store_scheme: &'static str,
 ) -> bool {
-    global_gc_enabled && object_store_scheme != object_store::Scheme::Fs
+    global_gc_enabled && object_store_scheme != object_store::services::FS_SCHEME
 }
 
 #[cfg(debug_assertions)]
@@ -82,7 +82,7 @@ pub fn should_enable_gc(
 /// so we need to enable GC for local file system.
 pub fn should_enable_gc(
     global_gc_enabled: bool,
-    _object_store_scheme: object_store::Scheme,
+    _object_store_scheme: &'static str,
 ) -> bool {
     global_gc_enabled
 }

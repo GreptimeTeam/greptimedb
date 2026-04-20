@@ -131,7 +131,7 @@ pub fn normalize_path(path: &str) -> String {
 pub fn with_instrument_layers(object_store: ObjectStore, path_label: bool) -> ObjectStore {
     object_store
         .layer(LoggingLayer::new(DefaultLoggingInterceptor))
-        .layer(TracingLayer)
+        .layer(TracingLayer::new())
         .layer(crate::layers::build_prometheus_metrics_layer(path_label))
 }
 
@@ -213,7 +213,7 @@ pub(crate) fn build_http_client(config: &HttpClientConfig) -> error::Result<Http
         );
     }
 
-    let client = reqwest::ClientBuilder::new()
+    let client = reqwest_013::ClientBuilder::new()
         .pool_max_idle_per_host(config.pool_max_idle_per_host as usize)
         .connect_timeout(config.connect_timeout)
         .pool_idle_timeout(config.pool_idle_timeout)

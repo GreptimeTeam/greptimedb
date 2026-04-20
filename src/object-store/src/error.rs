@@ -36,7 +36,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: reqwest::Error,
+        error: reqwest_013::Error,
     },
 
     #[snafu(display("Failed to create directory {}", dir))]

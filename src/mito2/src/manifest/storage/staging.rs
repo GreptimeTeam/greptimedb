@@ -191,13 +191,15 @@ impl StagingStorage {
     pub(crate) async fn clear(&self) -> Result<()> {
         self.delta_storage
             .object_store()
-            .remove_all(self.delta_storage.path())
+            .delete_with(self.delta_storage.path())
+            .recursive(true)
             .await
             .context(OpenDalSnafu)?;
 
         self.blob_storage
             .object_store()
-            .remove_all(self.blob_storage.path())
+            .delete_with(self.blob_storage.path())
+            .recursive(true)
             .await
             .context(OpenDalSnafu)?;
 

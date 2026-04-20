@@ -12,7 +12,9 @@ services-memory = ["opendal/services-memory"]
 testing = ["derive_builder"]
 
 [dependencies]
+async-trait.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
@@ -21,6 +23,7 @@ derive_builder = { workspace = true, optional = true }
 futures.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
+object_store_012 = { package = "object_store", version = "0.12.5" }
 opendal = { git = "https://github.com/apache/opendal.git", tag = "v0.56.0-rc.2", features = [
     "layers-tracing",
     "layers-prometheus",
@@ -33,6 +36,10 @@ opendal = { git = "https://github.com/apache/opendal.git", tag = "v0.56.0-rc.2",
 ] }
 prometheus.workspace = true
 reqwest.workspace = true
+reqwest_013 = { package = "reqwest", version = "0.13", default-features = false, features = [
+    "rustls",
+    "stream",
+] }
 serde.workspace = true
 snafu.workspace = true
 tokio.workspace = true

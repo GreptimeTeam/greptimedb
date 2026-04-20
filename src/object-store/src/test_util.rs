@@ -32,7 +32,7 @@ impl TempFolder {
     }
 
     pub async fn remove_all(&self) -> Result<()> {
-        self.store.remove_all(&self.path).await
+        self.store.delete_with(&self.path).recursive(true).await
     }
 }
 

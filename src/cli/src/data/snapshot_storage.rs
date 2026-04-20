@@ -486,7 +486,8 @@ impl SnapshotStorage for OpenDalStorage {
 
     async fn delete_snapshot(&self) -> Result<()> {
         self.object_store
-            .remove_all("/")
+            .delete_with("/")
+            .recursive(true)
             .await
             .context(StorageOperationSnafu {
                 operation: "delete snapshot",
