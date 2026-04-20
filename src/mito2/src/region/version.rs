@@ -444,6 +444,7 @@ impl VersionBuilder {
         self
     }
 
+    /// Apply edit to the builder.
     pub(crate) fn apply_edit(mut self, edit: RegionEdit, file_purger: FilePurgerRef) -> Self {
         if let Some(entry_id) = edit.flushed_entry_id {
             self.flushed_entry_id = self.flushed_entry_id.max(entry_id);
