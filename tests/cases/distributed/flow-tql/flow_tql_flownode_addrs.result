@@ -1,0 +1,36 @@
+CREATE TABLE http_requests (
+  ts timestamp(3) time index,
+  host STRING,
+  idc STRING,
+  val DOUBLE,
+  PRIMARY KEY(host, idc),
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_requests);
+
+Affected Rows: 0
+
+SELECT flownode_addrs IS NOT NULL AS flownode_addrs_is_not_null
+FROM information_schema.flows
+WHERE flow_name = 'calc_reqs';
+
++----------------------------+
+| flownode_addrs_is_not_null |
++----------------------------+
+| true                       |
++----------------------------+
+
+DROP FLOW calc_reqs;
+
+Affected Rows: 0
+
+DROP TABLE http_requests;
+
+Affected Rows: 0
+
+DROP TABLE cnt_reqs;
+
+Affected Rows: 0

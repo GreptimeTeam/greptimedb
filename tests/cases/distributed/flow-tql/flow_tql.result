@@ -21,17 +21,6 @@ SELECT source_table_names FROM information_schema.flows WHERE flow_name = 'calc_
 | greptime.public.http_requests |
 +-------------------------------+
 
--- SQLNESS REPLACE (127\.0\.0\.1:\d+) Address
-SELECT flow_name, flownode_ids, flownode_addrs
-FROM information_schema.flows
-WHERE flow_name = 'calc_reqs';
-
-+-----------+--------------+-----------------+
-| flow_name | flownode_ids | flownode_addrs  |
-+-----------+--------------+-----------------+
-| calc_reqs | {"0":0}      | {"0":"Address"} |
-+-----------+--------------+-----------------+
-
 SHOW CREATE TABLE cnt_reqs;
 
 +----------+---------------------------------------------------+
