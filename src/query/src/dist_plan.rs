@@ -20,6 +20,7 @@ mod merge_sort;
 mod planner;
 mod predicate_extractor;
 mod region_pruner;
+mod dyn_filter_bridge;
 mod remote_dyn_filter_registry;
 
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};

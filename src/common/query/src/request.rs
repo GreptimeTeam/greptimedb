@@ -12,26 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod initial_remote_dyn_filter_reg;
+
 use std::sync::Arc;
 
 use api::v1::region::RegionRequestHeader;
-use datafusion::arrow::datatypes::Schema;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::joins::HashTableLookupExpr;
+use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result as DataFusionResult};
 use datafusion_expr::LogicalPlan;
-use datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec;
 use datafusion_proto::physical_plan::from_proto::parse_physical_expr;
 use datafusion_proto::physical_plan::to_proto::serialize_physical_expr;
+use datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec;
 use datafusion_proto::protobuf::PhysicalExprNode;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionId;
 
 /// Current wire-format version for remote dynamic filter payload updates.
+pub use self::initial_remote_dyn_filter_reg::{
+    InitialDynFilterReg, InitialDynFilterRegs,
+    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+};
+
 pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;
 
 /// Serialized predicate payload for remote dynamic filter updates.
@@ -107,7 +113,7 @@ impl DynFilterPayload {
     pub fn decode_datafusion_expr(
         &self,
         task_ctx: &TaskContext,
-        input_schema: &Schema,
+        input_schema: &datafusion::arrow::datatypes::Schema,
         max_payload_bytes: usize,
     ) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
         let Self::Datafusion(bytes) = self;
@@ -122,6 +128,34 @@ impl DynFilterPayload {
         validate_decoded_payload_expr(&expr, input_schema)?;
         Ok(expr)
     }
+}
+
+fn encode_physical_expr_to_bytes(expr: &Arc<dyn PhysicalExpr>) -> DataFusionResult<Vec<u8>> {
+    let codec = DefaultPhysicalExtensionCodec {};
+    let proto = serialize_physical_expr(expr, &codec)?;
+    let mut bytes = Vec::new();
+    proto.encode(&mut bytes).map_err(|e| {
+        DataFusionError::Internal(format!("Failed to encode PhysicalExprNode: {e}"))
+    })?;
+    Ok(bytes)
+}
+
+pub(crate) fn decode_physical_expr_from_bytes(
+    bytes: &[u8],
+    task_ctx: &TaskContext,
+    input_schema: &datafusion::arrow::datatypes::Schema,
+    max_payload_bytes: usize,
+) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
+    validate_payload_size(bytes.len(), max_payload_bytes)?;
+    let codec = DefaultPhysicalExtensionCodec {};
+    let proto = PhysicalExprNode::decode(bytes).map_err(|e| {
+        DataFusionError::Internal(format!("Failed to decode PhysicalExprNode: {e}"))
+    })?;
+
+    let expr = parse_physical_expr(&proto, task_ctx, input_schema, &codec)?;
+    validate_supported_payload_expr(&expr)?;
+    validate_decoded_payload_expr(&expr, input_schema)?;
+    Ok(expr)
 }
 
 fn validate_payload_size(
@@ -161,7 +195,7 @@ fn validate_supported_payload_expr(expr: &Arc<dyn PhysicalExpr>) -> DataFusionRe
 /// schema inconsistency that should be surfaced loudly.
 fn validate_decoded_payload_expr(
     expr: &Arc<dyn PhysicalExpr>,
-    input_schema: &Schema,
+    input_schema: &datafusion::arrow::datatypes::Schema,
 ) -> DataFusionResult<()> {
     expr.apply(|node| {
         if let Some(column) = node.as_any().downcast_ref::<Column>() {

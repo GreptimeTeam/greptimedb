@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod catalog;
+mod registrations;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -98,6 +99,10 @@ use crate::error::{
 };
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
+use crate::region_server::registrations::{
+    RegisteredDynFilter, initial_dyn_filter_regs_from_query_ctx,
+    register_initial_dyn_filter_regs, remove_initial_dyn_filter_regs_for_region,
+};
 
 #[derive(Clone)]
 pub struct RegionServer {
@@ -275,6 +280,18 @@ impl RegionServer {
             common_telemetry::info!("Handle remote read for region: {}", region_id);
         }
 
+        let initial_dyn_filter_regs = initial_dyn_filter_regs_from_query_ctx(&query_ctx);
+        if query_ctx.explain_verbose() {
+            common_telemetry::info!(
+                "Initial remote dyn filter registrations for region {}: {}",
+                region_id,
+                initial_dyn_filter_regs
+                    .as_ref()
+                    .map(|regs| regs.regs.len())
+                    .unwrap_or(0)
+            );
+        }
+
         let decoder = self
             .inner
             .query_engine
@@ -287,7 +304,20 @@ impl RegionServer {
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
-        let stream = self
+        let query_id = query_ctx.remote_query_id().map(ToOwned::to_owned);
+        if let (Some(query_id), Some(regs)) = (
+            query_id.as_deref(),
+            initial_dyn_filter_regs.as_ref(),
+        ) {
+            register_initial_dyn_filter_regs(
+                &self.inner.initial_remote_dyn_filter_registrations,
+                query_id,
+                region_id,
+                regs,
+            );
+        }
+
+        let result = self
             .inner
             .handle_read(
                 QueryRequest {
@@ -297,8 +327,17 @@ impl RegionServer {
                 },
                 query_ctx.clone(),
             )
-            .await?;
+            .await;
 
+        if result.is_err() && let Some(query_id) = query_id.as_deref() {
+            remove_initial_dyn_filter_regs_for_region(
+                &self.inner.initial_remote_dyn_filter_registrations,
+                query_id,
+                region_id,
+            );
+        }
+
+        let stream = result?;
         let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
         Ok(maybe_guard_stream(stream, permit))
     }
@@ -1054,6 +1093,10 @@ struct RegionServerInner {
     /// server with a concrete engine; acceptable for now to fetch Mito-specific
     /// info (e.g., list SSTs). Consider a diagnostics trait later.
     mito_engine: RwLock<Option<MitoEngine>>,
+    /// TODO(remote-dyn-filter): Reap this query-scoped placeholder registry on query finish/cancel
+    /// and later fold it into the real remote dyn filter runtime state lifecycle.
+    initial_remote_dyn_filter_registrations:
+        DashMap<String, DashMap<String, RegisteredDynFilter>>,
 }
 
 struct RegionServerParallelism {
@@ -1170,6 +1213,7 @@ impl RegionServerInner {
             parallelism,
             topic_stats_reporter: RwLock::new(None),
             mito_engine: RwLock::new(None),
+            initial_remote_dyn_filter_registrations: DashMap::new(),
         }
     }
 
@@ -1904,6 +1948,10 @@ mod tests {
         RemoteDynFilterRequest, RemoteDynFilterUnregister, RemoteDynFilterUpdate,
         remote_dyn_filter_request,
     };
+    use common_query::request::{
+        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
+        InitialDynFilterRegs,
+    };
     use common_error::ext::ErrorExt;
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
@@ -2060,6 +2108,114 @@ mod tests {
         while pinned.next().await.is_some() {}
 
         assert!(pinned.as_ref().get_ref().metrics().is_none());
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_can_be_read_from_query_context() {
+        let mut query_ctx = QueryContext::with("greptime", "public");
+        query_ctx.set_extension(
+            INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+            InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+                "filter-1",
+                vec![vec![1, 2, 3]],
+            )])
+            .to_extension_value()
+            .unwrap(),
+        );
+
+        let regs = initial_dyn_filter_regs_from_query_ctx(&Arc::new(query_ctx)).unwrap();
+
+        assert_eq!(regs.regs.len(), 1);
+        assert_eq!(regs.regs[0].filter_id, "filter-1");
+    }
+
+    #[test]
+    fn register_initial_dyn_filter_regs_creates_query_scoped_entries() {
+        let regs_by_query = DashMap::<String, DashMap<String, RegisteredDynFilter>>::new();
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-1", vec![vec![1, 2, 3]]),
+            InitialDynFilterReg::new("filter-2", vec![vec![4, 5, 6]]),
+        ]);
+        let query_id = "query-1";
+        let region_id = RegionId::new(1024, 7);
+
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            query_id,
+            region_id,
+            &regs,
+        );
+
+        let query_regs = regs_by_query.get(query_id).unwrap();
+        assert_eq!(query_regs.len(), 2);
+        let registered = query_regs.get("filter-1").unwrap();
+        assert_eq!(registered.filter_id, "filter-1");
+        assert_eq!(registered.child_exprs_datafusion_proto, vec![vec![1, 2, 3]]);
+        assert_eq!(registered.subscriber_regions, vec![region_id]);
+    }
+
+    #[test]
+    fn register_initial_dyn_filter_regs_ignores_duplicate_filter_entry() {
+        let regs_by_query = DashMap::<String, DashMap<String, RegisteredDynFilter>>::new();
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-1", vec![vec![1, 2, 3]]),
+        ]);
+        let query_id = "query-1";
+        let region_id = RegionId::new(1024, 7);
+
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            query_id,
+            region_id,
+            &regs,
+        );
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            query_id,
+            region_id,
+            &regs,
+        );
+
+        let query_regs = regs_by_query.get(query_id).unwrap();
+        assert_eq!(query_regs.len(), 1);
+        let registered = query_regs.get("filter-1").unwrap();
+        assert_eq!(registered.subscriber_regions, vec![region_id]);
+    }
+
+    #[test]
+    fn remove_initial_dyn_filter_regs_for_region_removes_region_entries() {
+        let regs_by_query = DashMap::<String, DashMap<String, RegisteredDynFilter>>::new();
+        let query_id = "query-1";
+        let region_id = RegionId::new(1024, 7);
+        let other_query_id = "query-2";
+        let other_region_id = RegionId::new(1024, 8);
+
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            query_id,
+            region_id,
+            &InitialDynFilterRegs::new(vec![
+                InitialDynFilterReg::new("filter-1", vec![vec![1, 2, 3]]),
+            ]),
+        );
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            other_query_id,
+            other_region_id,
+            &InitialDynFilterRegs::new(vec![
+                InitialDynFilterReg::new("filter-2", vec![vec![4, 5, 6]]),
+            ]),
+        );
+
+        remove_initial_dyn_filter_regs_for_region(
+            &regs_by_query,
+            query_id,
+            region_id,
+        );
+
+        assert!(regs_by_query.get(query_id).is_none());
+        let other_query_regs = regs_by_query.get(other_query_id).unwrap();
+        assert_eq!(other_query_regs.len(), 1);
     }
 
     #[tokio::test]
