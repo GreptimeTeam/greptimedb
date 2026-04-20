@@ -1270,21 +1270,21 @@ impl BatchStats {
             metadata.primary_key_encoding,
             [(first_tag_id, SortField::new(data_type.clone()))].into_iter(),
         );
+        let pk_index = primary_key_column_index(batches.first()?.num_columns());
 
         let mut min_builder = data_type.create_mutable_vector(batches.len());
         let mut max_builder = data_type.create_mutable_vector(batches.len());
 
         for batch in batches {
-            let min_val = Self::extract_first_tag(batch, &*converter, true);
-            let max_val = Self::extract_first_tag(batch, &*converter, false);
-
-            match min_val {
-                Some(v) => min_builder.push_value_ref(&v.as_value_ref()),
-                None => min_builder.push_null(),
-            }
-            match max_val {
-                Some(v) => max_builder.push_value_ref(&v.as_value_ref()),
-                None => max_builder.push_null(),
+            match Self::extract_first_tag_bounds(batch, pk_index, &*converter) {
+                Some((min_val, max_val)) => {
+                    min_builder.push_value_ref(&min_val.as_value_ref());
+                    max_builder.push_value_ref(&max_val.as_value_ref());
+                }
+                None => {
+                    min_builder.push_null();
+                    max_builder.push_null();
+                }
             }
         }
 
@@ -1296,18 +1296,16 @@ impl BatchStats {
         })
     }
 
-    /// Extracts the first tag value from the first (is_min=true) or last (is_min=false)
-    /// row of a batch by decoding the encoded primary key.
-    fn extract_first_tag(
+    /// Extracts the first tag value from the first and last rows of a batch.
+    fn extract_first_tag_bounds(
         batch: &RecordBatch,
+        pk_index: usize,
         converter: &dyn PrimaryKeyCodec,
-        is_min: bool,
-    ) -> Option<datatypes::value::Value> {
+    ) -> Option<(datatypes::value::Value, datatypes::value::Value)> {
         if batch.num_rows() == 0 {
             return None;
         }
 
-        let pk_index = primary_key_column_index(batch.num_columns());
         let pk_dict = batch
             .column(pk_index)
             .as_any()
@@ -1315,11 +1313,15 @@ impl BatchStats {
         let pk_values = pk_dict.values().as_any().downcast_ref::<BinaryArray>()?;
 
         let keys = pk_dict.keys();
-        let row_index = if is_min { 0 } else { batch.num_rows() - 1 };
-        let key = keys.value(row_index);
-        let pk_bytes = pk_values.value(key as usize);
+        let min_key = keys.value(0);
+        let max_key = keys.value(batch.num_rows() - 1);
+        let min_bytes = pk_values.value(min_key as usize);
+        let max_bytes = pk_values.value(max_key as usize);
 
-        converter.decode_leftmost(pk_bytes).ok()?
+        Some((
+            converter.decode_leftmost(min_bytes).ok()??,
+            converter.decode_leftmost(max_bytes).ok()??,
+        ))
     }
 }
 
