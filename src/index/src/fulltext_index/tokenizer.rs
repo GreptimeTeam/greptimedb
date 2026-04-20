@@ -90,17 +90,13 @@ pub struct ChineseTokenizer;
 
 impl Tokenizer for ChineseTokenizer {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
-        if text.is_ascii() {
-            EnglishTokenizer {}.tokenize(text)
-        } else {
-            // Search-mode tokenization emits finer-grained searchable terms, while HMM helps
-            // merge some unknown fragments and avoid excessive token fragmentation.
-            JIEBA
-                .cut_for_search(text, true)
-                .into_iter()
-                .filter(|s| s.chars().any(|c| c.is_alphanumeric() || c == '_'))
-                .collect()
-        }
+        // Search-mode tokenization emits finer-grained searchable terms, while HMM helps
+        // merge some unknown fragments and avoid excessive token fragmentation.
+        JIEBA
+            .cut_for_search(text, true)
+            .into_iter()
+            .filter(|s| s.chars().any(|c| c.is_alphanumeric() || c == '_'))
+            .collect()
     }
 }
 
