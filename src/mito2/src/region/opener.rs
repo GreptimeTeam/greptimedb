@@ -1027,7 +1027,9 @@ async fn preload_parquet_meta_cache_for_files(
             .get_parquet_meta_data(file_id, &mut cache_metrics, Default::default())
             .await
         {
-            if let Some(primary_key_range) = extract_primary_key_range(&metadata, &region_metadata)
+            if file_handle.primary_key_range().is_none()
+                && let Some(primary_key_range) =
+                    extract_primary_key_range(&metadata, &region_metadata)
             {
                 file_handle.set_primary_key_range(primary_key_range);
             }
