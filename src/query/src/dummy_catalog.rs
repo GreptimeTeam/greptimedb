@@ -184,7 +184,9 @@ impl TableProvider for DummyTableProvider {
         request.limit = limit;
 
         if let Some(query_ctx) = &self.query_ctx {
-            apply_cached_snapshot_to_request(query_ctx, self.region_id, &mut request);
+            let is_sink_scan = is_sink_scan(query_ctx, self.region_id)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            apply_cached_snapshot_to_request(query_ctx, self.region_id, is_sink_scan, &mut request);
         }
 
         let scanner = self
@@ -413,7 +415,9 @@ fn build_scan_request(
     // time. A later scan may still refresh `memtable_max_sequence` if another source scan
     // has bound a snapshot into `query_ctx` after this provider was created.
     ScanRequest {
-        sst_min_sequence: query_ctx.sst_min_sequence(region_id.as_u64()),
+        sst_min_sequence: (!decision.is_sink_scan)
+            .then(|| query_ctx.sst_min_sequence(region_id.as_u64()))
+            .flatten(),
         snapshot_on_scan: decision.snapshot_on_scan,
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
@@ -421,11 +425,23 @@ fn build_scan_request(
     }
 }
 
+fn is_sink_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<bool> {
+    Ok(
+        FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())?
+            .is_some_and(|exts| exts.sink_table_id == Some(region_id.table_id())),
+    )
+}
+
 fn apply_cached_snapshot_to_request(
     query_ctx: &QueryContext,
     region_id: RegionId,
+    is_sink_scan: bool,
     scan_request: &mut ScanRequest,
 ) {
+    if is_sink_scan {
+        return;
+    }
+
     if let Some(snapshot_sequence) = query_ctx.get_snapshot(region_id.as_u64()) {
         // Reuse the previously bound per-region snapshot instead of rebinding a new
         // upper bound on scan open. This refresh is still needed at scan time because
@@ -702,10 +718,30 @@ mod tests {
             ..Default::default()
         };
 
-        apply_cached_snapshot_to_request(&query_ctx, region_id, &mut request);
+        apply_cached_snapshot_to_request(&query_ctx, region_id, false, &mut request);
 
         assert_eq!(request.memtable_max_sequence, Some(88));
         assert!(!request.snapshot_on_scan);
+    }
+
+    #[test]
+    fn test_apply_cached_snapshot_to_request_skips_sink_scan() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                88_u64,
+            )]))))
+            .build();
+        let mut request = ScanRequest {
+            snapshot_on_scan: true,
+            ..Default::default()
+        };
+
+        apply_cached_snapshot_to_request(&query_ctx, region_id, true, &mut request);
+
+        assert_eq!(request.memtable_max_sequence, None);
+        assert!(request.snapshot_on_scan);
     }
 
     #[test]
@@ -777,11 +813,16 @@ mod tests {
                 region_id.as_u64(),
                 88_u64,
             )]))))
+            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                77_u64,
+            )]))))
             .build();
 
         let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
         assert_eq!(request.memtable_min_sequence, None);
         assert_eq!(request.memtable_max_sequence, None);
+        assert_eq!(request.sst_min_sequence, None);
         assert!(!request.snapshot_on_scan);
     }
 
