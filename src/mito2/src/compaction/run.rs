@@ -341,7 +341,8 @@ where
                 current_run.push_item(item.clone());
             } else {
                 // the current item does not overlap with any item in current run,
-                // then it belongs to current run.
+                // then it belongs to current run. Because now we introduced primary
+                // key range, we cannot simply use timestamps to check overlapping.
                 let overlaps_any = current_run.items.iter().any(|i| i.overlap(item));
                 if !overlaps_any {
                     // does not overlap, push to current run
