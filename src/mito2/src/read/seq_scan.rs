@@ -692,8 +692,16 @@ pub(crate) async fn build_flat_sources(
                 ordered_sources[position] = Some(Box::pin(stream) as _);
             }
         } else {
-            let stream =
-                scan_util::maybe_scan_flat_other_ranges(stream_ctx, *index, part_metrics).await?;
+            let ext_options = crate::extension::ExtensionRangeReadOptions {
+                pre_filter_mode: stream_ctx.range_pre_filter_mode(part_range),
+            };
+            let stream = scan_util::maybe_scan_flat_other_ranges(
+                stream_ctx,
+                *index,
+                part_metrics,
+                ext_options,
+            )
+            .await?;
             ordered_sources[position] = Some(stream);
         }
     }

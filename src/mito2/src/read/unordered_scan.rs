@@ -142,10 +142,15 @@ impl UnorderedScan {
                         yield record_batch?;
                     }
                 } else {
+                    let part_range = range_meta.new_partition_range(part_range_id);
+                    let ext_options = crate::extension::ExtensionRangeReadOptions {
+                        pre_filter_mode: stream_ctx.range_pre_filter_mode(&part_range),
+                    };
                     let stream = scan_util::maybe_scan_flat_other_ranges(
                         &stream_ctx,
                         *index,
                         &part_metrics,
+                        ext_options,
                     ).await?;
                     for await record_batch in stream {
                         yield record_batch?;

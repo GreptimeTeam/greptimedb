@@ -1577,11 +1577,12 @@ pub(crate) async fn scan_flat_extension_range(
     context: Arc<StreamContext>,
     index: RowGroupIndex,
     partition_metrics: PartitionMetrics,
+    options: crate::extension::ExtensionRangeReadOptions,
 ) -> Result<BoxedRecordBatchStream> {
     use snafu::ResultExt;
 
     let range = context.input.extension_range(index.index);
-    let reader = range.flat_reader(context.as_ref());
+    let reader = range.flat_reader(context.as_ref(), options);
     let stream = reader
         .read(context, partition_metrics, index)
         .await
@@ -1593,10 +1594,11 @@ pub(crate) async fn maybe_scan_flat_other_ranges(
     context: &Arc<StreamContext>,
     index: RowGroupIndex,
     metrics: &PartitionMetrics,
+    options: crate::extension::ExtensionRangeReadOptions,
 ) -> Result<BoxedRecordBatchStream> {
     #[cfg(feature = "enterprise")]
     {
-        scan_flat_extension_range(context.clone(), index, metrics.clone()).await
+        scan_flat_extension_range(context.clone(), index, metrics.clone(), options).await
     }
 
     #[cfg(not(feature = "enterprise"))]
@@ -1604,6 +1606,7 @@ pub(crate) async fn maybe_scan_flat_other_ranges(
         let _ = context;
         let _ = index;
         let _ = metrics;
+        let _ = options;
 
         crate::error::UnexpectedSnafu {
             reason: "no other ranges scannable in flat format",
