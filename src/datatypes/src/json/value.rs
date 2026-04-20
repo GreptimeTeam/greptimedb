@@ -419,6 +419,19 @@ impl JsonValue {
         helper(self.json_variant)
     }
 
+    /// Recursively aligns this JSON value to `expected` in place. This is to make JSON values fill
+    /// into a [StructArray], which requires a unified static datatype.
+    ///
+    /// Alignment follows these rules:
+    /// - `Null` aligns to any type, and any value aligns to `Null` as `Null`.
+    /// - Numbers are converted only within compatible number categories.
+    /// - Arrays align each element recursively to the expected item type.
+    /// - Objects require `expected` to contain all fields from the current value. Missing expected
+    ///   fields are filled with `Null`.
+    /// - `Variant` preserves the original JSON payload as serialized bytes.
+    ///
+    /// Returns an error if the value cannot be aligned without losing existing object fields or
+    /// when a scalar type conversion is incompatible.
     pub(crate) fn try_align(&mut self, expected: &JsonType) -> Result<()> {
         if self.json_type() == expected {
             return Ok(());

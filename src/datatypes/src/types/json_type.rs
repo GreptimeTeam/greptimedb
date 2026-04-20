@@ -225,6 +225,10 @@ impl JsonType {
 
     /// Try to merge this json type with others, error on datatype conflict.
     pub fn merge(&mut self, other: &JsonType) -> Result<()> {
+        if self == other {
+            return Ok(());
+        }
+
         match (&self.format, &other.format) {
             (JsonFormat::Jsonb, JsonFormat::Jsonb) => Ok(()),
             (JsonFormat::Json2(this), JsonFormat::Json2(that)) => {
