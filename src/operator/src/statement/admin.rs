@@ -133,7 +133,7 @@ impl StatementExecutor {
             .invoke_async_with_args(func_args)
             .await
             .with_context(|_| ExecuteAdminFunctionSnafu {
-                msg: format!("Failed to execute admin function {}", fn_name),
+                msg: fn_name.to_string(),
             })?;
 
         // Convert result back to VectorRef

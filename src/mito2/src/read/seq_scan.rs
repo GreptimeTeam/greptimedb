@@ -214,12 +214,18 @@ impl SeqScan {
         }
 
         let mapper = stream_ctx.input.mapper.as_flat().unwrap();
-        let schema = mapper.input_arrow_schema(stream_ctx.input.compaction);
-
-        let metrics_reporter = part_metrics.map(|m| m.merge_metrics_reporter());
-        let reader =
-            FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE, metrics_reporter)
-                .await?;
+        let reader: BoxedRecordBatchStream = if sources.len() == 1 {
+            // Currently, we can't skip dedup when there is only one source because
+            // that source may have duplicate rows.
+            sources.pop().unwrap()
+        } else {
+            let schema = mapper.input_arrow_schema(stream_ctx.input.compaction);
+            let metrics_reporter = part_metrics.map(|m| m.merge_metrics_reporter());
+            let reader =
+                FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE, metrics_reporter)
+                    .await?;
+            Box::pin(reader.into_stream())
+        };
 
         let dedup = !skip_dedup && !stream_ctx.input.append_mode;
         let dedup_metrics_reporter = part_metrics.map(|m| m.dedup_metrics_reporter());
@@ -227,7 +233,7 @@ impl SeqScan {
             match stream_ctx.input.merge_mode {
                 MergeMode::LastRow => Box::pin(
                     FlatDedupReader::new(
-                        reader.into_stream().boxed(),
+                        reader,
                         FlatLastRow::new(stream_ctx.input.filter_deleted),
                         dedup_metrics_reporter,
                     )
@@ -235,7 +241,7 @@ impl SeqScan {
                 ) as _,
                 MergeMode::LastNonNull => Box::pin(
                     FlatDedupReader::new(
-                        reader.into_stream().boxed(),
+                        reader,
                         FlatLastNonNull::new(
                             mapper.field_column_start(),
                             stream_ctx.input.filter_deleted,
@@ -246,7 +252,7 @@ impl SeqScan {
                 ) as _,
             }
         } else {
-            Box::pin(reader.into_stream()) as _
+            reader
         };
 
         let reader = match &stream_ctx.input.series_row_selector {
@@ -565,6 +571,10 @@ impl RegionScanner for SeqScan {
 
     fn set_logical_region(&mut self, logical_region: bool) {
         self.properties.set_logical_region(logical_region);
+    }
+
+    fn snapshot_sequence(&self) -> Option<u64> {
+        self.stream_ctx.input.snapshot_sequence
     }
 }
 
