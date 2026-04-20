@@ -150,3 +150,20 @@ FROM logs WHERE `id` BETWEEN 20 AND 23 ORDER BY `id`;
 SELECT `id`, `log_message`, matches_term(lower(`log_message`), 'warning') as `matches_warning` FROM logs WHERE `id` >= 24 ORDER BY `id`;
 
 DROP TABLE logs;
+
+CREATE TABLE zh_logs (
+    `id` TIMESTAMP TIME INDEX,
+    `log_message` STRING FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true', false_positive_rate = '0.01', granularity = '10240')
+);
+
+INSERT INTO zh_logs VALUES
+    (1, '[2026/04/09/ 13:56:11.031]2026-04-09 13:56:11.031 - [ trace_id=340a6a44b0bd8e37bb7697ss7da61ff0 span_id=085ff5ttf1e0a23b trace_flags=01] - [http-nio-8081-exec-16] INFO c.h.p.xx.web.service.impl.CCCXForwardKKKServiceImpl.pushout(188) - 登录手机号18888888888的动态key：829889AC8'),
+    (2, '哈基米曼波');
+
+ADMIN flush_table('zh_logs');
+
+SELECT * FROM zh_logs where `log_message` @@ 'trace_id';
+
+SELECT * FROM zh_logs where `log_message` @@ '手机';
+
+DROP TABLE zh_logs;

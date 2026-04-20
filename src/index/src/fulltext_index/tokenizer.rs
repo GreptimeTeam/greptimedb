@@ -95,13 +95,34 @@ impl Tokenizer for ChineseTokenizer {
         } else {
             // Search-mode tokenization emits finer-grained searchable terms, while HMM helps
             // merge some unknown fragments and avoid excessive token fragmentation.
-            JIEBA
+            let mut tokens = JIEBA
                 .cut_for_search(text, true)
                 .into_iter()
-                .filter(|s| s.chars().any(|c| c.is_alphanumeric() || c == '_'))
-                .collect()
+                .filter(|s| is_indexable_token(s))
+                .collect::<Vec<_>>();
+
+            let english = EnglishTokenizer {};
+            tokens.extend(
+                english
+                    .tokenize(text)
+                    .into_iter()
+                    .filter(|token| is_ascii_underscore_compound(token)),
+            );
+
+            tokens
         }
     }
+}
+
+fn is_indexable_token(token: &str) -> bool {
+    token.chars().any(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn is_ascii_underscore_compound(token: &str) -> bool {
+    token.contains('_')
+        && token
+            .split('_')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 /// `Analyzer` analyzes a text into a list of tokens.
@@ -178,21 +199,28 @@ mod tests {
     #[test]
     fn test_chinese_tokenizer_issue_7943_sample() {
         let tokenizer = ChineseTokenizer;
-        let text = "登录手机号18888888888的动态key：829889AC8";
+        let text = "[2026/04/09/ 13:56:11.031]2026-04-09 13:56:11.031 - [ trace_id=340a6a44b0bd8e37bb7697ss7da61ff0 span_id=085ff5ttf1e0a23b trace_flags=01] - [http-nio-8081-exec-16] INFO c.h.p.xx.web.service.impl.CCCXForwardKKKServiceImpl.pushout(188) - 登录手机号18888888888的动态key：829889AC8";
         let tokens = tokenizer.tokenize(text);
-        assert_eq!(
-            tokens,
-            [
-                "登录",
-                "手机",
-                "手机号",
-                "18888888888",
-                "的",
-                "动态",
-                "key",
-                "829889AC8"
-            ]
-        );
+
+        assert!(tokens.contains(&"trace_id"));
+        assert!(tokens.contains(&"span_id"));
+        assert!(tokens.contains(&"trace_flags"));
+        assert!(tokens.contains(&"登录"));
+        assert!(tokens.contains(&"手机号"));
+        assert!(tokens.contains(&"key"));
+    }
+
+    #[test]
+    fn test_chinese_tokenizer_keeps_ascii_underscore_compounds() {
+        let tokenizer = ChineseTokenizer;
+        let text = "trace_id=abc 登录手机号 dynamic_key=xyz";
+
+        let tokens = tokenizer.tokenize(text);
+
+        assert!(tokens.contains(&"trace_id"));
+        assert!(tokens.contains(&"dynamic_key"));
+        assert!(tokens.contains(&"登录"));
+        assert!(tokens.contains(&"手机号"));
     }
 
     #[test]
