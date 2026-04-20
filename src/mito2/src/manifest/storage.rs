@@ -303,8 +303,8 @@ impl ManifestObjectStore {
             remove_from_cache(self.manifest_cache.as_ref(), entry.path()).await;
         }
 
-        // Try batch delete first. On failure, fall back to per-file deletes so a
-        // single bad key doesn't strand the rest of the batch. See issue #7986.
+        // Try batch delete first. On failure, fall back to per-file deletes.
+        // This is a workaround for S3-compatible object stores that do not support batch delete. See issue #7986.
         let mut succeeded = vec![false; del_entries.len()];
         match self.object_store.delete_iter(paths.clone()).await {
             Ok(()) => succeeded.fill(true),
