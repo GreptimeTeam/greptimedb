@@ -1497,7 +1497,7 @@ pub(crate) async fn scan_flat_file_ranges(
     fields(read_type = read_type, range_count = ranges.len())
 )]
 pub fn build_flat_file_range_scan_stream(
-    _stream_ctx: Arc<StreamContext>,
+    stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     read_type: &'static str,
     ranges: SmallVec<[FileRange; 2]>,
@@ -1515,7 +1515,15 @@ pub fn build_flat_file_range_scan_stream(
         };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let Some(mut reader) = range.flat_reader(_stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await? else{continue};
+            let Some(mut reader) = range
+                .flat_reader(
+                    stream_ctx.input.series_row_selector,
+                    fetch_metrics.as_deref(),
+                )
+                .await?
+            else {
+                continue;
+            };
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
