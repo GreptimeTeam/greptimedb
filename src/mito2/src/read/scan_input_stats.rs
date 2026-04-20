@@ -50,6 +50,7 @@ pub fn build_scan_input_stats(
         .map(|(index, file)| {
             let partition_expr_matches_region = file_partition_expr_matches_region(metadata, file)?;
             Ok(RegionScanFileInputStats {
+                file_id: file.file_id().file_id(),
                 file_ordinal: index,
                 exact_num_rows: exact_file_num_rows(file),
                 time_range: exact_file_time_range(file),

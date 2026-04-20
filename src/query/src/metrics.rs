@@ -74,6 +74,44 @@ lazy_static! {
         "total number of query memory allocations rejected"
     )
     .unwrap();
+
+    pub static ref AGGREGATE_STATS_STATS_INPUT_FILES_TOTAL: IntCounter = register_int_counter!(
+        "greptime_aggregate_stats_stats_input_files_total",
+        "aggregate stats literal or precomputed stats input files total"
+    )
+    .unwrap();
+    pub static ref AGGREGATE_STATS_SCANNED_INPUT_FILES_TOTAL: IntCounter = register_int_counter!(
+        "greptime_aggregate_stats_scanned_input_files_total",
+        "aggregate stats scanned files total"
+    )
+    .unwrap();
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AggregateStatsMetricsSnapshot {
+    pub stats_input_files: u64,
+    pub scanned_input_files: u64,
+}
+
+#[cfg(test)]
+impl AggregateStatsMetricsSnapshot {
+    pub fn delta(self, before: Self) -> Self {
+        Self {
+            stats_input_files: self
+                .stats_input_files
+                .saturating_sub(before.stats_input_files),
+            scanned_input_files: self
+                .scanned_input_files
+                .saturating_sub(before.scanned_input_files),
+        }
+    }
+}
+
+pub fn aggregate_stats_metrics_snapshot() -> AggregateStatsMetricsSnapshot {
+    AggregateStatsMetricsSnapshot {
+        stats_input_files: AGGREGATE_STATS_STATS_INPUT_FILES_TOTAL.get(),
+        scanned_input_files: AGGREGATE_STATS_SCANNED_INPUT_FILES_TOTAL.get(),
+    }
 }
 
 /// A stream to call the callback once a RecordBatch stream is done.

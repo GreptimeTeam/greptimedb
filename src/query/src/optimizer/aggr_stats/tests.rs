@@ -29,6 +29,7 @@ use common_time::timestamp::TimeUnit as TimestampUnit;
 use datafusion::execution::context::SessionContext;
 use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
+use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -54,7 +55,7 @@ use store_api::scan_stats::{
     RegionScanColumnStats as RegionScanColumnInputStats,
     RegionScanFileStats as RegionScanFileInputStats, RegionScanStats as RegionScanInputStats,
 };
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{FileId, RegionId, ScanRequest};
 use table::metadata::{TableInfoBuilder, TableMetaBuilder};
 use table::table::scan::RegionScanExec;
 use table::test_util::EmptyTable;
@@ -71,6 +72,10 @@ use crate::tests::new_query_engine_with_table;
 
 fn test_timestamp(value: i64) -> Timestamp {
     Timestamp::new(value, TimestampUnit::Millisecond)
+}
+
+fn test_file_id(seed: usize) -> FileId {
+    FileId::parse_str(&format!("00000000-0000-0000-0000-{:012x}", seed + 1)).unwrap()
 }
 
 fn field_stats(
@@ -410,6 +415,7 @@ fn test_count_star_file_stats_eligibility() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: None,
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: HashMap::new(),
@@ -417,6 +423,7 @@ fn test_count_star_file_stats_eligibility() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(42),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -424,6 +431,7 @@ fn test_count_star_file_stats_eligibility() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 2,
+                file_id: test_file_id(2),
                 exact_num_rows: Some(7),
                 time_range: Some((test_timestamp(50), test_timestamp(60))),
                 field_stats: HashMap::new(),
@@ -441,6 +449,7 @@ fn test_split_count_star_files() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: HashMap::new(),
@@ -448,6 +457,7 @@ fn test_split_count_star_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: None,
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -455,6 +465,7 @@ fn test_split_count_star_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 2,
+                file_id: test_file_id(2),
                 exact_num_rows: Some(5),
                 time_range: Some((test_timestamp(50), test_timestamp(60))),
                 field_stats: HashMap::new(),
@@ -475,6 +486,7 @@ fn test_split_count_star_files_keeps_zero_row_files_stats_eligible() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(0),
                 time_range: None,
                 field_stats: HashMap::new(),
@@ -482,6 +494,7 @@ fn test_split_count_star_files_keeps_zero_row_files_stats_eligible() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: None,
                 time_range: None,
                 field_stats: HashMap::new(),
@@ -597,6 +610,7 @@ fn test_partition_expr_mismatch_detection() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(1),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: HashMap::new(),
@@ -604,6 +618,7 @@ fn test_partition_expr_mismatch_detection() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(2),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -621,6 +636,7 @@ fn test_time_file_stats_eligibility() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: None,
                 field_stats: HashMap::new(),
@@ -628,6 +644,7 @@ fn test_time_file_stats_eligibility() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: None,
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -650,6 +667,7 @@ fn test_split_time_files() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(50), test_timestamp(70))),
                 field_stats: HashMap::new(),
@@ -657,6 +675,7 @@ fn test_split_time_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: None,
                 field_stats: HashMap::new(),
@@ -664,6 +683,7 @@ fn test_split_time_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 2,
+                file_id: test_file_id(2),
                 exact_num_rows: Some(5),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: HashMap::new(),
@@ -671,6 +691,7 @@ fn test_split_time_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 3,
+                file_id: test_file_id(3),
                 exact_num_rows: Some(6),
                 time_range: Some((test_timestamp(5), test_timestamp(100))),
                 field_stats: HashMap::new(),
@@ -692,6 +713,7 @@ fn test_count_field_file_stats_eligibility() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: HashMap::new(),
@@ -699,6 +721,7 @@ fn test_count_field_file_stats_eligibility() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(5),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: field_stats(Some(4), Some(Value::Int64(1)), Some(Value::Int64(9))),
@@ -722,6 +745,7 @@ fn test_split_count_field_files() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: field_stats(Some(2), Some(Value::Int64(1)), Some(Value::Int64(3))),
@@ -729,6 +753,7 @@ fn test_split_count_field_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -736,6 +761,7 @@ fn test_split_count_field_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 2,
+                file_id: test_file_id(2),
                 exact_num_rows: Some(5),
                 time_range: Some((test_timestamp(50), test_timestamp(60))),
                 field_stats: field_stats(Some(4), Some(Value::Int64(5)), Some(Value::Int64(8))),
@@ -756,6 +782,7 @@ fn test_min_max_field_stats_eligibility() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: field_stats(Some(2), Some(Value::Int64(1)), Some(Value::Int64(3))),
@@ -763,6 +790,7 @@ fn test_min_max_field_stats_eligibility() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -786,6 +814,7 @@ fn test_split_min_max_field_files() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: field_stats(Some(2), Some(Value::Int64(4)), Some(Value::Int64(9))),
@@ -793,6 +822,7 @@ fn test_split_min_max_field_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -800,6 +830,7 @@ fn test_split_min_max_field_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 2,
+                file_id: test_file_id(2),
                 exact_num_rows: Some(5),
                 time_range: Some((test_timestamp(50), test_timestamp(60))),
                 field_stats: field_stats(Some(4), Some(Value::Int64(1)), Some(Value::Int64(7))),
@@ -821,6 +852,7 @@ fn test_common_stats_file_ordinals_intersects_supported_aggregates() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: field_stats(Some(2), Some(Value::Int64(4)), Some(Value::Int64(9))),
@@ -828,6 +860,7 @@ fn test_common_stats_file_ordinals_intersects_supported_aggregates() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -835,6 +868,7 @@ fn test_common_stats_file_ordinals_intersects_supported_aggregates() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 2,
+                file_id: test_file_id(2),
                 exact_num_rows: Some(5),
                 time_range: Some((test_timestamp(50), test_timestamp(60))),
                 field_stats: field_stats(Some(4), Some(Value::Int64(1)), Some(Value::Int64(7))),
@@ -864,6 +898,7 @@ fn test_common_stats_file_ordinals_returns_only_shared_stats_eligible_files() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: field_stats(Some(2), Some(Value::Int64(4)), Some(Value::Int64(9))),
@@ -871,6 +906,7 @@ fn test_common_stats_file_ordinals_returns_only_shared_stats_eligible_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -896,6 +932,7 @@ fn test_filter_stats_by_file_ordinals_keeps_only_selected_files() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: HashMap::new(),
@@ -903,6 +940,7 @@ fn test_filter_stats_by_file_ordinals_keeps_only_selected_files() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -923,6 +961,7 @@ fn test_partial_state_from_stats_count_star() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: HashMap::new(),
@@ -930,6 +969,7 @@ fn test_partial_state_from_stats_count_star() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -961,6 +1001,7 @@ fn test_partial_state_from_stats_count_field() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: field_stats(Some(2), Some(Value::Int64(1)), Some(Value::Int64(3))),
@@ -968,6 +1009,7 @@ fn test_partial_state_from_stats_count_field() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: field_stats(Some(4), Some(Value::Int64(5)), Some(Value::Int64(9))),
@@ -998,6 +1040,7 @@ fn test_partial_state_from_stats_min_time() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(50), test_timestamp(70))),
                 field_stats: HashMap::new(),
@@ -1005,6 +1048,7 @@ fn test_partial_state_from_stats_min_time() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(5),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: HashMap::new(),
@@ -1036,6 +1080,7 @@ fn test_partial_state_from_stats_max_field() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: field_stats(Some(2), Some(Value::Int64(1)), Some(Value::Int64(3))),
@@ -1043,6 +1088,7 @@ fn test_partial_state_from_stats_max_field() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: field_stats(Some(4), Some(Value::Int64(5)), Some(Value::Int64(9))),
@@ -1080,6 +1126,7 @@ fn test_optimizer_rewrites_into_final_union_partial_scan_and_stats() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: field_stats(Some(2), Some(Value::Int64(1)), Some(Value::Int64(3))),
@@ -1087,6 +1134,7 @@ fn test_optimizer_rewrites_into_final_union_partial_scan_and_stats() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -1094,6 +1142,7 @@ fn test_optimizer_rewrites_into_final_union_partial_scan_and_stats() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 2,
+                file_id: test_file_id(2),
                 exact_num_rows: Some(5),
                 time_range: Some((test_timestamp(50), test_timestamp(60))),
                 field_stats: field_stats(Some(4), Some(Value::Int64(5)), Some(Value::Int64(9))),
@@ -1157,6 +1206,15 @@ fn test_optimizer_rewrites_into_final_union_partial_scan_and_stats() {
         vec![1]
     );
     assert_eq!(excluded_count.load(Ordering::Relaxed), 2);
+
+    let explain = displayable(optimized.as_ref()).indent(true).to_string();
+    assert!(
+        explain.contains("aggregate_stats: rewritten=true"),
+        "explain: {explain}"
+    );
+    assert!(explain.contains("stats_files=2"), "explain: {explain}");
+    assert!(explain.contains(&test_file_id(0).to_string()), "explain: {explain}");
+    assert!(explain.contains(&test_file_id(2).to_string()), "explain: {explain}");
 }
 
 #[test]
@@ -1175,6 +1233,7 @@ fn test_optimizer_rewrites_final_partial_plan_by_replacing_partial_input() {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(20))),
                 field_stats: field_stats(Some(2), Some(Value::Int64(1)), Some(Value::Int64(3))),
@@ -1182,6 +1241,7 @@ fn test_optimizer_rewrites_final_partial_plan_by_replacing_partial_input() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(40))),
                 field_stats: HashMap::new(),
@@ -1189,6 +1249,7 @@ fn test_optimizer_rewrites_final_partial_plan_by_replacing_partial_input() {
             },
             RegionScanFileInputStats {
                 file_ordinal: 2,
+                file_id: test_file_id(2),
                 exact_num_rows: Some(5),
                 time_range: Some((test_timestamp(50), test_timestamp(60))),
                 field_stats: field_stats(Some(4), Some(Value::Int64(5)), Some(Value::Int64(9))),
@@ -1307,6 +1368,7 @@ fn execution_test_stats() -> RegionScanInputStats {
         files: vec![
             RegionScanFileInputStats {
                 file_ordinal: 0,
+                file_id: test_file_id(0),
                 exact_num_rows: Some(3),
                 time_range: Some((test_timestamp(10), test_timestamp(12))),
                 field_stats: field_stats(Some(2), Some(Value::Int64(1)), Some(Value::Int64(3))),
@@ -1314,6 +1376,7 @@ fn execution_test_stats() -> RegionScanInputStats {
             },
             RegionScanFileInputStats {
                 file_ordinal: 1,
+                file_id: test_file_id(1),
                 exact_num_rows: Some(4),
                 time_range: Some((test_timestamp(30), test_timestamp(33))),
                 field_stats: HashMap::new(),
@@ -1321,6 +1384,7 @@ fn execution_test_stats() -> RegionScanInputStats {
             },
             RegionScanFileInputStats {
                 file_ordinal: 2,
+                file_id: test_file_id(2),
                 exact_num_rows: Some(5),
                 time_range: Some((test_timestamp(50), test_timestamp(54))),
                 field_stats: field_stats(Some(4), Some(Value::Int64(7)), Some(Value::Int64(10))),
@@ -1602,4 +1666,65 @@ async fn test_optimizer_execution_matrix() {
             case.name
         );
     }
+}
+
+#[test]
+fn test_optimizer_observability_distinguishes_rewrite_hit_and_miss() {
+    let schema = execution_test_schema();
+    let metadata = test_region_metadata();
+    let base_stats = execution_test_stats();
+    let file_batches = execution_test_file_batches(schema.clone());
+    let hit_excluded_count = Arc::new(AtomicUsize::new(0));
+
+    let hit_plan = build_execution_test_plan(
+        schema.clone(),
+        metadata.clone(),
+        base_stats.clone(),
+        file_batches.clone(),
+        ExecutionAggExprCase::CountValue {
+            ignore_nulls: false,
+        }
+        .build(),
+        hit_excluded_count.clone(),
+    );
+    let optimized_hit = AggregateStats::do_optimize(hit_plan).unwrap();
+    assert!(optimized_plan_uses_stats_union(&optimized_hit));
+    assert_eq!(hit_excluded_count.load(Ordering::Relaxed), 2);
+
+    let hit_explain = displayable(optimized_hit.as_ref()).indent(true).to_string();
+    assert!(hit_explain.contains("aggregate_stats: rewritten=true"));
+    assert!(hit_explain.contains("stats_files=2"));
+    assert!(hit_explain.contains(&test_file_id(0).to_string()));
+    assert!(hit_explain.contains(&test_file_id(2).to_string()));
+
+    let miss_excluded_count = Arc::new(AtomicUsize::new(0));
+    let miss_scanner = Box::new(
+        StatsRecordingScanner::new(
+            schema.clone(),
+            metadata,
+            base_stats,
+            miss_excluded_count.clone(),
+        )
+        .with_file_batches(file_batches),
+    );
+    let miss_scan = Arc::new(RegionScanExec::new(miss_scanner, ScanRequest::default(), None).unwrap());
+    let miss_aggr_expr = Arc::new(build_test_aggr_expr(true, false, false).unwrap());
+    let miss_plan: Arc<dyn ExecutionPlan> = Arc::new(
+        AggregateExec::try_new(
+            AggregateMode::Single,
+            PhysicalGroupBy::new_single(vec![]),
+            vec![miss_aggr_expr],
+            vec![None],
+            miss_scan,
+            schema.arrow_schema().clone(),
+        )
+        .unwrap(),
+    );
+
+    let optimized_miss = AggregateStats::do_optimize(miss_plan).unwrap();
+    assert!(!optimized_plan_uses_stats_union(&optimized_miss));
+    assert_eq!(miss_excluded_count.load(Ordering::Relaxed), 0);
+
+    let miss_explain = displayable(optimized_miss.as_ref()).indent(true).to_string();
+    assert!(!miss_explain.contains("aggregate_stats: rewritten=true"));
 }

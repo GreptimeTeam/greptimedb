@@ -22,6 +22,8 @@ use std::collections::HashMap;
 use common_time::Timestamp;
 use datatypes::value::Value;
 
+use crate::storage::FileId;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionScanColumnStats {
     pub min_value: Option<Value>,
@@ -31,7 +33,9 @@ pub struct RegionScanColumnStats {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionScanFileStats {
-    /// Stable file id within one `RegionScanStats` snapshot.
+    /// Stable file id for explainability and cross-plan correlation.
+    pub file_id: FileId,
+    /// Stable file ordinal within one `RegionScanStats` snapshot.
     pub file_ordinal: usize,
     pub exact_num_rows: Option<usize>,
     pub time_range: Option<(Timestamp, Timestamp)>,

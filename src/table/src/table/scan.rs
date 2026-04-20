@@ -49,7 +49,7 @@ use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
 use store_api::scan_stats::RegionScanStats;
-use store_api::storage::{ScanRequest, TimeSeriesDistribution};
+use store_api::storage::{FileId, ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
 
@@ -67,8 +67,14 @@ pub struct RegionScanExec {
     is_partition_set: bool,
     // TODO(ruihang): handle TimeWindowed dist via this parameter
     distribution: Option<TimeSeriesDistribution>,
+    aggr_stats_explain: Option<AggregateStatsExplain>,
     explain_verbose: bool,
     query_memory_permit: Option<Arc<MemoryPermit>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AggregateStatsExplain {
+    pub stats_file_ids: Vec<FileId>,
 }
 
 impl std::fmt::Debug for RegionScanExec {
@@ -83,6 +89,7 @@ impl std::fmt::Debug for RegionScanExec {
             .field("total_rows", &self.total_rows)
             .field("is_partition_set", &self.is_partition_set)
             .field("distribution", &self.distribution)
+            .field("aggr_stats_explain", &self.aggr_stats_explain)
             .field("explain_verbose", &self.explain_verbose)
             .finish()
     }
@@ -226,6 +233,7 @@ impl RegionScanExec {
             total_rows,
             is_partition_set: false,
             distribution: request.distribution,
+            aggr_stats_explain: None,
             explain_verbose: false,
             query_memory_permit,
         })
@@ -299,6 +307,7 @@ impl RegionScanExec {
             total_rows: self.total_rows,
             is_partition_set: true,
             distribution: self.distribution,
+            aggr_stats_explain: self.aggr_stats_explain.clone(),
             explain_verbose: self.explain_verbose,
             query_memory_permit: self.query_memory_permit.clone(),
         })
@@ -325,9 +334,27 @@ impl RegionScanExec {
             total_rows: self.total_rows,
             is_partition_set: self.is_partition_set,
             distribution: self.distribution,
+            aggr_stats_explain: self.aggr_stats_explain.clone(),
             explain_verbose: self.explain_verbose,
             query_memory_permit: self.query_memory_permit.clone(),
         })
+    }
+
+    pub fn with_aggregate_stats_explain(&self, explain: AggregateStatsExplain) -> Self {
+        Self {
+            scanner: self.scanner.clone(),
+            arrow_schema: self.arrow_schema.clone(),
+            output_ordering: self.output_ordering.clone(),
+            metric: self.metric.clone(),
+            properties: self.properties.clone(),
+            append_mode: self.append_mode,
+            total_rows: self.total_rows,
+            is_partition_set: self.is_partition_set,
+            distribution: self.distribution,
+            aggr_stats_explain: Some(explain),
+            explain_verbose: self.explain_verbose,
+            query_memory_permit: self.query_memory_permit.clone(),
+        }
     }
 
     pub fn distribution(&self) -> Option<TimeSeriesDistribution> {
@@ -520,7 +547,27 @@ impl DisplayAs for RegionScanExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // The scanner contains all information needed to display the plan.
         match self.scanner.try_lock() {
-            Ok(scanner) => scanner.fmt_as(t, f),
+            Ok(scanner) => {
+                scanner.fmt_as(t, f)?;
+                if let Some(explain) = self.aggr_stats_explain.as_ref() {
+                    write!(
+                        f,
+                        ", aggregate_stats: rewritten=true, stats_files={}",
+                        explain.stats_file_ids.len(),
+                    )?;
+
+                    if matches!(t, DisplayFormatType::Verbose) {
+                        let stats_file_ids = explain
+                            .stats_file_ids
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        write!(f, ", stats_file_ids=[{}]", stats_file_ids)?;
+                    }
+                }
+                Ok(())
+            }
             Err(_) => write!(f, "RegionScanExec <locked>"),
         }
     }

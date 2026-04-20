@@ -30,7 +30,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DataFusionError, Result as DfResult, ScalarValue};
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datatypes::arrow::datatypes::DataType;
-use table::table::scan::RegionScanExec;
+use table::table::scan::{AggregateStatsExplain, RegionScanExec};
 
 mod check;
 mod split;
@@ -39,6 +39,10 @@ mod tests;
 
 use check::RewriteCheck;
 use split::{common_stats_file_ordinals, filter_stats_by_file_ordinals, partial_state_from_stats};
+
+use crate::metrics::{
+    AGGREGATE_STATS_SCANNED_INPUT_FILES_TOTAL, AGGREGATE_STATS_STATS_INPUT_FILES_TOTAL,
+};
 
 enum RewriteTarget<'a> {
     SingleStage {
@@ -178,10 +182,22 @@ impl AggregateStats {
                 let Some(target) = RewriteTarget::extract(&plan) else {
                     return Ok(Transformed::no(plan));
                 };
+                let Some(scan_input_stats) = target.region_scan().scan_input_stats()? else {
+                    Self::record_rewrite_miss(None);
+                    return Ok(Transformed::no(plan));
+                };
 
                 let check = RewriteCheck::new(target.first_stage_aggregate(), target.region_scan());
                 if let Some(reason) = check.skip_reason()? {
                     debug!("Skip aggregate stats optimization: {reason}");
+                    Self::record_rewrite_miss(
+                        target
+                            .region_scan()
+                            .scan_input_stats()
+                            .ok()
+                            .flatten()
+                            .map(|stats| stats.files.len()),
+                    );
                     return Ok(Transformed::no(plan));
                 }
 
@@ -190,15 +206,13 @@ impl AggregateStats {
                         "aggregate stats rewrite became ineligible after eligibility check: {reason}"
                     ))
                 })?;
-                let Some(scan_input_stats) = target.region_scan().scan_input_stats()? else {
-                    return Ok(Transformed::no(plan));
-                };
 
                 let excluded_file_ordinals = common_stats_file_ordinals(&aggs, &scan_input_stats);
                 if excluded_file_ordinals.is_empty() {
                     debug!(
                         "Skip aggregate stats optimization: no shared stats-covered files across aggregates"
                     );
+                    Self::record_rewrite_miss(Some(scan_input_stats.files.len()));
                     return Ok(Transformed::no(plan));
                 }
 
@@ -208,6 +222,8 @@ impl AggregateStats {
                     &scan_input_stats,
                     &excluded_file_ordinals,
                 )?;
+
+                Self::record_rewrite_hit(scan_input_stats.files.len(), excluded_file_ordinals.len());
 
                 Ok(Transformed::yes(rewritten))
             })?
@@ -343,7 +359,14 @@ impl AggregateStats {
         let filtered_scan = Arc::new(
             region_scan
                 .with_excluded_file_ordinals(excluded_file_ordinals.to_vec())
-                .map_err(boxed_external)?,
+                .map_err(boxed_external)?
+                .with_aggregate_stats_explain(AggregateStatsExplain {
+                    stats_file_ids: stats_scan_input
+                        .files
+                        .iter()
+                        .map(|file| file.file_id)
+                        .collect(),
+                }),
         );
 
         let partial_scan = Arc::new(
@@ -411,6 +434,18 @@ impl AggregateStats {
                 )
             })?;
         Ok(struct_array.columns().to_vec())
+    }
+
+    fn record_rewrite_hit(total_files: usize, excluded_files: usize) {
+        let fallback_files = total_files.saturating_sub(excluded_files);
+        AGGREGATE_STATS_STATS_INPUT_FILES_TOTAL.inc_by(excluded_files as u64);
+        AGGREGATE_STATS_SCANNED_INPUT_FILES_TOTAL.inc_by(fallback_files as u64);
+    }
+
+    fn record_rewrite_miss(total_files: Option<usize>) {
+        if let Some(total_files) = total_files {
+            AGGREGATE_STATS_SCANNED_INPUT_FILES_TOTAL.inc_by(total_files as u64);
+        }
     }
 }
 
