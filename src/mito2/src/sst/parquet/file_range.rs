@@ -26,9 +26,8 @@ use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datatypes::arrow::array::{Array as _, ArrayRef, BooleanArray};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::Schema;
-use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
+use mito_codec::row_converter::PrimaryKeyCodec;
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::ParquetMetaData;
 use snafu::{OptionExt, ResultExt};
@@ -39,22 +38,19 @@ use table::predicate::Predicate;
 
 use crate::cache::CacheStrategy;
 use crate::error::{
-    ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
-    EvalPartitionFilterSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
-    UnexpectedSnafu,
+    ComputeArrowSnafu, DecodeStatsSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu,
+    RecordBatchSnafu, Result, StatsNotPresentSnafu, UnexpectedSnafu,
 };
-use crate::read::Batch;
-use crate::read::compat::CompatBatch;
+use crate::read::compat::FlatCompatBatch;
 use crate::read::flat_projection::CompactionProjectionMapper;
-use crate::read::last_row::{FlatRowGroupLastRowCachedReader, RowGroupLastRowCachedReader};
-use crate::read::prune::{FlatPruneReader, PruneReader};
+use crate::read::last_row::FlatRowGroupLastRowCachedReader;
+use crate::read::prune::FlatPruneReader;
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::flat_format::{
-    DecodedPrimaryKeys, decode_primary_keys, time_index_column_index,
+    DecodedPrimaryKeys, FlatReadFormat, decode_primary_keys, time_index_column_index,
 };
-use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
-    FlatRowGroupReader, MaybeFilter, RowGroupBuildContext, RowGroupReader, RowGroupReaderBuilder,
+    FlatRowGroupReader, MaybeFilter, RowGroupBuildContext, RowGroupReaderBuilder,
     SimpleFilterContext,
 };
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
@@ -158,69 +154,6 @@ impl FileRange {
             .unwrap_or(true) // unexpected, not skip just in case
     }
 
-    /// Returns a reader to read the [FileRange].
-    #[allow(dead_code)]
-    pub(crate) async fn reader(
-        &self,
-        selector: Option<TimeSeriesRowSelector>,
-        fetch_metrics: Option<&ParquetFetchMetrics>,
-    ) -> Result<Option<PruneReader>> {
-        if !self.in_dynamic_filter_range() {
-            return Ok(None);
-        }
-        // Compute skip_fields once for this row group
-        let skip_fields = self.context.base.pre_filter_mode.skip_fields();
-        let parquet_reader = self
-            .context
-            .reader_builder
-            .build(self.context.build_context(
-                self.row_group_idx,
-                self.row_selection.clone(),
-                fetch_metrics,
-                skip_fields,
-            ))
-            .await?;
-
-        let use_last_row_reader = if selector
-            .map(|s| s == TimeSeriesRowSelector::LastRow)
-            .unwrap_or(false)
-        {
-            // Only use LastRowReader if row group does not contain DELETE
-            // and all rows are selected.
-            let put_only = !self
-                .context
-                .contains_delete(self.row_group_idx)
-                .inspect_err(|e| {
-                    error!(e; "Failed to decode min value of op_type, fallback to RowGroupReader");
-                })
-                .unwrap_or(true);
-            put_only && self.select_all()
-        } else {
-            // No selector provided, use RowGroupReader
-            false
-        };
-
-        let prune_reader = if use_last_row_reader {
-            // Row group is PUT only, use LastRowReader to skip unnecessary rows.
-            let reader = RowGroupLastRowCachedReader::new(
-                self.file_handle().file_id().file_id(),
-                self.row_group_idx,
-                self.context.reader_builder.cache_strategy().clone(),
-                RowGroupReader::new(self.context.clone(), parquet_reader),
-            );
-            PruneReader::new_with_last_row_reader(self.context.clone(), reader, skip_fields)
-        } else {
-            // Row group contains DELETE, fallback to default reader.
-            PruneReader::new_with_row_group_reader(
-                self.context.clone(),
-                RowGroupReader::new(self.context.clone(), parquet_reader),
-                skip_fields,
-            )
-        };
-
-        Ok(Some(prune_reader))
-    }
-
     /// Creates a flat reader that returns RecordBatch.
     pub(crate) async fn flat_reader(
         &self,
@@ -293,7 +226,7 @@ impl FileRange {
     }
 
     /// Returns the helper to compat batches.
-    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
+    pub(crate) fn compat_batch(&self) -> Option<&FlatCompatBatch> {
         self.context.compat_batch()
     }
 
@@ -343,7 +276,7 @@ impl FileRangeContext {
     }
 
     /// Returns the format helper.
-    pub(crate) fn read_format(&self) -> &ReadFormat {
+    pub(crate) fn read_format(&self) -> &FlatReadFormat {
         &self.base.read_format
     }
 
@@ -353,7 +286,7 @@ impl FileRangeContext {
     }
 
     /// Returns the helper to compat batches.
-    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
+    pub(crate) fn compat_batch(&self) -> Option<&FlatCompatBatch> {
         self.base.compat_batch.as_ref()
     }
 
@@ -362,16 +295,9 @@ impl FileRangeContext {
         self.base.compaction_projection_mapper.as_ref()
     }
 
-    /// Sets the `CompatBatch` to the context.
-    pub(crate) fn set_compat_batch(&mut self, compat: Option<CompatBatch>) {
+    /// Sets the compat helper to the context.
+    pub(crate) fn set_compat_batch(&mut self, compat: Option<FlatCompatBatch>) {
         self.base.compat_batch = compat;
-    }
-
-    /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
-    /// Return the filtered batch. If the entire batch is filtered out, return None.
-    /// If a partition expr filter is configured, it is also applied.
-    pub(crate) fn precise_filter(&self, input: Batch, skip_fields: bool) -> Result<Option<Batch>> {
-        self.base.precise_filter(input, skip_fields)
     }
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
@@ -452,14 +378,14 @@ pub(crate) struct RangeBase {
     /// Dynamic filter physical exprs.
     pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
-    pub(crate) read_format: ReadFormat,
+    pub(crate) read_format: FlatReadFormat,
     pub(crate) expected_metadata: Option<RegionMetadataRef>,
     /// Schema used for pruning with dynamic filters.
     pub(crate) prune_schema: Arc<Schema>,
     /// Decoder for primary keys
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
-    pub(crate) compat_batch: Option<CompatBatch>,
+    pub(crate) compat_batch: Option<FlatCompatBatch>,
     /// Optional helper to project batches.
     pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,
     /// Mode to pre-filter columns.
@@ -483,122 +409,6 @@ impl TagDecodeState {
 }
 
 impl RangeBase {
-    /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
-    /// Return the filtered batch. If the entire batch is filtered out, return None.
-    ///
-    /// Supported filter expr type is defined in [SimpleFilterEvaluator].
-    ///
-    /// When a filter is referencing primary key column, this method will decode
-    /// the primary key and put it into the batch.
-    ///
-    /// # Arguments
-    /// * `input` - The batch to filter
-    /// * `skip_fields` - Whether to skip field filters based on PreFilterMode
-    pub(crate) fn precise_filter(
-        &self,
-        mut input: Batch,
-        skip_fields: bool,
-    ) -> Result<Option<Batch>> {
-        let mut mask = BooleanBuffer::new_set(input.num_rows());
-
-        // Run filter one by one and combine them result
-        // TODO(ruihang): run primary key filter first. It may short circuit other filters
-        for filter_ctx in &self.filters {
-            let filter = match filter_ctx.filter() {
-                MaybeFilter::Filter(f) => f,
-                // Column matches.
-                MaybeFilter::Matched => continue,
-                // Column doesn't match, filter the entire batch.
-                MaybeFilter::Pruned => return Ok(None),
-            };
-            let result = match filter_ctx.semantic_type() {
-                SemanticType::Tag => {
-                    let pk_values = if let Some(pk_values) = input.pk_values() {
-                        pk_values
-                    } else {
-                        input.set_pk_values(
-                            self.codec
-                                .decode(input.primary_key())
-                                .context(DecodeSnafu)?,
-                        );
-                        input.pk_values().unwrap()
-                    };
-                    let pk_value = match pk_values {
-                        CompositeValues::Dense(v) => {
-                            // Safety: this is a primary key
-                            let pk_index = self
-                                .read_format
-                                .metadata()
-                                .primary_key_index(filter_ctx.column_id())
-                                .unwrap();
-                            v[pk_index]
-                                .1
-                                .try_to_scalar_value(filter_ctx.data_type())
-                                .context(DataTypeMismatchSnafu)?
-                        }
-                        CompositeValues::Sparse(v) => {
-                            let v = v.get_or_null(filter_ctx.column_id());
-                            v.try_to_scalar_value(filter_ctx.data_type())
-                                .context(DataTypeMismatchSnafu)?
-                        }
-                    };
-                    if filter
-                        .evaluate_scalar(&pk_value)
-                        .context(RecordBatchSnafu)?
-                    {
-                        continue;
-                    } else {
-                        // PK not match means the entire batch is filtered out.
-                        return Ok(None);
-                    }
-                }
-                SemanticType::Field => {
-                    // Skip field filters if skip_fields is true
-                    if skip_fields {
-                        continue;
-                    }
-                    // Safety: Input is Batch so we are using primary key format.
-                    let Some(field_index) = self
-                        .read_format
-                        .as_primary_key()
-                        .unwrap()
-                        .field_index_by_id(filter_ctx.column_id())
-                    else {
-                        continue;
-                    };
-                    let field_col = &input.fields()[field_index].data;
-                    filter
-                        .evaluate_vector(field_col)
-                        .context(RecordBatchSnafu)?
-                }
-                SemanticType::Timestamp => filter
-                    .evaluate_vector(input.timestamps())
-                    .context(RecordBatchSnafu)?,
-            };
-
-            mask = mask.bitand(&result);
-        }
-
-        if mask.count_set_bits() == 0 {
-            return Ok(None);
-        }
-
-        // Apply partition filter
-        if let Some(partition_filter) = &self.partition_filter {
-            let record_batch = self
-                .build_record_batch_for_pruning(&mut input, &partition_filter.partition_schema)?;
-            let partition_mask = self.evaluate_partition_filter(&record_batch, partition_filter)?;
-            mask = mask.bitand(&partition_mask);
-        }
-
-        if mask.count_set_bits() == 0 {
-            Ok(None)
-        } else {
-            input.filter(&BooleanArray::from(mask).into())?;
-            Ok(Some(input))
-        }
-    }
-
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
     ///
     /// It assumes all necessary tags are already decoded from the primary key.
@@ -668,13 +478,7 @@ impl RangeBase {
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
-        let flat_format = self
-            .read_format
-            .as_flat()
-            .context(crate::error::UnexpectedSnafu {
-                reason: "Expected flat format for precise_filter_flat",
-            })?;
-        let metadata = flat_format.metadata();
+        let metadata = self.read_format.metadata();
 
         // Run filter one by one and combine them result
         for filter_ctx in &self.filters {
@@ -700,7 +504,9 @@ impl RangeBase {
             // Get the column directly by its projected index.
             // If the column is missing and it's not a tag/time column, this filter is skipped.
             // Assumes the projection indices align with the input batch schema.
-            let column_idx = flat_format.projected_index_by_id(filter_ctx.column_id());
+            let column_idx = self
+                .read_format
+                .projected_index_by_id(filter_ctx.column_id());
             if let Some(idx) = column_idx {
                 let column = &input.columns().get(idx).unwrap();
                 let result = filter.evaluate_array(column).context(RecordBatchSnafu)?;
@@ -804,84 +610,6 @@ impl RangeBase {
         Ok(mask)
     }
 
-    /// Builds a `RecordBatch` from the input `Batch` matching the given schema.
-    ///
-    /// This is used for partition expression evaluation. The schema should only contain
-    /// the columns referenced by the partition expression to minimize overhead.
-    fn build_record_batch_for_pruning(
-        &self,
-        input: &mut Batch,
-        schema: &Arc<Schema>,
-    ) -> Result<RecordBatch> {
-        let arrow_schema = schema.arrow_schema();
-        let mut columns = Vec::with_capacity(arrow_schema.fields().len());
-
-        // Decode primary key if necessary.
-        if input.pk_values().is_none() {
-            input.set_pk_values(
-                self.codec
-                    .decode(input.primary_key())
-                    .context(DecodeSnafu)?,
-            );
-        }
-
-        for field in arrow_schema.fields() {
-            let metadata = self.read_format.metadata();
-            let column_id = metadata.column_by_name(field.name()).map(|c| c.column_id);
-
-            // Partition pruning schema should be a subset of the input batch schema.
-            let Some(column_id) = column_id else {
-                return UnexpectedSnafu {
-                    reason: format!(
-                        "Partition pruning schema expects column '{}' but it is missing in \
-                         region metadata",
-                        field.name()
-                    ),
-                }
-                .fail();
-            };
-
-            // 1. Check if it's a tag.
-            if let Some(pk_index) = metadata.primary_key_index(column_id) {
-                let pk_values = input.pk_values().unwrap();
-                let value = match pk_values {
-                    CompositeValues::Dense(v) => &v[pk_index].1,
-                    CompositeValues::Sparse(v) => v.get_or_null(column_id),
-                };
-                let concrete_type = ConcreteDataType::from_arrow_type(field.data_type());
-                let arrow_scalar = value
-                    .try_to_scalar_value(&concrete_type)
-                    .context(DataTypeMismatchSnafu)?;
-                let array = arrow_scalar
-                    .to_array_of_size(input.num_rows())
-                    .context(EvalPartitionFilterSnafu)?;
-                columns.push(array);
-            } else if metadata.time_index_column().column_id == column_id {
-                // 2. Check if it's the timestamp column.
-                columns.push(input.timestamps().to_arrow_array());
-            } else if let Some(field_index) = self
-                .read_format
-                .as_primary_key()
-                .and_then(|f| f.field_index_by_id(column_id))
-            {
-                // 3. Check if it's a field column.
-                columns.push(input.fields()[field_index].data.to_arrow_array());
-            } else {
-                return UnexpectedSnafu {
-                    reason: format!(
-                        "Partition pruning schema expects column '{}' (id {}) but it is not \
-                         present in input batch",
-                        field.name(),
-                        column_id
-                    ),
-                }
-                .fail();
-            }
-        }
-
-        RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
-    }
-
     /// Projects the input `RecordBatch` to match the given schema.
     ///
     /// This is used for partition expression evaluation. The schema should only contain
@@ -895,13 +623,7 @@ impl RangeBase {
         let arrow_schema = schema.arrow_schema();
         let mut columns = Vec::with_capacity(arrow_schema.fields().len());
 
-        let flat_format = self
-            .read_format
-            .as_flat()
-            .context(crate::error::UnexpectedSnafu {
-                reason: "Expected flat format for precise_filter_flat",
-            })?;
-        let metadata = flat_format.metadata();
+        let metadata = self.read_format.metadata();
 
         for field in arrow_schema.fields() {
             let column_id = metadata.column_by_name(field.name()).map(|c| c.column_id);
@@ -917,7 +639,7 @@ impl RangeBase {
                 .fail();
             };
 
-            if let Some(idx) = flat_format.projected_index_by_id(column_id) {
+            if let Some(idx) = self.read_format.projected_index_by_id(column_id) {
                 columns.push(input.column(idx).clone());
                 continue;
             }
@@ -957,12 +679,12 @@ mod tests {
     use datafusion_expr::{col, lit};
 
     use super::*;
-    use crate::sst::parquet::format::ReadFormat;
+    use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::test_util::sst_util::{new_record_batch_with_custom_sequence, sst_region_metadata};
 
     fn new_test_range_base(filters: Vec<SimpleFilterContext>) -> RangeBase {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = ReadFormat::new_flat(
+        let read_format = FlatReadFormat::new(
             metadata.clone(),
             metadata.column_metadatas.iter().map(|c| c.column_id),
             None,

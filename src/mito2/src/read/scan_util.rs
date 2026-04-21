@@ -29,10 +29,9 @@ use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::Stream;
 use prometheus::IntGauge;
 use smallvec::SmallVec;
-use snafu::OptionExt;
 use store_api::storage::RegionId;
 
-use crate::error::{Result, UnexpectedSnafu};
+use crate::error::Result;
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROW_GROUPS_TOTAL,
@@ -1358,7 +1357,7 @@ mod split_tests {
     use store_api::storage::FileId;
 
     use super::*;
-    use crate::read::projection::ProjectionMapper;
+    use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::range::{RangeMeta, RowGroupIndex, SourceIndex};
     use crate::read::scan_region::{ScanInput, StreamContext};
     use crate::sst::file::FileHandle;
@@ -1369,7 +1368,7 @@ mod split_tests {
     async fn new_stream_context_with_files(files: Vec<FileHandle>) -> StreamContext {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
         let input = ScanInput::new(env.access_layer.clone(), mapper).with_files(files);
 
         StreamContext {
@@ -1498,7 +1497,7 @@ pub(crate) async fn scan_flat_file_ranges(
     fields(read_type = read_type, range_count = ranges.len())
 )]
 pub fn build_flat_file_range_scan_stream(
-    _stream_ctx: Arc<StreamContext>,
+    stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     read_type: &'static str,
     ranges: SmallVec<[FileRange; 2]>,
@@ -1516,18 +1515,19 @@ pub fn build_flat_file_range_scan_stream(
         };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let Some(mut reader) = range.flat_reader(_stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await? else{continue};
+            let Some(mut reader) = range
+                .flat_reader(
+                    stream_ctx.input.series_row_selector,
+                    fetch_metrics.as_deref(),
+                )
+                .await?
+            else {
+                continue;
+            };
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
-            let may_compat = range
-                .compat_batch()
-                .map(|compat| {
-                    compat.as_flat().context(UnexpectedSnafu {
-                        reason: "Invalid compat for flat format",
-                    })
-                })
-                .transpose()?;
+            let may_compat = range.compat_batch();
 
             let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch().await? {
@@ -1707,7 +1707,7 @@ mod tests {
         BoxedBatchIterator, BoxedRecordBatchIterator, IterBuilder, MemtableRange,
         MemtableRangeContext, MemtableStats,
     };
-    use crate::read::projection::ProjectionMapper;
+    use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::range::{MemRangeBuilder, SourceIndex};
     use crate::read::scan_region::ScanInput;
     use crate::sst::file::{FileHandle, FileMeta};
@@ -1741,7 +1741,7 @@ mod tests {
     ) -> Arc<StreamContext> {
         let env = SchedulerEnv::new().await;
         let metadata = metadata_for_test();
-        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
         let input = ScanInput::new(env.access_layer.clone(), mapper)
             .with_cache(CacheStrategy::Disabled)
             .with_memtables(memtables)

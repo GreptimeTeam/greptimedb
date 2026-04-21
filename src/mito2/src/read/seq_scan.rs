@@ -213,7 +213,7 @@ impl SeqScan {
             }
         }
 
-        let mapper = stream_ctx.input.mapper.as_flat().unwrap();
+        let mapper = &stream_ctx.input.mapper;
         let reader: BoxedRecordBatchStream = if sources.len() == 1 {
             // Currently, we can't skip dedup when there is only one source because
             // that source may have duplicate rows.

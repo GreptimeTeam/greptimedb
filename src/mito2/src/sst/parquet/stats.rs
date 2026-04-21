@@ -26,14 +26,15 @@ use parquet::file::metadata::RowGroupMetaData;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
-use crate::sst::parquet::format::{ReadFormat, StatValues};
+use crate::sst::parquet::flat_format::FlatReadFormat;
+use crate::sst::parquet::format::StatValues;
 
 /// Statistics for pruning row groups.
 pub(crate) struct RowGroupPruningStats<'a, T> {
     /// Metadata of SST row groups.
     row_groups: &'a [T],
     /// Helper to read the SST.
-    read_format: &'a ReadFormat,
+    read_format: &'a FlatReadFormat,
     /// The metadata of the region.
     /// It contains the schema a query expects to read. If it is not None, we use it instead
     /// of the metadata in the SST to get the column id of a column as the SST may have
@@ -47,7 +48,7 @@ impl<'a, T> RowGroupPruningStats<'a, T> {
     /// Creates a new statistics to prune specific `row_groups`.
     pub(crate) fn new(
         row_groups: &'a [T],
-        read_format: &'a ReadFormat,
+        read_format: &'a FlatReadFormat,
         expected_metadata: Option<RegionMetadataRef>,
         skip_fields: bool,
     ) -> Self {

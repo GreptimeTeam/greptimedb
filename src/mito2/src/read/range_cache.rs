@@ -631,7 +631,7 @@ mod tests {
 
     use super::*;
     use crate::cache::CacheManager;
-    use crate::read::projection::ProjectionMapper;
+    use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::range::{RangeMeta, RowGroupIndex, SourceIndex};
     use crate::read::scan_region::{PredicateGroup, ScanInput};
     use crate::test_util::memtable_util::metadata_with_primary_key;
@@ -691,7 +691,7 @@ mod tests {
     ) -> (StreamContext, PartitionRange) {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
         let predicate = PredicateGroup::new(metadata.as_ref(), &filters).unwrap();
         let file_id = FileId::random();
         let file = sst_file_handle_with_file_id(

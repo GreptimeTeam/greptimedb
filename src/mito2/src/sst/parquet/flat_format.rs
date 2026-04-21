@@ -53,7 +53,7 @@ use crate::error::{
 };
 use crate::sst::parquet::format::{
     FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
-    PrimaryKeyReadFormat, ReadFormat, StatValues,
+    PrimaryKeyReadFormat, StatValues, column_null_counts, column_values,
 };
 use crate::sst::{
     FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
@@ -518,7 +518,7 @@ impl ParquetFlat {
             return StatValues::NoColumn;
         };
 
-        let stats = ReadFormat::column_null_counts(row_groups, *index);
+        let stats = column_null_counts(row_groups, *index);
         StatValues::from_stats_opt(stats)
     }
 
@@ -535,7 +535,7 @@ impl ParquetFlat {
         // Safety: `column_id_to_sst_index` is built from `metadata`.
         let index = self.column_id_to_sst_index.get(&column_id).unwrap();
 
-        let stats = ReadFormat::column_values(row_groups, column, *index, is_min);
+        let stats = column_values(row_groups, column, *index, is_min);
         StatValues::from_stats_opt(stats)
     }
 }

@@ -26,7 +26,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
-use crate::sst::parquet::format::ReadFormat;
+use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::prefilter::CachedPrimaryKeyFilter;
 use crate::sst::parquet::reader::SimpleFilterContext;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -77,14 +77,26 @@ impl BulkIterContext {
             })
             .collect();
 
-        let read_format = ReadFormat::new(
-            region_metadata.clone(),
-            projection,
-            true,
-            None,
-            "memtable",
-            skip_auto_convert,
-        )?;
+        let read_format = if let Some(column_ids) = projection {
+            FlatReadFormat::new(
+                region_metadata.clone(),
+                column_ids.iter().copied(),
+                None,
+                "memtable",
+                skip_auto_convert,
+            )?
+        } else {
+            FlatReadFormat::new(
+                region_metadata.clone(),
+                region_metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id),
+                None,
+                "memtable",
+                skip_auto_convert,
+            )?
+        };
 
         let dyn_filters = predicate
             .as_ref()
@@ -143,11 +155,10 @@ impl BulkIterContext {
 
     /// Extracts PK filters if flat format with dictionary-encoded PKs is used.
     fn extract_pk_filters(
-        read_format: &ReadFormat,
+        read_format: &FlatReadFormat,
         filters: &[SimpleFilterContext],
     ) -> Option<Arc<Vec<SimpleFilterEvaluator>>> {
-        let flat_format = read_format.as_flat()?;
-        if flat_format.batch_has_raw_pk_columns() {
+        if read_format.batch_has_raw_pk_columns() {
             return None;
         }
         let metadata = read_format.metadata();
@@ -179,7 +190,7 @@ impl BulkIterContext {
         Some(CachedPrimaryKeyFilter::new(inner))
     }
 
-    pub(crate) fn read_format(&self) -> &ReadFormat {
+    pub(crate) fn read_format(&self) -> &FlatReadFormat {
         &self.base.read_format
     }
 
