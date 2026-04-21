@@ -33,7 +33,7 @@ use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
-use crate::error::{ComputeArrowSnafu, DecodeSnafu, Result, UnexpectedSnafu};
+use crate::error::{ComputeArrowSnafu, DecodeSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::reader::{RowGroupBuildContext, RowGroupReaderBuilder};
@@ -337,7 +337,9 @@ pub(crate) async fn execute_prefilter(
     let mut rows_before_filter = 0usize;
 
     while let Some(batch_result) = pk_stream.next().await {
-        let batch = batch_result?;
+        let batch = batch_result.context(ReadParquetSnafu {
+            path: reader_builder.file_path(),
+        })?;
         let batch_num_rows = batch.num_rows();
         if batch_num_rows == 0 {
             continue;
