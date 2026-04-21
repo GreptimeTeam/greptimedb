@@ -120,9 +120,7 @@ impl UnorderedScan {
             // Gets range meta.
             let range_meta = &stream_ctx.ranges[part_range_id];
             let part_range = range_meta.new_partition_range(part_range_id);
-            let ext_options = crate::extension::ExtensionRangeReadOptions {
-                pre_filter_mode: stream_ctx.range_pre_filter_mode(&part_range),
-            };
+            let pre_filter_mode = stream_ctx.range_pre_filter_mode(&part_range);
             for index in &range_meta.row_group_indices {
                 if stream_ctx.is_mem_range_index(*index) {
                     let stream = scan_flat_mem_ranges(
@@ -150,7 +148,7 @@ impl UnorderedScan {
                         &stream_ctx,
                         *index,
                         &part_metrics,
-                        ext_options,
+                        pre_filter_mode,
                     ).await?;
                     for await record_batch in stream {
                         yield record_batch?;

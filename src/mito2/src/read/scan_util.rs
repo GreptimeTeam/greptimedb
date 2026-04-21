@@ -47,7 +47,7 @@ use crate::sst::file::{FileTimeRange, RegionFileId};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
-use crate::sst::parquet::file_range::FileRange;
+use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
 use crate::sst::parquet::flat_format::time_index_column_index;
 use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderFilterMetrics, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
@@ -1594,10 +1594,11 @@ pub(crate) async fn maybe_scan_flat_other_ranges(
     context: &Arc<StreamContext>,
     index: RowGroupIndex,
     metrics: &PartitionMetrics,
-    options: crate::extension::ExtensionRangeReadOptions,
+    pre_filter_mode: PreFilterMode,
 ) -> Result<BoxedRecordBatchStream> {
     #[cfg(feature = "enterprise")]
     {
+        let options = crate::extension::ExtensionRangeReadOptions { pre_filter_mode };
         scan_flat_extension_range(context.clone(), index, metrics.clone(), options).await
     }
 
@@ -1606,7 +1607,7 @@ pub(crate) async fn maybe_scan_flat_other_ranges(
         let _ = context;
         let _ = index;
         let _ = metrics;
-        let _ = options;
+        let _ = pre_filter_mode;
 
         crate::error::UnexpectedSnafu {
             reason: "no other ranges scannable in flat format",
