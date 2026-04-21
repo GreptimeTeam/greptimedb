@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::data::import_v2::error::{
     ImportStateIoSnafu, ImportStateParseSnafu, ImportStateSerializeSnafu,
@@ -26,7 +27,8 @@ use crate::data::import_v2::error::{
 };
 use crate::data::path::encode_path_segment;
 
-const IMPORT_STATE_DIR: &str = ".greptime/import_state";
+const IMPORT_STATE_ROOT: &str = ".greptime";
+const IMPORT_STATE_DIR: &str = "import_state";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,9 +105,23 @@ impl ImportState {
 }
 
 pub(crate) fn default_state_path(snapshot_id: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = default_home_dir_with(|key| std::env::var_os(key));
     let cwd = std::env::current_dir().ok();
     default_state_path_with(home.as_deref(), cwd.as_deref(), snapshot_id)
+}
+
+fn default_home_dir_with<F>(get: F) -> Option<PathBuf>
+where
+    F: for<'a> Fn(&'a str) -> Option<std::ffi::OsString>,
+{
+    get("HOME")
+        .or_else(|| get("USERPROFILE"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            let drive = get("HOMEDRIVE")?;
+            let path = get("HOMEPATH")?;
+            Some(PathBuf::from(drive).join(path))
+        })
 }
 
 fn default_state_path_with(
@@ -115,7 +131,11 @@ fn default_state_path_with(
 ) -> Option<PathBuf> {
     let file_name = import_state_file_name(snapshot_id);
     match (home, cwd) {
-        (Some(home), _) => Some(home.join(IMPORT_STATE_DIR).join(file_name)),
+        (Some(home), _) => Some(
+            home.join(IMPORT_STATE_ROOT)
+                .join(IMPORT_STATE_DIR)
+                .join(file_name),
+        ),
         (None, Some(cwd)) => Some(cwd.join(file_name)),
         (None, None) => None,
     }
@@ -148,16 +168,26 @@ pub(crate) async fn save_import_state(path: &Path, state: &ImportState) -> Resul
 
     let bytes = serde_json::to_vec_pretty(state).context(ImportStateSerializeSnafu)?;
     let tmp_path = path.with_extension("tmp");
-    tokio::fs::write(&tmp_path, bytes)
+    let mut file = tokio::fs::File::create(&tmp_path)
         .await
         .context(ImportStateIoSnafu {
             path: tmp_path.display().to_string(),
         })?;
+    file.write_all(&bytes).await.context(ImportStateIoSnafu {
+        path: tmp_path.display().to_string(),
+    })?;
+    file.sync_all().await.context(ImportStateIoSnafu {
+        path: tmp_path.display().to_string(),
+    })?;
+    // Close before rename; Windows forbids renaming an open file.
+    drop(file);
+
     tokio::fs::rename(&tmp_path, path)
         .await
         .context(ImportStateIoSnafu {
             path: path.display().to_string(),
         })?;
+    sync_parent_dir(path).await?;
     Ok(())
 }
 
@@ -169,6 +199,28 @@ pub(crate) async fn delete_import_state(path: &Path) -> Result<()> {
             path: path.display().to_string(),
         }),
     }
+}
+
+#[cfg(unix)]
+async fn sync_parent_dir(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    let dir = tokio::fs::File::open(parent)
+        .await
+        .context(ImportStateIoSnafu {
+            path: parent.display().to_string(),
+        })?;
+    dir.sync_all().await.context(ImportStateIoSnafu {
+        path: parent.display().to_string(),
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn sync_parent_dir(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -235,6 +287,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_save_import_state_overwrites_existing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("import_state.json");
+        let mut state = ImportState::new("snapshot-1", "127.0.0.1:4000", [1]);
+        save_import_state(&path, &state).await.unwrap();
+
+        state
+            .set_chunk_status(1, ImportChunkStatus::Completed, None)
+            .unwrap();
+        save_import_state(&path, &state).await.unwrap();
+
+        let loaded = load_import_state(&path).await.unwrap().unwrap();
+        assert_eq!(loaded.chunk_status(1), Some(ImportChunkStatus::Completed));
+    }
+
+    #[tokio::test]
     async fn test_delete_import_state_ignores_missing_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("missing.json");
@@ -244,24 +312,59 @@ mod tests {
 
     #[test]
     fn test_default_state_path_prefers_home_and_encodes_snapshot_id() {
-        let home = Path::new("/tmp/home");
-        let cwd = Path::new("/tmp/cwd");
+        let home = tempdir().unwrap();
+        let cwd = tempdir().unwrap();
 
-        let path = default_state_path_with(Some(home), Some(cwd), "../snapshot").unwrap();
+        let path =
+            default_state_path_with(Some(home.path()), Some(cwd.path()), "../snapshot").unwrap();
 
         assert_eq!(
             path,
-            home.join(IMPORT_STATE_DIR)
+            home.path()
+                .join(IMPORT_STATE_ROOT)
+                .join(IMPORT_STATE_DIR)
                 .join(".import_state_%2E%2E%2Fsnapshot.json")
         );
     }
 
     #[test]
     fn test_default_state_path_falls_back_to_cwd_when_home_missing() {
-        let cwd = Path::new("/tmp/cwd");
+        let cwd = tempdir().unwrap();
 
-        let path = default_state_path_with(None, Some(cwd), "snapshot-1").unwrap();
+        let path = default_state_path_with(None, Some(cwd.path()), "snapshot-1").unwrap();
 
-        assert_eq!(path, cwd.join(".import_state_snapshot-1.json"));
+        assert_eq!(path, cwd.path().join(".import_state_snapshot-1.json"));
+    }
+
+    #[test]
+    fn test_default_home_dir_prefers_home() {
+        let detected = default_home_dir_with(|key| match key {
+            "HOME" => Some(std::ffi::OsString::from("/tmp/home")),
+            "USERPROFILE" => Some(std::ffi::OsString::from("/tmp/userprofile")),
+            _ => None,
+        });
+
+        assert_eq!(detected, Some(PathBuf::from("/tmp/home")));
+    }
+
+    #[test]
+    fn test_default_home_dir_falls_back_to_userprofile() {
+        let detected = default_home_dir_with(|key| match key {
+            "USERPROFILE" => Some(std::ffi::OsString::from("/tmp/userprofile")),
+            _ => None,
+        });
+
+        assert_eq!(detected, Some(PathBuf::from("/tmp/userprofile")));
+    }
+
+    #[test]
+    fn test_default_home_dir_falls_back_to_home_drive_and_path() {
+        let detected = default_home_dir_with(|key| match key {
+            "HOMEDRIVE" => Some(std::ffi::OsString::from("/tmp")),
+            "HOMEPATH" => Some(std::ffi::OsString::from("windows-home")),
+            _ => None,
+        });
+
+        assert_eq!(detected, Some(PathBuf::from("/tmp").join("windows-home")));
     }
 }
