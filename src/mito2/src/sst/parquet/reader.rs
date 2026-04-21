@@ -14,6 +14,8 @@
 
 //! Parquet reader.
 
+mod stream;
+
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -34,7 +36,7 @@ use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, RowSelection};
-use parquet::arrow::async_reader::{ParquetRecordBatchStream, ParquetRecordBatchStreamBuilder};
+use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use partition::expr::PartitionExpr;
 use snafu::ResultExt;
@@ -44,6 +46,7 @@ use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
+use self::stream::ProjectedRecordBatchStream;
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
@@ -78,7 +81,9 @@ use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, execute_prefilter, is_usable_primary_key_filter,
 };
-use crate::sst::parquet::read_columns::{ParquetReadColumns, build_projection_mask};
+use crate::sst::parquet::read_columns::{
+    ParquetReadColumns, ProjectionMaskPlan, build_projection_mask,
+};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -405,7 +410,8 @@ impl ParquetReaderBuilder {
             read_format.projection_indices().iter().copied(),
         );
 
-        let projection_mask = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
+        let projection_plan = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
+
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
@@ -490,7 +496,7 @@ impl ParquetReaderBuilder {
             parquet_meta,
             arrow_metadata,
             object_store: self.object_store.clone(),
-            projection: projection_mask,
+            projection_plan,
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder,
         };
@@ -1635,8 +1641,8 @@ pub(crate) struct RowGroupReaderBuilder {
     arrow_metadata: ArrowReaderMetadata,
     /// Object store as an Operator.
     object_store: ObjectStore,
-    /// Projection mask.
-    projection: ProjectionMask,
+    /// Projection plan for the full read path.
+    projection_plan: ProjectionMaskPlan,
     /// Cache.
     cache_strategy: CacheStrategy,
     /// Pre-built prefilter state. `None` if prefiltering is not applicable.
@@ -1691,19 +1697,20 @@ impl RowGroupReaderBuilder {
     pub(crate) async fn build(
         &self,
         build_ctx: RowGroupBuildContext<'_>,
-    ) -> Result<ParquetRecordBatchStream<SstAsyncFileReader>> {
+    ) -> Result<ProjectedRecordBatchStream> {
         let prefilter_ctx = self.prefilter_builder.as_ref().map(|b| b.build());
 
         let Some(mut prefilter_ctx) = prefilter_ctx else {
             // No prefilter applicable, build stream with full projection.
-            return self
+            let stream = self
                 .build_with_projection(
                     build_ctx.row_group_idx,
                     build_ctx.row_selection,
-                    self.projection.clone(),
+                    self.projection_plan.mask.clone(),
                     build_ctx.fetch_metrics,
                 )
-                .await;
+                .await?;
+            return Ok(stream);
         };
 
         let prefilter_start = Instant::now();
@@ -1716,13 +1723,15 @@ impl RowGroupReaderBuilder {
 
         let refined_selection = Some(prefilter_result.refined_selection);
 
-        self.build_with_projection(
-            build_ctx.row_group_idx,
-            refined_selection,
-            self.projection.clone(),
-            build_ctx.fetch_metrics,
-        )
-        .await
+        let stream = self
+            .build_with_projection(
+                build_ctx.row_group_idx,
+                refined_selection,
+                self.projection_plan.mask.clone(),
+                build_ctx.fetch_metrics,
+            )
+            .await?;
+        Ok(stream)
     }
 
     /// Builds a [ParquetRecordBatchStream] with a custom projection mask.
@@ -1732,7 +1741,7 @@ impl RowGroupReaderBuilder {
         row_selection: Option<RowSelection>,
         projection: ProjectionMask,
         fetch_metrics: Option<&ParquetFetchMetrics>,
-    ) -> Result<ParquetRecordBatchStream<SstAsyncFileReader>> {
+    ) -> Result<ProjectedRecordBatchStream> {
         // Create async file reader with caching support.
         let async_reader = SstAsyncFileReader::new(
             self.file_handle.file_id(),
@@ -1762,7 +1771,11 @@ impl RowGroupReaderBuilder {
             path: &self.file_path,
         })?;
 
-        Ok(stream)
+        Ok(ProjectedRecordBatchStream::new(
+            stream,
+            self.projection_plan.projected_root_matches.clone(),
+            self.arrow_metadata.schema().clone(),
+        )?)
     }
 }
 
@@ -1996,17 +2009,14 @@ pub(crate) struct FlatRowGroupReader {
     /// Context for file ranges.
     context: FileRangeContextRef,
     /// Inner parquet record batch stream.
-    stream: ParquetRecordBatchStream<SstAsyncFileReader>,
+    stream: ProjectedRecordBatchStream,
     /// Cached sequence array to override sequences.
     override_sequence: Option<ArrayRef>,
 }
 
 impl FlatRowGroupReader {
     /// Creates a new flat reader from file range.
-    pub(crate) fn new(
-        context: FileRangeContextRef,
-        stream: ParquetRecordBatchStream<SstAsyncFileReader>,
-    ) -> Self {
+    pub(crate) fn new(context: FileRangeContextRef, stream: ProjectedRecordBatchStream) -> Self {
         // The batch length from the reader should be less than or equal to DEFAULT_READ_BATCH_SIZE.
         let override_sequence = context
             .read_format()
@@ -2023,9 +2033,7 @@ impl FlatRowGroupReader {
     pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self.stream.next().await {
             Some(batch_result) => {
-                let record_batch = batch_result.context(ReadParquetSnafu {
-                    path: self.context.file_path(),
-                })?;
+                let record_batch = batch_result?;
 
                 let record_batch = self
                     .context
