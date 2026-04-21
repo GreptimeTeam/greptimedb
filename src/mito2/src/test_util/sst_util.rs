@@ -213,6 +213,7 @@ pub fn sst_file_handle_with_file_id(file_id: FileId, start_ms: i64, end_ms: i64)
             num_series: 0,
             sequence: None,
             partition_expr: None,
+            ..Default::default()
         },
         file_purger,
     )

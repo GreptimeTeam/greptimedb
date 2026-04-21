@@ -55,6 +55,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::WriteOptions;
+use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::version::{SstVersion, SstVersionRef};
 
 /// Region version for compaction that does not hold memtables.
@@ -405,22 +406,35 @@ impl SstMerger for DefaultSstMerger {
 
         let output_files = sst_infos
             .into_iter()
-            .map(|sst_info| FileMeta {
-                region_id,
-                file_id: sst_info.file_id,
-                time_range: sst_info.time_range,
-                level: output.output_level,
-                file_size: sst_info.file_size,
-                max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
-                available_indexes: sst_info.index_metadata.build_available_indexes(),
-                indexes: sst_info.index_metadata.build_indexes(),
-                index_file_size: sst_info.index_metadata.file_size,
-                index_version: 0,
-                num_rows: sst_info.num_rows as u64,
-                num_row_groups: sst_info.num_row_groups,
-                sequence: max_sequence,
-                partition_expr: partition_expr.clone(),
-                num_series: sst_info.num_series,
+            .map(|sst_info| {
+                let pk_range = sst_info
+                    .file_metadata
+                    .as_ref()
+                    .and_then(|meta| extract_primary_key_range(meta, &region_metadata));
+                let (primary_key_min, primary_key_max) = match pk_range {
+                    Some((min, max)) => (Some(min), Some(max)),
+                    None => (None, None),
+                };
+
+                FileMeta {
+                    region_id,
+                    file_id: sst_info.file_id,
+                    time_range: sst_info.time_range,
+                    level: output.output_level,
+                    file_size: sst_info.file_size,
+                    max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
+                    available_indexes: sst_info.index_metadata.build_available_indexes(),
+                    indexes: sst_info.index_metadata.build_indexes(),
+                    index_file_size: sst_info.index_metadata.file_size,
+                    index_version: 0,
+                    num_rows: sst_info.num_rows as u64,
+                    num_row_groups: sst_info.num_row_groups,
+                    sequence: max_sequence,
+                    partition_expr: partition_expr.clone(),
+                    num_series: sst_info.num_series,
+                    primary_key_min,
+                    primary_key_max,
+                }
             })
             .collect::<Vec<_>>();
         let output_file_names = output_files.iter().map(|f| f.file_id.to_string()).join(",");

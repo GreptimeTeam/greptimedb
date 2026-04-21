@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use bytes::Bytes;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
@@ -57,6 +58,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
+use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
 };
@@ -504,15 +506,20 @@ impl RegionFlushTask {
 
                 flush_metrics = flush_metrics.merge(metrics);
 
-                file_metas.extend(ssts_written.into_iter().map(|sst_info| {
+                for sst_info in ssts_written {
                     flushed_bytes += sst_info.file_size;
-                    Self::new_file_meta(
+                    let pk_range = sst_info
+                        .file_metadata
+                        .as_ref()
+                        .and_then(|meta| extract_primary_key_range(meta, &version.metadata));
+                    file_metas.push(Self::new_file_meta(
                         self.region_id,
                         max_sequence,
                         sst_info,
                         partition_expr.clone(),
-                    )
-                }));
+                        pk_range,
+                    ));
+                }
             }
 
             common_telemetry::debug!(
@@ -604,7 +611,12 @@ impl RegionFlushTask {
         max_sequence: u64,
         sst_info: SstInfo,
         partition_expr: Option<PartitionExpr>,
+        primary_key_range: Option<(Bytes, Bytes)>,
     ) -> FileMeta {
+        let (primary_key_min, primary_key_max) = match primary_key_range {
+            Some((min, max)) => (Some(min), Some(max)),
+            None => (None, None),
+        };
         FileMeta {
             region_id,
             file_id: sst_info.file_id,
@@ -621,6 +633,8 @@ impl RegionFlushTask {
             sequence: NonZeroU64::new(max_sequence),
             partition_expr,
             num_series: sst_info.num_series,
+            primary_key_min,
+            primary_key_max,
         }
     }
 

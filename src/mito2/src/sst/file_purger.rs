@@ -283,6 +283,7 @@ mod tests {
                     sequence: None,
                     partition_expr: None,
                     num_series: 0,
+                    ..Default::default()
                 },
                 file_purger,
             );
@@ -357,6 +358,7 @@ mod tests {
                     sequence: NonZeroU64::new(4096),
                     partition_expr: None,
                     num_series: 0,
+                    ..Default::default()
                 },
                 file_purger,
             );

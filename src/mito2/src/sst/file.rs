@@ -17,9 +17,11 @@
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
+use base64::prelude::{BASE64_STANDARD, Engine};
+use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error};
 use common_time::Timestamp;
@@ -35,6 +37,33 @@ use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
+
+/// Custom serde functions for Bytes fields serialized as base64 strings.
+fn serialize_bytes_option<S>(bytes: &Option<Bytes>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match bytes {
+        None => serializer.serialize_none(),
+        Some(b) => serializer.serialize_some(&BASE64_STANDARD.encode(b)),
+    }
+}
+
+fn deserialize_bytes_option<'de, D>(deserializer: D) -> Result<Option<Bytes>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(s) => {
+            let decoded = BASE64_STANDARD
+                .decode(&s)
+                .map_err(serde::de::Error::custom)?;
+            Ok(Some(Bytes::from(decoded)))
+        }
+    }
+}
 
 /// Custom serde functions for partition_expr field in FileMeta
 fn serialize_partition_expr<S>(
@@ -233,6 +262,24 @@ pub struct FileMeta {
     ///
     /// The number is 0 if the series number is not available.
     pub num_series: u64,
+    /// Minimum primary key value in the file, encoded as bytes.
+    /// `None` if the primary key range is not available (e.g., legacy files).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_bytes_option",
+        deserialize_with = "deserialize_bytes_option"
+    )]
+    pub primary_key_min: Option<Bytes>,
+    /// Maximum primary key value in the file, encoded as bytes.
+    /// `None` if the primary key range is not available (e.g., legacy files).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_bytes_option",
+        deserialize_with = "deserialize_bytes_option"
+    )]
+    pub primary_key_max: Option<Bytes>,
 }
 
 impl Debug for FileMeta {
@@ -273,8 +320,19 @@ impl Debug for FileMeta {
                 }
             })
             .field("partition_expr", &self.partition_expr)
-            .field("num_series", &self.num_series)
-            .finish()
+            .field("num_series", &self.num_series);
+        if self.primary_key_min.is_some() || self.primary_key_max.is_some() {
+            debug_struct
+                .field(
+                    "primary_key_min",
+                    &self.primary_key_min.as_ref().map(|b| b.len()),
+                )
+                .field(
+                    "primary_key_max",
+                    &self.primary_key_max.as_ref().map(|b| b.len()),
+                );
+        }
+        debug_struct.finish()
     }
 }
 
@@ -311,6 +369,14 @@ pub struct ColumnIndexMetadata {
 }
 
 impl FileMeta {
+    /// Returns the primary key range if both min and max are present.
+    pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
+        match (&self.primary_key_min, &self.primary_key_max) {
+            (Some(min), Some(max)) => Some((min.clone(), max.clone())),
+            _ => None,
+        }
+    }
+
     pub fn exists_index(&self) -> bool {
         !self.available_indexes.is_empty()
     }
@@ -323,7 +389,7 @@ impl FileMeta {
         }
     }
 
-    /// Whether the index file is up-to-date comparing to another file meta.    
+    /// Whether the index file is up-to-date comparing to another file meta.
     pub fn is_index_up_to_date(&self, other: &FileMeta) -> bool {
         self.exists_index() && other.exists_index() && self.index_version >= other.index_version
     }
@@ -417,8 +483,20 @@ impl fmt::Debug for FileHandle {
 
 impl FileHandle {
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
+        let pk_range = meta.primary_key_range();
         FileHandle {
-            inner: Arc::new(FileHandleInner::new(meta, file_purger)),
+            inner: Arc::new(FileHandleInner::new(meta, file_purger, pk_range)),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_with_primary_key_range(
+        meta: FileMeta,
+        file_purger: FilePurgerRef,
+        primary_key_range: Option<(Bytes, Bytes)>,
+    ) -> FileHandle {
+        FileHandle {
+            inner: Arc::new(FileHandleInner::new(meta, file_purger, primary_key_range)),
         }
     }
 
@@ -498,6 +576,14 @@ impl FileHandle {
     pub fn is_deleted(&self) -> bool {
         self.inner.deleted.load(Ordering::Relaxed)
     }
+
+    pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
+        self.inner.primary_key_range.read().unwrap().clone()
+    }
+
+    pub(crate) fn set_primary_key_range(&self, primary_key_range: (Bytes, Bytes)) {
+        *self.inner.primary_key_range.write().unwrap() = Some(primary_key_range);
+    }
 }
 
 /// Inner data of [FileHandle].
@@ -508,6 +594,7 @@ struct FileHandleInner {
     compacting: AtomicBool,
     deleted: AtomicBool,
     index_outdated: AtomicBool,
+    primary_key_range: RwLock<Option<(Bytes, Bytes)>>,
     file_purger: FilePurgerRef,
 }
 
@@ -523,13 +610,18 @@ impl Drop for FileHandleInner {
 
 impl FileHandleInner {
     /// There should only be one `FileHandleInner` for each file on a datanode
-    fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandleInner {
+    fn new(
+        meta: FileMeta,
+        file_purger: FilePurgerRef,
+        primary_key_range: Option<(Bytes, Bytes)>,
+    ) -> FileHandleInner {
         file_purger.new_file(&meta);
         FileHandleInner {
             meta,
             compacting: AtomicBool::new(false),
             deleted: AtomicBool::new(false),
             index_outdated: AtomicBool::new(false),
+            primary_key_range: RwLock::new(primary_key_range),
             file_purger,
         }
     }
@@ -734,6 +826,7 @@ mod tests {
             sequence: None,
             partition_expr: None,
             num_series: 0,
+            ..Default::default()
         }
     }
 
@@ -786,6 +879,7 @@ mod tests {
             sequence: None,
             partition_expr: Some(partition_expr.clone()),
             num_series: 0,
+            ..Default::default()
         };
 
         // Test serialization/deserialization
