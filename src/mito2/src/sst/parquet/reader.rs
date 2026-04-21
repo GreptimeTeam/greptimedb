@@ -27,7 +27,7 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{tracing, warn};
 use datafusion_expr::Expr;
 use datatypes::arrow::array::ArrayRef;
-use datatypes::arrow::datatypes::Field;
+use datatypes::arrow::datatypes::{Field, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -490,11 +490,14 @@ impl ParquetReaderBuilder {
             parquet_meta.file_metadata().schema_descr(),
         );
 
+        let output_schema = read_format.output_arrow_schema()?;
+
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
             file_path,
             parquet_meta,
             arrow_metadata,
+            output_schema,
             object_store: self.object_store.clone(),
             projection: projection_plan,
             cache_strategy: self.cache_strategy.clone(),
@@ -1639,6 +1642,8 @@ pub(crate) struct RowGroupReaderBuilder {
     parquet_meta: Arc<ParquetMetaData>,
     /// Arrow reader metadata for building async stream.
     arrow_metadata: ArrowReaderMetadata,
+    /// Projected output schema aligned with `projection.projected_root_presence`.
+    output_schema: SchemaRef,
     /// Object store as an Operator.
     object_store: ObjectStore,
     /// Projection mask.
@@ -1742,7 +1747,7 @@ impl RowGroupReaderBuilder {
         ProjectedRecordBatchStream::new(
             stream,
             self.projection.projected_root_presence.clone(),
-            self.arrow_metadata.schema().clone(),
+            self.output_schema.clone(),
         )
     }
 

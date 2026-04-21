@@ -255,6 +255,15 @@ impl FlatReadFormat {
         }
     }
 
+    /// Gets the projected output schema produced by parquet reading.
+    pub(crate) fn output_arrow_schema(&self) -> Result<SchemaRef> {
+        let schema = self
+            .arrow_schema()
+            .project(self.projection_indices())
+            .context(ComputeArrowSnafu)?;
+        Ok(Arc::new(schema))
+    }
+
     /// Gets the metadata of the SST.
     pub(crate) fn metadata(&self) -> &RegionMetadataRef {
         match &self.parquet_adapter {
@@ -790,6 +799,8 @@ impl FlatReadFormat {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::SemanticType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -797,8 +808,10 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
-    use super::field_column_start;
-    use crate::sst::{FlatSchemaOptions, flat_sst_arrow_schema_column_num};
+    use super::{FlatReadFormat, field_column_start};
+    use crate::sst::{
+        FlatSchemaOptions, flat_sst_arrow_schema_column_num, to_flat_sst_arrow_schema,
+    };
 
     /// Builds a `RegionMetadata` with the given number of tags and fields.
     fn build_metadata(
@@ -871,5 +884,27 @@ mod tests {
                 "num_tags={num_tags}, num_fields={num_fields}, encoding={encoding:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_output_arrow_schema_uses_projection() {
+        let metadata = Arc::new(build_metadata(1, 2, PrimaryKeyEncoding::Dense));
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            [0_u32, 2_u32].into_iter(),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+
+        let output_schema = read_format.output_arrow_schema().unwrap();
+        let expected = Arc::new(
+            to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default())
+                .project(read_format.projection_indices())
+                .unwrap(),
+        );
+
+        assert_eq!(expected, output_schema);
     }
 }
