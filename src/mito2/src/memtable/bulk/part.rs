@@ -32,6 +32,7 @@ use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, Schema, SchemaRef, UInt32Type,
 };
 use datatypes::data_type::DataType;
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::{MutableVector, Vector};
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
@@ -678,7 +679,10 @@ impl BulkPartConverter {
         columns.push(values.sequence.to_arrow_array());
         columns.push(values.op_type.to_arrow_array());
 
-        let batch = RecordBatch::try_new(self.schema, columns).context(NewRecordBatchSnafu)?;
+        // The actual datatype of JSON array is data oriented, not to be derived from the Region
+        // metadata, which is static. So here we have to align the schema.
+        let schema = align_schema_with_json_array(self.schema, &columns);
+        let batch = RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)?;
         // Sorts the record batch.
         let batch = sort_primary_key_record_batch(&batch)?;
 
@@ -691,6 +695,26 @@ impl BulkPartConverter {
             raw_data: None,
         })
     }
+}
+
+fn align_schema_with_json_array(schema: SchemaRef, columns: &[ArrayRef]) -> SchemaRef {
+    if schema.fields().iter().all(|f| !is_json_extension_type(f)) {
+        return schema;
+    }
+
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    for (field, array) in schema.fields().iter().zip(columns) {
+        if !is_json_extension_type(field) {
+            fields.push(field.clone());
+            continue;
+        }
+
+        let mut field = field.as_ref().clone();
+        field.set_data_type(array.data_type().clone());
+        fields.push(Arc::new(field));
+    }
+
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
 }
 
 fn new_primary_key_column_builders(

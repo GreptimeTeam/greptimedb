@@ -310,7 +310,7 @@ pub fn sql_data_type_to_concrete_data_type(
                             JsonStructureSettings::UnstructuredRaw => Some(JsonNativeType::Variant),
                             _ => None,
                         })
-                        .unwrap_or(JsonNativeType::Null);
+                        .unwrap_or(JsonNativeType::Object(Default::default()));
                     let format = JsonFormat::Json2(Box::new(native_type));
                     Ok(ConcreteDataType::Json(JsonType::new(format)))
                 }

@@ -352,11 +352,10 @@ impl Inserter {
         &self,
         insert: &Insert,
         ctx: &QueryContextRef,
-        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         let (inserts, table_info) =
             StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
-                .convert(insert, ctx, statement_executor)
+                .convert(insert, ctx)
                 .await?;
 
         let table_infos = HashMap::from_iter([(table_info.table_id(), table_info.clone())]);
