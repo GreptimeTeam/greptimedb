@@ -18,13 +18,15 @@ use std::sync::Arc;
 use common_telemetry::{debug, info, warn};
 use lazy_static::lazy_static;
 use regex::Regex;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use sqlx::mysql::MySqlRow;
 use sqlx::pool::Pool;
 use sqlx::{MySql, MySqlPool, Row, Transaction as MySqlTransaction};
 use strum::AsRefStr;
 
-use crate::error::{CreateMySqlPoolSnafu, MySqlExecutionSnafu, MySqlTransactionSnafu, Result};
+use crate::error::{
+    CreateMySqlPoolSnafu, MySqlExecutionSnafu, MySqlTransactionSnafu, Result, UnexpectedSnafu,
+};
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::rds::{
     Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
@@ -587,13 +589,11 @@ impl MySqlStore {
         sql_template_set: &MySqlTemplateSet,
     ) -> Result<()> {
         let table_name = &sql_template_set.table_name;
-        let Some(create_table_sql) = Self::fetch_create_table_sql(pool, sql_template_set).await?
-        else {
-            warn!(
-                "Missing MySQL metadata table definition for `{table_name}`, skip automatic MEDIUMBLOB upgrade"
-            );
-            return Ok(());
-        };
+        let create_table_sql = Self::fetch_create_table_sql(pool, sql_template_set)
+            .await?
+            .context(UnexpectedSnafu {
+                err_msg: format!("Failed to fetch CREATE TABLE SQL for `{table_name}`"),
+            })?;
 
         match Self::parse_value_column_blob_type(&create_table_sql) {
             Some(ValueBlobType::Blob) => {
@@ -642,11 +642,7 @@ impl MySqlStore {
             .with_context(|_| MySqlExecutionSnafu {
                 sql: sql_template_set.create_table_statement.clone(),
             })?;
-        if let Err(err) =
-            Self::maybe_upgrade_value_column_to_mediumblob(&pool, &sql_template_set).await
-        {
-            warn!(err; "Failed to auto-upgrade MySQL metadata value column, continue startup");
-        }
+        Self::maybe_upgrade_value_column_to_mediumblob(&pool, &sql_template_set).await?;
         Ok(Arc::new(MySqlStore {
             max_txn_ops,
             sql_template_set,
