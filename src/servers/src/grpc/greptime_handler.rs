@@ -35,7 +35,7 @@ use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{
     Channel, QueryContextBuilder, QueryContextRef, REMOTE_QUERY_ID_EXTENSION_KEY,
-    generate_remote_query_id,
+    generate_remote_query_id, is_reserved_extension_key,
 };
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
@@ -238,6 +238,9 @@ pub(crate) fn create_query_context(
     }
 
     for (key, value) in extensions {
+        if is_reserved_extension_key(&key) {
+            continue;
+        }
         ctx_builder = ctx_builder.set_extension(key, value);
     }
     Ok(ctx_builder.build().into())
@@ -325,6 +328,25 @@ mod tests {
         assert_eq!(
             query_context.remote_query_id(),
             Some(extensions[1].1.as_str())
+        );
+    }
+
+    #[test]
+    fn test_create_query_context_ignores_remote_query_id_extension() {
+        let query_context = create_query_context(
+            Channel::Grpc,
+            None,
+            vec![(
+                REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                "spoofed-query-id".to_string(),
+            )],
+        )
+        .unwrap();
+
+        assert_ne!(query_context.remote_query_id(), Some("spoofed-query-id"));
+        assert_eq!(
+            query_context.extension(REMOTE_QUERY_ID_EXTENSION_KEY),
+            query_context.remote_query_id()
         );
     }
 }
