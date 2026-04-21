@@ -1732,12 +1732,7 @@ mod test {
         let statement = Arc::new(StoredStatement::new(
             String::new(),
             PgSqlPlan {
-                plan: SqlPlan {
-                    query: String::new(),
-                    statement: None,
-                    plan: None,
-                    schema: None,
-                },
+                plan: SqlPlan::Empty,
                 copy_to_stdout_format: None,
             },
             client_param_types,

@@ -23,9 +23,10 @@ use common_recordbatch::error::Result as RecordBatchResult;
 use common_telemetry::{debug, info, tracing};
 use datafusion::sql::sqlparser::ast::{CopyOption, CopyTarget, Statement as SqlParserStatement};
 use datafusion_common::ParamValues;
+use datafusion_expr::LogicalPlan;
 use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::{Schema, SchemaRef};
 use futures::{Sink, SinkExt, Stream, StreamExt, future, stream};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
@@ -318,14 +319,16 @@ impl QueryParser for DefaultQueryParser {
         let query_ctx = self.session.new_query_context();
 
         // do not parse if query is empty or matches rules
-        if sql.is_empty() || fixtures::matches(sql) {
+        if sql.is_empty() {
             return Ok(PgSqlPlan {
-                plan: SqlPlan {
-                    query: sql.to_owned(),
-                    statement: None,
-                    plan: None,
-                    schema: None,
-                },
+                plan: SqlPlan::Empty,
+                copy_to_stdout_format: None,
+            });
+        }
+
+        if fixtures::matches(sql) {
+            return Ok(PgSqlPlan {
+                plan: SqlPlan::Shortcut(sql.to_string()),
                 copy_to_stdout_format: None,
             });
         }
@@ -354,31 +357,23 @@ impl QueryParser for DefaultQueryParser {
         } else {
             let stmt = stmts.remove(0);
 
-            let describe_result = self
+            if let Some(logical_plan) = self
                 .query_handler
                 .do_describe(stmt.clone(), query_ctx)
                 .await
-                .map_err(convert_err)?;
-
-            let (plan, schema) = if let Some(DescribeResult {
-                logical_plan,
-                schema,
-            }) = describe_result
+                .map_err(convert_err)?
+                .map(|DescribeResult { logical_plan }| logical_plan)
             {
-                (Some(logical_plan), Some(schema))
+                Ok(PgSqlPlan {
+                    plan: SqlPlan::Plan(logical_plan, sql),
+                    copy_to_stdout_format,
+                })
             } else {
-                (None, None)
-            };
-
-            Ok(PgSqlPlan {
-                plan: SqlPlan {
-                    query: sql.clone(),
-                    statement: Some(stmt),
-                    plan,
-                    schema,
-                },
-                copy_to_stdout_format,
-            })
+                Ok(PgSqlPlan {
+                    plan: SqlPlan::Statement(stmt, sql),
+                    copy_to_stdout_format,
+                })
+            }
         }
     }
 
@@ -432,39 +427,45 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         let pg_sql_plan = &portal.statement.statement;
         let sql_plan = &pg_sql_plan.plan;
 
-        if sql_plan.query.is_empty() {
-            // early return if query is empty
-            return Ok(Response::EmptyQuery);
-        }
-
-        if let Some(mut resps) = fixtures::process(&sql_plan.query, query_ctx.clone()) {
-            send_warning_opt(client, query_ctx).await?;
-            // if the statement matches our predefined rules, return it early
-            return Ok(resps.remove(0));
-        }
-
-        let output = if let Some(plan) = &sql_plan.plan {
-            let values = parameters_to_scalar_values(plan, portal)?;
-            let plan = plan
-                .clone()
-                .replace_params_with_values(&ParamValues::List(
-                    values.into_iter().map(Into::into).collect(),
-                ))
-                .context(DataFusionSnafu)
-                .map_err(convert_err)?;
-            self.query_handler
-                .do_exec_plan(sql_plan.statement.clone(), plan, query_ctx.clone())
-                .await
-        } else {
-            // We won't replace params from statement manually any more.
-            // Newer version of datafusion can generate plan for SELECT/INSERT/UPDATE/DELETE.
-            // Only CREATE TABLE and others minor statements cannot generate sql plan,
-            // in this case, we assume these statements will not carry parameters
-            // and execute them directly.
-            self.query_handler
-                .do_query(&sql_plan.query, query_ctx.clone())
-                .await
-                .remove(0)
+        let output = match sql_plan {
+            SqlPlan::Empty => {
+                // early return if query is empty
+                return Ok(Response::EmptyQuery);
+            }
+            SqlPlan::Shortcut(query) => {
+                if let Some(mut resps) = fixtures::process(query, query_ctx.clone()) {
+                    send_warning_opt(client, query_ctx).await?;
+                    // if the statement matches our predefined rules, return it early
+                    return Ok(resps.remove(0));
+                } else {
+                    // unreachable logic
+                    return Ok(Response::EmptyQuery);
+                }
+            }
+            SqlPlan::Plan(plan, query) => {
+                let values = parameters_to_scalar_values(plan, portal)?;
+                let plan = plan
+                    .clone()
+                    .replace_params_with_values(&ParamValues::List(
+                        values.into_iter().map(Into::into).collect(),
+                    ))
+                    .context(DataFusionSnafu)
+                    .map_err(convert_err)?;
+                self.query_handler
+                    .do_exec_plan(plan, query.clone(), query_ctx.clone())
+                    .await
+            }
+            SqlPlan::Statement(_stmt, query) => {
+                // We won't replace params from statement manually any more.
+                // Newer version of datafusion can generate plan for SELECT/INSERT/UPDATE/DELETE.
+                // Only CREATE TABLE and others minor statements cannot generate sql plan,
+                // in this case, we assume these statements will not carry parameters
+                // and execute them directly.
+                self.query_handler
+                    .do_query(query, query_ctx.clone())
+                    .await
+                    .remove(0)
+            }
         };
 
         send_warning_opt(client, query_ctx.clone()).await?;
@@ -487,7 +488,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         let sql_plan = &stmt.statement.plan;
         // client provided parameter types, can be empty if client doesn't try to parse statement
         let provided_param_types = &stmt.parameter_types;
-        let server_inferenced_types = if let Some(plan) = &sql_plan.plan {
+        let server_inferenced_types = if let SqlPlan::Plan(plan, _) = &sql_plan {
             let param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
                 .context(InferParameterTypesSnafu)
                 .map_err(convert_err)?
@@ -525,23 +526,9 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
             })
             .collect::<Vec<_>>();
 
-        if let Some(schema) = &sql_plan.schema {
-            schema_to_pg(schema, &Format::UnifiedText, None)
-                .map(|fields| DescribeStatementResponse::new(param_types, fields))
-                .map_err(convert_err)
-        } else {
-            if let Some(mut resp) =
-                fixtures::process(&sql_plan.query, self.session.new_query_context())
-                && let Response::Query(query_response) = resp.remove(0)
-            {
-                return Ok(DescribeStatementResponse::new(
-                    param_types,
-                    (*query_response.row_schema()).clone(),
-                ));
-            }
+        let fields = describe_fields(sql_plan, &Format::UnifiedText, &self.session)?;
 
-            Ok(DescribeStatementResponse::new(param_types, vec![]))
-        }
+        Ok(DescribeStatementResponse::new(param_types, fields))
     }
 
     async fn do_describe_portal<C>(
@@ -555,67 +542,99 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         let sql_plan = &portal.statement.statement.plan;
         let format = &portal.result_column_format;
 
-        match sql_plan.statement.as_ref() {
-            Some(Statement::Query(_)) => {
-                // if the query has a schema, it is managed by datafusion, use the schema
-                if let Some(schema) = &sql_plan.schema {
-                    schema_to_pg(schema, format, None)
-                        .map(DescribePortalResponse::new)
-                        .map_err(convert_err)
-                } else {
-                    // fallback to NoData
-                    Ok(DescribePortalResponse::new(vec![]))
-                }
+        let fields = describe_fields(sql_plan, format, &self.session)?;
+
+        Ok(DescribePortalResponse::new(fields))
+    }
+}
+
+fn describe_fields(
+    sql_plan: &SqlPlan,
+    format: &Format,
+    session: &Arc<Session>,
+) -> PgWireResult<Vec<FieldInfo>> {
+    match sql_plan {
+        // query
+        SqlPlan::Plan(plan, _) if !matches!(plan, LogicalPlan::Dml(_) | LogicalPlan::Ddl(_)) => {
+            let schema: Schema = plan.schema().clone().try_into().map_err(convert_err)?;
+            schema_to_pg(&schema, format, None).map_err(convert_err)
+        }
+        // We can cover only part of show statements
+        // these show create statements will return 2 columns
+        SqlPlan::Statement(
+            Statement::ShowCreateDatabase(_)
+            | Statement::ShowCreateTable(_)
+            | Statement::ShowCreateFlow(_)
+            | Statement::ShowCreateView(_),
+            _,
+        ) => Ok(vec![
+            FieldInfo::new(
+                "name".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                format.format_for(0),
+            ),
+            FieldInfo::new(
+                "create_statement".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                format.format_for(1),
+            ),
+        ]),
+        #[cfg(feature = "enterprise")]
+        SqlPlan::Statement(Statement::ShowCreateTrigger(_), _) => Ok(vec![
+            FieldInfo::new(
+                "name".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                format.format_for(0),
+            ),
+            FieldInfo::new(
+                "create_statement".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                format.format_for(1),
+            ),
+        ]),
+        // single column show statements
+        SqlPlan::Statement(
+            Statement::ShowTables(_) | Statement::ShowFlows(_) | Statement::ShowViews(_),
+            _,
+        ) => Ok(vec![FieldInfo::new(
+            "name".to_string(),
+            None,
+            None,
+            Type::TEXT,
+            format.format_for(0),
+        )]),
+        #[cfg(feature = "enterprise")]
+        SqlPlan::Statement(Statement::ShowTriggers(_), _) => Ok(vec![FieldInfo::new(
+            "name".to_string(),
+            None,
+            None,
+            Type::TEXT,
+            format.format_for(0),
+        )]),
+        // we will not support other show statements for extended query protocol at least for now.
+        // because the return columns is not predictable at this stage
+        SqlPlan::Shortcut(query) => {
+            // test if query caught by fixture
+            if let Some(mut resp) = fixtures::process(query, session.new_query_context())
+                && let Response::Query(query_response) = resp.remove(0)
+            {
+                Ok((*query_response.row_schema()).clone())
+            } else {
+                // fallback to NoData
+                Ok(vec![])
             }
-            // We can cover only part of show statements
-            // these show create statements will return 2 columns
-            Some(Statement::ShowCreateDatabase(_))
-            | Some(Statement::ShowCreateTable(_))
-            | Some(Statement::ShowCreateFlow(_))
-            | Some(Statement::ShowCreateView(_)) => Ok(DescribePortalResponse::new(vec![
-                FieldInfo::new(
-                    "name".to_string(),
-                    None,
-                    None,
-                    Type::TEXT,
-                    format.format_for(0),
-                ),
-                FieldInfo::new(
-                    "create_statement".to_string(),
-                    None,
-                    None,
-                    Type::TEXT,
-                    format.format_for(1),
-                ),
-            ])),
-            // single column show statements
-            Some(Statement::ShowTables(_))
-            | Some(Statement::ShowFlows(_))
-            | Some(Statement::ShowViews(_)) => {
-                Ok(DescribePortalResponse::new(vec![FieldInfo::new(
-                    "name".to_string(),
-                    None,
-                    None,
-                    Type::TEXT,
-                    format.format_for(0),
-                )]))
-            }
-            // we will not support other show statements for extended query protocol at least for now.
-            // because the return columns is not predictable at this stage
-            _ => {
-                // test if query caught by fixture
-                if let Some(mut resp) =
-                    fixtures::process(&sql_plan.query, self.session.new_query_context())
-                    && let Response::Query(query_response) = resp.remove(0)
-                {
-                    Ok(DescribePortalResponse::new(
-                        (*query_response.row_schema()).clone(),
-                    ))
-                } else {
-                    // fallback to NoData
-                    Ok(DescribePortalResponse::new(vec![]))
-                }
-            }
+        }
+        _ => {
+            // NoData
+            Ok(vec![])
         }
     }
 }

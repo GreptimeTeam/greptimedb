@@ -54,7 +54,7 @@ use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{DistPlannerOptions, MergeScanLogicalPlan};
 use crate::error::{
-    CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
+    CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
     TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
@@ -427,15 +427,7 @@ impl QueryEngine for DatafusionQueryEngine {
         plan: LogicalPlan,
         _query_ctx: QueryContextRef,
     ) -> Result<DescribeResult> {
-        let schema = plan
-            .schema()
-            .clone()
-            .try_into()
-            .context(ConvertSchemaSnafu)?;
-        Ok(DescribeResult {
-            schema,
-            logical_plan: plan,
-        })
+        Ok(DescribeResult { logical_plan: plan })
     }
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
@@ -876,10 +868,10 @@ mod tests {
             .await
             .unwrap();
 
-        let DescribeResult {
-            schema,
-            logical_plan,
-        } = engine.describe(plan, QueryContext::arc()).await.unwrap();
+        let DescribeResult { logical_plan } =
+            engine.describe(plan, QueryContext::arc()).await.unwrap();
+
+        let schema: Schema = logical_plan.schema().clone().try_into().unwrap();
 
         assert_eq!(
             schema.column_schemas()[0],

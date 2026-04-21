@@ -31,7 +31,6 @@ use common_query::Output;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion_expr::{AggregateUDF, LogicalPlan, WindowUDF};
-use datatypes::schema::Schema;
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
@@ -48,8 +47,6 @@ use crate::region_query::RegionQueryHandlerRef;
 /// Describe statement result
 #[derive(Debug)]
 pub struct DescribeResult {
-    /// The schema of statement
-    pub schema: Schema,
     /// The logical plan for statement
     pub logical_plan: LogicalPlan,
 }

@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = []
 dashboard = ["dep:rust-embed"]
+enterprise = ["sql/enterprise"]
 mem-prof = ["dep:common-mem-prof"]
 pprof = ["dep:common-pprof"]
 testing = []
