@@ -35,14 +35,13 @@ use datafusion_expr::{
 };
 use datafusion_optimizer::simplify_expressions::ExprSimplifier;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::TIME_INDEX_KEY;
 use promql_parser::util::parse_duration;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ensure};
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::error::{
-    CatalogSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu, UnknownTableSnafu,
-};
+use crate::error::{RangeQuerySnafu, Result, TimeIndexNotFoundSnafu};
 use crate::plan::ExtractExpr;
 use crate::range_select::plan::{Fill, RangeFn, RangeSelect};
 
@@ -495,19 +494,23 @@ impl RangePlanRewriter {
         for i in 0..schema.fields().len() {
             let (qualifier, _) = schema.qualified_field(i);
             if let Some(table_ref) = qualifier {
-                let table = self
-                    .table_provider
-                    .resolve_table(table_ref.clone())
-                    .await
-                    .context(CatalogSnafu)?
-                    .as_any()
-                    .downcast_ref::<DefaultTableSource>()
-                    .context(UnknownTableSnafu)?
+                let Ok(table_source) = self.table_provider.resolve_table(table_ref.clone()).await
+                else {
+                    continue;
+                };
+                let Some(default_table_source) =
+                    table_source.as_any().downcast_ref::<DefaultTableSource>()
+                else {
+                    continue;
+                };
+                let Some(adapter) = default_table_source
                     .table_provider
                     .as_any()
                     .downcast_ref::<DfTableProviderAdapter>()
-                    .context(UnknownTableSnafu)?
-                    .table();
+                else {
+                    continue;
+                };
+                let table = adapter.table();
                 let schema = table.schema();
                 let time_index_column =
                     schema
@@ -533,6 +536,20 @@ impl RangePlanRewriter {
                         Some(table_ref.clone()),
                         time_index_column.name.clone(),
                     ));
+                }
+            }
+        }
+        #[allow(deprecated)]
+        if matches!(time_index_expr, Expr::Wildcard { .. }) {
+            for i in 0..schema.fields().len() {
+                let (qualifier, field) = schema.qualified_field(i);
+                if field.metadata().contains_key(TIME_INDEX_KEY)
+                    && matches!(field.data_type(), DataType::Timestamp(_, _))
+                {
+                    default_by = vec![1.lit()];
+                    time_index_expr =
+                        Expr::Column(Column::new(qualifier.cloned(), field.name().clone()));
+                    break;
                 }
             }
         }
@@ -614,6 +631,7 @@ mod test {
     use datatypes::schema::{ColumnSchema, Schema};
     use session::context::QueryContext;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::table::TableRef;
     use table::test_util::EmptyTable;
 
     use super::*;
@@ -622,7 +640,45 @@ mod test {
     use crate::{QueryEngineFactory, QueryEngineRef};
 
     async fn create_test_engine() -> QueryEngineRef {
-        let table_name = "test".to_string();
+        create_test_engine_with_tables(&["test"], false).await
+    }
+
+    async fn create_union_test_engine() -> QueryEngineRef {
+        create_test_engine_with_tables(&["test_0", "test_1"], true).await
+    }
+
+    async fn create_test_engine_with_tables(
+        table_names: &[&str],
+        with_extra_timestamp: bool,
+    ) -> QueryEngineRef {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        for (i, table_name) in table_names.iter().enumerate() {
+            let table = create_test_table(table_name, with_extra_timestamp);
+            assert!(
+                catalog_list
+                    .register_table_sync(RegisterTableRequest {
+                        catalog: DEFAULT_CATALOG_NAME.to_string(),
+                        schema: DEFAULT_SCHEMA_NAME.to_string(),
+                        table_name: (*table_name).to_string(),
+                        table_id: 1024 + i as u32,
+                        table,
+                    })
+                    .is_ok()
+            );
+        }
+        QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine()
+    }
+
+    fn create_test_table(table_name: &str, with_extra_timestamp: bool) -> TableRef {
         let mut columns = vec![];
         for i in 0..5 {
             columns.push(ColumnSchema::new(
@@ -639,6 +695,13 @@ mod test {
             )
             .with_time_index(true),
         );
+        if with_extra_timestamp {
+            columns.push(ColumnSchema::new(
+                "timestamp_2".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ));
+        }
         for i in 0..5 {
             columns.push(ColumnSchema::new(
                 format!("field_{i}"),
@@ -650,43 +713,31 @@ mod test {
         let table_meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices((0..5).collect())
-            .value_indices((6..11).collect())
+            .value_indices(if with_extra_timestamp {
+                (6..12).collect()
+            } else {
+                (6..11).collect()
+            })
             .next_column_id(1024)
             .build()
             .unwrap();
         let table_info = TableInfoBuilder::default()
-            .name(&table_name)
+            .name(table_name)
             .meta(table_meta)
             .build()
             .unwrap();
-        let table = EmptyTable::from_table_info(&table_info);
-        let catalog_list = MemoryCatalogManager::with_default_setup();
-        assert!(
-            catalog_list
-                .register_table_sync(RegisterTableRequest {
-                    catalog: DEFAULT_CATALOG_NAME.to_string(),
-                    schema: DEFAULT_SCHEMA_NAME.to_string(),
-                    table_name,
-                    table_id: 1024,
-                    table,
-                })
-                .is_ok()
-        );
-        QueryEngineFactory::new(
-            catalog_list,
-            None,
-            None,
-            None,
-            None,
-            false,
-            QueryOptions::default(),
-        )
-        .query_engine()
+        EmptyTable::from_table_info(&table_info)
     }
 
     async fn do_query(sql: &str) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_test_engine().await;
+        engine.planner().plan(&stmt, QueryContext::arc()).await
+    }
+
+    async fn do_union_query(sql: &str) -> Result<LogicalPlan> {
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
+        let engine = create_union_test_engine().await;
         engine.planner().plan(&stmt, QueryContext::arc()).await
     }
 
@@ -763,6 +814,40 @@ mod test {
             \n        TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn range_from_union_query() {
+        let queries = [
+            r#"SELECT timestamp, tag_0, avg(field_0) RANGE '5m'
+            FROM (
+                SELECT timestamp, tag_0, field_0, timestamp_2 FROM test_0
+                UNION ALL
+                SELECT timestamp, tag_0, field_0, timestamp_2 FROM test_1
+            )
+            WHERE timestamp >= '1970-01-01 00:00:00'
+            ALIGN '1h' by (tag_0)"#,
+            r#"SELECT tmp.timestamp, tmp.tag_0, avg(tmp.field_0) RANGE '5m'
+            FROM (
+                SELECT timestamp, tag_0, field_0, timestamp_2 FROM test_0
+                UNION ALL
+                SELECT timestamp, tag_0, field_0, timestamp_2 FROM test_1
+            ) AS tmp
+            WHERE tmp.timestamp >= '1970-01-01 00:00:00'
+            ALIGN '1h' by (tmp.tag_0)"#,
+        ];
+
+        for query in queries {
+            let plan = do_union_query(query)
+                .await
+                .unwrap()
+                .display_indent_schema()
+                .to_string();
+
+            assert!(plan.contains("RangeSelect"));
+            assert!(plan.contains("Union"));
+            assert!(plan.contains("time_index=timestamp"));
+        }
     }
 
     #[tokio::test]
