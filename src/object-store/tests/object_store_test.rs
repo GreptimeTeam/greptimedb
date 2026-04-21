@@ -13,17 +13,22 @@
 // limitations under the License.
 
 use std::env;
+use std::sync::Arc;
 
 use anyhow::Result;
+use arrow_object_store::path::Path;
+use arrow_object_store::{ObjectStore as ArrowObjectStore, ObjectStoreExt};
+use bytes::Bytes;
 use common_telemetry::info;
-use common_test_util::temp_dir::create_temp_dir;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
+use object_store_opendal::OpendalStore;
 use opendal::EntryMode;
-use opendal::services::{Azblob, Gcs, Oss};
+use opendal::services::{Azblob, Gcs, Memory, Oss};
 use prometheus::{Encoder, TextEncoder};
+use tempfile::TempDir;
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     // Create object handler.
@@ -220,10 +225,39 @@ fn assert_opendal_metrics() {
     );
 }
 
+fn create_temp_dir(prefix: &str) -> Result<TempDir> {
+    Ok(tempfile::Builder::new().prefix(prefix).tempdir()?)
+}
+
+#[tokio::test]
+async fn test_opendal_memory_smoke() -> Result<()> {
+    let op = opendal::Operator::new(Memory::default())?.finish();
+    let store: OpendalStore = OpendalStore::new(op);
+    assert_eq!("memory", store.info().scheme());
+    assert!(format!("{store}").contains("memory"));
+    let store: Arc<dyn ArrowObjectStore> = Arc::new(store);
+    let location = Path::from("smoke/test.txt");
+    store
+        .put(&location, Bytes::from_static(b"hello, memory").into())
+        .await?;
+
+    let content = store.get(&location).await?.bytes().await?;
+    assert_eq!(content, Bytes::from_static(b"hello, memory"));
+
+    let listed = store
+        .list(Some(&Path::from("smoke")))
+        .try_collect::<Vec<_>>()
+        .await?;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].location, location);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_fs_backend() -> Result<()> {
-    let data_dir = create_temp_dir("test_fs_backend");
-    let tmp_dir = create_temp_dir("test_fs_backend");
+    let data_dir = create_temp_dir("test_fs_backend")?;
+    let tmp_dir = create_temp_dir("test_fs_backend")?;
     let builder = Fs::default()
         .root(&data_dir.path().to_string_lossy())
         .atomic_write_dir(&tmp_dir.path().to_string_lossy());

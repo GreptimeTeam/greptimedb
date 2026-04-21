@@ -19,11 +19,11 @@ common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-telemetry.workspace = true
+datafusion_object_store.workspace = true
 derive_builder = { workspace = true, optional = true }
 futures.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
-object_store_012 = { package = "object_store", version = "0.12.5" }
 opendal = { git = "https://github.com/apache/opendal.git", tag = "v0.56.0-rc.2", features = [
     "layers-tracing",
     "layers-prometheus",
@@ -36,10 +36,6 @@ opendal = { git = "https://github.com/apache/opendal.git", tag = "v0.56.0-rc.2",
 ] }
 prometheus.workspace = true
 reqwest.workspace = true
-reqwest_013 = { package = "reqwest", version = "0.13", default-features = false, features = [
-    "rustls",
-    "stream",
-] }
 serde.workspace = true
 snafu.workspace = true
 tokio.workspace = true
@@ -47,6 +43,9 @@ uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "1.0"
+arrow_object_store.workspace = true
 common-telemetry.workspace = true
 common-test-util.workspace = true
+object_store_opendal.workspace = true
+tempfile.workspace = true
 tokio.workspace = true

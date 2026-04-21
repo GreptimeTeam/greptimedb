@@ -213,7 +213,7 @@ pub(crate) fn build_http_client(config: &HttpClientConfig) -> error::Result<Http
         );
     }
 
-    let client = reqwest_013::ClientBuilder::new()
+    let client = reqwest::ClientBuilder::new()
         .pool_max_idle_per_host(config.pool_max_idle_per_host as usize)
         .connect_timeout(config.connect_timeout)
         .pool_idle_timeout(config.pool_idle_timeout)

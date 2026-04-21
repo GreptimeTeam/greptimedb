@@ -17,14 +17,14 @@ use std::fmt::{self, Debug, Display, Formatter};
 use std::io;
 use std::sync::Arc;
 
-use futures::stream::BoxStream;
-use futures::{FutureExt, StreamExt, TryStreamExt};
-use object_store_012::path::Path;
-use object_store_012::{
+use datafusion_object_store::path::Path;
+use datafusion_object_store::{
     Attribute, Attributes, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
     MultipartUpload, ObjectMeta, ObjectStore as ArrowObjectStore, PutMode, PutMultipartOptions,
     PutPayload, PutResult, UploadPart,
 };
+use futures::stream::BoxStream;
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use opendal::options::{CopyOptions, WriteOptions};
 use opendal::raw::percent_decode_path;
 use opendal::{Buffer, Operator, Writer};
@@ -48,7 +48,7 @@ impl OpendalStore {
         from: &Path,
         to: &Path,
         if_not_exists: bool,
-    ) -> object_store_012::Result<()> {
+    ) -> datafusion_object_store::Result<()> {
         let options = CopyOptions { if_not_exists };
 
         self.inner
@@ -60,7 +60,7 @@ impl OpendalStore {
             .await
             .map_err(|err| {
                 if if_not_exists && err.kind() == opendal::ErrorKind::AlreadyExists {
-                    object_store_012::Error::AlreadyExists {
+                    datafusion_object_store::Error::AlreadyExists {
                         path: to.to_string(),
                         source: Box::new(err),
                     }
@@ -110,8 +110,8 @@ impl ArrowObjectStore for OpendalStore {
         &self,
         location: &Path,
         payload: PutPayload,
-        opts: object_store_012::PutOptions,
-    ) -> object_store_012::Result<PutResult> {
+        opts: datafusion_object_store::PutOptions,
+    ) -> datafusion_object_store::Result<PutResult> {
         let decoded_location = percent_decode_path(location.as_ref());
         let mut future_write = self
             .inner
@@ -125,7 +125,7 @@ impl ArrowObjectStore for OpendalStore {
             }
             PutMode::Update(update_version) => {
                 let Some(etag) = update_version.e_tag else {
-                    return Err(object_store_012::Error::NotSupported {
+                    return Err(datafusion_object_store::Error::NotSupported {
                         source: Box::new(opendal::Error::new(
                             opendal::ErrorKind::Unsupported,
                             "etag is required for conditional put",
@@ -138,10 +138,10 @@ impl ArrowObjectStore for OpendalStore {
 
         let rp = future_write.await.map_err(|err| {
             match format_object_store_error(err, location.as_ref()) {
-                object_store_012::Error::Precondition { path, source }
+                datafusion_object_store::Error::Precondition { path, source }
                     if opts_mode == PutMode::Create =>
                 {
-                    object_store_012::Error::AlreadyExists { path, source }
+                    datafusion_object_store::Error::AlreadyExists { path, source }
                 }
                 err => err,
             }
@@ -157,7 +157,7 @@ impl ArrowObjectStore for OpendalStore {
         &self,
         location: &Path,
         opts: PutMultipartOptions,
-    ) -> object_store_012::Result<Box<dyn MultipartUpload>> {
+    ) -> datafusion_object_store::Result<Box<dyn MultipartUpload>> {
         let mut options = WriteOptions {
             concurrent: DEFAULT_CONCURRENT,
             ..Default::default()
@@ -200,7 +200,7 @@ impl ArrowObjectStore for OpendalStore {
         &self,
         location: &Path,
         options: GetOptions,
-    ) -> object_store_012::Result<GetResult> {
+    ) -> datafusion_object_store::Result<GetResult> {
         let raw_location = percent_decode_path(location.as_ref());
         let meta = {
             let mut stat = self.inner.stat_with(&raw_location);
@@ -307,7 +307,7 @@ impl ArrowObjectStore for OpendalStore {
             .await
             .map_err(|err| format_object_store_error(err, location.as_ref()))?
             .map_ok(|buf| buf)
-            .map_err(|err: io::Error| object_store_012::Error::Generic {
+            .map_err(|err: io::Error| datafusion_object_store::Error::Generic {
                 store: "IoError",
                 source: Box::new(err),
             });
@@ -320,7 +320,7 @@ impl ArrowObjectStore for OpendalStore {
         })
     }
 
-    async fn delete(&self, location: &Path) -> object_store_012::Result<()> {
+    async fn delete(&self, location: &Path) -> datafusion_object_store::Result<()> {
         self.inner
             .delete(&percent_decode_path(location.as_ref()))
             .await
@@ -330,7 +330,7 @@ impl ArrowObjectStore for OpendalStore {
     fn list(
         &self,
         prefix: Option<&Path>,
-    ) -> BoxStream<'static, object_store_012::Result<ObjectMeta>> {
+    ) -> BoxStream<'static, datafusion_object_store::Result<ObjectMeta>> {
         let path = prefix.map_or_else(String::new, |prefix| {
             format!("{}/", percent_decode_path(prefix.as_ref()))
         });
@@ -344,7 +344,7 @@ impl ArrowObjectStore for OpendalStore {
                 .await
                 .map_err(|err| format_object_store_error(err, &path))?;
 
-            Ok::<_, object_store_012::Error>(stream.then(|res| async {
+            Ok::<_, datafusion_object_store::Error>(stream.then(|res| async {
                 let entry = res.map_err(|err| format_object_store_error(err, ""))?;
                 Ok(format_object_meta(entry.path(), entry.metadata()))
             }))
@@ -356,7 +356,7 @@ impl ArrowObjectStore for OpendalStore {
     async fn list_with_delimiter(
         &self,
         prefix: Option<&Path>,
-    ) -> object_store_012::Result<ListResult> {
+    ) -> datafusion_object_store::Result<ListResult> {
         let path = prefix.map_or_else(String::new, |prefix| {
             format!("{}/", percent_decode_path(prefix.as_ref()))
         });
@@ -393,11 +393,15 @@ impl ArrowObjectStore for OpendalStore {
         })
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store_012::Result<()> {
+    async fn copy(&self, from: &Path, to: &Path) -> datafusion_object_store::Result<()> {
         self.copy_request(from, to, false).await
     }
 
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store_012::Result<()> {
+    async fn copy_if_not_exists(
+        &self,
+        from: &Path,
+        to: &Path,
+    ) -> datafusion_object_store::Result<()> {
         self.copy_request(from, to, true).await
     }
 }
@@ -443,7 +447,7 @@ impl MultipartUpload for OpendalMultipartUpload {
         .boxed()
     }
 
-    async fn complete(&mut self) -> object_store_012::Result<PutResult> {
+    async fn complete(&mut self) -> datafusion_object_store::Result<PutResult> {
         let mut writer = self.writer.lock().await;
         let metadata = writer
             .close()
@@ -456,7 +460,7 @@ impl MultipartUpload for OpendalMultipartUpload {
         })
     }
 
-    async fn abort(&mut self) -> object_store_012::Result<()> {
+    async fn abort(&mut self) -> datafusion_object_store::Result<()> {
         let mut writer = self.writer.lock().await;
         writer
             .abort()
@@ -473,24 +477,24 @@ impl Debug for OpendalMultipartUpload {
     }
 }
 
-fn format_object_store_error(err: opendal::Error, path: &str) -> object_store_012::Error {
+fn format_object_store_error(err: opendal::Error, path: &str) -> datafusion_object_store::Error {
     match err.kind() {
-        opendal::ErrorKind::NotFound => object_store_012::Error::NotFound {
+        opendal::ErrorKind::NotFound => datafusion_object_store::Error::NotFound {
             path: path.to_string(),
             source: Box::new(err),
         },
-        opendal::ErrorKind::Unsupported => object_store_012::Error::NotSupported {
+        opendal::ErrorKind::Unsupported => datafusion_object_store::Error::NotSupported {
             source: Box::new(err),
         },
-        opendal::ErrorKind::AlreadyExists => object_store_012::Error::AlreadyExists {
+        opendal::ErrorKind::AlreadyExists => datafusion_object_store::Error::AlreadyExists {
             path: path.to_string(),
             source: Box::new(err),
         },
-        opendal::ErrorKind::ConditionNotMatch => object_store_012::Error::Precondition {
+        opendal::ErrorKind::ConditionNotMatch => datafusion_object_store::Error::Precondition {
             path: path.to_string(),
             source: Box::new(err),
         },
-        kind => object_store_012::Error::Generic {
+        kind => datafusion_object_store::Error::Generic {
             store: kind.into_static(),
             source: Box::new(err),
         },
