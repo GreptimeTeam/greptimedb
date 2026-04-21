@@ -106,7 +106,7 @@ impl Tokenizer for ChineseTokenizer {
                 english
                     .tokenize(text)
                     .into_iter()
-                    .filter(|token| is_ascii_underscore_compound(token)),
+                    .filter(|token| is_ascii_underscore_token(token)),
             );
 
             tokens
@@ -118,11 +118,8 @@ fn is_indexable_token(token: &str) -> bool {
     token.chars().any(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn is_ascii_underscore_compound(token: &str) -> bool {
-    token.contains('_')
-        && token
-            .split('_')
-            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric()))
+fn is_ascii_underscore_token(token: &str) -> bool {
+    token.is_ascii() && token.chars().any(|c| c == '_')
 }
 
 /// `Analyzer` analyzes a text into a list of tokens.
@@ -167,11 +164,26 @@ mod tests {
     #[test]
     fn test_english_tokenizer() {
         let tokenizer = EnglishTokenizer;
-        let text = "Hello, world!!! This is a----++   test012_345+67890";
+        let text = "Hello, world!!! This is a----++   test012_345+67890 ship_ship ship__ship _ __ __IDENTIFIER__ _ship ship_";
         let tokens = tokenizer.tokenize(text);
         assert_eq!(
             tokens,
-            vec!["Hello", "world", "This", "is", "a", "test012_345", "67890"]
+            vec![
+                "Hello",
+                "world",
+                "This",
+                "is",
+                "a",
+                "test012_345",
+                "67890",
+                "ship_ship",
+                "ship__ship",
+                "_",
+                "__",
+                "__IDENTIFIER__",
+                "_ship",
+                "ship_"
+            ]
         );
     }
 
@@ -199,15 +211,85 @@ mod tests {
     #[test]
     fn test_chinese_tokenizer_issue_7943_sample() {
         let tokenizer = ChineseTokenizer;
-        let text = "[2026/04/09/ 13:56:11.031]2026-04-09 13:56:11.031 - [ trace_id=340a6a44b0bd8e37bb7697ss7da61ff0 span_id=085ff5ttf1e0a23b trace_flags=01] - [http-nio-8081-exec-16] INFO c.h.p.xx.web.service.impl.CCCXForwardKKKServiceImpl.pushout(188) - 登录手机号18888888888的动态key：829889AC8";
+        let text = "[2026/04/09/ 13:56:11.031]2026-04-09 13:56:11.031 - [ trace_id=340a6a44b0bd8e37bb7697ss7da61ff0 span_id=085ff5ttf1e0a23b trace_flags=01] - [http-nio-8081-exec-16] INFO c.h.p.xx.web.service.impl.CCCXForwardKKKServiceImpl.pushout(188) - 登录手机号18888888888的动态key：829889AC8 ship_ship ship__ship _ __ __IDENTIFIER__ _ship ship_ EOF";
         let tokens = tokenizer.tokenize(text);
 
-        assert!(tokens.contains(&"trace_id"));
-        assert!(tokens.contains(&"span_id"));
-        assert!(tokens.contains(&"trace_flags"));
-        assert!(tokens.contains(&"登录"));
-        assert!(tokens.contains(&"手机号"));
-        assert!(tokens.contains(&"key"));
+        assert_eq!(
+            tokens,
+            vec![
+                "2026",
+                "04",
+                "09",
+                "13",
+                "56",
+                "11.031",
+                "2026-04",
+                "09",
+                "13",
+                "56",
+                "11.031",
+                "trace",
+                "_",
+                "id",
+                "340a6a44b0bd8e37bb7697ss7da61ff0",
+                "span",
+                "_",
+                "id",
+                "085ff5ttf1e0a23b",
+                "trace",
+                "_",
+                "flags",
+                "01",
+                "http",
+                "nio-8081",
+                "exec-16",
+                "INFO",
+                "c",
+                "h",
+                "p",
+                "xx",
+                "web",
+                "service",
+                "impl",
+                "CCCXForwardKKKServiceImpl",
+                "pushout",
+                "188",
+                "登录",
+                "手机",
+                "手机号",
+                "18888888888",
+                "的",
+                "动态",
+                "key",
+                "829889AC8",
+                "ship",
+                "_",
+                "ship",
+                "ship",
+                "__",
+                "ship",
+                "_",
+                "__",
+                "__",
+                "IDENTIFIER",
+                "__",
+                "_",
+                "ship",
+                "ship",
+                "_",
+                "EOF",
+                "trace_id",
+                "span_id",
+                "trace_flags",
+                "ship_ship",
+                "ship__ship",
+                "_",
+                "__",
+                "__IDENTIFIER__",
+                "_ship",
+                "ship_"
+            ]
+        );
     }
 
     #[test]
@@ -221,6 +303,31 @@ mod tests {
         assert!(tokens.contains(&"dynamic_key"));
         assert!(tokens.contains(&"登录"));
         assert!(tokens.contains(&"手机号"));
+    }
+
+    #[test]
+    fn test_chinese_tokenizer_skips_non_ascii_underscore_tokens() {
+        let tokenizer = ChineseTokenizer;
+        let text = "登录_id trace_id 手机号_trace";
+
+        let tokens = tokenizer.tokenize(text);
+
+        assert_eq!(
+            tokens,
+            [
+                "登录",
+                "_",
+                "id",
+                "trace",
+                "_",
+                "id",
+                "手机",
+                "手机号",
+                "_",
+                "trace",
+                "trace_id"
+            ]
+        );
     }
 
     #[test]
