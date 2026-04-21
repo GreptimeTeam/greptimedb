@@ -105,6 +105,16 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 }
 
 async fn test_object_list_start_after(store: &ObjectStore) -> Result<()> {
+    let scheme = store.info().scheme();
+    // `start_after` is a service-level capability. Skip the checks when the
+    // backend (e.g. the local Fs service) doesn't honor it natively — the
+    // bound would be silently ignored and the full listing returned.
+    if !store.info().native_capability().list_with_start_after {
+        info!("Skip test_object_list_start_after: backend {scheme} lacks start_after support");
+        return Ok(());
+    }
+    info!("Run test_object_list_start_after on backend {scheme}");
+
     let files = [
         "00000000000000000001.json",
         "00000000000000000002.json",
