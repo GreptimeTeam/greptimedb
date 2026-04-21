@@ -101,6 +101,13 @@ bench = false
 doc = false
 
 [[bin]]
+name = "fuzz_repartition_table_chaos"
+path = "targets/ddl/fuzz_repartition_table_chaos.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
 name = "fuzz_repartition_metric_table"
 path = "targets/ddl/fuzz_repartition_metric_table.rs"
 test = false

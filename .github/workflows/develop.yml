@@ -506,6 +506,12 @@ jobs:
               minio: true
               kafka: false
               values: "with-minio.yaml"
+          - target: "fuzz_repartition_table_chaos"
+            mode:
+              name: "Local WAL repartition chaos"
+              minio: true
+              kafka: false
+              values: "with-minio-repartition-gc.yaml"
     steps:
       - name: Remove unused software
         run: |
