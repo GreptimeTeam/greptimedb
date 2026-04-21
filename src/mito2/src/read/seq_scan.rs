@@ -296,7 +296,6 @@ impl SeqScan {
             file_scan_semaphore,
         )
         .await?;
-        let num_sources = sources.len();
         let estimated_rows_per_batch = split_batch_size.unwrap_or(DEFAULT_READ_BATCH_SIZE);
         let channel_size = compute_parallel_channel_size(estimated_rows_per_batch);
         let stream = Self::build_flat_reader_from_sources(
@@ -315,7 +314,6 @@ impl SeqScan {
                 stream_ctx.input.cache_strategy.clone(),
                 key,
                 part_metrics.clone(),
-                num_sources,
             ),
             None => stream,
         };
