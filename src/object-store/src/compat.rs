@@ -22,8 +22,8 @@ use futures::{FutureExt, StreamExt, TryStreamExt};
 use object_store_012::path::Path;
 use object_store_012::{
     Attribute, Attributes, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
-    MultipartUpload, ObjectMeta, ObjectStore as ArrowObjectStore, PutMode,
-    PutMultipartOptions, PutPayload, PutResult, UploadPart,
+    MultipartUpload, ObjectMeta, ObjectStore as ArrowObjectStore, PutMode, PutMultipartOptions,
+    PutPayload, PutResult, UploadPart,
 };
 use opendal::options::{CopyOptions, WriteOptions};
 use opendal::raw::percent_decode_path;
@@ -43,7 +43,12 @@ impl OpendalStore {
         Self { inner: op }
     }
 
-    async fn copy_request(&self, from: &Path, to: &Path, if_not_exists: bool) -> object_store_012::Result<()> {
+    async fn copy_request(
+        &self,
+        from: &Path,
+        to: &Path,
+        if_not_exists: bool,
+    ) -> object_store_012::Result<()> {
         let options = CopyOptions { if_not_exists };
 
         self.inner
@@ -131,11 +136,15 @@ impl ArrowObjectStore for OpendalStore {
             }
         }
 
-        let rp = future_write.await.map_err(|err| match format_object_store_error(err, location.as_ref()) {
-            object_store_012::Error::Precondition { path, source } if opts_mode == PutMode::Create => {
-                object_store_012::Error::AlreadyExists { path, source }
+        let rp = future_write.await.map_err(|err| {
+            match format_object_store_error(err, location.as_ref()) {
+                object_store_012::Error::Precondition { path, source }
+                    if opts_mode == PutMode::Create =>
+                {
+                    object_store_012::Error::AlreadyExists { path, source }
+                }
+                err => err,
             }
-            err => err,
         })?;
 
         Ok(PutResult {
@@ -181,7 +190,10 @@ impl ArrowObjectStore for OpendalStore {
             .await
             .map_err(|err| format_object_store_error(err, location.as_ref()))?;
 
-        Ok(Box::new(OpendalMultipartUpload::new(writer, location.clone())))
+        Ok(Box::new(OpendalMultipartUpload::new(
+            writer,
+            location.clone(),
+        )))
     }
 
     async fn get_opts(
@@ -201,7 +213,9 @@ impl ArrowObjectStore for OpendalStore {
             if let Some(if_none_match) = &options.if_none_match {
                 stat = stat.if_none_match(if_none_match.as_str());
             }
-            if let Some(if_modified_since) = options.if_modified_since.and_then(datetime_to_timestamp) {
+            if let Some(if_modified_since) =
+                options.if_modified_since.and_then(datetime_to_timestamp)
+            {
                 stat = stat.if_modified_since(if_modified_since);
             }
             if let Some(if_unmodified_since) =
@@ -216,7 +230,10 @@ impl ArrowObjectStore for OpendalStore {
         let mut attributes = Attributes::new();
         if let Some(user_meta) = meta.user_metadata() {
             for (key, value) in user_meta {
-                attributes.insert(Attribute::Metadata(key.clone().into()), value.clone().into());
+                attributes.insert(
+                    Attribute::Metadata(key.clone().into()),
+                    value.clone().into(),
+                );
             }
         }
 
@@ -251,7 +268,9 @@ impl ArrowObjectStore for OpendalStore {
             if let Some(if_none_match) = options.if_none_match {
                 read = read.if_none_match(if_none_match.as_str());
             }
-            if let Some(if_modified_since) = options.if_modified_since.and_then(datetime_to_timestamp) {
+            if let Some(if_modified_since) =
+                options.if_modified_since.and_then(datetime_to_timestamp)
+            {
                 read = read.if_modified_since(if_modified_since);
             }
             if let Some(if_unmodified_since) =
@@ -308,7 +327,10 @@ impl ArrowObjectStore for OpendalStore {
             .map_err(|err| format_object_store_error(err, location.as_ref()))
     }
 
-    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store_012::Result<ObjectMeta>> {
+    fn list(
+        &self,
+        prefix: Option<&Path>,
+    ) -> BoxStream<'static, object_store_012::Result<ObjectMeta>> {
         let path = prefix.map_or_else(String::new, |prefix| {
             format!("{}/", percent_decode_path(prefix.as_ref()))
         });
@@ -331,7 +353,10 @@ impl ArrowObjectStore for OpendalStore {
         fut.into_stream().try_flatten().boxed()
     }
 
-    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store_012::Result<ListResult> {
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&Path>,
+    ) -> object_store_012::Result<ListResult> {
         let path = prefix.map_or_else(String::new, |prefix| {
             format!("{}/", percent_decode_path(prefix.as_ref()))
         });
