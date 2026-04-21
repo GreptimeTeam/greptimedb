@@ -1,0 +1,14 @@
+src/common/meta/src/kv_backend/rds/mysql.rs
+  h_6bf4f2d0301578 21,28,593-596,645
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "989107707b9f6c19ea06f9137a3c6bfa247e89ff",
+  "prompts": {},
+  "humans": {
+    "h_6bf4f2d0301578": {
+      "author": "WenyXu"
+    }
+  }
+}
