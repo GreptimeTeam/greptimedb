@@ -80,6 +80,19 @@ pub fn checkpoint_file(version: ManifestVersion) -> String {
     format!("{version:020}.checkpoint")
 }
 
+/// Returns a lexicographic `start_after` key used to push a version
+/// lower bound into an object-store `list` request.
+///
+/// Manifest files are named `{version:020}.{json,checkpoint}[.gz]` and
+/// sort lexicographically by version. The bare 20-digit key returned
+/// here is a strict-exclusive lower bound:
+/// - files for `v < version` have a 20-digit prefix `< {version:020}` and are skipped;
+/// - files for `v >= version` (e.g. `{version:020}.json`) extend the key with
+///   `.` (ASCII 46 < `'0'` = 48), so they sort strictly greater and are kept.
+pub fn list_start_after(version: ManifestVersion) -> String {
+    format!("{version:020}")
+}
+
 pub fn gen_path(path: &str, file: &str, compress_type: CompressionType) -> String {
     if compress_type == CompressionType::Uncompressed {
         format!("{}{}", path, file)
@@ -198,11 +211,19 @@ impl ManifestObjectStore {
     }
 
     /// Returns an iterator of manifests from normal or staging directory.
-    pub(crate) async fn manifest_lister(&self, is_staging: bool) -> Result<Option<Lister>> {
+    ///
+    /// `start_after` is forwarded to the non-staging lister to skip entries
+    /// whose name is lexicographically less than or equal to it. It is
+    /// ignored for the staging directory.
+    pub(crate) async fn manifest_lister(
+        &self,
+        is_staging: bool,
+        start_after: Option<&str>,
+    ) -> Result<Option<Lister>> {
         if is_staging {
             self.staging_storage.manifest_lister().await
         } else {
-            self.delta_storage.manifest_lister().await
+            self.delta_storage.manifest_lister(start_after).await
         }
     }
 
@@ -243,9 +264,14 @@ impl ManifestObjectStore {
         keep_last_checkpoint: bool,
     ) -> Result<usize> {
         // Stores (entry, is_checkpoint, version) in a Vec.
+        //
+        // `start_after` is intentionally `None` here: a previous deletion
+        // may have been interrupted and left stale files at versions below
+        // the current checkpoint; we need the lister to surface them so
+        // cleanup can finish.
         let entries: Vec<_> = self
             .delta_storage
-            .get_paths(|entry| {
+            .get_paths(None, |entry| {
                 let file_name = entry.name();
                 let is_checkpoint = is_checkpoint_file(file_name);
                 if is_delta_file(file_name) || is_checkpoint_file(file_name) {
@@ -717,5 +743,57 @@ mod tests {
         );
 
         assert_eq!(log_store.total_manifest_size(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_start_after_uncompress() {
+        let mut log_store = new_test_manifest_store();
+        log_store.set_compress_type(CompressionType::Uncompressed);
+        test_scan_with_start_after_case(log_store).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_start_after_compress() {
+        let mut log_store = new_test_manifest_store();
+        log_store.set_compress_type(CompressionType::Gzip);
+        test_scan_with_start_after_case(log_store).await;
+    }
+
+    async fn test_scan_with_start_after_case(mut log_store: ManifestObjectStore) {
+        for v in 0..10 {
+            log_store
+                .save(v, format!("hello, {v}").as_bytes(), false)
+                .await
+                .unwrap();
+        }
+        // A checkpoint at version 5 shares the directory; scan must still
+        // return only delta files in range.
+        log_store
+            .save_checkpoint(5, "checkpoint".as_bytes())
+            .await
+            .unwrap();
+
+        // start > 0: `start_after` must skip pre-start deltas without losing any.
+        let entries = log_store.delta_storage.scan(3, 10).await.unwrap();
+        let versions: Vec<_> = entries.iter().map(|(v, _)| *v).collect();
+        assert_eq!(versions, vec![3, 4, 5, 6, 7, 8, 9]);
+
+        // start == 0: `start_after` is skipped; every delta is returned.
+        let entries = log_store.delta_storage.scan(0, 10).await.unwrap();
+        let versions: Vec<_> = entries.iter().map(|(v, _)| *v).collect();
+        assert_eq!(versions, (0..10).collect::<Vec<_>>());
+
+        // Upper bound exclusive.
+        let entries = log_store.delta_storage.scan(7, 9).await.unwrap();
+        let versions: Vec<_> = entries.iter().map(|(v, _)| *v).collect();
+        assert_eq!(versions, vec![7, 8]);
+
+        // Start beyond any existing file returns empty.
+        let entries = log_store
+            .delta_storage
+            .scan(10, ManifestVersion::MAX)
+            .await
+            .unwrap();
+        assert!(entries.is_empty());
     }
 }
