@@ -85,7 +85,8 @@ FROM (
 ) s
 GROUP BY a;
 
--- Zero-key reduction should rewrite SinglePartitioned to Single.
+-- Zero-key reduction should collapse the redundant repartition while keeping
+-- the outer aggregate in SinglePartitioned mode.
 SELECT sum(m)
 FROM (
   SELECT a, b, c, min(val) AS m

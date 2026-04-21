@@ -193,13 +193,8 @@ impl QueryEngineState {
         );
         Self::insert_physical_optimizer_rule_after(
             &mut physical_optimizer.rules,
-            datafusion::physical_optimizer::combine_partial_final_agg::CombinePartialFinalAggregate::new().name(),
+            datafusion::physical_optimizer::update_aggr_exprs::OptimizeAggregateOrder::new().name(),
             Arc::new(ReduceAggregateRepartition),
-        );
-        Self::insert_physical_optimizer_rule_after(
-            &mut physical_optimizer.rules,
-            ReduceAggregateRepartition.name(),
-            Arc::new(datafusion::physical_optimizer::enforce_distribution::EnforceDistribution {}),
         );
         // Add rule for windowed sort
         physical_optimizer
