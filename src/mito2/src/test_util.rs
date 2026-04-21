@@ -610,9 +610,16 @@ impl TestEnv {
         let manifest_dir = data_home.join("manifest").as_path().display().to_string();
 
         let builder = Fs::default();
-        let object_store = ObjectStore::new(builder.root(&manifest_dir))
-            .unwrap()
-            .finish();
+        let object_store = if let Some(mock_layer) = self.object_store_mock_layer.as_ref() {
+            ObjectStore::new(builder.root(&manifest_dir))
+                .unwrap()
+                .layer(mock_layer.clone())
+                .finish()
+        } else {
+            ObjectStore::new(builder.root(&manifest_dir))
+                .unwrap()
+                .finish()
+        };
 
         // The "manifest_dir" here should be the relative path from the `object_store`'s root.
         // Otherwise the OpenDal's list operation would fail with "StripPrefixError". This is

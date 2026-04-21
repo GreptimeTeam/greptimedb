@@ -24,18 +24,22 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use common_datasource::compression::CompressionType;
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use crc32fast::Hasher;
 use lazy_static::lazy_static;
 use object_store::util::join_dir;
 use object_store::{Lister, ObjectStore, util};
 use regex::Regex;
-use snafu::{ResultExt, ensure};
+#[cfg(test)]
+use snafu::ResultExt;
+use snafu::ensure;
 use store_api::ManifestVersion;
 use store_api::storage::RegionId;
 
 use crate::cache::manifest_cache::ManifestCache;
-use crate::error::{ChecksumMismatchSnafu, OpenDalSnafu, Result};
+#[cfg(test)]
+use crate::error::OpenDalSnafu;
+use crate::error::{ChecksumMismatchSnafu, Result};
 use crate::manifest::storage::checkpoint::CheckpointStorage;
 use crate::manifest::storage::delta::DeltaStorage;
 use crate::manifest::storage::size_tracker::{CheckpointTracker, DeltaTracker, SizeTracker};
@@ -287,11 +291,11 @@ impl ManifestObjectStore {
             .iter()
             .map(|(e, _, _)| e.path().to_string())
             .collect::<Vec<_>>();
-        let ret = paths.len();
+        let total = paths.len();
 
         debug!(
             "Deleting {} logs from manifest storage path {} until {}, checkpoint_version: {:?}, paths: {:?}",
-            ret, self.path, end, checkpoint_version, paths,
+            total, self.path, end, checkpoint_version, paths,
         );
 
         // Remove from cache first
@@ -299,13 +303,37 @@ impl ManifestObjectStore {
             remove_from_cache(self.manifest_cache.as_ref(), entry.path()).await;
         }
 
-        self.object_store
-            .delete_iter(paths)
-            .await
-            .context(OpenDalSnafu)?;
+        // Try batch delete first. On failure, fall back to per-file deletes.
+        // This is a workaround for S3-compatible object stores that do not support batch delete. See issue #7986.
+        let mut succeeded = vec![false; del_entries.len()];
+        match self.object_store.delete_iter(paths.clone()).await {
+            Ok(()) => succeeded.fill(true),
+            Err(batch_err) => {
+                warn!(
+                    batch_err;
+                    "Batch delete failed for manifest path {}, falling back to per-file delete for {} paths",
+                    self.path, total,
+                );
+                for (i, path) in paths.iter().enumerate() {
+                    if let Err(e) = self.object_store.delete(path).await {
+                        warn!(
+                            e;
+                            "Failed to delete manifest file {} under {}, aborting fallback, {} files will be retried on next checkpoint",
+                            path, self.path, total - i,
+                        );
+                        break;
+                    }
+                    succeeded[i] = true;
+                }
+            }
+        }
 
-        // delete manifest sizes
-        for (_, is_checkpoint, version) in &del_entries {
+        let mut deleted = 0usize;
+        for (i, (_, is_checkpoint, version)) in del_entries.iter().enumerate() {
+            if !succeeded[i] {
+                continue;
+            }
+            deleted += 1;
             if *is_checkpoint {
                 self.size_tracker
                     .remove(&size_tracker::FileKey::Checkpoint(*version));
@@ -315,7 +343,7 @@ impl ManifestObjectStore {
             }
         }
 
-        Ok(ret)
+        Ok(deleted)
     }
 
     /// Save the delta manifest file.
