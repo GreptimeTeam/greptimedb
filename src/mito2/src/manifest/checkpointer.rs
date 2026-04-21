@@ -16,7 +16,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use store_api::storage::RegionId;
 use store_api::{MIN_VERSION, ManifestVersion};
 
@@ -78,7 +78,7 @@ impl Inner {
             .store(version, Ordering::Relaxed);
 
         if let Err(e) = self.manifest_store.delete_until(version, true).await {
-            error!(e; "Failed to delete manifest actions until version {} for region {}, leftover files will be ignored on recovery", version, region_id);
+            warn!(e; "Failed to delete manifest actions until version {} for region {}, leftover files will be ignored on recovery", version, region_id);
         }
 
         info!(
