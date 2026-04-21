@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, info};
@@ -255,6 +256,7 @@ impl RegionManifestManager {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["open"])
             .start_timer();
+        let open_start = Instant::now();
 
         // construct storage
         let mut store = ManifestObjectStore::new(
@@ -290,8 +292,15 @@ impl RegionManifestManager {
             RegionManifestBuilder::default()
         };
 
+        let replay_start_version = version;
+        info!(
+            "Replaying region manifest {} from version {}, last checkpoint version: {}",
+            options.manifest_dir, replay_start_version, last_checkpoint_version,
+        );
+
         // apply actions from storage
         let manifests = store.fetch_manifests(version, MAX_VERSION).await?;
+        let replayed_deltas = manifests.len();
 
         for (manifest_version, raw_action_list) in manifests {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
@@ -334,6 +343,7 @@ impl RegionManifestManager {
         );
         let version = manifest.manifest_version;
 
+        let manifest_dir = options.manifest_dir.clone();
         let checkpointer = Checkpointer::new(
             manifest.metadata.region_id,
             options,
@@ -344,6 +354,16 @@ impl RegionManifestManager {
         manifest
             .removed_files
             .update_file_removed_cnt_to_stats(stats);
+        info!(
+            "Opened region manifest {}, region_id: {}, start_version: {}, last_checkpoint_version: {}, replayed_deltas: {}, final_version: {}, cost: {:?}",
+            manifest_dir,
+            manifest.metadata.region_id,
+            replay_start_version,
+            last_checkpoint_version,
+            replayed_deltas,
+            version,
+            open_start.elapsed(),
+        );
         Ok(Some(Self {
             store,
             last_version: manifest_version,
