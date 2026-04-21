@@ -16,38 +16,40 @@ use std::sync::Arc;
 
 use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
-use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::repartition::RepartitionExec;
-use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties, InputOrderMode};
 use datafusion_common::Result as DfResult;
-use datafusion_physical_expr::{Distribution, Partitioning};
+use datafusion_physical_expr::expressions::Column;
+use datafusion_physical_expr::{Distribution, PhysicalExpr};
 
-/// Replaces a redundant hash repartition before a coarser aggregate with a
-/// single fan-in.
+use crate::dist_plan::MergeScanExec;
+
+/// This is a [`PhysicalOptimizerRule`] to reduce repartition overhead between
+/// partial and final aggregates by pushing a coarser hash distribution
+/// requirement through [`AggregateExec`] in partial mode down to [`MergeScanExec`].
 ///
-/// This only applies when the aggregate already receives hash partitioning
-/// satisfying its grouping keys and the repartition input is already hash
-/// partitioned on a strict superset of those repartition keys.
+/// This rule keeps the partition fanout unchanged. It only enables
+/// source-aware partition-column coarsening that [`MergeScanExec`] can already
+/// satisfy without a full reshuffle.
+///
+/// This rule is expected to be run before [`EnforceDistribution`].
+///
+/// [`EnforceDistribution`]: datafusion::physical_optimizer::enforce_distribution::EnforceDistribution
+/// [`MergeScanExec`]: crate::dist_plan::MergeScanExec
 #[derive(Debug)]
 pub struct ReduceAggregateRepartition;
-
-struct OptimizedPlan {
-    plan: Arc<dyn ExecutionPlan>,
-    subtree_is_linear: bool,
-}
 
 impl PhysicalOptimizerRule for ReduceAggregateRepartition {
     fn optimize(
         &self,
         plan: Arc<dyn ExecutionPlan>,
-        _config: &ConfigOptions,
+        config: &ConfigOptions,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        Ok(Self::do_optimize_with_context(plan, false)?.plan)
+        Self::do_optimize(plan, config)
     }
 
     fn name(&self) -> &str {
-        "ReduceAggregateRepartition"
+        "ReduceAggregateRepartitionRule"
     }
 
     fn schema_check(&self) -> bool {
@@ -56,117 +58,110 @@ impl PhysicalOptimizerRule for ReduceAggregateRepartition {
 }
 
 impl ReduceAggregateRepartition {
-    fn do_optimize_with_context(
+    fn do_optimize(
         plan: Arc<dyn ExecutionPlan>,
-        under_branching_ancestor: bool,
-    ) -> DfResult<OptimizedPlan> {
-        let children = plan.children();
-        let subtree_branches_here = children.len() > 1;
-        let child_under_branching_ancestor = under_branching_ancestor || subtree_branches_here;
-        let optimized_children = children
-            .into_iter()
-            .map(|child| {
-                Self::do_optimize_with_context(Arc::clone(child), child_under_branching_ancestor)
-            })
-            .collect::<DfResult<Vec<_>>>()?;
-        let subtree_is_linear = !subtree_branches_here
-            && optimized_children
-                .iter()
-                .all(|child| child.subtree_is_linear);
-        let new_children = optimized_children
-            .into_iter()
-            .map(|child| child.plan)
-            .collect();
-        let plan = plan.with_new_children(new_children)?;
-
-        let plan = if under_branching_ancestor || !subtree_is_linear {
-            plan
-        } else {
-            Self::try_reduce_repartition(plan)?
-        };
-
-        Ok(OptimizedPlan {
-            plan,
-            subtree_is_linear,
-        })
+        _config: &ConfigOptions,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        Self::rewrite_with_distribution(plan, None)
     }
 
-    fn aggregate_repartition_candidate(
-        plan: &Arc<dyn ExecutionPlan>,
-    ) -> Option<(&AggregateExec, &RepartitionExec)> {
-        let agg_exec = plan.as_any().downcast_ref::<AggregateExec>()?;
-        let repartition_exec = agg_exec
-            .input()
-            .as_any()
-            .downcast_ref::<RepartitionExec>()?;
-        Some((agg_exec, repartition_exec))
-    }
-
-    fn can_rewrite_aggregate(agg_exec: &AggregateExec, repartition_exec: &RepartitionExec) -> bool {
-        if !matches!(
-            agg_exec.mode(),
-            AggregateMode::FinalPartitioned | AggregateMode::SinglePartitioned
-        ) || agg_exec.input_order_mode() != &InputOrderMode::Linear
-            || agg_exec.group_expr().has_grouping_set()
-            || repartition_exec.preserve_order()
+    fn rewrite_with_distribution(
+        plan: Arc<dyn ExecutionPlan>,
+        current_req: Option<Distribution>,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>()
+            && let Some(distribution) = current_req.as_ref()
+            && let Some(new_plan) = merge_scan.try_with_new_distribution(distribution.clone())
         {
-            return false;
+            return Ok(Arc::new(new_plan) as _);
         }
 
-        let Some(required_distribution) = agg_exec.required_input_distribution().into_iter().next()
-        else {
-            return false;
-        };
-        let repartition_satisfaction = repartition_exec.partitioning().satisfaction(
-            &required_distribution,
-            repartition_exec.properties().equivalence_properties(),
-            true,
-        );
-        repartition_satisfaction.is_satisfied() && Self::can_reduce_repartition(repartition_exec)
-    }
-
-    fn try_reduce_repartition(plan: Arc<dyn ExecutionPlan>) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let Some((agg_exec, repartition_exec)) = Self::aggregate_repartition_candidate(&plan)
-        else {
-            return Ok(plan);
-        };
-
-        if !Self::can_rewrite_aggregate(agg_exec, repartition_exec) {
+        let children = plan.children();
+        if children.is_empty() {
             return Ok(plan);
         }
 
-        let new_input = Arc::new(CoalescePartitionsExec::new(
-            repartition_exec.input().clone(),
-        ));
-        let new_agg = AggregateExec::try_new(
-            *agg_exec.mode(),
-            agg_exec.group_expr().clone(),
-            agg_exec.aggr_expr().to_vec(),
-            agg_exec.filter_expr().to_vec(),
-            new_input,
-            agg_exec.input_schema(),
-        )?
-        .with_limit_options(agg_exec.limit_options());
+        let required = plan.required_input_distribution();
+        let mut new_children = Vec::with_capacity(children.len());
+        for (idx, child) in children.into_iter().enumerate() {
+            let child_req =
+                Self::child_distribution_requirement(&plan, idx, current_req.as_ref(), &required);
+            let new_child = Self::rewrite_with_distribution(child.clone(), child_req)?;
+            new_children.push(new_child);
+        }
 
-        Ok(Arc::new(new_agg))
+        let unchanged = plan
+            .children()
+            .into_iter()
+            .zip(new_children.iter())
+            .all(|(old, new)| Arc::ptr_eq(old, new));
+        if unchanged {
+            Ok(plan)
+        } else {
+            plan.with_new_children(new_children)
+        }
     }
 
-    fn can_reduce_repartition(repartition_exec: &RepartitionExec) -> bool {
-        let Partitioning::Hash(finer_partition_exprs, _) =
-            repartition_exec.input().output_partitioning()
-        else {
-            return false;
+    fn child_distribution_requirement(
+        plan: &Arc<dyn ExecutionPlan>,
+        child_idx: usize,
+        current_req: Option<&Distribution>,
+        required: &[Distribution],
+    ) -> Option<Distribution> {
+        match required.get(child_idx) {
+            Some(Distribution::UnspecifiedDistribution) => {
+                Self::partial_aggregate_child_distribution(plan, child_idx, current_req)
+            }
+            None => current_req.cloned(),
+            Some(req) => Some(req.clone()),
+        }
+    }
+
+    fn partial_aggregate_child_distribution(
+        plan: &Arc<dyn ExecutionPlan>,
+        child_idx: usize,
+        current_req: Option<&Distribution>,
+    ) -> Option<Distribution> {
+        if child_idx == 0 {
+            Self::partial_aggregate_input_distribution(plan, current_req)
+        } else {
+            None
+        }
+    }
+
+    fn partial_aggregate_input_distribution(
+        plan: &Arc<dyn ExecutionPlan>,
+        current_req: Option<&Distribution>,
+    ) -> Option<Distribution> {
+        let agg_exec = plan.as_any().downcast_ref::<AggregateExec>()?;
+        if agg_exec.mode() != &AggregateMode::Partial || agg_exec.group_expr().has_grouping_set() {
+            return None;
+        }
+
+        let Distribution::HashPartitioned(required_exprs) = current_req? else {
+            return None;
         };
 
-        let coarsening_satisfaction = repartition_exec.partitioning().satisfaction(
-            &Distribution::HashPartitioned(finer_partition_exprs.clone()),
-            repartition_exec
-                .input()
-                .properties()
-                .equivalence_properties(),
-            true,
-        );
-        coarsening_satisfaction.is_subset()
+        let output_group_exprs = agg_exec.output_group_expr();
+        let input_group_exprs = agg_exec.group_expr().input_exprs();
+        let mut mapped_exprs = Vec::with_capacity(required_exprs.len());
+        for required_expr in required_exprs {
+            let required_col = required_expr.as_any().downcast_ref::<Column>()?;
+            let group_idx = output_group_exprs
+                .iter()
+                .position(|expr| Self::same_column(expr, required_col))?;
+            mapped_exprs.push(input_group_exprs[group_idx].clone());
+        }
+
+        Some(Distribution::HashPartitioned(mapped_exprs))
+    }
+
+    fn same_column(expr: &Arc<dyn PhysicalExpr>, expected: &Column) -> bool {
+        expr.as_any()
+            .downcast_ref::<Column>()
+            .is_some_and(|column| {
+                column.index() == expected.index() && column.name() == expected.name()
+            })
     }
 }
 
@@ -177,19 +172,11 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
-    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
-    use datafusion::physical_optimizer::PhysicalOptimizerRule;
+    use datafusion::physical_plan::ExecutionPlan;
     use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
-    use datafusion::physical_plan::projection::ProjectionExec;
-    use datafusion::physical_plan::repartition::RepartitionExec;
-    use datafusion::physical_plan::union::UnionExec;
-    use datafusion::physical_plan::{ExecutionPlan, displayable};
-    use datafusion_common::{DFSchema, Result};
-    use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
-    use datafusion_physical_expr::expressions::col;
-    use datafusion_physical_expr::{Partitioning, PhysicalExpr};
-    use pretty_assertions::assert_eq;
-    use promql::extension_plan::SeriesNormalize;
+    use datafusion_common::Result;
+    use datafusion_physical_expr::Distribution;
+    use datafusion_physical_expr::expressions::{Column, col};
 
     use super::ReduceAggregateRepartition;
 
@@ -204,362 +191,85 @@ mod tests {
     }
 
     fn group_by(names: &[&str], schema: &SchemaRef) -> Result<PhysicalGroupBy> {
-        let groups: Result<Vec<(Arc<dyn PhysicalExpr>, String)>> = names
+        let groups = names
             .iter()
             .map(|name| Ok((col(name, schema)?, (*name).to_string())))
-            .collect();
-        Ok(PhysicalGroupBy::new_single(groups?))
-    }
-
-    fn repartition(
-        input: Arc<dyn ExecutionPlan>,
-        keys: &[&str],
-        schema: &SchemaRef,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        let exprs = keys
-            .iter()
-            .map(|name| col(name, schema))
             .collect::<Result<Vec<_>>>()?;
-        Ok(Arc::new(RepartitionExec::try_new(
-            input,
-            Partitioning::Hash(exprs, 8),
-        )?))
+        Ok(PhysicalGroupBy::new_single(groups))
     }
 
-    fn aggregate(
-        mode: AggregateMode,
-        input: Arc<dyn ExecutionPlan>,
-        group_by: PhysicalGroupBy,
-        input_schema: SchemaRef,
-        aggr_expr: Vec<Arc<AggregateFunctionExpr>>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        let filter_expr = vec![None; aggr_expr.len()];
+    fn partial_aggregate(group_keys: &[&str]) -> Result<Arc<dyn ExecutionPlan>> {
+        let input = input_exec();
+        let schema = input.schema();
         Ok(Arc::new(AggregateExec::try_new(
-            mode,
-            group_by,
-            aggr_expr,
-            filter_expr,
+            AggregateMode::Partial,
+            group_by(group_keys, &schema)?,
+            vec![],
+            vec![],
             input,
-            input_schema,
+            schema,
         )?))
     }
 
-    fn optimize(plan: Arc<dyn ExecutionPlan>) -> Result<String> {
-        let optimized = ReduceAggregateRepartition.optimize(plan, &Default::default())?;
-        Ok(displayable(optimized.as_ref()).indent(true).to_string())
+    fn hash_columns(distribution: Distribution) -> Vec<(String, usize)> {
+        let Distribution::HashPartitioned(exprs) = distribution else {
+            panic!("expected hash distribution");
+        };
+        exprs
+            .into_iter()
+            .map(|expr| {
+                let column = expr
+                    .as_any()
+                    .downcast_ref::<datafusion_physical_expr::expressions::Column>()
+                    .unwrap();
+                (column.name().to_string(), column.index())
+            })
+            .collect()
     }
 
-    fn empty_logical_plan() -> LogicalPlan {
-        LogicalPlan::EmptyRelation(EmptyRelation {
-            produce_one_row: false,
-            schema: Arc::new(DFSchema::empty()),
-        })
-    }
+    #[test]
+    fn maps_partial_aggregate_hash_requirement_to_input_columns() -> Result<()> {
+        let aggregate = partial_aggregate(&["b", "a", "c"])?;
+        let required = Distribution::HashPartitioned(vec![
+            aggregate
+                .as_any()
+                .downcast_ref::<AggregateExec>()
+                .unwrap()
+                .output_group_expr()[0]
+                .clone(),
+            aggregate
+                .as_any()
+                .downcast_ref::<AggregateExec>()
+                .unwrap()
+                .output_group_expr()[1]
+                .clone(),
+        ]);
 
-    fn project_with_aliases(
-        input: Arc<dyn ExecutionPlan>,
-        aliases: &[(&str, &str)],
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        let exprs: Result<Vec<(Arc<dyn PhysicalExpr>, String)>> = aliases
-            .iter()
-            .map(|(from, to)| Ok((col(from, &input.schema())?, (*to).to_string())))
-            .collect();
-        Ok(Arc::new(ProjectionExec::try_new(exprs?, input)?))
-    }
-
-    fn promql_normalize(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        SeriesNormalize::new(
-            0,
-            "a",
-            false,
-            vec!["b".to_string(), "c".to_string()],
-            empty_logical_plan(),
+        let mapped = ReduceAggregateRepartition::partial_aggregate_input_distribution(
+            &aggregate,
+            Some(&required),
         )
-        .to_execution_plan(input)
-    }
-
-    #[test]
-    fn rewrites_final_partitioned_subset_repartition() -> Result<()> {
-        let raw = input_exec();
-        let finer = repartition(raw.clone(), &["a", "b"], &raw.schema())?;
-        let partial = aggregate(
-            AggregateMode::Partial,
-            finer,
-            group_by(&["a", "b"], &raw.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
-        let final_repartition = repartition(partial.clone(), &["a"], &partial.schema())?;
-        let final_agg = aggregate(
-            AggregateMode::FinalPartitioned,
-            final_repartition,
-            group_by(&["a"], &partial.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
+        .unwrap();
 
         assert_eq!(
-            optimize(final_agg)?.trim(),
-            r#"AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[]
-  CoalescePartitionsExec
-    AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[]
-      RepartitionExec: partitioning=Hash([a@0, b@1], 8), input_partitions=1
-        DataSourceExec: partitions=1, partition_sizes=[0]"#
+            hash_columns(mapped),
+            vec![("b".to_string(), 1), ("a".to_string(), 0)]
         );
         Ok(())
     }
 
     #[test]
-    fn rewrites_single_partitioned_subset_repartition() -> Result<()> {
-        let raw = input_exec();
-        let finer = repartition(raw.clone(), &["a", "b"], &raw.schema())?;
-        let final_repartition = repartition(finer.clone(), &["a"], &finer.schema())?;
-        let final_agg = aggregate(
-            AggregateMode::SinglePartitioned,
-            final_repartition,
-            group_by(&["a"], &finer.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
+    fn rejects_non_grouping_hash_requirement_for_partial_aggregate() -> Result<()> {
+        let aggregate = partial_aggregate(&["b", "a"])?;
+        let unrelated = Distribution::HashPartitioned(vec![Arc::new(Column::new("c", 2)) as _]);
 
-        assert_eq!(
-            optimize(final_agg)?.trim(),
-            r#"AggregateExec: mode=SinglePartitioned, gby=[a@0 as a], aggr=[]
-  CoalescePartitionsExec
-    RepartitionExec: partitioning=Hash([a@0, b@1], 8), input_partitions=1
-      DataSourceExec: partitions=1, partition_sizes=[0]"#
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn keeps_equal_partitioning_keys() -> Result<()> {
-        let raw = input_exec();
-        let finer = repartition(raw.clone(), &["a", "b"], &raw.schema())?;
-        let partial = aggregate(
-            AggregateMode::Partial,
-            finer,
-            group_by(&["a", "b"], &raw.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
-        let final_repartition = repartition(partial.clone(), &["a", "b"], &partial.schema())?;
-        let final_agg = aggregate(
-            AggregateMode::FinalPartitioned,
-            final_repartition,
-            group_by(&["a", "b"], &partial.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
-
-        assert_eq!(
-            optimize(final_agg)?.trim(),
-            r#"AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[]
-  RepartitionExec: partitioning=Hash([a@0, b@1], 8), input_partitions=8
-    AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[]
-      RepartitionExec: partitioning=Hash([a@0, b@1], 8), input_partitions=1
-        DataSourceExec: partitions=1, partition_sizes=[0]"#
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn rewrites_when_finer_key_order_differs() -> Result<()> {
-        let raw = input_exec();
-        let finer = repartition(raw.clone(), &["c", "a", "b"], &raw.schema())?;
-        let partial = aggregate(
-            AggregateMode::Partial,
-            finer,
-            group_by(&["c", "a", "b"], &raw.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
-        let final_repartition = repartition(partial.clone(), &["b", "c"], &partial.schema())?;
-        let final_agg = aggregate(
-            AggregateMode::FinalPartitioned,
-            final_repartition,
-            group_by(&["b", "c"], &partial.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
-
-        assert_eq!(
-            optimize(final_agg)?.trim(),
-            r#"AggregateExec: mode=FinalPartitioned, gby=[b@2 as b, c@0 as c], aggr=[]
-  CoalescePartitionsExec
-    AggregateExec: mode=Partial, gby=[c@2 as c, a@0 as a, b@1 as b], aggr=[]
-      RepartitionExec: partitioning=Hash([c@2, a@0, b@1], 8), input_partitions=1
-        DataSourceExec: partitions=1, partition_sizes=[0]"#
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn rewrites_when_repartition_satisfies_group_by_with_subset_keys() -> Result<()> {
-        let raw = input_exec();
-        let finer = repartition(raw.clone(), &["a", "b", "c"], &raw.schema())?;
-        let final_repartition = repartition(finer.clone(), &["a"], &finer.schema())?;
-        let final_agg = aggregate(
-            AggregateMode::FinalPartitioned,
-            final_repartition,
-            group_by(&["a", "b"], &finer.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
-
-        assert_eq!(
-            optimize(final_agg)?.trim(),
-            r#"AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[]
-  CoalescePartitionsExec
-    RepartitionExec: partitioning=Hash([a@0, b@1, c@2], 8), input_partitions=1
-      DataSourceExec: partitions=1, partition_sizes=[0]"#
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn keeps_non_hash_repartition_child() -> Result<()> {
-        let raw = input_exec();
-        let finer = repartition(raw.clone(), &["a", "b"], &raw.schema())?;
-        let partial = aggregate(
-            AggregateMode::Partial,
-            finer,
-            group_by(&["a", "b"], &raw.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
-        let final_repartition = Arc::new(RepartitionExec::try_new(
-            partial.clone(),
-            Partitioning::RoundRobinBatch(8),
-        )?);
-        let final_agg = aggregate(
-            AggregateMode::FinalPartitioned,
-            final_repartition,
-            group_by(&["a"], &partial.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
-
-        assert_eq!(
-            optimize(final_agg)?.trim(),
-            r#"AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[]
-  RepartitionExec: partitioning=RoundRobinBatch(8), input_partitions=8
-    AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[]
-      RepartitionExec: partitioning=Hash([a@0, b@1], 8), input_partitions=1
-        DataSourceExec: partitions=1, partition_sizes=[0]"#
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn rewrites_subset_partitioning_through_projection() -> Result<()> {
-        let raw = input_exec();
-        let finer = repartition(raw.clone(), &["a", "b", "c"], &raw.schema())?;
-        let projected = project_with_aliases(finer, &[("a", "x"), ("b", "y"), ("c", "z")])?;
-        let final_repartition = repartition(projected.clone(), &["x", "y"], &projected.schema())?;
-        let final_agg = aggregate(
-            AggregateMode::SinglePartitioned,
-            final_repartition,
-            group_by(&["x", "y"], &projected.schema())?,
-            projected.schema(),
-            vec![],
-        )?;
-
-        let optimized = optimize(final_agg)?;
         assert!(
-            optimized.contains(
-                "AggregateExec: mode=SinglePartitioned, gby=[x@0 as x, y@1 as y], aggr=[]"
+            ReduceAggregateRepartition::partial_aggregate_input_distribution(
+                &aggregate,
+                Some(&unrelated),
             )
+            .is_none()
         );
-        assert!(optimized.contains("CoalescePartitionsExec"));
-        assert!(optimized.contains("ProjectionExec: expr=[a@0 as x, b@1 as y, c@2 as z]"));
-        Ok(())
-    }
-
-    #[test]
-    fn rewrites_promql_subset_partitioning_through_projection() -> Result<()> {
-        let raw = input_exec();
-        let finer = repartition(raw.clone(), &["a", "b", "c"], &raw.schema())?;
-        let normalized = promql_normalize(finer);
-        let projected = project_with_aliases(normalized, &[("a", "ts"), ("b", "x"), ("c", "y")])?;
-        let final_repartition = repartition(projected.clone(), &["x", "y"], &projected.schema())?;
-        let final_agg = aggregate(
-            AggregateMode::SinglePartitioned,
-            final_repartition,
-            group_by(&["x", "y"], &projected.schema())?,
-            projected.schema(),
-            vec![],
-        )?;
-
-        let optimized = optimize(final_agg)?;
-        assert!(
-            optimized.contains(
-                "AggregateExec: mode=SinglePartitioned, gby=[x@1 as x, y@2 as y], aggr=[]"
-            ),
-            "{optimized}"
-        );
-        assert!(optimized.contains("CoalescePartitionsExec"), "{optimized}");
-        assert!(optimized.contains("PromSeriesNormalizeExec"), "{optimized}");
-        Ok(())
-    }
-
-    #[test]
-    fn keeps_subset_partitioning_with_branching_descendant() -> Result<()> {
-        let left = input_exec();
-        let right = input_exec();
-        let union = UnionExec::try_new(vec![left, right])?;
-        let finer = repartition(union.clone(), &["a", "b", "c"], &union.schema())?;
-        let partial = aggregate(
-            AggregateMode::Partial,
-            finer,
-            group_by(&["a", "b", "c"], &union.schema())?,
-            union.schema(),
-            vec![],
-        )?;
-        let final_repartition = repartition(partial.clone(), &["a", "b"], &partial.schema())?;
-        let final_agg = aggregate(
-            AggregateMode::FinalPartitioned,
-            final_repartition,
-            group_by(&["a", "b"], &partial.schema())?,
-            union.schema(),
-            vec![],
-        )?;
-
-        let optimized = optimize(final_agg)?;
-        assert!(
-            optimized.contains("RepartitionExec: partitioning=Hash([a@0, b@1], 8)"),
-            "{optimized}"
-        );
-        assert!(optimized.contains("UnionExec"), "{optimized}");
-        assert!(!optimized.contains("CoalescePartitionsExec"), "{optimized}");
-        Ok(())
-    }
-
-    #[test]
-    fn keeps_non_subset_repartition() -> Result<()> {
-        let raw = input_exec();
-        let coarser = repartition(raw.clone(), &["a"], &raw.schema())?;
-        let final_repartition = repartition(coarser.clone(), &["a", "b"], &coarser.schema())?;
-        let final_agg = aggregate(
-            AggregateMode::FinalPartitioned,
-            final_repartition,
-            group_by(&["a", "b"], &coarser.schema())?,
-            raw.schema(),
-            vec![],
-        )?;
-
-        let optimized = optimize(final_agg)?;
-        assert!(
-            optimized.contains(
-                "AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[]"
-            ),
-            "{optimized}"
-        );
-        assert!(
-            optimized.contains("RepartitionExec: partitioning=Hash([a@0, b@1], 8)"),
-            "{optimized}"
-        );
-        assert!(!optimized.contains("CoalescePartitionsExec"), "{optimized}");
         Ok(())
     }
 }

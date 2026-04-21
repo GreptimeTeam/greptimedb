@@ -82,11 +82,8 @@ impl PassDistribution {
         let required = plan.required_input_distribution();
         let mut new_children = Vec::with_capacity(children.len());
         for (idx, child) in children.into_iter().enumerate() {
-            let child_req = match required.get(idx) {
-                Some(Distribution::UnspecifiedDistribution) => None,
-                None => current_req.clone(),
-                Some(req) => Some(req.clone()),
-            };
+            let child_req =
+                Self::child_distribution_requirement(idx, current_req.as_ref(), &required);
             let new_child = Self::rewrite_with_distribution(child.clone(), child_req)?;
             new_children.push(new_child);
         }
@@ -101,6 +98,18 @@ impl PassDistribution {
             Ok(plan)
         } else {
             plan.with_new_children(new_children)
+        }
+    }
+
+    fn child_distribution_requirement(
+        child_idx: usize,
+        current_req: Option<&Distribution>,
+        required: &[Distribution],
+    ) -> Option<Distribution> {
+        match required.get(child_idx) {
+            Some(Distribution::UnspecifiedDistribution) => None,
+            None => current_req.cloned(),
+            Some(req) => Some(req.clone()),
         }
     }
 }

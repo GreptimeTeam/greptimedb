@@ -186,15 +186,15 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .insert(6, Arc::new(PassDistribution));
+        // Reduce aggregate repartition overhead by pushing coarser hash requirements
+        // through partial aggregates before EnforceDistribution runs.
+        physical_optimizer
+            .rules
+            .insert(7, Arc::new(ReduceAggregateRepartition));
         // Enforce sorting AFTER custom rules that modify the plan structure
         physical_optimizer.rules.insert(
-            7,
+            8,
             Arc::new(datafusion::physical_optimizer::enforce_sorting::EnforceSorting {}),
-        );
-        Self::insert_physical_optimizer_rule_after(
-            &mut physical_optimizer.rules,
-            datafusion::physical_optimizer::update_aggr_exprs::OptimizeAggregateOrder::new().name(),
-            Arc::new(ReduceAggregateRepartition),
         );
         // Add rule for windowed sort
         physical_optimizer
@@ -255,19 +255,6 @@ impl QueryEngineState {
         name: &str,
     ) {
         rules.retain(|rule| rule.name() != name);
-    }
-
-    fn insert_physical_optimizer_rule_after(
-        rules: &mut Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
-        name: &str,
-        rule: Arc<dyn PhysicalOptimizerRule + Send + Sync>,
-    ) {
-        let index = rules
-            .iter()
-            .position(|candidate| candidate.name() == name)
-            .map(|index| index + 1)
-            .unwrap_or(rules.len());
-        rules.insert(index, rule);
     }
 
     /// Optimize the logical plan by the extension analyzer rules.
