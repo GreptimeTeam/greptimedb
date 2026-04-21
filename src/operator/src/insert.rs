@@ -680,8 +680,7 @@ impl Inserter {
                         // - trace_id: when searching by trace id
                         // - parent_span_id: when searching root span
                         // - span_name: when searching certain types of span
-                        let index_columns =
-                            [TRACE_ID_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN];
+                        let index_columns = [PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN];
                         for index_column in index_columns {
                             if let Some(col) = create_table
                                 .column_defs
