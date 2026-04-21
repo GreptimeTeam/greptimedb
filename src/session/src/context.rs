@@ -43,6 +43,10 @@ pub type ConnInfoRef = Arc<ConnInfo>;
 const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 pub const REMOTE_QUERY_ID_EXTENSION_KEY: &str = "remote_query_id";
 
+pub fn is_reserved_extension_key(key: &str) -> bool {
+    key == REMOTE_QUERY_ID_EXTENSION_KEY
+}
+
 pub fn generate_remote_query_id() -> String {
     generate_remote_query_id_value().to_string()
 }
