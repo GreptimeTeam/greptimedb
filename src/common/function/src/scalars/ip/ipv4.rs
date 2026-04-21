@@ -20,7 +20,10 @@ use common_query::error::InvalidFuncArgsSnafu;
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder, UInt32Builder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType, UInt32Type};
-use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, Volatility};
+use datafusion_expr::{
+    Coercion, ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, TypeSignatureClass,
+    Volatility,
+};
 use derive_more::Display;
 
 use crate::function::{Function, extract_args};
@@ -44,7 +47,7 @@ impl Default for Ipv4NumToString {
     fn default() -> Self {
         Self {
             signature: Signature::new(
-                TypeSignature::Exact(vec![DataType::UInt32]),
+                TypeSignature::Coercible(vec![Coercion::new_exact(TypeSignatureClass::Integer)]),
                 Volatility::Immutable,
             ),
             aliases: ["inet_ntoa".to_string()],
@@ -70,6 +73,14 @@ impl Function for Ipv4NumToString {
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
         let [arg0] = extract_args(self.name(), &args)?;
+        let arg0 = compute::cast_with_options(
+            &arg0,
+            &DataType::UInt32,
+            &compute::CastOptions {
+                safe: false,
+                ..Default::default()
+            },
+        )?;
         let uint_vec = arg0.as_primitive::<UInt32Type>();
 
         let size = uint_vec.len();
@@ -171,7 +182,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::Field;
-    use datafusion_common::arrow::array::{StringViewArray, UInt32Array};
+    use datafusion_common::arrow::array::{Int64Array, StringViewArray, UInt32Array};
 
     use super::*;
 
@@ -198,6 +209,51 @@ mod tests {
         assert_eq!(result.value(1), "192.168.0.1");
         assert_eq!(result.value(2), "0.0.0.0");
         assert_eq!(result.value(3), "255.255.255.255");
+    }
+
+    #[test]
+    fn test_ipv4_num_to_string_accepts_int64() {
+        let func = Ipv4NumToString::default();
+
+        // Test data
+        let values = vec![167772161i64, 3232235521i64, 0i64, 4294967295i64];
+        let input = ColumnarValue::Array(Arc::new(Int64Array::from(values)));
+
+        let args = ScalarFunctionArgs {
+            args: vec![input],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(4).unwrap();
+        let result = result.as_string_view();
+
+        assert_eq!(result.value(0), "10.0.0.1");
+        assert_eq!(result.value(1), "192.168.0.1");
+        assert_eq!(result.value(2), "0.0.0.0");
+        assert_eq!(result.value(3), "255.255.255.255");
+    }
+
+    #[test]
+    fn test_ipv4_num_to_string_rejects_negative_int64() {
+        let func = Ipv4NumToString::default();
+
+        // Test data
+        let values = vec![-1i64];
+        let input = ColumnarValue::Array(Arc::new(Int64Array::from(values)));
+
+        let args = ScalarFunctionArgs {
+            args: vec![input],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args);
+
+        assert!(result.is_err());
     }
 
     #[test]
