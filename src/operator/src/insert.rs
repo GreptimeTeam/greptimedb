@@ -677,7 +677,6 @@ impl Inserter {
                         };
 
                         // add skip index to
-                        // - trace_id: when searching by trace id
                         // - parent_span_id: when searching root span
                         // - span_name: when searching certain types of span
                         let index_columns = [PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN];
