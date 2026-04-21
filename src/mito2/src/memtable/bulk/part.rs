@@ -39,8 +39,11 @@ use datatypes::arrow::datatypes::{
 use datatypes::data_type::DataType;
 use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::{MutableVector, Vector};
+use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::types::JsonType;
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
+use datatypes::vectors::json::array::JsonArray;
 use mito_codec::key_values::{KeyValue, KeyValues};
 use mito_codec::row_converter::{PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields};
 use parquet::arrow::ArrowWriter;
@@ -55,9 +58,9 @@ use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId, SequenceNumber, SequenceRange};
 
 use crate::error::{
-    self, ColumnNotFoundSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DataTypeMismatchSnafu,
-    EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu, InvalidRequestSnafu,
-    NewRecordBatchSnafu, Result,
+    self, ColumnNotFoundSnafu, ComputeArrowSnafu, ConvertValueSnafu, CreateDefaultSnafu,
+    DataTypeMismatchSnafu, EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu,
+    InvalidRequestSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
@@ -432,11 +435,13 @@ impl UnorderedPart {
 
         // Get the schema from the first part
         let schema = self.parts[0].batch.schema();
-
-        // Concatenate all record batches
-        let batches: Vec<RecordBatch> = self.parts.iter().map(|p| p.batch.clone()).collect();
-        let concatenated =
-            arrow::compute::concat_batches(&schema, &batches).context(ComputeArrowSnafu)?;
+        let concatenated = if schema.has_json_extension_field() {
+            let (schema, batches) = align_parts(&self.parts)?;
+            arrow::compute::concat_batches(&schema, &batches).context(ComputeArrowSnafu)?
+        } else {
+            arrow::compute::concat_batches(&schema, self.parts.iter().map(|x| &x.batch))
+                .context(ComputeArrowSnafu)?
+        };
 
         // Sort the concatenated batch
         let sorted_batch = sort_primary_key_record_batch(&concatenated)?;
@@ -471,6 +476,73 @@ impl UnorderedPart {
         self.max_timestamp = i64::MIN;
         self.max_sequence = 0;
     }
+}
+
+/// Align the JSON columns in [BulkPart]s, to unified Arrow arrays. So that we can compute (concat,
+/// sort, etc.) on them.
+fn align_parts(parts: &[BulkPart]) -> Result<(SchemaRef, Vec<RecordBatch>)> {
+    debug_assert!(
+        !parts.is_empty()
+            && parts
+                .windows(2)
+                .all(|w| w[0].batch.schema_ref().fields().len()
+                    == w[1].batch.schema_ref().fields().len())
+    );
+
+    let first = &parts[0];
+    let base_schema = first.batch.schema_ref();
+    let rest = &parts[1..];
+
+    let mut merged_types = HashMap::new();
+    let mut aligned_fields = Vec::with_capacity(base_schema.fields().len());
+    for (i, field) in base_schema.fields().iter().enumerate() {
+        if is_json_extension_type(field) {
+            let mut merged = JsonType::from(field.data_type());
+            rest.iter()
+                .try_fold(&mut merged, |acc, x| {
+                    acc.merge(&JsonType::from(x.batch.schema_ref().field(i).data_type()))?;
+                    Ok(acc)
+                })
+                .context(DataTypeMismatchSnafu)?;
+            merged_types.insert(i, merged.as_arrow_type());
+
+            aligned_fields.push(Arc::new(
+                Field::new(
+                    field.name().clone(),
+                    merged.as_arrow_type(),
+                    field.is_nullable(),
+                )
+                .with_metadata(field.metadata().clone()),
+            ));
+        } else {
+            aligned_fields.push(field.clone())
+        };
+    }
+    let aligned_schema = Arc::new(Schema::new_with_metadata(
+        aligned_fields,
+        base_schema.metadata().clone(),
+    ));
+
+    let mut aligned_batches = Vec::with_capacity(parts.len());
+    for part in parts {
+        let mut columns = Vec::with_capacity(part.batch.num_columns());
+        for (i, column) in part.batch.columns().iter().enumerate() {
+            if let Some(expect) = merged_types.get(&i) {
+                columns.push(
+                    JsonArray::from(column)
+                        .try_align(expect)
+                        .context(ConvertValueSnafu)?,
+                );
+            } else {
+                columns.push(column.clone());
+            }
+        }
+        aligned_batches.push(
+            RecordBatch::try_new(aligned_schema.clone(), columns).context(NewRecordBatchSnafu)?,
+        );
+    }
+
+    Ok((aligned_schema, aligned_batches))
 }
 
 /// More accurate estimation of the size of a record batch.
