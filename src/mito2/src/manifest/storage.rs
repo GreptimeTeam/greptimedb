@@ -80,17 +80,22 @@ pub fn checkpoint_file(version: ManifestVersion) -> String {
     format!("{version:020}.checkpoint")
 }
 
-/// Returns a lexicographic `start_after` key used to push a version
-/// lower bound into an object-store `list` request.
+/// Returns a lexicographic `start_after` key for an object-store `list`
+/// request over the manifest directory at `path`.
 ///
-/// Manifest files are named `{version:020}.{json,checkpoint}[.gz]` and
-/// sort lexicographically by version. The bare 20-digit key returned
-/// here is a strict-exclusive lower bound:
-/// - files for `v < version` have a 20-digit prefix `< {version:020}` and are skipped;
-/// - files for `v >= version` (e.g. `{version:020}.json`) extend the key with
-///   `.` (ASCII 46 < `'0'` = 48), so they sort strictly greater and are kept.
-pub fn list_start_after(version: ManifestVersion) -> String {
-    format!("{version:020}")
+/// `path` must be the same directory prefix passed to `lister_with(path)`
+/// and must end with `/`. OpenDAL resolves `start_after` against the
+/// operator root, not relative to the listed path, so the caller must
+/// supply the full prefix — otherwise the bound is compared against keys
+/// that already share a longer prefix and is silently a no-op.
+pub(crate) fn list_start_after(path: &str, version: ManifestVersion) -> String {
+    debug_assert!(
+        path.ends_with('/'),
+        "list_start_after: path must end with '/', got {path:?}",
+    );
+    // Manifest files are named `{version:020}.{json,checkpoint}[.gz]` and sort lexicographically;
+    // `{path}{version:020}` is a strict prefix of `{path}{version:020}.{json,checkpoint}[.gz]`.
+    format!("{path}{version:020}")
 }
 
 pub fn gen_path(path: &str, file: &str, compress_type: CompressionType) -> String {
@@ -474,12 +479,16 @@ mod tests {
     use crate::manifest::storage::checkpoint::CheckpointMetadata;
 
     fn new_test_manifest_store() -> ManifestObjectStore {
+        new_test_manifest_store_at("/")
+    }
+
+    fn new_test_manifest_store_at(path: &str) -> ManifestObjectStore {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_manifest_log_store");
         let builder = Fs::default().root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
         ManifestObjectStore::new(
-            "/",
+            path,
             object_store,
             CompressionType::Uncompressed,
             Default::default(),
@@ -756,6 +765,16 @@ mod tests {
     async fn test_scan_with_start_after_compress() {
         let mut log_store = new_test_manifest_store();
         log_store.set_compress_type(CompressionType::Gzip);
+        test_scan_with_start_after_case(log_store).await;
+    }
+
+    // OpenDAL resolves `start_after` against the operator
+    // root, so the bound must embed the manifest directory prefix. Running the
+    // same assertions against a non-root path exercises that composition.
+    #[tokio::test]
+    async fn test_scan_with_start_after_nested_path() {
+        let mut log_store = new_test_manifest_store_at("/nested/region-1/");
+        log_store.set_compress_type(CompressionType::Uncompressed);
         test_scan_with_start_after_case(log_store).await;
     }
 

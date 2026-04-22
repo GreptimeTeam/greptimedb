@@ -653,9 +653,9 @@ impl RegionManifestManager {
         let last_version = self.last_version();
 
         // Skip older files at the object-store layer. Files for `v == last_version`
-        // may still appear (the 20-digit bare key sorts before `{v:020}.json`) but
+        // may still appear (`{path}{v:020}` sorts before `{path}{v:020}.json`) but
         // they are filtered out below by the `version > last_version` check.
-        let start_after = list_start_after(last_version);
+        let start_after = list_start_after(self.store.manifest_dir(), last_version);
         let streamer = self
             .store
             .manifest_lister(false, Some(&start_after))

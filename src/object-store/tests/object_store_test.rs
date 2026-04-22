@@ -165,6 +165,45 @@ async fn test_object_list_start_after(store: &ObjectStore) -> Result<()> {
     for name in files {
         store.delete(name).await?;
     }
+
+    // OpenDAL resolves `start_after` against the operator root, not the
+    // `lister_with` path. For a nested prefix like `manifest/`, the bound
+    // must also embed that prefix — passing only the bare 20-digit name is
+    // silently a no-op because the full keys start with `m...` > `0...`.
+    let nested_files = [
+        "manifest/00000000000000000001.json",
+        "manifest/00000000000000000002.json",
+        "manifest/00000000000000000003.checkpoint",
+        "manifest/00000000000000000003.json",
+        "manifest/00000000000000000004.json",
+    ];
+    for name in nested_files {
+        store.write(name, "x").await?;
+    }
+
+    let lister = store
+        .lister_with("manifest/")
+        .start_after("manifest/00000000000000000003")
+        .await?;
+    let mut got: Vec<String> = lister
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .filter(|e| e.metadata().mode() == EntryMode::FILE)
+        .map(|e| e.name().to_string())
+        .collect();
+    got.sort();
+    let mut expected = vec![
+        "00000000000000000003.checkpoint".to_string(),
+        "00000000000000000003.json".to_string(),
+        "00000000000000000004.json".to_string(),
+    ];
+    expected.sort();
+    assert_eq!(expected, got);
+
+    for name in nested_files {
+        store.delete(name).await?;
+    }
     Ok(())
 }
 

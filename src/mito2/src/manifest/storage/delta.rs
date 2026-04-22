@@ -131,7 +131,7 @@ impl<T: Tracker> DeltaStorage<T> {
 
         // Push the version lower bound into the list request via
         // `list_start_after`; skip the hint when `start == 0` (nothing to skip).
-        let start_after = (start > 0).then(|| list_start_after(start));
+        let start_after = (start > 0).then(|| list_start_after(&self.path, start));
         let mut total_paths = 0;
         let mut entries: Vec<(ManifestVersion, Entry)> = self
             .get_paths(start_after.as_deref(), |entry| {
