@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use datatypes::arrow::array::{BinaryArray, BooleanArray, BooleanBufferBuilder};
+use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
@@ -665,7 +665,13 @@ fn apply_filters_to_batch(
                 .context(UnexpectedSnafu {
                     reason: "Failed to downcast physical filter result to BooleanArray",
                 })?;
-        mask = mask.bitand(boolean_array.values());
+        // Treat null results as false (filtered out); value bits are not guaranteed
+        // to be false for invalid entries.
+        let mut result = boolean_array.values().clone();
+        if let Some(nulls) = boolean_array.nulls() {
+            result = result.bitand(nulls.inner());
+        }
+        mask = mask.bitand(&result);
     }
 
     if mask.count_set_bits() == 0 {
