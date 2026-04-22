@@ -19,6 +19,7 @@ pub mod flow_state;
 mod flownode_addr_helper;
 pub(crate) mod flownode_flow;
 pub(crate) mod table_flow;
+use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -149,6 +150,22 @@ impl FlowMetadataManager {
     /// Returns the [`TableFlowManager`].
     pub fn table_flow_manager(&self) -> &TableFlowManager {
         &self.table_flow_manager
+    }
+
+    /// Returns a best-effort mapping from flow partition to flownode address.
+    pub async fn flownode_addrs(
+        &self,
+        flow_id: FlowId,
+    ) -> Result<BTreeMap<FlowPartitionId, String>> {
+        let routes = self.flow_route_manager.routes(flow_id).await?;
+
+        Ok(routes
+            .into_iter()
+            .filter_map(|(key, route)| {
+                let addr = route.peer.addr;
+                (!addr.is_empty()).then_some((key.partition_id(), addr))
+            })
+            .collect())
     }
 
     /// Creates metadata for flow and returns an error if different metadata exists.
@@ -400,10 +417,13 @@ mod tests {
 
     use super::*;
     use crate::FlownodeId;
-    use crate::key::FlowPartitionId;
     use crate::key::flow::table_flow::TableFlowKey;
+    use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
+    use crate::key::{FlowPartitionId, MetadataValue};
+    use crate::kv_backend::KvBackend;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
+    use crate::rpc::store::PutRequest;
 
     #[derive(Debug)]
     struct MockKey {
@@ -565,6 +585,83 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_flownode_addrs_remaps_to_latest_address() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
+        let flow_id = 10;
+        let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024]);
+        let flow_routes = vec![(
+            0u32,
+            FlowRouteValue {
+                peer: Peer::new(1, "old-addr"),
+            },
+        )];
+
+        flow_metadata_manager
+            .create_flow_metadata(flow_id, flow_value, flow_routes)
+            .await
+            .unwrap();
+
+        mem_kv
+            .put(PutRequest {
+                key: NodeAddressKey::with_flownode(1).to_bytes(),
+                value: NodeAddressValue::new(Peer::new(1, "new-addr"))
+                    .try_as_raw_value()
+                    .unwrap(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let addrs = flow_metadata_manager.flownode_addrs(flow_id).await.unwrap();
+        assert_eq!(addrs, BTreeMap::from([(0, "new-addr".to_string())]));
+    }
+
+    #[tokio::test]
+    async fn test_flownode_addrs_falls_back_to_route_address() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
+        let flow_id = 10;
+        let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024]);
+        let flow_routes = vec![(
+            0u32,
+            FlowRouteValue {
+                peer: Peer::new(1, "route-addr"),
+            },
+        )];
+
+        flow_metadata_manager
+            .create_flow_metadata(flow_id, flow_value, flow_routes)
+            .await
+            .unwrap();
+
+        let addrs = flow_metadata_manager.flownode_addrs(flow_id).await.unwrap();
+        assert_eq!(addrs, BTreeMap::from([(0, "route-addr".to_string())]));
+    }
+
+    #[tokio::test]
+    async fn test_flownode_addrs_skips_empty_addresses() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
+        let flow_id = 10;
+        let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024]);
+        let flow_routes = vec![(
+            0u32,
+            FlowRouteValue {
+                peer: Peer::empty(1),
+            },
+        )];
+
+        flow_metadata_manager
+            .create_flow_metadata(flow_id, flow_value, flow_routes)
+            .await
+            .unwrap();
+
+        let addrs = flow_metadata_manager.flownode_addrs(flow_id).await.unwrap();
+        assert!(addrs.is_empty());
     }
 
     #[tokio::test]
