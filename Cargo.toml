@@ -208,7 +208,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "form",
     "json",
     "query",
-    "rustls-no-provider",
+    "rustls",
     "stream",
     "multipart",
 ] }
