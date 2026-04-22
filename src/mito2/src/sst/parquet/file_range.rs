@@ -260,11 +260,6 @@ impl FileRangeContext {
         }
     }
 
-    /// Returns the path of the file to read.
-    pub(crate) fn file_path(&self) -> &str {
-        self.reader_builder.file_path()
-    }
-
     /// Returns filters pushed down.
     pub(crate) fn filters(&self) -> &[SimpleFilterContext] {
         &self.base.filters
