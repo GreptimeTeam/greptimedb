@@ -129,19 +129,20 @@ SELECT * FROM information_schema.ssts_index_meta ORDER BY meta_json;
 
 -- SQLNESS REPLACE (\s+\d+\s+) <NUM>
 -- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,9}) <DATETIME>
 -- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
 SELECT * FROM information_schema.ssts_storage order by file_path;
 
-+---------------------------------------------------------------------------------------------+-----------+------------------+---------+
-| file_path                                                                                   | file_size | last_modified_ms | node_id |
-+---------------------------------------------------------------------------------------------+-----------+------------------+---------+
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
-+---------------------------------------------------------------------------------------------+-----------+------------------+---------+
++---------------------------------------------------------------------------------------------+-----------+-------------------------+---------+
+| file_path                                                                                   | file_size | last_modified_ms        | node_id |
++---------------------------------------------------------------------------------------------+-----------+-------------------------+---------+
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>| <DATETIME> |<NUM>|
++---------------------------------------------------------------------------------------------+-----------+-------------------------+---------+
 
 INSERT INTO sst_case VALUES
   (24, 'foo', 'foo', 100),
@@ -205,23 +206,24 @@ SELECT * FROM information_schema.ssts_index_meta ORDER BY meta_json;
 
 -- SQLNESS REPLACE (\s+\d+\s+) <NUM>
 -- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,9}) <DATETIME>
 -- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
 SELECT * FROM information_schema.ssts_storage order by file_path;
 
-+---------------------------------------------------------------------------------------------+-----------+------------------+---------+
-| file_path                                                                                   | file_size | last_modified_ms | node_id |
-+---------------------------------------------------------------------------------------------+-----------+------------------+---------+
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
-| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
-+---------------------------------------------------------------------------------------------+-----------+------------------+---------+
++---------------------------------------------------------------------------------------------+-----------+-------------------------+---------+
+| file_path                                                                                   | file_size | last_modified_ms        | node_id |
++---------------------------------------------------------------------------------------------+-----------+-------------------------+---------+
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |<NUM>| <DATETIME> |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>| <DATETIME> |<NUM>|
++---------------------------------------------------------------------------------------------+-----------+-------------------------+---------+
 
 DROP TABLE sst_case;
 
