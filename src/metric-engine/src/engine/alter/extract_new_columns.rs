@@ -16,8 +16,9 @@ use std::collections::{HashMap, HashSet};
 
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{AlterKind, RegionAlterRequest};
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::RegionId;
 
+use crate::engine::state::PhysicalColumnInfo;
 use crate::error::Result;
 
 /// Extract new columns from the create requests.
@@ -27,7 +28,7 @@ use crate::error::Result;
 /// This function will panic if the alter kind is not `AddColumns`.
 pub fn extract_new_columns<'a>(
     requests: &'a [(RegionId, RegionAlterRequest)],
-    physical_columns: &HashMap<String, ColumnId>,
+    physical_columns: &HashMap<String, PhysicalColumnInfo>,
     new_column_names: &mut HashSet<&'a str>,
     new_columns: &mut Vec<ColumnMetadata>,
 ) -> Result<()> {

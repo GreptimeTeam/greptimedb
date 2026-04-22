@@ -16,7 +16,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use api::v1::SemanticType;
 use common_time::timestamp::TimeUnit;
+use datatypes::prelude::ConcreteDataType;
 use snafu::OptionExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
@@ -27,9 +29,20 @@ use crate::error::{PhysicalRegionNotFoundSnafu, Result};
 use crate::metrics::LOGICAL_REGION_COUNT;
 use crate::utils::to_data_region_id;
 
+/// Metadata cached for each physical column in a physical region.
+///
+/// Only the subset needed for validation and row-modification is cached here
+/// to avoid holding the full [`ColumnMetadata`] in memory for every column.
+#[derive(Debug, Clone)]
+pub struct PhysicalColumnInfo {
+    pub column_id: ColumnId,
+    pub data_type: ConcreteDataType,
+    pub semantic_type: SemanticType,
+}
+
 pub struct PhysicalRegionState {
     logical_regions: HashSet<RegionId>,
-    physical_columns: HashMap<String, ColumnId>,
+    physical_columns: HashMap<String, PhysicalColumnInfo>,
     primary_key_encoding: PrimaryKeyEncoding,
     options: PhysicalRegionOptions,
     time_index_unit: TimeUnit,
@@ -37,7 +50,7 @@ pub struct PhysicalRegionState {
 
 impl PhysicalRegionState {
     pub fn new(
-        physical_columns: HashMap<String, ColumnId>,
+        physical_columns: HashMap<String, PhysicalColumnInfo>,
         primary_key_encoding: PrimaryKeyEncoding,
         options: PhysicalRegionOptions,
         time_index_unit: TimeUnit,
@@ -57,7 +70,7 @@ impl PhysicalRegionState {
     }
 
     /// Returns a reference to the physical columns.
-    pub fn physical_columns(&self) -> &HashMap<String, ColumnId> {
+    pub fn physical_columns(&self) -> &HashMap<String, PhysicalColumnInfo> {
         &self.physical_columns
     }
 
@@ -90,7 +103,7 @@ impl MetricEngineState {
     pub fn add_physical_region(
         &mut self,
         physical_region_id: RegionId,
-        physical_columns: HashMap<String, ColumnId>,
+        physical_columns: HashMap<String, PhysicalColumnInfo>,
         primary_key_encoding: PrimaryKeyEncoding,
         options: PhysicalRegionOptions,
         time_index_unit: TimeUnit,
@@ -112,12 +125,12 @@ impl MetricEngineState {
     pub fn add_physical_columns(
         &mut self,
         physical_region_id: RegionId,
-        physical_columns: impl IntoIterator<Item = (String, ColumnId)>,
+        physical_columns: impl IntoIterator<Item = (String, PhysicalColumnInfo)>,
     ) {
         let physical_region_id = to_data_region_id(physical_region_id);
         let state = self.physical_regions.get_mut(&physical_region_id).unwrap();
-        for (col, id) in physical_columns {
-            state.physical_columns.insert(col, id);
+        for (col, info) in physical_columns {
+            state.physical_columns.insert(col, info);
         }
     }
 

@@ -28,6 +28,7 @@ use store_api::storage::RegionId;
 use crate::engine::MetricEngineInner;
 use crate::engine::create::region_options_for_metadata_region;
 use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
+use crate::engine::state::PhysicalColumnInfo;
 use crate::error::{
     BatchOpenMitoRegionSnafu, NoOpenRegionResultSnafu, OpenMitoRegionSnafu,
     PhysicalRegionNotFoundSnafu, Result,
@@ -326,7 +327,16 @@ impl MetricEngineInner {
                 .unwrap();
             let physical_columns = physical_columns
                 .into_iter()
-                .map(|col| (col.column_schema.name, col.column_id))
+                .map(|col| {
+                    (
+                        col.column_schema.name.clone(),
+                        PhysicalColumnInfo {
+                            column_id: col.column_id,
+                            data_type: col.column_schema.data_type.clone(),
+                            semantic_type: col.semantic_type,
+                        },
+                    )
+                })
                 .collect();
             state.add_physical_region(
                 physical_region_id,
