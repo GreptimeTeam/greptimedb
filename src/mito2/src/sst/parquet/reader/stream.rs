@@ -39,6 +39,8 @@ pub struct MissingColFiller<S> {
     output_schema: SchemaRef,
     /// Whether each projected root exists in the physical batch returned by parquet.
     projected_root_matches: Vec<bool>,
+    /// Number of columns expected from the physical batch returned by parquet.
+    expected_input_col_num: usize,
     /// Whether all projected roots are present and the stream can pass batches through.
     all_matched: bool,
 }
@@ -65,12 +67,17 @@ where
             }
         );
 
+        let expected_input_col_num = projected_root_matches
+            .iter()
+            .filter(|matched| **matched)
+            .count();
         let all_matched = projected_root_matches.iter().all(|&m| m);
 
         Ok(MissingColFiller {
             inner,
             output_schema,
             projected_root_matches,
+            expected_input_col_num,
             all_matched,
         })
     }
@@ -91,7 +98,12 @@ where
                 let rb = if this.all_matched {
                     rb
                 } else {
-                    fill_missing_cols(rb, output_schema, &this.projected_root_matches)?
+                    fill_missing_cols(
+                        rb,
+                        output_schema,
+                        &this.projected_root_matches,
+                        this.expected_input_col_num,
+                    )?
                 };
                 Poll::Ready(Some(Ok(rb)))
             }
@@ -106,18 +118,14 @@ fn fill_missing_cols(
     rb: RecordBatch,
     output_schema: &SchemaRef,
     projected_root_matches: &[bool],
+    expected_input_col_num: usize,
 ) -> Result<RecordBatch> {
-    let expected_input_cols = projected_root_matches
-        .iter()
-        .filter(|matched| **matched)
-        .count();
-
     ensure!(
-        rb.columns().len() == expected_input_cols,
+        rb.columns().len() == expected_input_col_num,
         UnexpectedSnafu {
             reason: format!(
                 "MissingColFiller expected {} input columns but got {}",
-                expected_input_cols,
+                expected_input_col_num,
                 rb.columns().len()
             ),
         }
