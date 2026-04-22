@@ -497,23 +497,23 @@ async fn test_checkpoint_bypass_in_staging_mode() {
     assert_eq!(last_version, 16);
 }
 
-/// A deleter that fails on `flush`, simulating the S3 batch-delete failure
+/// A deleter that fails on `close`, simulating the S3 batch-delete failure
 /// described in issue #7986.
 struct FailingDeleter {
     inner: oio::Deleter,
-    flush_calls: Arc<AtomicUsize>,
+    close_calls: Arc<AtomicUsize>,
 }
 
 impl oio::Delete for FailingDeleter {
-    fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
-        self.inner.delete(path, args)
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        self.inner.delete(path, args).await
     }
 
-    async fn flush(&mut self) -> MockResult<usize> {
-        self.flush_calls.fetch_add(1, Ordering::Relaxed);
+    async fn close(&mut self) -> MockResult<()> {
+        self.close_calls.fetch_add(1, Ordering::Relaxed);
         Err(MockError::new(
             ErrorKind::Unexpected,
-            "mock manifest delete flush failure",
+            "mock manifest delete close failure",
         ))
     }
 }
@@ -522,13 +522,13 @@ impl oio::Delete for FailingDeleter {
 async fn checkpoint_advances_and_recovery_works_when_delete_fails() {
     common_telemetry::init_default_ut_logging();
 
-    let flush_calls = Arc::new(AtomicUsize::new(0));
-    let factory_flush_calls = flush_calls.clone();
+    let close_calls = Arc::new(AtomicUsize::new(0));
+    let factory_close_calls = close_calls.clone();
     let mock_layer = MockLayerBuilder::default()
         .deleter_factory(Arc::new(move |inner| {
             Box::new(FailingDeleter {
                 inner,
-                flush_calls: factory_flush_calls.clone(),
+                close_calls: factory_close_calls.clone(),
             })
         }))
         .build()
@@ -550,7 +550,7 @@ async fn checkpoint_advances_and_recovery_works_when_delete_fails() {
     }
 
     // The checkpointer must have attempted to delete stale files at least once.
-    assert!(flush_calls.load(Ordering::Relaxed) > 0);
+    assert!(close_calls.load(Ordering::Relaxed) > 0);
 
     // Despite delete failures, the in-memory checkpoint marker advances so
     // subsequent `maybe_do_checkpoint` calls compute correct ranges.
