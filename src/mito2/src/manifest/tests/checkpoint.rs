@@ -567,10 +567,10 @@ async fn checkpoint_advances_and_recovery_works_when_delete_fails() {
 
     // Stale deltas below the checkpoint version must still be present because
     // the mocked deleter refused them.
-    let file_names = manager
+    let file_names: Vec<String> = manager
         .store()
         .delta_storage()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(None, |e| Some(e.name().to_string()))
         .await
         .unwrap();
     let stale_delta_count = file_names.iter().filter(|name| is_delta_file(name)).count();
