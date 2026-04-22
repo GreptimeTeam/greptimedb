@@ -14,119 +14,51 @@
 
 #![allow(dead_code)]
 
-use std::future::Future;
 use std::time::Duration;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RetryConfig {
-    pub(crate) max_retries: usize,
-    pub(crate) initial_backoff: Duration,
-    pub(crate) max_backoff: Duration,
-    pub(crate) multiplier: u32,
-}
+use backon::ExponentialBuilder;
 
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_retries: 3,
-            initial_backoff: Duration::from_secs(1),
-            max_backoff: Duration::from_secs(300),
-            multiplier: 2,
-        }
-    }
-}
-
-impl RetryConfig {
-    pub(crate) fn backoff_delay(&self, attempt: usize) -> Duration {
-        if attempt == 0 {
-            return Duration::ZERO;
-        }
-
-        let mut delay = self.initial_backoff;
-        for _ in 1..attempt {
-            delay = delay.saturating_mul(self.multiplier);
-            if delay >= self.max_backoff {
-                return self.max_backoff;
-            }
-        }
-        delay.min(self.max_backoff)
-    }
-}
-
-pub(crate) async fn retry_async<T, E, Op, Fut, Pred>(
-    config: &RetryConfig,
-    mut op: Op,
-    is_retryable: Pred,
-) -> std::result::Result<T, E>
-where
-    Op: FnMut() -> Fut,
-    Fut: Future<Output = std::result::Result<T, E>>,
-    Pred: Fn(&E) -> bool,
-{
-    let mut attempt = 0;
-    loop {
-        match op().await {
-            Ok(value) => return Ok(value),
-            Err(error) if attempt < config.max_retries && is_retryable(&error) => {
-                let delay = config.backoff_delay(attempt + 1);
-                tokio::time::sleep(delay).await;
-                attempt += 1;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+pub(crate) fn default_retry_policy() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_min_delay(Duration::from_secs(1))
+        .with_max_delay(Duration::from_secs(300))
+        .with_factor(2.0)
+        // This is the number of retries after the initial attempt.
+        .with_max_times(3)
+        .with_jitter()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::future::ready;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+
+    use backon::Retryable;
 
     use super::*;
 
-    #[test]
-    fn test_backoff_delay_clamps_to_max() {
-        let config = RetryConfig {
-            max_retries: 3,
-            initial_backoff: Duration::from_secs(2),
-            max_backoff: Duration::from_secs(5),
-            multiplier: 3,
-        };
-
-        assert_eq!(config.backoff_delay(0), Duration::ZERO);
-        assert_eq!(config.backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(config.backoff_delay(2), Duration::from_secs(5));
-        assert_eq!(config.backoff_delay(3), Duration::from_secs(5));
-    }
-
     #[tokio::test]
-    async fn test_retry_async_retries_retryable_error_until_success() {
+    async fn test_retry_policy_retries_retryable_error_until_success() {
         let attempts = Arc::new(AtomicUsize::new(0));
-        let config = RetryConfig {
-            initial_backoff: Duration::ZERO,
-            max_backoff: Duration::ZERO,
-            ..Default::default()
-        };
 
-        let result = retry_async(
-            &config,
-            {
+        let result = ({
+            let attempts = attempts.clone();
+            move || {
                 let attempts = attempts.clone();
-                move || {
-                    let attempts = attempts.clone();
-                    async move {
-                        let current = attempts.fetch_add(1, Ordering::SeqCst);
-                        if current < 2 {
-                            Err("retryable")
-                        } else {
-                            Ok("done")
-                        }
+                async move {
+                    let current = attempts.fetch_add(1, Ordering::SeqCst);
+                    if current < 2 {
+                        Err("retryable")
+                    } else {
+                        Ok("done")
                     }
                 }
-            },
-            |error| *error == "retryable",
-        )
+            }
+        })
+        .retry(default_retry_policy())
+        .when(|error| *error == "retryable")
+        .sleep(|_| ready(()))
         .await;
 
         assert_eq!(result, Ok("done"));
@@ -134,28 +66,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retry_async_stops_on_non_retryable_error() {
+    async fn test_retry_policy_stops_on_non_retryable_error() {
         let attempts = Arc::new(AtomicUsize::new(0));
-        let config = RetryConfig {
-            initial_backoff: Duration::ZERO,
-            max_backoff: Duration::ZERO,
-            ..Default::default()
-        };
 
-        let result: std::result::Result<(), &str> = retry_async(
-            &config,
-            {
+        let result: std::result::Result<(), &str> = ({
+            let attempts = attempts.clone();
+            move || {
                 let attempts = attempts.clone();
-                move || {
-                    let attempts = attempts.clone();
-                    async move {
-                        attempts.fetch_add(1, Ordering::SeqCst);
-                        Err("fatal")
-                    }
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err("fatal")
                 }
-            },
-            |error| *error == "retryable",
-        )
+            }
+        })
+        .retry(default_retry_policy())
+        .when(|error| *error == "retryable")
+        .sleep(|_| ready(()))
         .await;
 
         assert_eq!(result, Err("fatal"));
@@ -163,29 +89,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retry_async_returns_last_error_after_reaching_limit() {
+    async fn test_retry_policy_returns_last_error_after_reaching_limit() {
         let attempts = Arc::new(AtomicUsize::new(0));
-        let config = RetryConfig {
-            max_retries: 2,
-            initial_backoff: Duration::ZERO,
-            max_backoff: Duration::ZERO,
-            ..Default::default()
-        };
 
-        let result: std::result::Result<(), usize> = retry_async(
-            &config,
-            {
+        let result: std::result::Result<(), usize> = ({
+            let attempts = attempts.clone();
+            move || {
                 let attempts = attempts.clone();
-                move || {
-                    let attempts = attempts.clone();
-                    async move {
-                        let current = attempts.fetch_add(1, Ordering::SeqCst);
-                        Err(current)
-                    }
+                async move {
+                    let current = attempts.fetch_add(1, Ordering::SeqCst);
+                    Err(current)
                 }
-            },
-            |_| true,
-        )
+            }
+        })
+        .retry(default_retry_policy().with_max_times(2))
+        .when(|_| true)
+        .sleep(|_| ready(()))
         .await;
 
         assert_eq!(result, Err(2));

@@ -15,20 +15,23 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{IntoError, OptionExt, ResultExt};
 use tokio::io::AsyncWriteExt;
 
 use crate::data::import_v2::error::{
-    ImportStateIoSnafu, ImportStateParseSnafu, ImportStateSerializeSnafu,
+    ImportStateIoSnafu, ImportStateLockedSnafu, ImportStateParseSnafu,
     ImportStateUnknownChunkSnafu, Result,
 };
 use crate::data::path::encode_path_segment;
 
 const IMPORT_STATE_ROOT: &str = ".greptime";
 const IMPORT_STATE_DIR: &str = "import_state";
+static IMPORT_STATE_TMP_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +55,7 @@ pub(crate) struct ImportState {
     pub(crate) snapshot_id: String,
     pub(crate) target_addr: String,
     pub(crate) updated_at: DateTime<Utc>,
+    // Chunk counts are expected to stay below ~1000, so linear scans are acceptable here.
     pub(crate) chunks: Vec<ImportChunkState>,
 }
 
@@ -104,6 +108,17 @@ impl ImportState {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct ImportStateLockGuard {
+    file: std::fs::File,
+}
+
+impl Drop for ImportStateLockGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 pub(crate) fn default_state_path(snapshot_id: &str) -> Option<PathBuf> {
     let home = default_home_dir_with(|key| std::env::var_os(key));
     let cwd = std::env::current_dir().ok();
@@ -147,9 +162,12 @@ fn import_state_file_name(snapshot_id: &str) -> String {
 
 pub(crate) async fn load_import_state(path: &Path) -> Result<Option<ImportState>> {
     match tokio::fs::read(path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .context(ImportStateParseSnafu)
-            .map(Some),
+        Ok(bytes) => {
+            let mut state: ImportState =
+                serde_json::from_slice(&bytes).context(ImportStateParseSnafu)?;
+            normalize_import_state_for_resume(&mut state);
+            Ok(Some(state))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(source).context(ImportStateIoSnafu {
             path: path.display().to_string(),
@@ -157,6 +175,7 @@ pub(crate) async fn load_import_state(path: &Path) -> Result<Option<ImportState>
     }
 }
 
+/// Caller must hold the lock acquired via `try_acquire_import_state_lock`.
 pub(crate) async fn save_import_state(path: &Path, state: &ImportState) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -166,8 +185,9 @@ pub(crate) async fn save_import_state(path: &Path, state: &ImportState) -> Resul
             })?;
     }
 
-    let bytes = serde_json::to_vec_pretty(state).context(ImportStateSerializeSnafu)?;
-    let tmp_path = path.with_extension("tmp");
+    let bytes =
+        serde_json::to_vec_pretty(state).expect("ImportState should always be serializable");
+    let tmp_path = unique_tmp_path(path);
     let mut file = tokio::fs::File::create(&tmp_path)
         .await
         .context(ImportStateIoSnafu {
@@ -189,6 +209,61 @@ pub(crate) async fn save_import_state(path: &Path, state: &ImportState) -> Resul
         })?;
     sync_parent_dir(path).await?;
     Ok(())
+}
+
+pub(crate) fn try_acquire_import_state_lock(path: &Path) -> Result<ImportStateLockGuard> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context(ImportStateIoSnafu {
+            path: parent.display().to_string(),
+        })?;
+    }
+
+    let lock_path = import_state_lock_path(path);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .context(ImportStateIoSnafu {
+            path: lock_path.display().to_string(),
+        })?;
+    file.try_lock_exclusive().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            ImportStateLockedSnafu {
+                path: lock_path.display().to_string(),
+            }
+            .build()
+        } else {
+            ImportStateIoSnafu {
+                path: lock_path.display().to_string(),
+            }
+            .into_error(error)
+        }
+    })?;
+
+    Ok(ImportStateLockGuard { file })
+}
+
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let seq = IMPORT_STATE_TMP_ID.fetch_add(1, Ordering::Relaxed);
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{file_name}.{pid}.{seq}.tmp"))
+}
+
+fn import_state_lock_path(path: &Path) -> PathBuf {
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{file_name}.lock"))
+}
+
+fn normalize_import_state_for_resume(state: &mut ImportState) {
+    for chunk in &mut state.chunks {
+        if chunk.status == ImportChunkStatus::InProgress {
+            chunk.status = ImportChunkStatus::Pending;
+            chunk.error = None;
+        }
+    }
 }
 
 pub(crate) async fn delete_import_state(path: &Path) -> Result<()> {
@@ -300,6 +375,64 @@ mod tests {
 
         let loaded = load_import_state(&path).await.unwrap().unwrap();
         assert_eq!(loaded.chunk_status(1), Some(ImportChunkStatus::Completed));
+    }
+
+    #[test]
+    fn test_load_import_state_resets_in_progress_to_pending() {
+        let mut state = ImportState::new("snapshot-1", "127.0.0.1:4000", [1, 2]);
+        state
+            .set_chunk_status(
+                2,
+                ImportChunkStatus::InProgress,
+                Some("running".to_string()),
+            )
+            .unwrap();
+
+        normalize_import_state_for_resume(&mut state);
+
+        assert_eq!(state.chunk_status(1), Some(ImportChunkStatus::Pending));
+        assert_eq!(state.chunk_status(2), Some(ImportChunkStatus::Pending));
+        assert_eq!(state.chunks[1].error, None);
+    }
+
+    #[test]
+    fn test_unique_tmp_path_generates_distinct_paths() {
+        let path = Path::new("/tmp/import_state.json");
+
+        let first = unique_tmp_path(path);
+        let second = unique_tmp_path(path);
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("/tmp"));
+        assert!(second.starts_with("/tmp"));
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        );
+        assert!(
+            second
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        );
+    }
+
+    #[test]
+    fn test_try_acquire_import_state_lock_rejects_second_holder() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("import_state.json");
+
+        let _first = try_acquire_import_state_lock(&path).unwrap();
+        let error = try_acquire_import_state_lock(&path).unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::data::import_v2::error::Error::ImportStateLocked { .. }
+        ));
     }
 
     #[tokio::test]

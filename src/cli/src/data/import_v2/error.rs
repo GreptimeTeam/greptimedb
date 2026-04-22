@@ -113,19 +113,18 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to serialize import state file"))]
-    ImportStateSerialize {
-        #[snafu(source)]
-        error: serde_json::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Import state I/O failed at '{}': {}", path, error))]
     ImportStateIo {
         path: String,
         #[snafu(source)]
         error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Import state is already locked at '{}'", path))]
+    ImportStateLocked {
+        path: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -154,10 +153,9 @@ impl ErrorExt for Error {
             Error::SnapshotStorage { error, .. } | Error::ChunkImportFailed { error, .. } => {
                 error.status_code()
             }
-            Error::ImportStateParse { .. } | Error::ImportStateSerialize { .. } => {
-                StatusCode::Internal
-            }
+            Error::ImportStateParse { .. } => StatusCode::Internal,
             Error::ImportStateIo { .. } => StatusCode::StorageUnavailable,
+            Error::ImportStateLocked { .. } => StatusCode::IllegalState,
         }
     }
 
