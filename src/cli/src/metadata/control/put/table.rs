@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use common_error::ext::BoxedError;
@@ -23,7 +25,7 @@ use common_meta::key::{
 };
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::rpc::router::{RegionRoute, region_distribution};
-use snafu::ensure;
+use snafu::{OptionExt, ensure};
 use store_api::storage::TableId;
 use table::metadata::TableInfo;
 
@@ -213,7 +215,8 @@ impl Tool for PutTableRouteTool {
             )
         })?;
         let new_region_routes = new_table_route.region_routes().map_err(BoxedError::new)?;
-        validate_table_route(table_id, new_region_routes).map_err(BoxedError::new)?;
+        validate_table_route(table_id, new_region_routes, current_region_routes)
+            .map_err(BoxedError::new)?;
         let region_info =
             load_region_info(&table_metadata_manager, table_id, current_region_routes).await?;
         let new_region_options = current_table_info.table_info.to_region_options();
@@ -238,7 +241,15 @@ impl Tool for PutTableRouteTool {
     }
 }
 
-fn validate_table_route(table_id: TableId, new_region_routes: &[RegionRoute]) -> Result<(), Error> {
+fn validate_table_route(
+    table_id: TableId,
+    new_region_routes: &[RegionRoute],
+    current_region_route: &[RegionRoute],
+) -> Result<(), Error> {
+    let current_region_ids = current_region_route
+        .iter()
+        .map(|r| r.region.id)
+        .collect::<HashSet<_>>();
     for route in new_region_routes {
         ensure!(
             route.region.id.table_id() == table_id,
@@ -249,7 +260,18 @@ fn validate_table_route(table_id: TableId, new_region_routes: &[RegionRoute]) ->
                 ),
             }
         );
+        // Ensure the region in new route exists in current route
+        current_region_ids
+            .contains(&route.region.id)
+            .then_some(())
+            .context(InvalidArgumentsSnafu {
+                msg: format!(
+                    "Invalid table route: region {} does not exist in current routes",
+                    route.region.id
+                ),
+            })?;
     }
+
     Ok(())
 }
 
@@ -386,9 +408,14 @@ mod tests {
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
+    use common_meta::rpc::router::RegionRoute;
+    use store_api::storage::RegionId;
     use tokio::io::BufReader;
 
-    use super::{PutTableInfoCommand, PutTableInfoTool, PutTableRouteCommand, PutTableRouteTool};
+    use super::{
+        PutTableInfoCommand, PutTableInfoTool, PutTableRouteCommand, PutTableRouteTool,
+        validate_table_route,
+    };
     use crate::Tool;
     use crate::metadata::control::selector::TableSelector;
     use crate::metadata::control::test_utils::prepare_physical_table_metadata;
@@ -591,6 +618,48 @@ mod tests {
 
         let err = tool.do_work().await.unwrap_err();
         assert!(err.output_msg().contains("non-physical TableRouteValue."));
+    }
+
+    #[test]
+    fn test_validate_table_route_rejects_new_region_not_in_current_route() {
+        let table_id = 1024;
+        let current_region_routes = vec![
+            RegionRoute {
+                region: common_meta::rpc::router::Region {
+                    id: RegionId::new(table_id, 1),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            RegionRoute {
+                region: common_meta::rpc::router::Region {
+                    id: RegionId::new(table_id, 2),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+        let new_region_routes = vec![
+            RegionRoute {
+                region: common_meta::rpc::router::Region {
+                    id: RegionId::new(table_id, 1),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            RegionRoute {
+                region: common_meta::rpc::router::Region {
+                    id: RegionId::new(table_id, 3),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+
+        let err =
+            validate_table_route(table_id, &current_region_routes, &new_region_routes).unwrap_err();
+
+        assert!(err.to_string().contains("does not exist in current routes"));
     }
 
     #[tokio::test]
