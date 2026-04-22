@@ -148,7 +148,7 @@ impl ErrorExt for Error {
             | Error::IncompleteSnapshot { .. }
             | Error::EmptyChunkManifest { .. }
             | Error::MissingChunkData { .. } => StatusCode::InvalidArguments,
-            Error::ImportStateUnknownChunk { .. } => StatusCode::Internal,
+            Error::ImportStateUnknownChunk { .. } => StatusCode::Unexpected,
             Error::Database { error, .. } => error.status_code(),
             Error::SnapshotStorage { error, .. } | Error::ChunkImportFailed { error, .. } => {
                 error.status_code()

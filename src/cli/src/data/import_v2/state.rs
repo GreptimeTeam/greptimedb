@@ -119,10 +119,10 @@ impl Drop for ImportStateLockGuard {
     }
 }
 
-pub(crate) fn default_state_path(snapshot_id: &str) -> Option<PathBuf> {
+pub(crate) fn default_state_path(snapshot_id: &str, target_addr: &str) -> Option<PathBuf> {
     let home = default_home_dir_with(|key| std::env::var_os(key));
     let cwd = std::env::current_dir().ok();
-    default_state_path_with(home.as_deref(), cwd.as_deref(), snapshot_id)
+    default_state_path_with(home.as_deref(), cwd.as_deref(), snapshot_id, target_addr)
 }
 
 fn default_home_dir_with<F>(get: F) -> Option<PathBuf>
@@ -143,8 +143,9 @@ fn default_state_path_with(
     home: Option<&Path>,
     cwd: Option<&Path>,
     snapshot_id: &str,
+    target_addr: &str,
 ) -> Option<PathBuf> {
-    let file_name = import_state_file_name(snapshot_id);
+    let file_name = import_state_file_name(snapshot_id, target_addr);
     match (home, cwd) {
         (Some(home), _) => Some(
             home.join(IMPORT_STATE_ROOT)
@@ -156,8 +157,12 @@ fn default_state_path_with(
     }
 }
 
-fn import_state_file_name(snapshot_id: &str) -> String {
-    format!(".import_state_{}.json", encode_path_segment(snapshot_id))
+fn import_state_file_name(snapshot_id: &str, target_addr: &str) -> String {
+    format!(
+        ".import_state_{}_{}.json",
+        encode_path_segment(snapshot_id),
+        encode_path_segment(target_addr)
+    )
 }
 
 pub(crate) async fn load_import_state(path: &Path) -> Result<Option<ImportState>> {
@@ -268,7 +273,10 @@ fn normalize_import_state_for_resume(state: &mut ImportState) {
 
 pub(crate) async fn delete_import_state(path: &Path) -> Result<()> {
     match tokio::fs::remove_file(path).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            sync_parent_dir(path).await?;
+            Ok(())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(source).context(ImportStateIoSnafu {
             path: path.display().to_string(),
@@ -448,15 +456,20 @@ mod tests {
         let home = tempdir().unwrap();
         let cwd = tempdir().unwrap();
 
-        let path =
-            default_state_path_with(Some(home.path()), Some(cwd.path()), "../snapshot").unwrap();
+        let path = default_state_path_with(
+            Some(home.path()),
+            Some(cwd.path()),
+            "../snapshot",
+            "127.0.0.1:4000",
+        )
+        .unwrap();
 
         assert_eq!(
             path,
             home.path()
                 .join(IMPORT_STATE_ROOT)
                 .join(IMPORT_STATE_DIR)
-                .join(".import_state_%2E%2E%2Fsnapshot.json")
+                .join(".import_state_%2E%2E%2Fsnapshot_127%2E0%2E0%2E1%3A4000.json")
         );
     }
 
@@ -464,9 +477,26 @@ mod tests {
     fn test_default_state_path_falls_back_to_cwd_when_home_missing() {
         let cwd = tempdir().unwrap();
 
-        let path = default_state_path_with(None, Some(cwd.path()), "snapshot-1").unwrap();
+        let path =
+            default_state_path_with(None, Some(cwd.path()), "snapshot-1", "target-a").unwrap();
 
-        assert_eq!(path, cwd.path().join(".import_state_snapshot-1.json"));
+        assert_eq!(
+            path,
+            cwd.path().join(".import_state_snapshot-1_target-a.json")
+        );
+    }
+
+    #[test]
+    fn test_default_state_path_isolated_by_target_addr() {
+        let cwd = tempdir().unwrap();
+
+        let first = default_state_path_with(None, Some(cwd.path()), "snapshot-1", "127.0.0.1:4000")
+            .unwrap();
+        let second =
+            default_state_path_with(None, Some(cwd.path()), "snapshot-1", "127.0.0.1:4001")
+                .unwrap();
+
+        assert_ne!(first, second);
     }
 
     #[test]
