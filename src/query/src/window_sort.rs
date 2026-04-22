@@ -30,6 +30,7 @@ use common_error::status_code::StatusCode;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use common_telemetry::error;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit as TimestampUnit;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
 use datafusion::execution::{RecordBatchStream, TaskContext};
 use datafusion::physical_plan::memory::MemoryStream;
@@ -778,18 +779,11 @@ fn find_slice_from_range(
     sort_column: &SortColumn,
     range: &TimeRange,
 ) -> datafusion_common::Result<(usize, usize)> {
-    let ty = sort_column.values.data_type();
-    let time_unit = if let DataType::Timestamp(unit, _) = ty {
-        unit
-    } else {
-        return Err(DataFusionError::Internal(format!(
-            "Unsupported sort column type: {}",
-            sort_column.values.data_type()
-        )));
-    };
+    let time_unit = sort_timestamp_unit(sort_column.values.data_type())?;
     let array = &sort_column.values;
     let opt = &sort_column.options.unwrap_or_default();
     let descending = opt.descending;
+    let range = convert_time_range_for_sort(range, time_unit)?;
 
     let typed_sorted_range = [range.start, range.end]
         .iter()
@@ -834,6 +828,59 @@ fn find_slice_from_range(
     };
 
     Ok((start, end - start))
+}
+
+fn sort_timestamp_unit(data_type: &DataType) -> datafusion_common::Result<arrow_schema::TimeUnit> {
+    if let DataType::Timestamp(unit, _) = data_type {
+        Ok(*unit)
+    } else {
+        Err(DataFusionError::Internal(format!(
+            "Unsupported sort column type: {data_type}"
+        )))
+    }
+}
+
+fn convert_time_range_for_sort(
+    range: &TimeRange,
+    time_unit: arrow_schema::TimeUnit,
+) -> datafusion_common::Result<TimeRange> {
+    let target_unit = time_unit.into();
+    Ok(TimeRange::new(
+        convert_timestamp_range_bound(range.start, target_unit, false)?,
+        convert_timestamp_range_bound(range.end, target_unit, true)?,
+    ))
+}
+
+fn convert_timestamp_range_bound(
+    timestamp: Timestamp,
+    target_unit: TimestampUnit,
+    round_exclusive_end_up: bool,
+) -> datafusion_common::Result<Timestamp> {
+    let converted = if round_exclusive_end_up {
+        timestamp.convert_to_ceil(target_unit)
+    } else {
+        timestamp.convert_to(target_unit)
+    };
+
+    converted.ok_or_else(|| {
+        DataFusionError::Internal(format!(
+            "Failed to convert timestamp from {:?} to {:?}",
+            timestamp.unit(),
+            target_unit
+        ))
+    })
+}
+
+pub(crate) fn project_partition_range_for_sort(
+    range: PartitionRange,
+    sort_data_type: &DataType,
+) -> datafusion_common::Result<PartitionRange> {
+    let target_unit = sort_timestamp_unit(sort_data_type)?.into();
+    Ok(PartitionRange {
+        start: convert_timestamp_range_bound(range.start, target_unit, false)?,
+        end: convert_timestamp_range_bound(range.end, target_unit, true)?,
+        ..range
+    })
 }
 
 /// Get an iterator from a primitive array.
@@ -1496,6 +1543,39 @@ mod test {
                 split_idx
             );
         }
+    }
+
+    #[test]
+    fn test_project_partition_range_for_sort_uses_ceil_on_exclusive_end() {
+        let range = PartitionRange {
+            start: Timestamp::new_nanosecond(1_000_000),
+            end: Timestamp::new_nanosecond(1_000_001),
+            num_rows: 1,
+            identifier: 0,
+        };
+
+        let projected = project_partition_range_for_sort(
+            range,
+            &DataType::Timestamp(TimeUnit::Millisecond, None),
+        )
+        .unwrap();
+
+        assert_eq!(Timestamp::new_millisecond(1), projected.start);
+        assert_eq!(Timestamp::new_millisecond(2), projected.end);
+    }
+
+    #[test]
+    fn test_find_slice_from_range_preserves_last_row_after_precision_drop() {
+        let sort_column = SortColumn {
+            values: Arc::new(TimestampMillisecondArray::from_iter_values([1])) as ArrayRef,
+            options: Some(SortOptions::default()),
+        };
+        let range = TimeRange::new(
+            Timestamp::new_nanosecond(1_000_000),
+            Timestamp::new_nanosecond(1_000_001),
+        );
+
+        assert_eq!((0, 1), find_slice_from_range(&sort_column, &range).unwrap());
     }
 
     #[allow(clippy::type_complexity)]

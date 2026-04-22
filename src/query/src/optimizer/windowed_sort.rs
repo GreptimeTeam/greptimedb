@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
+use arrow_schema::DataType;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -26,7 +26,8 @@ use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion_common::Result as DataFusionResult;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_physical_expr::expressions::Column as PhysicalColumn;
+use datafusion_physical_expr::expressions::{CastExpr, Column as PhysicalColumn};
+use datafusion_physical_expr::{PhysicalExpr, ScalarFunctionExpr};
 use store_api::region_engine::PartitionRange;
 use table::table::scan::RegionScanExec;
 
@@ -91,9 +92,11 @@ impl WindowedSortPhysicalRule {
                         .expr
                         .as_any()
                         .downcast_ref::<PhysicalColumn>()
-                        && scanner_info
-                            .time_index
-                            .contains(input_schema.field(column_expr.index()).name())
+                        && matches!(
+                            input_schema.field(column_expr.index()).data_type(),
+                            DataType::Timestamp(_, _)
+                        )
+                        && is_time_index_expr(sort_input.clone(), first_sort_expr.expr.clone())?
                         && sort_exec.fetch().is_none()
                     // skip if there is a limit, as dyn filter along is good enough in this case
                     {
@@ -154,14 +157,11 @@ impl WindowedSortPhysicalRule {
 #[derive(Debug)]
 struct ScannerInfo {
     partition_ranges: Vec<Vec<PartitionRange>>,
-    time_index: HashSet<String>,
     tag_columns: Vec<String>,
 }
 
 fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Option<ScannerInfo>> {
     let mut partition_ranges = None;
-    let mut time_index = HashSet::new();
-    let mut alias_map = Vec::new();
     let mut tag_columns = None;
 
     input.transform_up(|plan| {
@@ -184,18 +184,6 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             partition_ranges = None;
         }
 
-        // TODO(discord9): do this in logical plan instead as it's lessy bugy there
-        // Collects alias of the time index column.
-        if let Some(projection) = plan.as_any().downcast_ref::<ProjectionExec>() {
-            for expr in projection.expr() {
-                if let Some(column_expr) = expr.expr.as_any().downcast_ref::<PhysicalColumn>() {
-                    alias_map.push((column_expr.name().to_string(), expr.alias.clone()));
-                }
-            }
-            // resolve alias properly
-            time_index = resolve_alias(&alias_map, &time_index);
-        }
-
         if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
             // `PerSeries` distribution is not supported in windowed sort.
             if region_scan_exec.distribution()
@@ -206,8 +194,6 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             }
 
             partition_ranges = Some(region_scan_exec.get_uncollapsed_partition_ranges());
-            // Reset time index column.
-            time_index = HashSet::from([region_scan_exec.time_index()]);
             tag_columns = Some(region_scan_exec.tag_columns());
 
             region_scan_exec.with_distinguish_partition_range(true);
@@ -219,12 +205,88 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     let result = try {
         ScannerInfo {
             partition_ranges: partition_ranges?,
-            time_index,
             tag_columns: tag_columns?,
         }
     };
 
     Ok(result)
+}
+
+fn is_time_index_expr(
+    plan: Arc<dyn ExecutionPlan>,
+    expr: Arc<dyn PhysicalExpr>,
+) -> DataFusionResult<bool> {
+    if let Some(column_expr) = expr.as_any().downcast_ref::<PhysicalColumn>() {
+        return is_time_index_column(plan, column_expr);
+    }
+
+    if let Some(cast_expr) = expr.as_any().downcast_ref::<CastExpr>() {
+        return if matches!(cast_expr.cast_type(), DataType::Timestamp(_, _)) {
+            is_time_index_expr(plan, cast_expr.expr().clone())
+        } else {
+            Ok(false)
+        };
+    }
+
+    if let Some(scalar_function_expr) = expr.as_any().downcast_ref::<ScalarFunctionExpr>() {
+        return if is_supported_time_index_wrapper(scalar_function_expr)
+            && scalar_function_expr.args().len() == 1
+        {
+            is_time_index_expr(plan, scalar_function_expr.args()[0].clone())
+        } else {
+            Ok(false)
+        };
+    }
+
+    Ok(false)
+}
+
+fn is_time_index_column(
+    plan: Arc<dyn ExecutionPlan>,
+    column_expr: &PhysicalColumn,
+) -> DataFusionResult<bool> {
+    if let Some(projection) = plan.as_any().downcast_ref::<ProjectionExec>() {
+        let Some(projection_expr) = projection.expr().get(column_expr.index()) else {
+            return Ok(false);
+        };
+        return is_time_index_expr(projection.input().clone(), projection_expr.expr.clone());
+    }
+
+    if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
+        return Ok(matches!(
+            plan.schema().field(column_expr.index()).data_type(),
+            DataType::Timestamp(_, _)
+        ) && plan.schema().field(column_expr.index()).name().as_ref()
+            == region_scan_exec.time_index());
+    }
+
+    let Some(child) = passthrough_child(plan.as_ref()) else {
+        return Ok(false);
+    };
+    is_time_index_expr(child, Arc::new(column_expr.clone()))
+}
+
+fn passthrough_child(plan: &dyn ExecutionPlan) -> Option<Arc<dyn ExecutionPlan>> {
+    if plan.as_any().is::<FilterExec>()
+        || plan.as_any().is::<CoalescePartitionsExec>()
+        || plan.as_any().is::<RepartitionExec>()
+        || plan.as_any().is::<CooperativeExec>()
+    {
+        return plan.children().first().cloned().cloned();
+    }
+
+    None
+}
+
+fn is_supported_time_index_wrapper(expr: &ScalarFunctionExpr) -> bool {
+    matches!(
+        expr.name(),
+        "to_timestamp"
+            | "to_timestamp_seconds"
+            | "to_timestamp_millis"
+            | "to_timestamp_micros"
+            | "to_timestamp_nanos"
+    ) && matches!(expr.return_type(), DataType::Timestamp(_, _))
 }
 
 /// Removes the repartition plan between the filter and region scan.
@@ -248,80 +310,212 @@ fn remove_repartition(
     })
 }
 
-/// Resolves alias of the time index column.
-///
-/// i.e if a is time index, alias= {a:b, b:c}, then result should be {a, b}(not {a, c}) because projection is not transitive
-/// if alias={b:a} and a is time index, then return empty
-fn resolve_alias(alias_map: &[(String, String)], time_index: &HashSet<String>) -> HashSet<String> {
-    // available old name for time index
-    let mut avail_old_name = time_index.clone();
-    let mut new_time_index = HashSet::new();
-    for (old, new) in alias_map {
-        if time_index.contains(old) {
-            new_time_index.insert(new.clone());
-        } else if time_index.contains(new) && old != new {
-            // other alias to time index, remove the old name
-            avail_old_name.remove(new);
-            continue;
-        }
-    }
-    // add the remaining time index that is not in alias map
-    new_time_index.extend(avail_old_name);
-    new_time_index
-}
-
 #[cfg(test)]
 mod test {
-    use itertools::Itertools;
+    use std::sync::Arc;
+
+    use api::v1::SemanticType;
+    use arrow_schema::{Field, TimeUnit};
+    use common_recordbatch::RecordBatches;
+    use datafusion::config::ConfigOptions;
+    use datafusion_functions::datetime::to_timestamp_millis;
+    use datafusion_physical_expr::expressions::CastExpr;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::region_engine::SinglePartitionScanner;
+    use store_api::storage::{RegionId, ScanRequest};
 
     use super::*;
 
     #[test]
-    fn test_alias() {
-        let testcases = [
-            // notice the old name is still in the result
-            (
-                vec![("a", "b"), ("b", "c")],
-                HashSet::from(["a"]),
-                HashSet::from(["a", "b"]),
-            ),
-            // alias swap
-            (
-                vec![("b", "a"), ("a", "b")],
-                HashSet::from(["a"]),
-                HashSet::from(["b"]),
-            ),
-            (
-                vec![("b", "a"), ("b", "c")],
-                HashSet::from(["a"]),
-                HashSet::from([]),
-            ),
-            // not in alias map
-            (
-                vec![("c", "d"), ("d", "c")],
-                HashSet::from(["a"]),
-                HashSet::from(["a"]),
-            ),
-            // no alias
-            (vec![], HashSet::from(["a"]), HashSet::from(["a"])),
-            // empty time index
-            (vec![], HashSet::from([]), HashSet::from([])),
-        ];
-        for (alias_map, time_index, expected) in testcases {
-            let alias_map = alias_map
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect_vec();
-            let time_index = time_index.into_iter().map(|i| i.to_string()).collect();
-            let expected: HashSet<String> = expected.into_iter().map(|i| i.to_string()).collect();
+    fn test_is_time_index_expr_tracks_aliases_through_projection() {
+        let scan = new_region_scan();
+        let projection = Arc::new(
+            ProjectionExec::try_new(
+                vec![(
+                    Arc::new(PhysicalColumn::new("ts", 1)) as Arc<dyn PhysicalExpr>,
+                    "alias_ts".to_string(),
+                )],
+                scan,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
 
-            assert_eq!(
-                expected,
-                resolve_alias(&alias_map, &time_index),
-                "alias_map={:?}, time_index={:?}",
-                alias_map,
-                time_index
-            );
-        }
+        assert!(
+            is_time_index_expr(projection, Arc::new(PhysicalColumn::new("alias_ts", 0))).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_is_time_index_expr_tracks_multi_level_aliases() {
+        let scan = new_region_scan();
+        let first_projection = Arc::new(
+            ProjectionExec::try_new(
+                vec![(
+                    Arc::new(PhysicalColumn::new("ts", 1)) as Arc<dyn PhysicalExpr>,
+                    "alias_1".to_string(),
+                )],
+                scan,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+        let second_projection = Arc::new(
+            ProjectionExec::try_new(
+                vec![(
+                    Arc::new(PhysicalColumn::new("alias_1", 0)) as Arc<dyn PhysicalExpr>,
+                    "alias_2".to_string(),
+                )],
+                first_projection,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        assert!(
+            is_time_index_expr(
+                second_projection,
+                Arc::new(PhysicalColumn::new("alias_2", 0))
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_is_time_index_expr_tracks_wrapped_aliases_through_projection() {
+        let scan = new_region_scan();
+        let config = Arc::new(ConfigOptions::default());
+        let return_field = Arc::new(Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ));
+        let projection = Arc::new(
+            ProjectionExec::try_new(
+                vec![(
+                    Arc::new(ScalarFunctionExpr::new(
+                        "to_timestamp_millis",
+                        to_timestamp_millis(config.as_ref()),
+                        vec![Arc::new(PhysicalColumn::new("ts", 1))],
+                        return_field,
+                        config,
+                    )) as Arc<dyn PhysicalExpr>,
+                    "ts".to_string(),
+                )],
+                scan,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        assert!(is_time_index_expr(projection, Arc::new(PhysicalColumn::new("ts", 0))).unwrap());
+    }
+
+    #[test]
+    fn test_is_time_index_expr_tracks_cast_aliases_through_projection() {
+        let scan = new_region_scan();
+        let projection = Arc::new(
+            ProjectionExec::try_new(
+                vec![(
+                    Arc::new(CastExpr::new(
+                        Arc::new(PhysicalColumn::new("ts", 1)),
+                        DataType::Timestamp(TimeUnit::Millisecond, None),
+                        None,
+                    )) as Arc<dyn PhysicalExpr>,
+                    "ts_ms".to_string(),
+                )],
+                scan,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        assert!(is_time_index_expr(projection, Arc::new(PhysicalColumn::new("ts_ms", 0))).unwrap());
+    }
+
+    #[test]
+    fn test_is_time_index_expr_rejects_unsupported_wrappers() {
+        let scan = new_region_scan();
+        let config = Arc::new(ConfigOptions::default());
+        let return_field = Arc::new(Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ));
+        let projection = Arc::new(
+            ProjectionExec::try_new(
+                vec![(
+                    Arc::new(ScalarFunctionExpr::new(
+                        "date_trunc",
+                        to_timestamp_millis(config.as_ref()),
+                        vec![Arc::new(PhysicalColumn::new("ts", 1))],
+                        return_field,
+                        config,
+                    )) as Arc<dyn PhysicalExpr>,
+                    "ts".to_string(),
+                )],
+                scan,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        assert!(!is_time_index_expr(projection, Arc::new(PhysicalColumn::new("ts", 0))).unwrap());
+    }
+
+    #[test]
+    fn test_is_time_index_expr_rejects_non_timestamp_casts() {
+        let scan = new_region_scan();
+        let cast_expr = CastExpr::new(
+            Arc::new(PhysicalColumn::new("ts", 1)),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            None,
+        );
+        assert!(is_time_index_expr(scan.clone(), Arc::new(cast_expr)).unwrap());
+
+        let non_timestamp_cast = CastExpr::new(
+            Arc::new(PhysicalColumn::new("ts", 1)),
+            DataType::Int64,
+            None,
+        );
+        assert!(!is_time_index_expr(scan, Arc::new(non_timestamp_cast)).unwrap());
+    }
+
+    fn new_region_scan() -> Arc<dyn ExecutionPlan> {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            ),
+        ]));
+        let recordbatches = RecordBatches::try_new(schema.clone(), vec![]).unwrap();
+        let stream = recordbatches.as_stream();
+
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "value",
+                    ConcreteDataType::int32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_nanosecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            });
+
+        let scanner = Box::new(SinglePartitionScanner::new(
+            stream,
+            false,
+            Arc::new(builder.build().unwrap()),
+            None,
+        ));
+        Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap())
     }
 }

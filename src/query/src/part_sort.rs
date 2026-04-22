@@ -56,7 +56,7 @@ use snafu::location;
 use store_api::region_engine::PartitionRange;
 
 use crate::error::Result;
-use crate::window_sort::check_partition_range_monotonicity;
+use crate::window_sort::{check_partition_range_monotonicity, project_partition_range_for_sort};
 use crate::{array_iter_helper, downcast_ts_array};
 
 /// Get the primary end of a `PartitionRange` based on sort direction.
@@ -473,6 +473,7 @@ impl PartSortStream {
                 snafu::location!()
             )?
         };
+        let cur_range = project_partition_range_for_sort(cur_range, sort_column.data_type())?;
 
         downcast_ts_array!(
             sort_column.data_type() => (array_check_helper, sort_column, cur_range, min_max_idx),
@@ -506,7 +507,10 @@ impl PartSortStream {
                 snafu::location!()
             )?;
         }
-        let cur_range = self.partition_ranges[self.cur_part_idx];
+        let cur_range = project_partition_range_for_sort(
+            self.partition_ranges[self.cur_part_idx],
+            sort_column.data_type(),
+        )?;
 
         let sort_column_iter = downcast_ts_array!(
             sort_column.data_type() => (array_iter_helper, sort_column),
