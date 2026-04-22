@@ -27,7 +27,6 @@ use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::{DFSchema, DataFusionError, Result as DFResult};
-use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{
     Aggregate, Analyze, Cast, Distinct, DistinctOn, Explain, Expr, ExprSchemable, Extension,
@@ -38,10 +37,12 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::TIME_INDEX_KEY;
 use promql_parser::util::parse_duration;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::error::{RangeQuerySnafu, Result, TimeIndexNotFoundSnafu};
+use crate::error::{
+    CatalogSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu, UnknownTableSnafu,
+};
 use crate::plan::ExtractExpr;
 use crate::range_select::plan::{Fill, RangeFn, RangeSelect};
 
@@ -375,7 +376,7 @@ impl RangePlanRewriter {
                     }
                     .fail();
                 };
-                let (time_index, default_by) = self.get_index_by(input.schema()).await?;
+                let query_ctx = self.query_ctx.clone();
                 let mut range_rewriter = RangeExprRewriter {
                     input_plan: &input,
                     align: Duration::default(),
@@ -383,13 +384,16 @@ impl RangePlanRewriter {
                     by: vec![],
                     range_fn: BTreeSet::new(),
                     sub_aggr: aggr_plan,
-                    query_ctx: &self.query_ctx,
+                    query_ctx: &query_ctx,
                 };
                 let new_expr = expr
                     .iter()
                     .map(|expr| expr.clone().rewrite(&mut range_rewriter).map(|x| x.data))
                     .collect::<DFResult<Vec<_>>>()?;
-                if range_rewriter.by.is_empty() {
+                let need_default_by = range_rewriter.by.is_empty();
+                let (time_index, default_by) =
+                    self.get_index_by(input.schema(), need_default_by).await?;
+                if need_default_by {
                     range_rewriter.by = default_by;
                 }
                 let range_select = RangeSelect::try_new(
@@ -484,85 +488,111 @@ impl RangePlanRewriter {
     /// return `(time_index, [row_columns])` to the rewriter.
     /// If the user does not explicitly use the `by` keyword to indicate time series,
     /// `[row_columns]` will be use as default time series
-    async fn get_index_by(&mut self, schema: &Arc<DFSchema>) -> Result<(Expr, Vec<Expr>)> {
-        #[allow(deprecated)]
-        let mut time_index_expr = Expr::Wildcard {
-            qualifier: None,
-            options: Box::new(WildcardOptions::default()),
-        };
+    async fn get_index_by(
+        &mut self,
+        schema: &Arc<DFSchema>,
+        need_default_by: bool,
+    ) -> Result<(Expr, Vec<Expr>)> {
+        let mut time_index_expr = None;
         let mut default_by = vec![];
+
+        let metadata_time_index_expr = find_time_index_by_metadata(schema);
+
+        let mut table_refs = Vec::new();
         for i in 0..schema.fields().len() {
             let (qualifier, _) = schema.qualified_field(i);
-            if let Some(table_ref) = qualifier {
-                let Ok(table_source) = self.table_provider.resolve_table(table_ref.clone()).await
-                else {
-                    continue;
-                };
-                let Some(default_table_source) =
-                    table_source.as_any().downcast_ref::<DefaultTableSource>()
-                else {
-                    continue;
-                };
-                let Some(adapter) = default_table_source
-                    .table_provider
-                    .as_any()
-                    .downcast_ref::<DfTableProviderAdapter>()
-                else {
-                    continue;
-                };
-                let table = adapter.table();
-                let schema = table.schema();
-                let time_index_column =
-                    schema
-                        .timestamp_column()
-                        .with_context(|| TimeIndexNotFoundSnafu {
-                            table: table_ref.to_string(),
-                        })?;
-                // assert time_index's datatype is timestamp
-                if let ConcreteDataType::Timestamp(_) = time_index_column.data_type {
-                    default_by = table
-                        .table_info()
-                        .meta
-                        .row_key_column_names()
-                        .map(|key| Expr::Column(Column::new(Some(table_ref.clone()), key)))
-                        .collect();
-                    // If the user does not specify a primary key when creating a table,
-                    // then by default all data will be aggregated into one time series,
-                    // which is equivalent to using `by(1)` in SQL
-                    if default_by.is_empty() {
-                        default_by = vec![1.lit()];
+            if let Some(table_ref) = qualifier
+                && !table_refs.contains(table_ref)
+            {
+                table_refs.push(table_ref.clone());
+            }
+        }
+
+        for table_ref in table_refs {
+            let table_source = match self.table_provider.resolve_table(table_ref.clone()).await {
+                Ok(table_source) => table_source,
+                Err(error) => {
+                    if matches!(&error, catalog::error::Error::TableNotExist { .. })
+                        && metadata_time_index_expr.is_some()
+                    {
+                        continue;
                     }
-                    time_index_expr = Expr::Column(Column::new(
-                        Some(table_ref.clone()),
-                        time_index_column.name.clone(),
-                    ));
+                    return Err(error).context(CatalogSnafu);
                 }
-            }
-        }
-        #[allow(deprecated)]
-        if matches!(time_index_expr, Expr::Wildcard { .. }) {
-            for i in 0..schema.fields().len() {
-                let (qualifier, field) = schema.qualified_field(i);
-                if field.metadata().contains_key(TIME_INDEX_KEY)
-                    && matches!(field.data_type(), DataType::Timestamp(_, _))
-                {
+            };
+            let default_table_source = table_source
+                .as_any()
+                .downcast_ref::<DefaultTableSource>()
+                .context(UnknownTableSnafu)?;
+            let adapter = default_table_source
+                .table_provider
+                .as_any()
+                .downcast_ref::<DfTableProviderAdapter>()
+                .context(UnknownTableSnafu)?;
+            let table = adapter.table();
+            let schema = table.schema();
+            let time_index_column =
+                schema
+                    .timestamp_column()
+                    .with_context(|| TimeIndexNotFoundSnafu {
+                        table: table_ref.to_string(),
+                    })?;
+            // assert time_index's datatype is timestamp
+            if let ConcreteDataType::Timestamp(_) = time_index_column.data_type {
+                default_by = table
+                    .table_info()
+                    .meta
+                    .row_key_column_names()
+                    .map(|key| Expr::Column(Column::new(Some(table_ref.clone()), key)))
+                    .collect();
+                // If the user does not specify a primary key when creating a table,
+                // then by default all data will be aggregated into one time series,
+                // which is equivalent to using `by(1)` in SQL
+                if default_by.is_empty() {
                     default_by = vec![1.lit()];
-                    time_index_expr =
-                        Expr::Column(Column::new(qualifier.cloned(), field.name().clone()));
-                    break;
                 }
+                time_index_expr = Some(Expr::Column(Column::new(
+                    Some(table_ref.clone()),
+                    time_index_column.name.clone(),
+                )));
             }
         }
-        #[allow(deprecated)]
-        if matches!(time_index_expr, Expr::Wildcard { .. }) {
-            TimeIndexNotFoundSnafu {
-                table: schema.to_string(),
-            }
-            .fail()
-        } else {
-            Ok((time_index_expr, default_by))
+
+        if let Some(expr) = time_index_expr {
+            return Ok((expr, default_by));
         }
+
+        if let Some(expr) = metadata_time_index_expr {
+            ensure!(
+                !need_default_by,
+                RangeQuerySnafu {
+                    msg: "Cannot infer default BY columns from derived range query input"
+                }
+            );
+            return Ok((expr, vec![]));
+        }
+
+        TimeIndexNotFoundSnafu {
+            table: schema.to_string(),
+        }
+        .fail()
     }
+}
+
+fn find_time_index_by_metadata(schema: &DFSchema) -> Option<Expr> {
+    (0..schema.fields().len()).find_map(|i| {
+        let (qualifier, field) = schema.qualified_field(i);
+        if field.metadata().contains_key(TIME_INDEX_KEY)
+            && matches!(field.data_type(), DataType::Timestamp(_, _))
+        {
+            Some(Expr::Column(Column::new(
+                qualifier.cloned(),
+                field.name().clone(),
+            )))
+        } else {
+            None
+        }
+    })
 }
 
 fn have_range_in_exprs(exprs: &[Expr]) -> bool {
