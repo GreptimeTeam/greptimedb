@@ -103,16 +103,19 @@ impl<T: Tracker> DeltaStorage<T> {
     ///
     /// `start_after` is forwarded to the underlying lister to skip entries
     /// whose name is lexicographically less than or equal to it.
-    pub async fn get_paths<F, R>(&self, start_after: Option<&str>, filter: F) -> Result<Vec<R>>
+    pub async fn get_paths<F, R>(&self, start_after: Option<&str>, mut filter: F) -> Result<Vec<R>>
     where
-        F: Fn(Entry) -> Option<R>,
+        F: FnMut(Entry) -> Option<R>,
     {
         let Some(streamer) = self.manifest_lister(start_after).await? else {
             return Ok(vec![]);
         };
 
         streamer
-            .try_filter_map(|e| async { Ok(filter(e)) })
+            .try_filter_map(|e| {
+                let result = filter(e);
+                async { Ok(result) }
+            })
             .try_collect::<Vec<_>>()
             .await
             .context(OpenDalSnafu)
@@ -129,8 +132,10 @@ impl<T: Tracker> DeltaStorage<T> {
         // Push the version lower bound into the list request via
         // `list_start_after`; skip the hint when `start == 0` (nothing to skip).
         let start_after = (start > 0).then(|| list_start_after(start));
+        let mut total_paths = 0;
         let mut entries: Vec<(ManifestVersion, Entry)> = self
             .get_paths(start_after.as_deref(), |entry| {
+                total_paths += 1;
                 let file_name = entry.name();
                 if is_delta_file(file_name) {
                     let version = file_version(file_name);
@@ -143,6 +148,16 @@ impl<T: Tracker> DeltaStorage<T> {
             .await?;
 
         sort_manifests(&mut entries);
+
+        common_telemetry::debug!(
+            "DeltaStorage get paths for {}, start: {}, end: {}, start_after: {:?}, total_paths: {}, entries: {}",
+            self.path,
+            start,
+            end,
+            start_after,
+            total_paths,
+            entries.len()
+        );
 
         Ok(entries)
     }
