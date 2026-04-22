@@ -1795,8 +1795,6 @@ pub(crate) struct SimpleFilterContext {
     column_id: ColumnId,
     /// Semantic type of the column.
     semantic_type: SemanticType,
-    /// The data type of the column.
-    data_type: ConcreteDataType,
 }
 
 impl SimpleFilterContext {
@@ -1844,7 +1842,6 @@ impl SimpleFilterContext {
             filter: maybe_filter,
             column_id: column_metadata.column_id,
             semantic_type: column_metadata.semantic_type,
-            data_type: column_metadata.column_schema.data_type.clone(),
         })
     }
 
@@ -1861,11 +1858,6 @@ impl SimpleFilterContext {
     /// Returns the semantic type of the column.
     pub(crate) fn semantic_type(&self) -> SemanticType {
         self.semantic_type
-    }
-
-    /// Returns the data type of the column.
-    pub(crate) fn data_type(&self) -> &ConcreteDataType {
-        &self.data_type
     }
 }
 
