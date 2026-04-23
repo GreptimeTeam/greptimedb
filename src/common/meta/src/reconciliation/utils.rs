@@ -370,7 +370,7 @@ pub(crate) fn build_table_meta_from_column_metadatas(
             SemanticType::Tag => {
                 primary_key_indices.push(idx);
             }
-            SemanticType::Field => {
+            SemanticType::Field | SemanticType::FollowSchema => {
                 value_indices.push(idx);
             }
             SemanticType::Timestamp => {

@@ -53,7 +53,8 @@ pub(crate) fn build_new_physical_table_info(
                     primary_key_indices.push(idx);
                 }
             }
-            SemanticType::Field => value_indices.push(idx),
+            // treat followschema column as field
+            SemanticType::Field | SemanticType::FollowSchema => value_indices.push(idx),
             SemanticType::Timestamp => {
                 value_indices.push(idx);
             }

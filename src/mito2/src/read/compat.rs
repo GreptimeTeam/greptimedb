@@ -613,7 +613,7 @@ mod tests {
                 SemanticType::Tag => {
                     ColumnSchema::new(format!("tag_{id}"), data_type.clone(), true)
                 }
-                SemanticType::Field => {
+                SemanticType::Field | SemanticType::FollowSchema => {
                     ColumnSchema::new(format!("field_{id}"), data_type.clone(), true)
                 }
                 SemanticType::Timestamp => ColumnSchema::new("ts", data_type.clone(), false),

@@ -83,6 +83,7 @@ macro_rules! grpc_tests {
                 test_auto_create_table_with_hints,
                 test_otel_arrow_auth,
                 test_insert_and_select,
+                test_insert_with_follow_table,
                 test_dbname,
                 test_grpc_message_size_ok,
                 test_grpc_zstd_compression,
@@ -693,6 +694,227 @@ fn testing_create_expr() -> CreateTableExpr {
         table_id: None,
         engine: MITO_ENGINE.to_string(),
     }
+}
+
+pub async fn test_insert_with_follow_table(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (_db, fe_grpc_server) =
+        setup_grpc_server(store_type, "test_insert_with_follow_table").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+
+    // Negative test: inserting with FollowSchema into a non-existent table should fail
+    let row_insert_request = RowInsertRequest {
+        table_name: "non_existent_table".to_string(),
+        rows: Some(api::v1::Rows {
+            schema: vec![
+                api::v1::ColumnSchema {
+                    column_name: "host".to_string(),
+                    datatype: ColumnDataType::String as i32,
+                    semantic_type: SemanticType::FollowSchema as i32,
+                    ..Default::default()
+                },
+                api::v1::ColumnSchema {
+                    column_name: "ts".to_string(),
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+            ],
+            rows: vec![api::v1::Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::StringValue("host1".to_string())),
+                    },
+                    Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(100)),
+                    },
+                ],
+            }],
+        }),
+    };
+    let result = db
+        .row_inserts(RowInsertRequests {
+            inserts: vec![row_insert_request],
+        })
+        .await;
+    assert!(result.is_err(), "Should fail when table does not exist with FollowSchema semantic type");
+
+    // Positive test: create table first, then insert with FollowSchema should succeed
+    let column_defs = vec![
+        ColumnDef {
+            name: "host".to_string(),
+            data_type: ColumnDataType::String as i32,
+            is_nullable: false,
+            default_constraint: vec![],
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnDef {
+            name: "cpu".to_string(),
+            data_type: ColumnDataType::Float64 as i32,
+            is_nullable: true,
+            default_constraint: vec![],
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+        ColumnDef {
+            name: "ts".to_string(),
+            data_type: ColumnDataType::TimestampMillisecond as i32,
+            is_nullable: false,
+            default_constraint: vec![],
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+    ];
+    let expr = CreateTableExpr {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: "follow_schema_demo".to_string(),
+        desc: String::new(),
+        column_defs,
+        time_index: "ts".to_string(),
+        primary_keys: vec!["host".to_string()],
+        create_if_not_exists: true,
+        table_options: Default::default(),
+        table_id: None,
+        engine: MITO_ENGINE.to_string(),
+    };
+    let result = db.create(expr).await.unwrap();
+    assert!(matches!(result.data, OutputData::AffectedRows(0)));
+
+    // Insert data with FOLLOW_SCHEMA semantic type on the host column
+    let host_col = Column {
+        column_name: "host".to_string(),
+        values: Some(column::Values {
+            string_values: vec!["host1".to_string(), "host2".to_string()],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::FollowSchema as i32,
+        datatype: ColumnDataType::String as i32,
+        ..Default::default()
+    };
+    let cpu_col = Column {
+        column_name: "cpu".to_string(),
+        values: Some(column::Values {
+            f64_values: vec![0.31, 0.41],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::Field as i32,
+        datatype: ColumnDataType::Float64 as i32,
+        ..Default::default()
+    };
+    let ts_col = Column {
+        column_name: "ts".to_string(),
+        values: Some(column::Values {
+            timestamp_millisecond_values: vec![100, 101],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::Timestamp as i32,
+        datatype: ColumnDataType::TimestampMillisecond as i32,
+        ..Default::default()
+    };
+
+    let request = InsertRequest {
+        table_name: "follow_schema_demo".to_string(),
+        columns: vec![host_col, cpu_col, ts_col],
+        row_count: 2,
+    };
+    let result = db
+        .insert(InsertRequests {
+            inserts: vec![request],
+        })
+        .await;
+    assert_eq!(result.unwrap(), 2);
+
+    // Select and verify
+    let output = db
+        .sql("SELECT host, cpu, ts FROM follow_schema_demo ORDER BY host")
+        .await
+        .unwrap();
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    assert!(record_batches.iter().all(|r| r.num_rows() > 0));
+
+    // Insert a new column "memory" with FollowSchema semantic type; it should be stored as FIELD
+    let host_col = Column {
+        column_name: "host".to_string(),
+        values: Some(column::Values {
+            string_values: vec!["host3".to_string()],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::Tag as i32,
+        datatype: ColumnDataType::String as i32,
+        ..Default::default()
+    };
+    let cpu_col = Column {
+        column_name: "cpu".to_string(),
+        values: Some(column::Values {
+            f64_values: vec![0.55],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::Field as i32,
+        datatype: ColumnDataType::Float64 as i32,
+        ..Default::default()
+    };
+    let mem_col = Column {
+        column_name: "memory".to_string(),
+        values: Some(column::Values {
+            f64_values: vec![2048.0],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::FollowSchema as i32,
+        datatype: ColumnDataType::Float64 as i32,
+        ..Default::default()
+    };
+    let ts_col = Column {
+        column_name: "ts".to_string(),
+        values: Some(column::Values {
+            timestamp_millisecond_values: vec![200],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::Timestamp as i32,
+        datatype: ColumnDataType::TimestampMillisecond as i32,
+        ..Default::default()
+    };
+
+    let request = InsertRequest {
+        table_name: "follow_schema_demo".to_string(),
+        columns: vec![host_col, cpu_col, mem_col, ts_col],
+        row_count: 1,
+    };
+    let result = db
+        .insert(InsertRequests {
+            inserts: vec![request],
+        })
+        .await;
+    assert_eq!(result.unwrap(), 1);
+
+    // Verify the "memory" column was stored with semantic_type FIELD
+    let output = db
+        .sql(
+            "select column_name, semantic_type from information_schema.columns \
+             where table_name = 'follow_schema_demo' and column_name = 'memory'",
+        )
+        .await
+        .unwrap();
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    let pretty = record_batches.pretty_print().unwrap();
+    assert!(
+        pretty.contains("FIELD"),
+        "Expected 'memory' column to have semantic_type FIELD, got:\n{pretty}"
+    );
+
+    let _ = fe_grpc_server.shutdown().await;
 }
 
 pub async fn test_health_check(store_type: StorageType) {

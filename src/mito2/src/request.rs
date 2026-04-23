@@ -176,22 +176,27 @@ impl WriteRequest {
     ///
     /// If column with default value is missing, it returns a special [FillDefault](crate::error::Error::FillDefault)
     /// error.
-    pub(crate) fn check_schema(&self, metadata: &RegionMetadata) -> Result<()> {
+    /// If a column's semantic type is FollowSchema, it means we will use table semantic type.
+    pub(crate) fn check_schema(&mut self, metadata: &RegionMetadata) -> Result<()> {
         debug_assert_eq!(self.region_id, metadata.region_id);
 
         let region_id = self.region_id;
         // Index all columns in rows.
-        let mut rows_columns: HashMap<_, _> = self
+        let mut name_to_index: HashMap<_, _> = self
             .rows
             .schema
             .iter()
-            .map(|column| (&column.column_name, column))
+            .enumerate()
+            .map(|(i, column)| (&column.column_name, i))
             .collect();
 
         let mut need_fill_default = false;
+        let mut follow_schema_fixups: Vec<(usize, i32)> = vec![];
         // Checks all columns in this region.
         for column in &metadata.column_metadatas {
-            if let Some(input_col) = rows_columns.remove(&column.column_schema.name) {
+            if let Some(idx) = name_to_index.remove(&column.column_schema.name) {
+                let input_col = &self.rows.schema[idx];
+
                 // Check data type.
                 ensure!(
                     is_column_type_value_eq(
@@ -230,9 +235,14 @@ impl WriteRequest {
                     }
                 );
 
+                // If input semantic type is FollowSchema, record the fixup to apply later.
+                if input_col.semantic_type == SemanticType::FollowSchema as i32 {
+                    follow_schema_fixups.push((idx, column.semantic_type as i32));
+                }
+
                 // Check nullable.
-                // Safety: `rows_columns` ensures this column exists.
-                let has_null = self.has_null[self.name_to_index[&column.column_schema.name]];
+                // Safety: `name_to_index` ensures this column exists.
+                let has_null = self.has_null[idx];
                 ensure!(
                     !has_null || column.column_schema.is_nullable(),
                     InvalidRequestSnafu {
@@ -252,8 +262,8 @@ impl WriteRequest {
         }
 
         // Checks all columns in rows exist in the region.
-        if !rows_columns.is_empty() {
-            let names: Vec<_> = rows_columns.into_keys().collect();
+        if !name_to_index.is_empty() {
+            let names: Vec<_> = name_to_index.into_keys().collect();
             return InvalidRequestSnafu {
                 region_id,
                 reason: format!("unknown columns: {:?}", names),
@@ -263,6 +273,12 @@ impl WriteRequest {
 
         // If we need to fill default values, return a special error.
         ensure!(!need_fill_default, FillDefaultSnafu { region_id });
+
+        // Apply FollowSchema fixups: replace with the table's semantic type.
+        // This must happen after `name_to_index` is dropped to release the borrow on `self.rows.schema`.
+        for (idx, semantic_type) in follow_schema_fixups {
+            self.rows.schema[idx].semantic_type = semantic_type;
+        }
 
         Ok(())
     }
@@ -1312,7 +1328,7 @@ mod tests {
         };
         let metadata = new_region_metadata();
 
-        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         request.check_schema(&metadata).unwrap();
     }
 
@@ -1329,7 +1345,7 @@ mod tests {
         };
         let metadata = new_region_metadata();
 
-        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
         check_invalid_request(
             &err,
@@ -1354,7 +1370,7 @@ mod tests {
         };
         let metadata = new_region_metadata();
 
-        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
         check_invalid_request(&err, "column ts has semantic type Timestamp, given: TAG(0)");
     }
@@ -1376,7 +1392,7 @@ mod tests {
         };
         let metadata = new_region_metadata();
 
-        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
         check_invalid_request(&err, "column ts is not null but input has null");
     }
@@ -1395,7 +1411,7 @@ mod tests {
         };
         let metadata = new_region_metadata();
 
-        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
         check_invalid_request(&err, "missing column ts");
     }
@@ -1418,7 +1434,7 @@ mod tests {
         };
         let metadata = new_region_metadata();
 
-        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
         check_invalid_request(&err, r#"unknown columns: ["k1"]"#);
     }
@@ -1728,7 +1744,7 @@ mod tests {
         };
         let metadata = region_metadata_two_fields();
 
-        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
         check_invalid_request(
             &err,

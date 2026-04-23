@@ -193,6 +193,16 @@ pub fn write_fields(
     write_by_semantic_type(table_data, SemanticType::Field, fields, one_row)
 }
 
+#[allow(dead_code)]
+/// When table is already there, use table schema for data semantictype
+pub fn write_column_follow_schema(
+    table_data: &mut TableData,
+    fields: impl Iterator<Item = (String, ColumnDataType, Option<ValueData>)>,
+    one_row: &mut Vec<Value>,
+) -> Result<()> {
+    write_by_semantic_type(table_data, SemanticType::FollowSchema, fields, one_row)
+}
+
 /// Write data as a tag into the table data.
 pub fn write_tag(
     table_data: &mut TableData,

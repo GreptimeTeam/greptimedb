@@ -405,7 +405,7 @@ impl MetricEngineInner {
                         actual: col.column_schema.data_type.clone(),
                     }
                 ),
-                SemanticType::Field => {
+                SemanticType::Field | SemanticType::FollowSchema => {
                     if let Some(field_col) = field_col {
                         MultipleFieldColumnSnafu {
                             previous: field_col.column_schema.name.clone(),

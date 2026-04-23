@@ -296,7 +296,7 @@ impl IterIndex {
                         );
                     }
                 },
-                SemanticType::Field => {
+                SemanticType::Field | SemanticType::FollowSchema => {
                     field_indices.push(ValueIndex {
                         column_id: *name_to_column_id.get(&col.column_name).unwrap(),
                         index: idx,

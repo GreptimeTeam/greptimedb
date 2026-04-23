@@ -877,8 +877,10 @@ pub fn pb_value_to_value_ref<'a>(
 }
 
 /// Returns true if the pb semantic type is valid.
+/// If the input semantic type is [SemanticType::FollowSchema], it always returns true
+/// as the caller should use the table's semantic type instead.
 pub fn is_semantic_type_eq(type_value: i32, semantic_type: SemanticType) -> bool {
-    type_value == semantic_type as i32
+    type_value == semantic_type as i32 || type_value == SemanticType::FollowSchema as i32
 }
 
 /// Returns true if the pb type value is valid.

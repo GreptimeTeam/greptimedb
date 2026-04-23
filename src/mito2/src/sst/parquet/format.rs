@@ -385,7 +385,7 @@ impl PrimaryKeyReadFormat {
         };
         match column.semantic_type {
             SemanticType::Tag => self.tag_values(row_groups, column, true),
-            SemanticType::Field => {
+            SemanticType::Field | SemanticType::FollowSchema => {
                 // Safety: `field_id_to_index` is initialized by the semantic type.
                 let index = self.field_id_to_index.get(&column_id).unwrap();
                 let stats = column_values(row_groups, column, *index, true);
@@ -411,7 +411,7 @@ impl PrimaryKeyReadFormat {
         };
         match column.semantic_type {
             SemanticType::Tag => self.tag_values(row_groups, column, false),
-            SemanticType::Field => {
+            SemanticType::Field | SemanticType::FollowSchema => {
                 // Safety: `field_id_to_index` is initialized by the semantic type.
                 let index = self.field_id_to_index.get(&column_id).unwrap();
                 let stats = column_values(row_groups, column, *index, false);
@@ -437,7 +437,7 @@ impl PrimaryKeyReadFormat {
         };
         match column.semantic_type {
             SemanticType::Tag => StatValues::NoStats,
-            SemanticType::Field => {
+            SemanticType::Field | SemanticType::FollowSchema => {
                 // Safety: `field_id_to_index` is initialized by the semantic type.
                 let index = self.field_id_to_index.get(&column_id).unwrap();
                 let stats = column_null_counts(row_groups, *index);

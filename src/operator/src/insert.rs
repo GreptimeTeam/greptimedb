@@ -565,6 +565,21 @@ impl Inserter {
                     }
                 }
                 None => {
+                    if let Some(rows) = &req.rows
+                        && rows
+                            .schema
+                            .iter()
+                            .any(|col| col.semantic_type == SemanticType::FollowSchema as i32)
+                    {
+                        return InvalidInsertRequestSnafu {
+                                reason: format!(
+                                    "Table `{}` does not exist, cannot use semantic type FollowSchema for auto-created table",
+                                    req.table_name
+                                ),
+                            }
+                            .fail();
+                    }
+
                     let create_expr =
                         self.get_create_table_expr_on_demand(req, &auto_create_table_type, ctx)?;
                     create_tables.push(create_expr);
