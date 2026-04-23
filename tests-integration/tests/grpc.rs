@@ -740,7 +740,45 @@ pub async fn test_insert_with_follow_table(store_type: StorageType) {
             inserts: vec![row_insert_request],
         })
         .await;
-    assert!(result.is_err(), "Should fail when table does not exist with FollowSchema semantic type");
+    assert!(
+        result.is_err(),
+        "Should fail when table does not exist with FollowSchema semantic type"
+    );
+
+    // Negative test: column-based insert with FollowSchema into a non-existent table should also fail
+    let host_col = Column {
+        column_name: "host".to_string(),
+        values: Some(column::Values {
+            string_values: vec!["host1".to_string()],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::FollowSchema as i32,
+        datatype: ColumnDataType::String as i32,
+        ..Default::default()
+    };
+    let ts_col = Column {
+        column_name: "ts".to_string(),
+        values: Some(column::Values {
+            timestamp_millisecond_values: vec![100],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::Timestamp as i32,
+        datatype: ColumnDataType::TimestampMillisecond as i32,
+        ..Default::default()
+    };
+    let result = db
+        .insert(InsertRequests {
+            inserts: vec![InsertRequest {
+                table_name: "another_non_existent_table".to_string(),
+                columns: vec![host_col, ts_col],
+                row_count: 1,
+            }],
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "Should fail when table does not exist with FollowSchema semantic type"
+    );
 
     // Positive test: create table first, then insert with FollowSchema should succeed
     let column_defs = vec![
