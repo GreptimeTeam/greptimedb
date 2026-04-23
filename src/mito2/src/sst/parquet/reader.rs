@@ -48,7 +48,6 @@ use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
-use self::stream::{ParquetErrorAdapter, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
@@ -86,6 +85,7 @@ use crate::sst::parquet::prefilter::{
 use crate::sst::parquet::read_columns::{
     ParquetReadColumns, ProjectionMaskPlan, build_projection_plan,
 };
+use crate::sst::parquet::reader::stream::{ParquetErrorAdapter, ProjectedRecordBatchStream};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
