@@ -840,26 +840,31 @@ fn sort_timestamp_unit(data_type: &DataType) -> datafusion_common::Result<arrow_
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RangeBoundKind {
+    InclusiveStart,
+    ExclusiveEnd,
+}
+
 fn convert_time_range_for_sort(
     range: &TimeRange,
     time_unit: arrow_schema::TimeUnit,
 ) -> datafusion_common::Result<TimeRange> {
     let target_unit = time_unit.into();
     Ok(TimeRange::new(
-        convert_timestamp_range_bound(range.start, target_unit, false)?,
-        convert_timestamp_range_bound(range.end, target_unit, true)?,
+        convert_timestamp_range_bound(range.start, target_unit, RangeBoundKind::InclusiveStart)?,
+        convert_timestamp_range_bound(range.end, target_unit, RangeBoundKind::ExclusiveEnd)?,
     ))
 }
 
 fn convert_timestamp_range_bound(
     timestamp: Timestamp,
     target_unit: TimestampUnit,
-    round_exclusive_end_up: bool,
+    bound_kind: RangeBoundKind,
 ) -> datafusion_common::Result<Timestamp> {
-    let converted = if round_exclusive_end_up {
-        timestamp.convert_to_ceil(target_unit)
-    } else {
-        timestamp.convert_to(target_unit)
+    let converted = match bound_kind {
+        RangeBoundKind::InclusiveStart => timestamp.convert_to(target_unit),
+        RangeBoundKind::ExclusiveEnd => timestamp.convert_to_ceil(target_unit),
     };
 
     converted.ok_or_else(|| {
@@ -877,10 +882,18 @@ pub(crate) fn project_partition_range_for_sort(
 ) -> datafusion_common::Result<PartitionRange> {
     let target_unit = sort_timestamp_unit(sort_data_type)?.into();
     Ok(PartitionRange {
-        start: convert_timestamp_range_bound(range.start, target_unit, false)?,
-        end: convert_timestamp_range_bound(range.end, target_unit, true)?,
+        start: convert_timestamp_range_bound(
+            range.start,
+            target_unit,
+            RangeBoundKind::InclusiveStart,
+        )?,
+        end: convert_timestamp_range_bound(range.end, target_unit, RangeBoundKind::ExclusiveEnd)?,
         ..range
     })
+}
+
+fn discrete_exclusive_end(timestamp: Timestamp) -> Timestamp {
+    Timestamp::new(timestamp.value() + 1, timestamp.unit())
 }
 
 /// Get an iterator from a primitive array.
@@ -952,7 +965,7 @@ impl SucRun<Timestamp> {
         let end = self
             .first_val
             .max(self.last_val)
-            .map(|i| Timestamp::new(i.value() + 1, i.unit()));
+            .map(discrete_exclusive_end);
         start.zip(end).map(|(s, e)| TimeRange::new(s, e))
     }
 }
@@ -1576,6 +1589,16 @@ mod test {
         );
 
         assert_eq!((0, 1), find_slice_from_range(&sort_column, &range).unwrap());
+    }
+
+    #[test]
+    fn test_discrete_exclusive_end_creates_half_open_upper_bound() {
+        let timestamp = Timestamp::new_millisecond(42);
+
+        assert_eq!(
+            Timestamp::new_millisecond(43),
+            discrete_exclusive_end(timestamp)
+        );
     }
 
     #[allow(clippy::type_complexity)]
