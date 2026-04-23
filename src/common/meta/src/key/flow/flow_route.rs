@@ -32,7 +32,7 @@ use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use crate::rpc::KeyValue;
 use crate::rpc::store::RangeRequest;
 
-const FLOW_ROUTE_KEY_PREFIX: &str = "route";
+pub const FLOW_ROUTE_KEY_PREFIX: &str = "route";
 
 lazy_static! {
     static ref FLOW_ROUTE_KEY_PATTERN: Regex =

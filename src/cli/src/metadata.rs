@@ -21,7 +21,7 @@ use clap::Subcommand;
 use common_error::ext::BoxedError;
 
 use crate::Tool;
-use crate::metadata::control::{DelCommand, GetCommand};
+use crate::metadata::control::{DelCommand, GetCommand, PutCommand};
 use crate::metadata::repair::RepairCommand;
 use crate::metadata::snapshot::SnapshotCommand;
 
@@ -37,6 +37,8 @@ pub enum MetadataCommand {
     #[clap(subcommand)]
     Del(DelCommand),
     #[clap(subcommand)]
+    Put(PutCommand),
+    #[clap(subcommand)]
     Repair(RepairCommand),
 }
 
@@ -47,6 +49,7 @@ impl MetadataCommand {
             MetadataCommand::Repair(cmd) => cmd.build().await,
             MetadataCommand::Get(cmd) => cmd.build().await,
             MetadataCommand::Del(cmd) => cmd.build().await,
+            MetadataCommand::Put(cmd) => cmd.build().await,
         }
     }
 }

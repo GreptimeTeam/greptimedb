@@ -24,7 +24,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::PutRequest;
 
 /// The entire FlowId to Flow Size's Map is stored directly in the value part of the key.
-const FLOW_STATE_KEY: &str = "state";
+pub const FLOW_STATE_KEY: &str = "state";
 
 /// The key of flow state.
 #[derive(Debug, Clone, Copy, PartialEq)]

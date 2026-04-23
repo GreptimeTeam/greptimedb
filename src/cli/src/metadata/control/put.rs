@@ -1,0 +1,56 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+mod key;
+mod table;
+
+use clap::Subcommand;
+use common_error::ext::BoxedError;
+use snafu::ResultExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
+
+use crate::Tool;
+use crate::error::FileIoSnafu;
+use crate::metadata::control::put::key::PutKeyCommand;
+use crate::metadata::control::put::table::PutTableCommand;
+
+pub(crate) async fn read_value<R>(mut reader: R) -> Result<Vec<u8>, BoxedError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut value = Vec::new();
+    reader
+        .read_to_end(&mut value)
+        .await
+        .context(FileIoSnafu)
+        .map_err(BoxedError::new)?;
+    Ok(value)
+}
+
+/// Subcommand for putting metadata into the metadata store.
+#[derive(Subcommand)]
+pub enum PutCommand {
+    Key(PutKeyCommand),
+    #[clap(subcommand)]
+    Table(PutTableCommand),
+}
+
+impl PutCommand {
+    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
+        match self {
+            PutCommand::Key(cmd) => cmd.build().await,
+            PutCommand::Table(cmd) => cmd.build().await,
+        }
+    }
+}

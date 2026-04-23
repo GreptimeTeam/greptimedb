@@ -45,6 +45,48 @@ use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::Txn;
 use crate::rpc::store::BatchDeleteRequest;
 
+pub const FLOW_KEY_PREFIX: &str = "__flow";
+
+/// Returns a flow metadata key under the `__flow` scope.
+pub fn scoped_flow_key(inner_key: &str) -> String {
+    format!("{FLOW_KEY_PREFIX}/{inner_key}")
+}
+
+/// Returns a flow metadata key prefix under the `__flow` scope.
+pub fn scoped_flow_key_prefix(inner_prefix: &str) -> String {
+    scoped_flow_key(inner_prefix)
+}
+
+/// Returns the full prefix of flow info keys.
+pub fn flow_info_key_prefix() -> String {
+    scoped_flow_key_prefix(flow_info::FLOW_INFO_KEY_PREFIX)
+}
+
+/// Returns the full prefix of flow name keys.
+pub fn flow_name_key_prefix() -> String {
+    scoped_flow_key_prefix(flow_name::FLOW_NAME_KEY_PREFIX)
+}
+
+/// Returns the full prefix of flow route keys.
+pub fn flow_route_key_prefix() -> String {
+    scoped_flow_key_prefix(flow_route::FLOW_ROUTE_KEY_PREFIX)
+}
+
+/// Returns the full prefix of table flow keys.
+pub fn table_flow_key_prefix() -> String {
+    scoped_flow_key_prefix(table_flow::TABLE_FLOW_KEY_PREFIX)
+}
+
+/// Returns the full prefix of flownode flow keys.
+pub fn flownode_flow_key_prefix() -> String {
+    scoped_flow_key_prefix(flownode_flow::FLOWNODE_FLOW_KEY_PREFIX)
+}
+
+/// Returns the full key of flow state.
+pub fn flow_state_full_key() -> String {
+    scoped_flow_key(flow_state::FLOW_STATE_KEY)
+}
+
 /// The key of `__flow/` scope.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlowScoped<T> {
