@@ -1918,7 +1918,7 @@ async fn test_alter_region_skip_wal() {
         .await
         .unwrap();
 
-    let check_skip_wal = |engine: &MitoEngine, expected: &WalOptions| {
+    let check_wal_options = |engine: &MitoEngine, expected: &WalOptions| {
         let wal_mode = &engine
             .get_region(region_id)
             .unwrap()
@@ -1927,7 +1927,19 @@ async fn test_alter_region_skip_wal() {
             .wal_options;
         assert_eq!(wal_mode, expected);
     };
-    check_skip_wal(&engine, &WalOptions::default());
+
+    let check_skip_wal = |engine: &MitoEngine, expected: bool| {
+        let skip_wal = &engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .skip_wal;
+        assert_eq!(*skip_wal, expected);
+    };
+
+    check_wal_options(&engine, &WalOptions::default());
+    check_skip_wal(&engine, false);
 
     // Try to alter skip_wal from default to true
     let alter_request = RegionAlterRequest {
@@ -1940,8 +1952,9 @@ async fn test_alter_region_skip_wal() {
         .await
         .unwrap();
 
-    // WAL should switch to no op when disabled
-    check_skip_wal(&engine, &WalOptions::Noop);
+    // WAL shouldn't change wal options and skip wal should be true
+    check_wal_options(&engine, &WalOptions::default());
+    check_skip_wal(&engine, true);
 
     // Try to alter skip_wal from true to false
     let alter_request = RegionAlterRequest {
@@ -1954,5 +1967,6 @@ async fn test_alter_region_skip_wal() {
         .await
         .unwrap();
 
-    check_skip_wal(&engine, &WalOptions::default());
+    check_wal_options(&engine, &WalOptions::default());
+    check_skip_wal(&engine, false);
 }

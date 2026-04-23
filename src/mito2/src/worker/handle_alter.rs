@@ -236,14 +236,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     }
                 }
                 SetRegionOption::SkipWal(skip_wal) => {
-                    let new_wal_options = if skip_wal {
-                        WalOptions::Noop
-                    } else {
-                        WalOptions::default()
-                    };
-
-                    if current_options.wal_options != new_wal_options {
-                        current_options.wal_options = new_wal_options;
+                    if current_options.skip_wal != skip_wal {
+                        current_options.skip_wal = skip_wal;
+                        all_options_altered = false;
                     }
                 }
             }
@@ -273,7 +268,7 @@ fn new_region_options_on_empty_memtable(
     let mut current_options = current_options.clone();
     for option in options {
         match option {
-            SetRegionOption::Ttl(_) | SetRegionOption::Twsc(_, _) | SetRegionOption::SkipWal(_) => (),
+            SetRegionOption::Ttl(_) | SetRegionOption::Twsc(_, _) => (),
             SetRegionOption::Format(format_str) => {
                 // Safety: handle_alter_region_options_fast() has validated this.
                 let new_format = format_str.parse::<FormatType>().unwrap();
@@ -285,6 +280,9 @@ fn new_region_options_on_empty_memtable(
 
                 current_options.append_mode = true;
                 current_options.merge_mode = None;
+            }
+            SetRegionOption::SkipWal(skip_wal) => {
+                current_options.skip_wal = *skip_wal;
             }
         }
     }
