@@ -95,6 +95,7 @@ impl PrimaryKeyWriteFormat {
     }
 
     /// Gets the arrow schema to store in parquet.
+    #[cfg(test)]
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }

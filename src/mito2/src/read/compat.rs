@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use common_recordbatch::recordbatch::align_json_array;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryBuilder, DictionaryArray, UInt32Array,
 };
@@ -29,6 +28,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use datatypes::vectors::json::array::JsonArray;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
     build_primary_key_codec_with_fields,
@@ -39,8 +39,8 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{
-    CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
-    NewRecordBatchSnafu, RecordBatchSnafu, Result, UnsupportedOperationSnafu,
+    CompatReaderSnafu, ComputeArrowSnafu, ConvertValueSnafu, CreateDefaultSnafu, DecodeSnafu,
+    EncodeSnafu, NewRecordBatchSnafu, Result, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::sst::parquet::flat_format::primary_key_column_index;
@@ -240,9 +240,12 @@ impl FlatCompatBatch {
                     let old_column = batch.column(*pos);
 
                     if let Some(ty) = cast_type {
-                        let casted = if let Some(json_type) = ty.as_json() {
-                            align_json_array(old_column, &json_type.as_arrow_type())
-                                .context(RecordBatchSnafu)?
+                        let casted = if let Some(json_type) = ty.as_json()
+                            && json_type.is_json2()
+                        {
+                            JsonArray::from(old_column)
+                                .try_align(&json_type.as_arrow_type())
+                                .context(ConvertValueSnafu)?
                         } else {
                             datatypes::arrow::compute::cast(old_column, &ty.as_arrow_type())
                                 .context(ComputeArrowSnafu)?

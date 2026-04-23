@@ -87,6 +87,7 @@ impl FlatWriteFormat {
     }
 
     /// Gets the arrow schema to store in parquet.
+    #[cfg(test)]
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
@@ -103,7 +104,7 @@ impl FlatWriteFormat {
         let sequence_array = Arc::new(UInt64Array::from(vec![override_sequence; batch.num_rows()]));
         columns[sequence_column_index(batch.num_columns())] = sequence_array;
 
-        RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+        RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
     }
 }
 

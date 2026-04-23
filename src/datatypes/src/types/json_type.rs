@@ -317,6 +317,12 @@ fn merge(this: &JsonNativeType, that: &JsonNativeType) -> JsonNativeType {
     }
 }
 
+impl From<&ArrowDataType> for JsonType {
+    fn from(t: &ArrowDataType) -> Self {
+        JsonType::new_json2(JsonNativeType::from(&ConcreteDataType::from_arrow_type(t)))
+    }
+}
+
 impl DataType for JsonType {
     fn name(&self) -> String {
         match &self.format {
