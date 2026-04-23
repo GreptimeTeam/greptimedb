@@ -18,6 +18,10 @@ mod concurrent;
 mod config;
 mod err_handle;
 mod full_list;
+mod fuzz;
+mod fuzz_input;
+mod fuzz_oracle;
+mod fuzz_scenarios;
 mod integration;
 mod misc;
 
@@ -34,7 +38,7 @@ use common_meta::rpc::router::{Region, RegionRoute};
 use common_telemetry::debug;
 use ordered_float::OrderedFloat;
 use store_api::region_engine::RegionRole;
-use store_api::storage::{FileRefsManifest, GcReport, RegionId};
+use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 use tokio::sync::mpsc::Sender;
 
@@ -84,6 +88,12 @@ pub struct MockSchedulerCtx {
     pub gc_regions_success_after_retries: Arc<Mutex<HashMap<RegionId, usize>>>,
     // Per-region error injection
     pub gc_regions_per_region_errors: Arc<Mutex<HashMap<RegionId, crate::error::Error>>>,
+    pub last_gc_regions_full_file_listing: Arc<Mutex<Vec<bool>>>,
+    pub last_gc_regions_route_overrides: Arc<Mutex<Vec<Region2Peers>>>,
+    pub region_live_files: Arc<Mutex<HashMap<RegionId, HashSet<FileId>>>>,
+    pub region_protected_files: Arc<Mutex<HashMap<RegionId, HashSet<FileId>>>>,
+    pub regions_require_full_listing: Arc<Mutex<HashSet<RegionId>>>,
+    pub dropped_regions: Arc<Mutex<HashSet<RegionId>>>,
 }
 
 impl MockSchedulerCtx {
@@ -209,11 +219,20 @@ impl SchedulerCtx for MockSchedulerCtx {
     async fn gc_regions(
         &self,
         region_ids: &[RegionId],
-        _full_file_listing: bool,
+        full_file_listing: bool,
         _timeout: Duration,
-        _region_routes_override: Region2Peers,
+        region_routes_override: Region2Peers,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
+        let route_overrides_snapshot = region_routes_override.clone();
+        self.last_gc_regions_full_file_listing
+            .lock()
+            .unwrap()
+            .push(full_file_listing);
+        self.last_gc_regions_route_overrides
+            .lock()
+            .unwrap()
+            .push(route_overrides_snapshot.clone());
 
         // Check per-region error injection first (for any region)
         for &region_id in region_ids {
@@ -267,6 +286,10 @@ impl SchedulerCtx for MockSchedulerCtx {
         let mut final_report = GcReport::default();
         let gc_reports = self.gc_reports.lock().unwrap();
         let success_after_retries = self.gc_regions_success_after_retries.lock().unwrap();
+        let region_live_files = self.region_live_files.lock().unwrap().clone();
+        let semantic_full_listing_regions =
+            self.regions_require_full_listing.lock().unwrap().clone();
+        let semantic_dropped_regions = self.dropped_regions.lock().unwrap().clone();
 
         for &region_id in region_ids {
             // Get current retry count for this region
@@ -306,17 +329,44 @@ impl SchedulerCtx for MockSchedulerCtx {
                     *retry_count_map.entry(region_id).or_insert(0) += 1;
                 }
             } else {
-                // No retry requirement - check if we have a GC report for this region
-                if let Some(report) = gc_reports.get(&region_id) {
-                    // We have a GC report - succeed immediately
-                    final_report.merge(report.clone());
-                    // Track the success attempt
-                    let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
-                    *retry_count_map.entry(region_id).or_insert(0) += 1;
+                let semantic_opt_in = semantic_dropped_regions.contains(&region_id)
+                    || semantic_full_listing_regions.contains(&region_id)
+                    || region_live_files.contains_key(&region_id);
+                let has_live_files = region_live_files
+                    .get(&region_id)
+                    .map(|files| !files.is_empty())
+                    .unwrap_or(true);
+                let semantic_ready = if semantic_dropped_regions.contains(&region_id) {
+                    full_file_listing && route_overrides_snapshot.contains_key(&region_id)
+                } else if semantic_full_listing_regions.contains(&region_id) {
+                    full_file_listing
                 } else {
-                    // No GC report available - this region should be marked for retry
+                    true
+                };
+
+                if semantic_ready && has_live_files {
+                    if let Some(report) = gc_reports.get(&region_id) {
+                        final_report.merge(report.clone());
+                        let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
+                        *retry_count_map.entry(region_id).or_insert(0) += 1;
+                    } else {
+                        final_report.need_retry_regions.insert(region_id);
+                        let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
+                        *retry_count_map.entry(region_id).or_insert(0) += 1;
+                    }
+                } else if !semantic_opt_in {
+                    if let Some(report) = gc_reports.get(&region_id) {
+                        // Keep legacy success behavior for tests that don't opt into the semantic fixture fields.
+                        final_report.merge(report.clone());
+                        let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
+                        *retry_count_map.entry(region_id).or_insert(0) += 1;
+                    } else {
+                        final_report.need_retry_regions.insert(region_id);
+                        let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
+                        *retry_count_map.entry(region_id).or_insert(0) += 1;
+                    }
+                } else {
                     final_report.need_retry_regions.insert(region_id);
-                    // Track the attempt
                     let mut retry_count_map = self.gc_regions_retry_count.lock().unwrap();
                     *retry_count_map.entry(region_id).or_insert(0) += 1;
                 }

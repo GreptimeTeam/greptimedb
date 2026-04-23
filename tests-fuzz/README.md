@@ -67,6 +67,39 @@ GT_FUZZ_OVERRIDE_SEED=6666 GT_FUZZ_OVERRIDE_ACTIONS=175 cargo fuzz run fuzz_targ
 
 For more details, visit [cargo fuzz](https://rust-fuzz.github.io/book/cargo-fuzz/tutorial.html) or run the command `cargo fuzz --help`.
 
+## Phase 2 Scheduler/Mock Regression Seeds
+
+Phase 2（调度/Mock 层）目前维护一组稳定 replay seeds，放在：
+
+- `tests-fuzz/corpus/phase2_mock/`
+
+每个 seed 文件使用简单的 `key=value` 格式，记录：
+
+- `seed`
+- `action_count`
+- `dropped_region_bias`
+- `route_override_bias`
+- `retry_bias`
+- `full_listing_bias`
+
+默认回放命令：
+
+```bash
+cargo test -p meta-srv test_phase2_mock_fuzz_replay_corpus -- --nocapture
+```
+
+如果要回放自定义 corpus，可覆盖目录：
+
+```bash
+GT_PHASE2_SEED_DIR=/path/to/phase2_mock cargo test -p meta-srv test_phase2_mock_fuzz_replay_corpus -- --nocapture
+```
+
+这组回放测试会复用 Phase 2 的 scheduler/mock harness、fixture builder 与 oracle，确保：
+
+- dropped-region / route override / retry 组合可重放
+- 失败输出带 seed 与 evidence summary，便于 triage
+- 已提升为稳定 seed 的输入持续受回归保护
+
 ## Repartition Metric Dump Artifacts
 
 For `fuzz_repartition_metric_table`, dump artifacts are written under one run directory.
