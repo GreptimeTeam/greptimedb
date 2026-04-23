@@ -355,7 +355,7 @@ impl ServerMode {
                     "-c".to_string(),
                     self.generate_config_file(sqlness_home, db_ctx, id),
                     format!("--http-addr={http_addr}"),
-                    format!("--rpc-addr={rpc_bind_addr}"),
+                    format!("--grpc-bind-addr={rpc_bind_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                 ]);
@@ -370,10 +370,10 @@ impl ServerMode {
                 args.extend([
                     format!("--metasrv-addrs={metasrv_addr}"),
                     format!("--http-addr={http_addr}"),
-                    format!("--rpc-addr={rpc_bind_addr}"),
+                    format!("--grpc-bind-addr={rpc_bind_addr}"),
                     // since sqlness run on local, bind addr is the same as server addr
                     // this is needed so that `cluster_info`'s server addr column can be correct
-                    format!("--rpc-server-addr={rpc_bind_addr}"),
+                    format!("--grpc-server-addr={rpc_bind_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                     format!(
@@ -391,9 +391,9 @@ impl ServerMode {
                 http_addr,
             } => {
                 args.extend([
-                    "--bind-addr".to_string(),
+                    "--grpc-bind-addr".to_string(),
                     rpc_bind_addr.clone(),
-                    "--server-addr".to_string(),
+                    "--grpc-server-addr".to_string(),
                     rpc_server_addr.clone(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
@@ -476,8 +476,8 @@ impl ServerMode {
                     db_ctx.time()
                 ));
                 args.extend([
-                    format!("--rpc-addr={rpc_bind_addr}"),
-                    format!("--rpc-server-addr={rpc_server_addr}"),
+                    format!("--grpc-bind-addr={rpc_bind_addr}"),
+                    format!("--grpc-server-addr={rpc_server_addr}"),
                     format!("--http-addr={http_addr}"),
                     format!("--data-home={}", data_home.display()),
                     format!("--log-dir={}/logs", data_home.display()),
@@ -495,8 +495,8 @@ impl ServerMode {
                 node_id,
             } => {
                 args.extend([
-                    format!("--rpc-addr={rpc_bind_addr}"),
-                    format!("--rpc-server-addr={rpc_server_addr}"),
+                    format!("--grpc-bind-addr={rpc_bind_addr}"),
+                    format!("--grpc-server-addr={rpc_server_addr}"),
                     format!("--node-id={node_id}"),
                     format!(
                         "--log-dir={}/greptimedb-{}-flownode/logs",

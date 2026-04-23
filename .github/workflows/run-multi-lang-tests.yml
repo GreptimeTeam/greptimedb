@@ -127,7 +127,7 @@ jobs:
         run: |
           ./bins/greptime standalone start \
             --http-addr 0.0.0.0:${{ inputs.http-port }} \
-            --rpc-addr 0.0.0.0:4001 \
+            --grpc-bind-addr 0.0.0.0:4001 \
             --mysql-addr 0.0.0.0:${{ inputs.mysql-port }} \
             --postgres-addr 0.0.0.0:${{ inputs.postgres-port }} \
             --user-provider=static_user_provider:cmd:${{ inputs.username }}=${{ inputs.password }} > /tmp/greptimedb.log 2>&1 &

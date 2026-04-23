@@ -152,21 +152,33 @@ impl SubCommand {
 #[derive(Debug, Default, Parser)]
 pub struct StartCommand {
     /// The address to bind the gRPC server.
-    #[clap(long, alias = "rpc-addr")]
-    rpc_bind_addr: Option<String>,
+    #[clap(long = "grpc-bind-addr", alias = "rpc-bind-addr", alias = "rpc-addr")]
+    grpc_bind_addr: Option<String>,
     /// The address advertised to the metasrv, and used for connections from outside the host.
     /// If left empty or unset, the server will automatically use the IP address of the first network interface
-    /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
-    #[clap(long, alias = "rpc-hostname")]
-    rpc_server_addr: Option<String>,
+    /// on the host, with the same port number as the one specified in `grpc_bind_addr`.
+    #[clap(
+        long = "grpc-server-addr",
+        alias = "rpc-server-addr",
+        alias = "rpc-hostname"
+    )]
+    grpc_server_addr: Option<String>,
     /// The address to bind the internal gRPC server.
-    #[clap(long, alias = "internal-rpc-addr")]
-    internal_rpc_bind_addr: Option<String>,
+    #[clap(
+        long = "internal-grpc-bind-addr",
+        alias = "internal-rpc-bind-addr",
+        alias = "internal-rpc-addr"
+    )]
+    internal_grpc_bind_addr: Option<String>,
     /// The address advertised to the metasrv, and used for connections from outside the host.
     /// If left empty or unset, the server will automatically use the IP address of the first network interface
-    /// on the host, with the same port number as the one specified in `internal_rpc_bind_addr`.
-    #[clap(long, alias = "internal-rpc-hostname")]
-    internal_rpc_server_addr: Option<String>,
+    /// on the host, with the same port number as the one specified in `internal_grpc_bind_addr`.
+    #[clap(
+        long = "internal-grpc-server-addr",
+        alias = "internal-rpc-server-addr",
+        alias = "internal-rpc-hostname"
+    )]
+    internal_grpc_server_addr: Option<String>,
     #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
@@ -258,16 +270,16 @@ impl StartCommand {
             opts.http.disable_dashboard = disable_dashboard;
         }
 
-        if let Some(addr) = &self.rpc_bind_addr {
+        if let Some(addr) = &self.grpc_bind_addr {
             opts.grpc.bind_addr.clone_from(addr);
             opts.grpc.tls = merge_tls_option(&opts.grpc.tls, tls_opts.clone());
         }
 
-        if let Some(addr) = &self.rpc_server_addr {
+        if let Some(addr) = &self.grpc_server_addr {
             opts.grpc.server_addr.clone_from(addr);
         }
 
-        if let Some(addr) = &self.internal_rpc_bind_addr {
+        if let Some(addr) = &self.internal_grpc_bind_addr {
             if let Some(internal_grpc) = &mut opts.internal_grpc {
                 internal_grpc.bind_addr = addr.clone();
             } else {
@@ -280,7 +292,7 @@ impl StartCommand {
             }
         }
 
-        if let Some(addr) = &self.internal_rpc_server_addr {
+        if let Some(addr) = &self.internal_grpc_server_addr {
             if let Some(internal_grpc) = &mut opts.internal_grpc {
                 internal_grpc.server_addr = addr.clone();
             } else {
@@ -515,6 +527,7 @@ mod tests {
     use std::time::Duration;
 
     use auth::{Identity, Password, UserProviderRef};
+    use clap::{CommandFactory, Parser};
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
@@ -530,8 +543,8 @@ mod tests {
             http_addr: Some("127.0.0.1:1234".to_string()),
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
-            internal_rpc_bind_addr: Some("127.0.0.1:4010".to_string()),
-            internal_rpc_server_addr: Some("10.0.0.24:4010".to_string()),
+            internal_grpc_bind_addr: Some("127.0.0.1:4010".to_string()),
+            internal_grpc_server_addr: Some("10.0.0.24:4010".to_string()),
             influxdb_enable: Some(false),
             disable_dashboard: Some(false),
             ..Default::default()
@@ -743,5 +756,98 @@ mod tests {
                 assert_eq!(fe_opts.grpc.bind_addr, GrpcOptions::default().bind_addr);
             },
         );
+    }
+
+    #[test]
+    fn test_parse_grpc_cli_aliases() {
+        let command = StartCommand::try_parse_from([
+            "frontend",
+            "--grpc-bind-addr",
+            "127.0.0.1:14001",
+            "--grpc-server-addr",
+            "10.0.0.1:14001",
+            "--internal-grpc-bind-addr",
+            "127.0.0.1:14010",
+            "--internal-grpc-server-addr",
+            "10.0.0.1:14010",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:14001"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.1:14001"));
+        assert_eq!(
+            command.internal_grpc_bind_addr.as_deref(),
+            Some("127.0.0.1:14010")
+        );
+        assert_eq!(
+            command.internal_grpc_server_addr.as_deref(),
+            Some("10.0.0.1:14010")
+        );
+
+        let command = StartCommand::try_parse_from([
+            "frontend",
+            "--rpc-bind-addr",
+            "127.0.0.1:24001",
+            "--rpc-server-addr",
+            "10.0.0.2:24001",
+            "--internal-rpc-bind-addr",
+            "127.0.0.1:24010",
+            "--internal-rpc-server-addr",
+            "10.0.0.2:24010",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:24001"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.2:24001"));
+        assert_eq!(
+            command.internal_grpc_bind_addr.as_deref(),
+            Some("127.0.0.1:24010")
+        );
+        assert_eq!(
+            command.internal_grpc_server_addr.as_deref(),
+            Some("10.0.0.2:24010")
+        );
+
+        let command = StartCommand::try_parse_from([
+            "frontend",
+            "--rpc-addr",
+            "127.0.0.1:34001",
+            "--rpc-hostname",
+            "10.0.0.3:34001",
+            "--internal-rpc-addr",
+            "127.0.0.1:34010",
+            "--internal-rpc-hostname",
+            "10.0.0.3:34010",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:34001"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.3:34001"));
+        assert_eq!(
+            command.internal_grpc_bind_addr.as_deref(),
+            Some("127.0.0.1:34010")
+        );
+        assert_eq!(
+            command.internal_grpc_server_addr.as_deref(),
+            Some("10.0.0.3:34010")
+        );
+    }
+
+    #[test]
+    fn test_help_uses_grpc_option_names() {
+        let mut cmd = StartCommand::command();
+        let mut help = Vec::new();
+        cmd.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("--grpc-bind-addr"));
+        assert!(help.contains("--grpc-server-addr"));
+        assert!(help.contains("--internal-grpc-bind-addr"));
+        assert!(help.contains("--internal-grpc-server-addr"));
+        assert!(!help.contains("--rpc-bind-addr"));
+        assert!(!help.contains("--rpc-server-addr"));
+        assert!(!help.contains("--rpc-addr"));
+        assert!(!help.contains("--rpc-hostname"));
+        assert!(!help.contains("--internal-rpc-bind-addr"));
+        assert!(!help.contains("--internal-rpc-server-addr"));
+        assert!(!help.contains("--internal-rpc-addr"));
+        assert!(!help.contains("--internal-rpc-hostname"));
     }
 }
