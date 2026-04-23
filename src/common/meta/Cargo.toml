@@ -15,7 +15,7 @@ pg_kvbackend = [
     "dep:rustls-native-certs",
     "dep:rustls",
 ]
-mysql_kvbackend = ["dep:sqlx"]
+mysql_kvbackend = ["dep:sqlx", "dep:rustls"]
 enterprise = ["prost-types"]
 
 [lints]

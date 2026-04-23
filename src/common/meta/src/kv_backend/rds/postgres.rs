@@ -41,6 +41,7 @@ use crate::kv_backend::rds::{
     Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
     RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
     RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
+    ensure_rustls_crypto_provider_installed,
 };
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -422,6 +423,7 @@ pub fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustl
         "Creating PostgreSQL TLS connector with mode: {:?}",
         tls_config.mode
     );
+    ensure_rustls_crypto_provider_installed()?;
 
     let config_builder = match tls_config.mode {
         TlsMode::Disable => {
