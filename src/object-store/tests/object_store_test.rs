@@ -17,6 +17,7 @@ use std::env;
 use anyhow::Result;
 use common_telemetry::info;
 use common_test_util::temp_dir::create_temp_dir;
+use futures::TryStreamExt;
 use object_store::ObjectStore;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
@@ -103,6 +104,109 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     Ok(())
 }
 
+async fn test_object_list_start_after(store: &ObjectStore) -> Result<()> {
+    let scheme = store.info().scheme();
+    // `start_after` is a service-level capability. Skip the checks when the
+    // backend (e.g. the local Fs service) doesn't honor it natively — the
+    // bound would be silently ignored and the full listing returned.
+    if !store.info().native_capability().list_with_start_after {
+        info!("Skip test_object_list_start_after: backend {scheme} lacks start_after support");
+        return Ok(());
+    }
+    info!("Run test_object_list_start_after on backend {scheme}");
+
+    let files = [
+        "00000000000000000001.json",
+        "00000000000000000002.json",
+        "00000000000000000003.checkpoint",
+        "00000000000000000003.json",
+        "00000000000000000004.json",
+    ];
+    for name in files {
+        store.write(name, "x").await?;
+    }
+
+    // Bare 20-digit bound: versions 1..=2 are skipped; version-3 deltas and
+    // checkpoint are kept (their `.` suffix sorts after the bound).
+    let lister = store
+        .lister_with("/")
+        .start_after("00000000000000000003")
+        .await?;
+    let mut got: Vec<String> = lister
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .filter(|e| e.metadata().mode() == EntryMode::FILE)
+        .map(|e| e.name().to_string())
+        .collect();
+    got.sort();
+    let mut expected = vec![
+        "00000000000000000003.checkpoint".to_string(),
+        "00000000000000000003.json".to_string(),
+        "00000000000000000004.json".to_string(),
+    ];
+    expected.sort();
+    assert_eq!(expected, got);
+
+    // A bound that matches an existing name exactly excludes that name.
+    let lister = store
+        .lister_with("/")
+        .start_after("00000000000000000003.json")
+        .await?;
+    let got: Vec<String> = lister
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .filter(|e| e.metadata().mode() == EntryMode::FILE)
+        .map(|e| e.name().to_string())
+        .collect();
+    assert_eq!(vec!["00000000000000000004.json".to_string()], got);
+
+    for name in files {
+        store.delete(name).await?;
+    }
+
+    // OpenDAL resolves `start_after` against the operator root, not the
+    // `lister_with` path. For a nested prefix like `manifest/`, the bound
+    // must also embed that prefix — passing only the bare 20-digit name is
+    // silently a no-op because the full keys start with `m...` > `0...`.
+    let nested_files = [
+        "manifest/00000000000000000001.json",
+        "manifest/00000000000000000002.json",
+        "manifest/00000000000000000003.checkpoint",
+        "manifest/00000000000000000003.json",
+        "manifest/00000000000000000004.json",
+    ];
+    for name in nested_files {
+        store.write(name, "x").await?;
+    }
+
+    let lister = store
+        .lister_with("manifest/")
+        .start_after("manifest/00000000000000000003")
+        .await?;
+    let mut got: Vec<String> = lister
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .filter(|e| e.metadata().mode() == EntryMode::FILE)
+        .map(|e| e.name().to_string())
+        .collect();
+    got.sort();
+    let mut expected = vec![
+        "00000000000000000003.checkpoint".to_string(),
+        "00000000000000000003.json".to_string(),
+        "00000000000000000004.json".to_string(),
+    ];
+    expected.sort();
+    assert_eq!(expected, got);
+
+    for name in nested_files {
+        store.delete(name).await?;
+    }
+    Ok(())
+}
+
 fn assert_opendal_metrics() {
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
@@ -129,6 +233,7 @@ async fn test_fs_backend() -> Result<()> {
 
     test_object_crud(&store).await?;
     test_object_list(&store).await?;
+    test_object_list_start_after(&store).await?;
 
     assert_opendal_metrics();
 
@@ -158,6 +263,7 @@ async fn test_s3_backend() -> Result<()> {
         let guard = TempFolder::new(&store, "/");
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
+        test_object_list_start_after(&store).await?;
         assert_opendal_metrics();
         guard.remove_all().await?;
     }
@@ -187,6 +293,7 @@ async fn test_oss_backend() -> Result<()> {
         let guard = TempFolder::new(&store, "/");
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
+        test_object_list_start_after(&store).await?;
         assert_opendal_metrics();
         guard.remove_all().await?;
     }
@@ -216,6 +323,7 @@ async fn test_azblob_backend() -> Result<()> {
         let guard = TempFolder::new(&store, "/");
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
+        test_object_list_start_after(&store).await?;
         assert_opendal_metrics();
         guard.remove_all().await?;
     }
@@ -244,6 +352,7 @@ async fn test_gcs_backend() -> Result<()> {
         let guard = TempFolder::new(&store, "/");
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
+        test_object_list_start_after(&store).await?;
         assert_opendal_metrics();
         guard.remove_all().await?;
     }
