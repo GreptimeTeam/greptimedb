@@ -350,6 +350,7 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
 fuzz_target!(|input: FuzzInput| {
     common_telemetry::init_default_ut_logging();
+    tests_fuzz::install_rustls_crypto_provider();
     common_runtime::block_on_global(async {
         let Connections { mysql } = init_greptime_connections_via_env().await;
         let ctx = FuzzContext {

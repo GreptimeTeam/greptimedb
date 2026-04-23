@@ -46,6 +46,7 @@ paste.workspace = true
 rand = { workspace = true }
 rand_chacha = "0.9"
 reqwest = { workspace = true }
+rustls = { workspace = true, default-features = false, features = ["ring", "std", "tls12"] }
 schemars = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }

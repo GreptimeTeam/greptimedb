@@ -21,5 +21,19 @@ pub mod translator;
 pub mod utils;
 pub mod validator;
 
+use std::sync::OnceLock;
+
 #[cfg(test)]
 pub mod test_utils;
+
+static RUSTLS_CRYPTO_PROVIDER_INIT: OnceLock<()> = OnceLock::new();
+
+pub fn install_rustls_crypto_provider() {
+    RUSTLS_CRYPTO_PROVIDER_INIT.get_or_init(|| {
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            let _ = rustls::crypto::CryptoProvider::install_default(
+                rustls::crypto::ring::default_provider(),
+            );
+        }
+    });
+}

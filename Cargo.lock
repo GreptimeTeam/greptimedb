@@ -14036,6 +14036,7 @@ dependencies = [
  "rand 0.9.1",
  "rand_chacha 0.9.0",
  "reqwest 0.13.2",
+ "rustls",
  "schemars",
  "serde",
  "serde_json",
