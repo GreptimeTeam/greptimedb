@@ -55,17 +55,6 @@ use crate::system_schema::utils;
 
 const INIT_CAPACITY: usize = 42;
 
-fn user_visible_flow_options(
-    options: &std::collections::HashMap<String, String>,
-) -> sql::statements::OptionMap {
-    sql::statements::OptionMap::from(
-        options
-            .iter()
-            .filter(|(key, _)| key.as_str() != FlowType::FLOW_TYPE_KEY)
-            .map(|(key, value)| (key.clone(), value.clone())),
-    )
-}
-
 // rows of information_schema.flows
 // pk is (flow_name, flow_id, table_catalog)
 pub const FLOW_NAME: &str = "flow_name";
@@ -177,7 +166,10 @@ impl InformationSchemaFlows {
             expire_after: flow_info.expire_after(),
             eval_interval: flow_info.eval_interval(),
             comment,
-            flow_options: user_visible_flow_options(flow_info.options()),
+            flow_options: sql::statements::OptionMap::from_filtered_string_map(
+                flow_info.options(),
+                &[FlowType::FLOW_TYPE_KEY],
+            ),
             query,
         };
 
