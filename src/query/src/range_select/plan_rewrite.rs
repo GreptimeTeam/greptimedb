@@ -520,6 +520,9 @@ impl RangePlanRewriter {
                 {
                     Ok(table_source) => table_source,
                     Err(error) => {
+                        // TableNotExist may infer this table is a derived table (like from JOIN or set op),
+                        // in this case we can still continue with time index column identified from column
+                        // metadata.
                         if matches!(&error, catalog::error::Error::TableNotExist { .. })
                             && metadata_time_index_expr.is_some()
                         {
