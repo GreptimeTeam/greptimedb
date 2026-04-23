@@ -315,19 +315,20 @@ impl FlatReadFormat {
             return Ok(batch);
         };
 
-        let mut columns = batch.columns().to_vec();
-        let sequence_column_idx = sequence_column_index(batch.num_columns());
+        let batch_num_rows = batch.num_rows();
+        let (schema, mut columns, _) = batch.into_parts();
+        let sequence_column_idx = sequence_column_index(columns.len());
 
         // Use the provided override sequence array, slicing if necessary to match batch length
-        let sequence_array = if override_array.len() > batch.num_rows() {
-            override_array.slice(0, batch.num_rows())
+        let sequence_array = if override_array.len() > batch_num_rows {
+            override_array.slice(0, batch_num_rows)
         } else {
             override_array.clone()
         };
 
         columns[sequence_column_idx] = sequence_array;
 
-        RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
+        RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)
     }
 
     /// Checks whether the batch from the parquet file needs to be converted to match the flat format.
