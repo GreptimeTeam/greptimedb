@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::SemanticType;
+use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::filter::SimpleFilterEvaluator;
@@ -36,7 +37,10 @@ use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::{OptionExt as _, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::region_engine::{PartitionRange, RegionScannerRef};
+use store_api::region_engine::{
+    FileStatsItem, PartitionRange, QueryScanContext, RegionScannerRef, RowGroupStatsItem,
+    SendableFileStatsStream,
+};
 use store_api::storage::{
     ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
     TimeSeriesRowSelector,
@@ -1448,6 +1452,53 @@ pub struct StreamContext {
     // Metrics:
     /// The start time of the query.
     pub(crate) query_start: Instant,
+}
+
+pub(crate) fn scan_input_stats(
+    input: &ScanInput,
+    ctx: &QueryScanContext,
+) -> SendableFileStatsStream {
+    let access_layer = input.access_layer.clone();
+    let cache_strategy = input.cache_strategy.clone();
+    let region_metadata = input.region_metadata().clone();
+    let files = input.files.clone();
+    let explain_verbose = ctx.explain_verbose;
+
+    Box::pin(try_stream! {
+        if explain_verbose {
+            common_telemetry::info!(
+                "Scan stats, region_id: {}, files: {}",
+                region_metadata.region_id,
+                files.len()
+            );
+        }
+
+        for file in files {
+            let sst_meta = access_layer
+                .read_sst(file.clone())
+                .cache(cache_strategy.clone())
+                .expected_metadata(Some(region_metadata.clone()))
+                .read_sst_meta()
+                .await
+                .map_err(BoxedError::new)?;
+            let parquet_meta = sst_meta.parquet_metadata();
+            let row_groups = parquet_meta
+                .row_groups()
+                .iter()
+                .enumerate()
+                .map(|(row_group_index, metadata)| RowGroupStatsItem {
+                    row_group_index,
+                    metadata: Arc::new(metadata.clone()),
+                })
+                .collect();
+
+            yield FileStatsItem {
+                num_rows: Some(parquet_meta.file_metadata().num_rows() as u64),
+                file_partition_expr: file.meta_ref().partition_expr.as_ref().map(ToString::to_string),
+                row_groups,
+            };
+        }
+    })
 }
 
 impl StreamContext {

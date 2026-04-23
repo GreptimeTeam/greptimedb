@@ -30,12 +30,12 @@ use futures::{Stream, StreamExt};
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties, SendableFileStatsStream,
 };
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::pruner::{PartitionPruner, Pruner};
-use crate::read::scan_region::{ScanInput, StreamContext};
+use crate::read::scan_region::{ScanInput, StreamContext, scan_input_stats};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, scan_flat_file_ranges, scan_flat_mem_ranges,
 };
@@ -329,6 +329,10 @@ impl RegionScanner for UnorderedScan {
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scan_partition_impl(ctx, metrics_set, partition)
             .map_err(BoxedError::new)
+    }
+
+    fn scan_stats(&self, ctx: &QueryScanContext) -> Result<SendableFileStatsStream, BoxedError> {
+        Ok(scan_input_stats(&self.stream_ctx.input, ctx))
     }
 
     /// If this scanner have predicate other than region partition exprs

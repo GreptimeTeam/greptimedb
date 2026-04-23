@@ -66,6 +66,7 @@ pub struct RegionScanExec {
     is_partition_set: bool,
     // TODO(ruihang): handle TimeWindowed dist via this parameter
     distribution: Option<TimeSeriesDistribution>,
+    stats_aware_skip_mode: bool,
     explain_verbose: bool,
     query_memory_tracker: Option<QueryMemoryTracker>,
 }
@@ -82,6 +83,7 @@ impl std::fmt::Debug for RegionScanExec {
             .field("total_rows", &self.total_rows)
             .field("is_partition_set", &self.is_partition_set)
             .field("distribution", &self.distribution)
+            .field("stats_aware_skip_mode", &self.stats_aware_skip_mode)
             .field("explain_verbose", &self.explain_verbose)
             .finish()
     }
@@ -225,6 +227,7 @@ impl RegionScanExec {
             total_rows,
             is_partition_set: false,
             distribution: request.distribution,
+            stats_aware_skip_mode: false,
             explain_verbose: false,
             query_memory_tracker,
         })
@@ -258,6 +261,10 @@ impl RegionScanExec {
     pub fn scanner_type(&self) -> String {
         let scanner = self.scanner.lock().unwrap();
         scanner.name().to_string()
+    }
+
+    pub fn scanner(&self) -> Arc<Mutex<RegionScannerRef>> {
+        self.scanner.clone()
     }
 
     /// Update the partition ranges of underlying scanner.
@@ -298,9 +305,45 @@ impl RegionScanExec {
             total_rows: self.total_rows,
             is_partition_set: true,
             distribution: self.distribution,
+            stats_aware_skip_mode: self.stats_aware_skip_mode,
             explain_verbose: self.explain_verbose,
             query_memory_tracker: self.query_memory_tracker.clone(),
         })
+    }
+
+    pub fn with_stats_aware_skip_mode(
+        &self,
+        stats_aware_skip_mode: bool,
+    ) -> Result<Self, BoxedError> {
+        {
+            let mut scanner = self.scanner.lock().unwrap();
+            scanner.prepare(
+                PrepareRequest::default().with_stats_aware_skip_mode(stats_aware_skip_mode),
+            )?;
+        }
+
+        Ok(Self {
+            scanner: self.scanner.clone(),
+            arrow_schema: self.arrow_schema.clone(),
+            output_ordering: self.output_ordering.clone(),
+            metric: self.metric.clone(),
+            properties: self.properties.clone(),
+            append_mode: self.append_mode,
+            total_rows: self.total_rows,
+            is_partition_set: self.is_partition_set,
+            distribution: self.distribution,
+            stats_aware_skip_mode,
+            explain_verbose: self.explain_verbose,
+            query_memory_tracker: self.query_memory_tracker.clone(),
+        })
+    }
+
+    pub fn stats_aware_skip_mode(&self) -> bool {
+        self.stats_aware_skip_mode
+    }
+
+    pub fn append_mode(&self) -> bool {
+        self.append_mode
     }
 
     pub fn distribution(&self) -> Option<TimeSeriesDistribution> {

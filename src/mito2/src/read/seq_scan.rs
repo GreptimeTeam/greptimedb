@@ -31,6 +31,7 @@ use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    SendableFileStatsStream,
 };
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
@@ -44,7 +45,7 @@ use crate::read::range::RangeMeta;
 use crate::read::range_cache::{
     build_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
 };
-use crate::read::scan_region::{ScanInput, StreamContext};
+use crate::read::scan_region::{ScanInput, StreamContext, scan_input_stats};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, compute_parallel_channel_size,
     scan_flat_file_ranges, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
@@ -543,6 +544,10 @@ impl RegionScanner for SeqScan {
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scan_partition_impl(ctx, metrics_set, partition)
             .map_err(BoxedError::new)
+    }
+
+    fn scan_stats(&self, ctx: &QueryScanContext) -> Result<SendableFileStatsStream, BoxedError> {
+        Ok(scan_input_stats(&self.stream_ctx.input, ctx))
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {

@@ -35,6 +35,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    SendableFileStatsStream,
 };
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::error::{SendTimeoutError, TrySendError};
@@ -46,7 +47,7 @@ use crate::error::{
 };
 use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner};
-use crate::read::scan_region::{ScanInput, StreamContext};
+use crate::read::scan_region::{ScanInput, StreamContext, scan_input_stats};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_average_batch_size,
     compute_parallel_channel_size,
@@ -351,6 +352,10 @@ impl RegionScanner for SeriesScan {
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scan_partition_impl(ctx, metrics_set, partition)
             .map_err(BoxedError::new)
+    }
+
+    fn scan_stats(&self, ctx: &QueryScanContext) -> Result<SendableFileStatsStream, BoxedError> {
+        Ok(scan_input_stats(&self.stream_ctx.input, ctx))
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {

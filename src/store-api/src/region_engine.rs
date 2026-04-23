@@ -17,6 +17,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
@@ -28,7 +29,9 @@ use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
+use futures::Stream;
 use futures::future::join_all;
+use parquet::file::metadata::RowGroupMetaData;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
@@ -313,6 +316,9 @@ pub struct ScannerProperties {
 
     /// Whether the scanner is scanning a logical region.
     logical_region: bool,
+
+    /// Whether stats-aware skip mode is enabled for aggregate-stats runtime execution.
+    stats_aware_skip_mode: bool,
 }
 
 impl ScannerProperties {
@@ -337,6 +343,7 @@ impl ScannerProperties {
             distinguish_partition_range: false,
             target_partitions: 0,
             logical_region: false,
+            stats_aware_skip_mode: false,
         }
     }
 
@@ -351,6 +358,9 @@ impl ScannerProperties {
         if let Some(target_partitions) = request.target_partitions {
             self.target_partitions = target_partitions;
         }
+        if let Some(stats_aware_skip_mode) = request.stats_aware_skip_mode {
+            self.stats_aware_skip_mode = stats_aware_skip_mode;
+        }
     }
 
     /// Returns the number of actual partitions.
@@ -364,6 +374,11 @@ impl ScannerProperties {
 
     pub fn total_rows(&self) -> usize {
         self.total_rows
+    }
+
+    /// Returns whether stats-aware skip mode is enabled.
+    pub fn stats_aware_skip_mode(&self) -> bool {
+        self.stats_aware_skip_mode
     }
 
     /// Returns whether the scanner is scanning a logical region.
@@ -395,6 +410,8 @@ pub struct PrepareRequest {
     pub distinguish_partition_range: Option<bool>,
     /// The expected number of target partitions.
     pub target_partitions: Option<usize>,
+    /// Whether to enable stats-aware skip mode on the scanner.
+    pub stats_aware_skip_mode: Option<bool>,
 }
 
 impl PrepareRequest {
@@ -415,6 +432,12 @@ impl PrepareRequest {
         self.target_partitions = Some(target_partitions);
         self
     }
+
+    /// Sets the stats-aware skip mode flag.
+    pub fn with_stats_aware_skip_mode(mut self, stats_aware_skip_mode: bool) -> Self {
+        self.stats_aware_skip_mode = Some(stats_aware_skip_mode);
+        self
+    }
 }
 
 /// Necessary context of the query for the scanner.
@@ -423,6 +446,27 @@ pub struct QueryScanContext {
     /// Whether the query is EXPLAIN ANALYZE VERBOSE.
     pub explain_verbose: bool,
 }
+
+/// File-level stats returned by [`RegionScanner::scan_stats`].
+#[derive(Debug, Clone)]
+pub struct FileStatsItem {
+    /// Exact row count from parquet metadata.
+    pub num_rows: Option<u64>,
+    /// Greptime file metadata, not parquet-native metadata.
+    pub file_partition_expr: Option<String>,
+    /// Nested parquet row-group metadata for future finer-grained use.
+    pub row_groups: Vec<RowGroupStatsItem>,
+}
+
+/// Row-group stats nested inside one [`FileStatsItem`].
+#[derive(Debug, Clone)]
+pub struct RowGroupStatsItem {
+    pub row_group_index: usize,
+    pub metadata: Arc<RowGroupMetaData>,
+}
+
+pub type SendableFileStatsStream =
+    Pin<Box<dyn Stream<Item = Result<FileStatsItem, BoxedError>> + Send>>;
 
 /// A scanner that provides a way to scan the region concurrently.
 ///
@@ -455,6 +499,11 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    /// Returns file-level stats for the current scan context.
+    ///
+    /// This method is read-only and does not scan row data.
+    fn scan_stats(&self, ctx: &QueryScanContext) -> Result<SendableFileStatsStream, BoxedError>;
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
     fn has_predicate_without_region(&self) -> bool;
@@ -1014,6 +1063,10 @@ impl RegionScanner for SinglePartitionScanner {
             .take()
             .or_else(|| Some(Box::pin(EmptyRecordBatchStream::new(self.schema.clone()))));
         Ok(result.unwrap())
+    }
+
+    fn scan_stats(&self, _ctx: &QueryScanContext) -> Result<SendableFileStatsStream, BoxedError> {
+        Ok(Box::pin(futures::stream::empty()))
     }
 
     fn has_predicate_without_region(&self) -> bool {

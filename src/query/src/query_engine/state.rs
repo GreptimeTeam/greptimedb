@@ -59,6 +59,7 @@ use crate::dist_plan::{
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
+use crate::optimizer::aggr_stats::AggrStatsPhysicalRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
@@ -177,17 +178,21 @@ impl QueryEngineState {
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
+        // Prepare aggregate-stats runtime rewrite shape before scan repartitioning/distribution.
+        physical_optimizer
+            .rules
+            .insert(5, Arc::new(AggrStatsPhysicalRule));
         // Change TableScan's partition right before enforcing distribution
         physical_optimizer
             .rules
-            .insert(5, Arc::new(ParallelizeScan));
+            .insert(6, Arc::new(ParallelizeScan));
         // Pass distribution requirement to MergeScanExec to avoid unnecessary shuffling
         physical_optimizer
             .rules
-            .insert(6, Arc::new(PassDistribution));
+            .insert(7, Arc::new(PassDistribution));
         // Enforce sorting AFTER custom rules that modify the plan structure
         physical_optimizer.rules.insert(
-            7,
+            8,
             Arc::new(datafusion::physical_optimizer::enforce_sorting::EnforceSorting {}),
         );
         // Add rule for windowed sort

@@ -34,8 +34,7 @@ use snafu::ResultExt;
 
 use crate::error;
 
-#[cfg(test)]
-mod stats;
+pub mod stats;
 
 /// Assert the scalar value is not utf8. Returns `None` if it's utf8.
 /// In theory, it should be converted to a timestamp scalar value by `TypeConversionRule`.
