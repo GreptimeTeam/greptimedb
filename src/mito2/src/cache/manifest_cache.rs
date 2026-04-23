@@ -378,7 +378,7 @@ impl ManifestCache {
                     warn!(e; "Failed to remove empty root dir {}", dir.display());
                     return Err(e);
                 } else {
-                    warn!("Empty root dir not found before removal {}", dir.display());
+                    info!("Empty root dir not found before removal {}", dir.display());
                 }
             } else {
                 info!(
