@@ -253,11 +253,12 @@ fn is_time_index_column(
     }
 
     if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
-        return Ok(matches!(
-            plan.schema().field(column_expr.index()).data_type(),
-            DataType::Timestamp(_, _)
-        ) && plan.schema().field(column_expr.index()).name().as_ref()
-            == region_scan_exec.time_index());
+        let schema = plan.schema();
+        let column_field = schema.field(column_expr.index());
+        return Ok(
+            matches!(column_field.data_type(), DataType::Timestamp(_, _))
+                && column_field.name().as_ref() == region_scan_exec.time_index(),
+        );
     }
 
     let Some(child) = passthrough_child(plan.as_ref()) else {
