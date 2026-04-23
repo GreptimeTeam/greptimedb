@@ -14,8 +14,10 @@
 
 use criterion::criterion_main;
 
+mod bench_histogram_fold;
 mod bench_range_fn;
 
 criterion_main! {
-    bench_range_fn::benches
+    bench_range_fn::benches,
+    bench_histogram_fold::benches,
 }
