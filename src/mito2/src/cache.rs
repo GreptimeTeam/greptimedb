@@ -50,7 +50,7 @@ use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCache
 #[cfg(feature = "vector_index")]
 use crate::cache::index::vector_index::{VectorIndexCache, VectorIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
-use crate::error::{InvalidMetadataSnafu, InvalidParquetSnafu, Result};
+use crate::error::{InvalidMetadataSnafu, InvalidParquetSnafu, Result, UnexpectedSnafu};
 use crate::memtable::record_batch_estimated_size;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
@@ -80,6 +80,7 @@ const RANGE_RESULT_CONCAT_MEMORY_PERMIT: ReadableSize = ReadableSize::kb(1);
 pub(crate) struct RangeResultMemoryLimiter {
     semaphore: Arc<tokio::sync::Semaphore>,
     permit_bytes: usize,
+    total_permits: usize,
 }
 
 impl Default for RangeResultMemoryLimiter {
@@ -94,23 +95,46 @@ impl Default for RangeResultMemoryLimiter {
 impl RangeResultMemoryLimiter {
     pub(crate) fn new(limit_bytes: usize, permit_bytes: usize) -> Self {
         let permit_bytes = permit_bytes.max(1);
-        let permits = limit_bytes.div_ceil(permit_bytes).max(1);
+        let total_permits = limit_bytes
+            .div_ceil(permit_bytes)
+            .clamp(1, tokio::sync::Semaphore::MAX_PERMITS);
         Self {
-            semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(total_permits)),
             permit_bytes,
+            total_permits,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn permit_bytes(&self) -> usize {
         self.permit_bytes
     }
 
-    pub(crate) async fn acquire(
-        &self,
-        bytes: usize,
-    ) -> std::result::Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::AcquireError> {
-        let permits = bytes.div_ceil(self.permit_bytes()).max(1) as u32;
-        self.semaphore.acquire_many(permits).await
+    #[cfg(test)]
+    pub(crate) fn available_permits(&self) -> usize {
+        self.semaphore.available_permits()
+    }
+
+    pub(crate) async fn acquire(&self, bytes: usize) -> Result<tokio::sync::SemaphorePermit<'_>> {
+        let permits = bytes.div_ceil(self.permit_bytes).max(1);
+        if permits > self.total_permits {
+            return UnexpectedSnafu {
+                reason: format!(
+                    "range result memory request of {bytes} bytes exceeds limiter capacity of {} bytes",
+                    self.total_permits.saturating_mul(self.permit_bytes)
+                ),
+            }
+            .fail();
+        }
+        self.semaphore
+            .acquire_many(permits as u32)
+            .await
+            .map_err(|_| {
+                UnexpectedSnafu {
+                    reason: "range result memory limiter is unexpectedly closed",
+                }
+                .build()
+            })
     }
 }
 
@@ -431,6 +455,15 @@ impl CacheStrategy {
         }
     }
 
+    pub(crate) fn range_result_cache_size(&self) -> Option<usize> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                Some(cache_manager.range_result_cache_size())
+            }
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
     /// Calls [CacheManager::write_cache()].
     /// It returns None if the strategy is [CacheStrategy::Disabled].
     pub fn write_cache(&self) -> Option<&WriteCacheRef> {
@@ -534,6 +567,8 @@ pub struct CacheManager {
     selector_result_cache: Option<SelectorResultCache>,
     /// Cache for range scan outputs in flat format.
     range_result_cache: Option<RangeResultCache>,
+    /// Configured capacity for range scan outputs in flat format.
+    range_result_cache_size: u64,
     /// Shared memory limiter for async range-result cache tasks.
     range_result_memory_limiter: Arc<RangeResultMemoryLimiter>,
     /// Cache for index result.
@@ -804,6 +839,10 @@ impl CacheManager {
         &self.range_result_memory_limiter
     }
 
+    pub(crate) fn range_result_cache_size(&self) -> usize {
+        self.range_result_cache_size as usize
+    }
+
     /// Gets the write cache.
     pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
         self.write_cache.as_ref()
@@ -1038,7 +1077,11 @@ impl CacheManagerBuilder {
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
             range_result_cache,
-            range_result_memory_limiter: Arc::new(RangeResultMemoryLimiter::default()),
+            range_result_cache_size: self.range_result_cache_size,
+            range_result_memory_limiter: Arc::new(RangeResultMemoryLimiter::new(
+                self.range_result_cache_size as usize,
+                RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize,
+            )),
             index_result_cache,
         }
     }
@@ -1446,6 +1489,46 @@ mod tests {
         assert!(disabled.get_range_result(&key).is_none());
         disabled.put_range_result(key.clone(), value);
         assert!(cache.get_range_result(&key).is_some());
+    }
+
+    #[test]
+    fn test_range_result_cache_size_configures_limiter() {
+        let cache_size = 3 * 1024_u64;
+        let cache = CacheManager::builder()
+            .range_result_cache_size(cache_size)
+            .build();
+
+        assert_eq!(cache.range_result_cache_size(), cache_size as usize);
+        assert_eq!(
+            cache.range_result_memory_limiter().permit_bytes(),
+            RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize
+        );
+        assert_eq!(
+            cache.range_result_memory_limiter().available_permits(),
+            (cache_size as usize).div_ceil(RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize)
+        );
+    }
+
+    #[tokio::test]
+    async fn range_result_memory_limiter_rejects_oversized_request() {
+        let limiter = RangeResultMemoryLimiter::new(2 * 1024, 1024);
+        assert_eq!(limiter.available_permits(), 2);
+
+        let err = limiter.acquire(10 * 1024).await.unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds limiter capacity"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(limiter.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn range_result_memory_limiter_allows_request_up_to_capacity() {
+        let limiter = RangeResultMemoryLimiter::new(2 * 1024, 1024);
+        let permit = limiter.acquire(2 * 1024).await.unwrap();
+        assert_eq!(limiter.available_permits(), 0);
+        drop(permit);
+        assert_eq!(limiter.available_permits(), 2);
     }
 
     #[tokio::test]
