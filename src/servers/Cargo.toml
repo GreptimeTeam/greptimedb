@@ -133,6 +133,7 @@ tokio-stream = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 tonic.workspace = true
 tonic-reflection = "0.14"
+tonic-web = "0.14"
 tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["full"] }
 tracing.workspace = true

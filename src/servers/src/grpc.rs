@@ -355,7 +355,11 @@ impl Server for GrpcServer {
             .layer(MetricsMiddlewareLayer)
             .into_inner();
 
-        let mut builder = tonic::transport::Server::builder().layer(metrics_layer);
+        let mut builder = tonic::transport::Server::builder()
+            .accept_http1(true)
+            .layer(metrics_layer)
+            .layer(tonic_web::GrpcWebLayer::new());
+
         if let Some(tls_config) = self.tls_config.clone() {
             builder = builder.tls_config(tls_config).context(StartGrpcSnafu)?;
         }
