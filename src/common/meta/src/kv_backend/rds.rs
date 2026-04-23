@@ -60,16 +60,23 @@ static RUSTLS_CRYPTO_PROVIDER_INIT: OnceLock<std::result::Result<(), String>> = 
 pub(crate) fn ensure_rustls_crypto_provider_installed() -> Result<()> {
     RUSTLS_CRYPTO_PROVIDER_INIT
         .get_or_init(|| {
-            rustls::crypto::CryptoProvider::install_default(
+            if rustls::crypto::CryptoProvider::get_default().is_some() {
+                return Ok(());
+            }
+
+            match rustls::crypto::CryptoProvider::install_default(
                 rustls::crypto::ring::default_provider(),
-            )
-            .map_err(|provider| {
-                format!(
+            ) {
+                Ok(()) => Ok(()),
+                Err(_provider) if rustls::crypto::CryptoProvider::get_default().is_some() => {
+                    Ok(())
+                }
+                Err(provider) => Err(format!(
                     "Failed to install rustls CryptoProvider, existing default: {:?}, attempted provider: {:?}",
                     rustls::crypto::CryptoProvider::get_default(),
                     provider
-                )
-            })
+                )),
+            }
         })
         .clone()
         .map_err(|err_msg| UnexpectedSnafu { err_msg }.build())
