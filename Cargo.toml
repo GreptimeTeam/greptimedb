@@ -151,6 +151,7 @@ etcd-client = { version = "0.17", features = [
     "tls",
     "tls-roots",
 ] }
+fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"

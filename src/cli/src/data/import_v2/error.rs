@@ -104,6 +104,37 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to parse import state file"))]
+    ImportStateParse {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Import state I/O failed at '{}': {}", path, error))]
+    ImportStateIo {
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Import state is already locked at '{}'", path))]
+    ImportStateLocked {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Import state references unknown chunk {}", chunk_id))]
+    ImportStateUnknownChunk {
+        chunk_id: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -117,10 +148,14 @@ impl ErrorExt for Error {
             | Error::IncompleteSnapshot { .. }
             | Error::EmptyChunkManifest { .. }
             | Error::MissingChunkData { .. } => StatusCode::InvalidArguments,
+            Error::ImportStateUnknownChunk { .. } => StatusCode::Unexpected,
             Error::Database { error, .. } => error.status_code(),
             Error::SnapshotStorage { error, .. } | Error::ChunkImportFailed { error, .. } => {
                 error.status_code()
             }
+            Error::ImportStateParse { .. } => StatusCode::Internal,
+            Error::ImportStateIo { .. } => StatusCode::StorageUnavailable,
+            Error::ImportStateLocked { .. } => StatusCode::IllegalState,
         }
     }
 
