@@ -27,6 +27,7 @@ use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::{DFSchema, DataFusionError, Result as DFResult};
+use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{
     Aggregate, Analyze, Cast, Distinct, DistinctOn, Explain, Expr, ExprSchemable, Extension,
@@ -517,52 +518,52 @@ impl RangePlanRewriter {
             if let Some(table_ref) = qualifier {
                 let table_source = match self.table_provider.resolve_table(table_ref.clone()).await
                 {
-                Ok(table_source) => table_source,
-                Err(error) => {
-                    if matches!(&error, catalog::error::Error::TableNotExist { .. })
-                        && metadata_time_index_expr.is_some()
-                    {
-                        continue;
+                    Ok(table_source) => table_source,
+                    Err(error) => {
+                        if matches!(&error, catalog::error::Error::TableNotExist { .. })
+                            && metadata_time_index_expr.is_some()
+                        {
+                            continue;
+                        }
+                        return Err(error).context(CatalogSnafu);
                     }
-                    return Err(error).context(CatalogSnafu);
-                }
-            };
+                };
                 let table = table_source
-                .as_any()
-                .downcast_ref::<DefaultTableSource>()
+                    .as_any()
+                    .downcast_ref::<DefaultTableSource>()
                     .context(UnknownTableSnafu)?
-                .table_provider
-                .as_any()
-                .downcast_ref::<DfTableProviderAdapter>()
+                    .table_provider
+                    .as_any()
+                    .downcast_ref::<DfTableProviderAdapter>()
                     .context(UnknownTableSnafu)?
                     .table();
-            let schema = table.schema();
-            let time_index_column =
-                schema
-                    .timestamp_column()
-                    .with_context(|| TimeIndexNotFoundSnafu {
-                        table: table_ref.to_string(),
-                    })?;
-            // assert time_index's datatype is timestamp
-            if let ConcreteDataType::Timestamp(_) = time_index_column.data_type {
-                default_by = table
-                    .table_info()
-                    .meta
-                    .row_key_column_names()
-                    .map(|key| Expr::Column(Column::new(Some(table_ref.clone()), key)))
-                    .collect();
-                // If the user does not specify a primary key when creating a table,
-                // then by default all data will be aggregated into one time series,
-                // which is equivalent to using `by(1)` in SQL
-                if default_by.is_empty() {
-                    default_by = vec![1.lit()];
-                }
+                let schema = table.schema();
+                let time_index_column =
+                    schema
+                        .timestamp_column()
+                        .with_context(|| TimeIndexNotFoundSnafu {
+                            table: table_ref.to_string(),
+                        })?;
+                // assert time_index's datatype is timestamp
+                if let ConcreteDataType::Timestamp(_) = time_index_column.data_type {
+                    default_by = table
+                        .table_info()
+                        .meta
+                        .row_key_column_names()
+                        .map(|key| Expr::Column(Column::new(Some(table_ref.clone()), key)))
+                        .collect();
+                    // If the user does not specify a primary key when creating a table,
+                    // then by default all data will be aggregated into one time series,
+                    // which is equivalent to using `by(1)` in SQL
+                    if default_by.is_empty() {
+                        default_by = vec![1.lit()];
+                    }
                     time_index_expr = Expr::Column(Column::new(
-                    Some(table_ref.clone()),
-                    time_index_column.name.clone(),
+                        Some(table_ref.clone()),
+                        time_index_column.name.clone(),
                     ));
+                }
             }
-        }
         }
         #[allow(deprecated)]
         if matches!(time_index_expr, Expr::Wildcard { .. })
@@ -578,10 +579,10 @@ impl RangePlanRewriter {
         }
         #[allow(deprecated)]
         if matches!(time_index_expr, Expr::Wildcard { .. }) {
-        TimeIndexNotFoundSnafu {
-            table: schema.to_string(),
-        }
-        .fail()
+            TimeIndexNotFoundSnafu {
+                table: schema.to_string(),
+            }
+            .fail()
         } else {
             Ok((time_index_expr, default_by))
         }
