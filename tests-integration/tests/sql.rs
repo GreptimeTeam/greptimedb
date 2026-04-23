@@ -82,6 +82,7 @@ macro_rules! sql_tests {
                 test_postgres_datestyle,
                 test_postgres_intervalstyle,
                 test_postgres_parameter_inference,
+                test_postgres_uint64_parameter,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
                 test_declare_fetch_close_cursor,
@@ -1293,6 +1294,57 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
     assert_eq!(1, rows.len());
 
     // Shutdown the client.
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_uint64_parameter(store_type: StorageType) {
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_uint64_parameter").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    let _ = client
+        .simple_query("create table demo_u64(v bigint unsigned, ts timestamp time index)")
+        .await
+        .unwrap();
+
+    let dt = NaiveDate::from_yo_opt(2015, 100)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    let _ = client
+        .execute(
+            "INSERT INTO demo_u64 VALUES($1, $2)",
+            &[&Decimal::from(123456u64), &dt],
+        )
+        .await
+        .unwrap();
+
+    let rows = client
+        .query(
+            "SELECT count(*) FROM demo_u64 WHERE v = $1",
+            &[&Decimal::from(123456u64)],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(1, rows.len());
+    let count: i64 = rows[0].get(0);
+    assert_eq!(count, 1);
+
     drop(client);
     rx.await.unwrap();
 

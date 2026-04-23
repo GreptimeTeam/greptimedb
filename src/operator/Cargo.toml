@@ -53,7 +53,7 @@ lazy_static.workspace = true
 meta-client.workspace = true
 meter-core.workspace = true
 meter-macros.workspace = true
-moka.workspace = true
+moka = { workspace = true, features = ["future"] }
 object-store.workspace = true
 object_store_opendal.workspace = true
 partition.workspace = true

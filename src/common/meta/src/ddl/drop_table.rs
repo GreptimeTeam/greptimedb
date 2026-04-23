@@ -43,7 +43,7 @@ use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
-use crate::rpc::router::{RegionRoute, operating_leader_regions};
+use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
 pub struct DropTableProcedure {
     /// The context of procedure runtime.
@@ -94,7 +94,7 @@ impl DropTableProcedure {
 
     /// Register dropping regions if doesn't exist.
     fn register_dropping_regions(&mut self) -> Result<()> {
-        let dropping_regions = operating_leader_regions(&self.data.physical_region_routes);
+        let dropping_regions = operating_leader_region_roles(&self.data.physical_region_routes);
 
         if !self.dropping_regions.is_empty() {
             return Ok(());
@@ -102,11 +102,11 @@ impl DropTableProcedure {
 
         let mut dropping_region_guards = Vec::with_capacity(dropping_regions.len());
 
-        for (region_id, datanode_id) in dropping_regions {
+        for (region_id, datanode_id, role) in dropping_regions {
             let guard = self
                 .context
                 .memory_region_keeper
-                .register(datanode_id, region_id)
+                .register_with_role(datanode_id, region_id, role)
                 .context(error::RegionOperatingRaceSnafu {
                     region_id,
                     peer_id: datanode_id,
@@ -154,7 +154,24 @@ impl DropTableProcedure {
         Ok(Status::executing(true))
     }
 
-    pub async fn on_datanode_drop_regions(&mut self) -> Result<Status> {
+    pub async fn on_datanode_drop_regions(&mut self, retrying: bool) -> Result<Status> {
+        if retrying {
+            info!(
+                "Remapping region routes addresses for retrying drop regions for table_id: {}",
+                self.data.table_id()
+            );
+            let storage = self
+                .context
+                .table_metadata_manager
+                .table_route_manager()
+                .table_route_storage();
+            // The peer addresses may change during retries,
+            // so we always remap the region routes.
+            storage
+                .remap_region_routes(&mut self.data.physical_region_routes)
+                .await?;
+        }
+
         self.executor
             .on_drop_regions(
                 &self.context.node_manager,
@@ -215,7 +232,7 @@ impl Procedure for DropTableProcedure {
         Ok(())
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.data.state;
         let _timer = metrics::METRIC_META_PROCEDURE_DROP_TABLE
             .with_label_values(&[state.as_ref()])
@@ -225,7 +242,10 @@ impl Procedure for DropTableProcedure {
             DropTableState::Prepare => self.on_prepare().await,
             DropTableState::DeleteMetadata => self.on_delete_metadata().await,
             DropTableState::InvalidateTableCache => self.on_broadcast().await,
-            DropTableState::DatanodeDropRegions => self.on_datanode_drop_regions().await,
+            DropTableState::DatanodeDropRegions => {
+                let retrying = ctx.is_retrying().await.unwrap_or(false);
+                self.on_datanode_drop_regions(retrying).await
+            }
             DropTableState::DeleteTombstone => self.on_delete_metadata_tombstone().await,
         }
         .map_err(map_to_procedure_error)

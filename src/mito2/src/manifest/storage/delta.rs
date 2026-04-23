@@ -34,7 +34,7 @@ use crate::manifest::storage::utils::{
 };
 use crate::manifest::storage::{
     FETCH_MANIFEST_PARALLELISM, delta_file, file_compress_type, file_version, gen_path,
-    is_delta_file,
+    is_delta_file, list_start_after,
 };
 
 #[derive(Debug, Clone)]
@@ -76,8 +76,18 @@ impl<T: Tracker> DeltaStorage<T> {
     }
 
     /// Returns an iterator of manifests from path directory.
-    pub(crate) async fn manifest_lister(&self) -> Result<Option<Lister>> {
-        match self.object_store.lister_with(&self.path).await {
+    ///
+    /// If `start_after` is `Some`, the lister will skip entries whose name is
+    /// lexicographically less than or equal to it (see OpenDAL's `start_after`).
+    pub(crate) async fn manifest_lister(
+        &self,
+        start_after: Option<&str>,
+    ) -> Result<Option<Lister>> {
+        let mut builder = self.object_store.lister_with(&self.path);
+        if let Some(s) = start_after {
+            builder = builder.start_after(s);
+        }
+        match builder.await {
             Ok(streamer) => Ok(Some(streamer)),
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 debug!("Manifest directory does not exist: {}", self.path);
@@ -90,16 +100,22 @@ impl<T: Tracker> DeltaStorage<T> {
     /// Return all `R`s in the directory that meet the `filter` conditions (that is, the `filter` closure returns `Some(R)`),
     /// and discard `R` that does not meet the conditions (that is, the `filter` closure returns `None`)
     /// Return an empty vector when directory is not found.
-    pub async fn get_paths<F, R>(&self, filter: F) -> Result<Vec<R>>
+    ///
+    /// `start_after` is forwarded to the underlying lister to skip entries
+    /// whose name is lexicographically less than or equal to it.
+    pub async fn get_paths<F, R>(&self, start_after: Option<&str>, mut filter: F) -> Result<Vec<R>>
     where
-        F: Fn(Entry) -> Option<R>,
+        F: FnMut(Entry) -> Option<R>,
     {
-        let Some(streamer) = self.manifest_lister().await? else {
+        let Some(streamer) = self.manifest_lister(start_after).await? else {
             return Ok(vec![]);
         };
 
         streamer
-            .try_filter_map(|e| async { Ok(filter(e)) })
+            .try_filter_map(|e| {
+                let result = filter(e);
+                async { Ok(result) }
+            })
             .try_collect::<Vec<_>>()
             .await
             .context(OpenDalSnafu)
@@ -113,8 +129,13 @@ impl<T: Tracker> DeltaStorage<T> {
     ) -> Result<Vec<(ManifestVersion, Entry)>> {
         ensure!(start <= end, InvalidScanIndexSnafu { start, end });
 
+        // Push the version lower bound into the list request via
+        // `list_start_after`; skip the hint when `start == 0` (nothing to skip).
+        let start_after = (start > 0).then(|| list_start_after(&self.path, start));
+        let mut total_paths = 0;
         let mut entries: Vec<(ManifestVersion, Entry)> = self
-            .get_paths(|entry| {
+            .get_paths(start_after.as_deref(), |entry| {
+                total_paths += 1;
                 let file_name = entry.name();
                 if is_delta_file(file_name) {
                     let version = file_version(file_name);
@@ -127,6 +148,16 @@ impl<T: Tracker> DeltaStorage<T> {
             .await?;
 
         sort_manifests(&mut entries);
+
+        common_telemetry::debug!(
+            "DeltaStorage get paths for {}, start: {}, end: {}, start_after: {:?}, total_paths: {}, entries: {}",
+            self.path,
+            start,
+            end,
+            start_after,
+            total_paths,
+            entries.len()
+        );
 
         Ok(entries)
     }

@@ -47,6 +47,21 @@ SELECT matches_term('café>', 'café') as result;
 -- Expect: true
 SELECT matches_term('русский!', 'русский') as result;
 
+-- Phase 1 mixed Chinese and numeric behavior
+SELECT matches_term('登录手机号18888888888的动态key', '手机号') as result;
+SELECT matches_term('登录手机号18888888888的动态key', '18888888888') as result;
+SELECT matches_term('登录手机号18888888888的动态key', '手机') as result;
+SELECT matches_term('登录手机号18888888888的动态key', '机号') as result;
+SELECT matches_term('登录手机号18888888888的动态key', '机号1888') as result;
+SELECT matches_term('中国农业银行', '农业') as result;
+SELECT matches_term('中国农业银行账号', '行账号') as result;
+SELECT matches_term('错误error日志', 'error') as result;
+SELECT matches_term('trace_id=abc', 'trace_id') as result;
+SELECT matches_term('ship__ship', 'ship__ship') as result;
+SELECT matches_term('__IDENTIFIER__', '__IDENTIFIER__') as result;
+SELECT matches_term('_ship', '_ship') as result;
+SELECT matches_term('ship_', 'ship_') as result;
+
 -- Test complete word matching
 CREATE TABLE logs (
     `id` TIMESTAMP TIME INDEX,
@@ -140,3 +155,34 @@ FROM logs WHERE `id` BETWEEN 20 AND 23 ORDER BY `id`;
 SELECT `id`, `log_message`, matches_term(lower(`log_message`), 'warning') as `matches_warning` FROM logs WHERE `id` >= 24 ORDER BY `id`;
 
 DROP TABLE logs;
+
+CREATE TABLE zh_logs (
+    `id` TIMESTAMP TIME INDEX,
+    `log_message` STRING FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true', false_positive_rate = '0.01', granularity = '10240')
+);
+
+INSERT INTO zh_logs VALUES
+    (1, '[2026/04/09/ 13:56:11.031]2026-04-09 13:56:11.031 - [ trace_id=340a6a44b0bd8e37bb7697ss7da61ff0 span_id=085ff5ttf1e0a23b trace_flags=01] - [http-nio-8081-exec-16] INFO c.h.p.xx.web.service.impl.CCCXForwardKKKServiceImpl.pushout(188) - 登录手机号18888888888的动态key：829889AC8 ship_ship ship__ship __IDENTIFIER__ _ship ship_'),
+    (2, '哈基米曼波');
+
+ADMIN flush_table('zh_logs');
+
+SELECT * FROM zh_logs where `log_message` @@ 'trace_id';
+
+SELECT * FROM zh_logs where `log_message` @@ 'ship_ship';
+
+SELECT * FROM zh_logs where `log_message` @@ 'ship__ship';
+
+SELECT * FROM zh_logs where `log_message` @@ '__IDENTIFIER__';
+
+SELECT * FROM zh_logs where `log_message` @@ '_ship';
+
+SELECT * FROM zh_logs where `log_message` @@ 'ship_';
+
+SELECT * FROM zh_logs where `log_message` @@ '登录_id';
+
+SELECT * FROM zh_logs where `log_message` @@ '手机号_trace';
+
+SELECT * FROM zh_logs where `log_message` @@ '手机';
+
+DROP TABLE zh_logs;

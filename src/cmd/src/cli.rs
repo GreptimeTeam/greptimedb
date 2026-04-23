@@ -102,31 +102,79 @@ impl Command {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+    use std::ops::RangeInclusive;
+
     use clap::Parser;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_telemetry::logging::LoggingOptions;
+    use rand::Rng;
 
     use crate::error::Result as CmdResult;
     use crate::options::GlobalOptions;
     use crate::{App, cli, standalone};
 
+    fn random_standalone_addrs() -> (String, String, String, String) {
+        let offset = choose_random_unused_port_offset(14000..=24000, 10);
+
+        (
+            format!("127.0.0.1:{}", 4000 + offset),
+            format!("127.0.0.1:{}", 4001 + offset),
+            format!("127.0.0.1:{}", 4002 + offset),
+            format!("127.0.0.1:{}", 4003 + offset),
+        )
+    }
+
+    fn choose_random_unused_port_offset(
+        port_range: RangeInclusive<u16>,
+        max_attempts: usize,
+    ) -> u16 {
+        let mut rng = rand::rng();
+
+        for _ in 0..max_attempts {
+            let http_port = rng.random_range(port_range.clone());
+            let offset = http_port - 4000;
+            let ports = [4000 + offset, 4001 + offset, 4002 + offset, 4003 + offset];
+
+            let listeners = ports
+                .into_iter()
+                .map(|port| TcpListener::bind(("127.0.0.1", port)))
+                .collect::<Result<Vec<_>, _>>();
+
+            if listeners.is_ok() {
+                return offset;
+            }
+        }
+
+        panic!("failed to find unused standalone test ports");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_export_create_table_with_quoted_names() -> CmdResult<()> {
         let output_dir = tempfile::tempdir().unwrap();
+        let (http_addr, rpc_addr, mysql_addr, postgres_addr) = random_standalone_addrs();
 
         let standalone = standalone::Command::parse_from([
             "standalone",
             "start",
             "--data-home",
             &*output_dir.path().to_string_lossy(),
+            "--http-addr",
+            &http_addr,
+            "--rpc-bind-addr",
+            &rpc_addr,
+            "--mysql-addr",
+            &mysql_addr,
+            "--postgres-addr",
+            &postgres_addr,
         ]);
 
         let standalone_opts = standalone.load_options(&GlobalOptions::default()).unwrap();
         let mut instance = standalone.build(standalone_opts).await?;
         instance.start().await?;
 
-        let client = Client::with_urls(["127.0.0.1:4001"]);
+        let client = Client::with_urls([rpc_addr.as_str()]);
         let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
         database
             .sql(r#"CREATE DATABASE "cli.export.create_table";"#)
@@ -149,7 +197,7 @@ mod tests {
             "data",
             "export",
             "--addr",
-            "127.0.0.1:4000",
+            &http_addr,
             "--output-dir",
             &*output_dir.path().to_string_lossy(),
             "--target",

@@ -37,7 +37,7 @@ use crate::error::{
 };
 use crate::http::header::{GREPTIME_TIMEZONE_HEADER_NAME, GreptimeDbName};
 use crate::http::result::error_result::ErrorResponse;
-use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_APIS};
+use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_API_PREFIX};
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
 
 /// AuthState is a holder state for [`UserProviderRef`]
@@ -285,7 +285,7 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
 fn need_auth<B>(req: &Request<B>) -> bool {
     let path = req.uri().path();
 
-    for api in PUBLIC_APIS {
+    for api in PUBLIC_API_PREFIX {
         if path.starts_with(api) {
             return false;
         }

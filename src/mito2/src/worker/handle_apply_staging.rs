@@ -75,7 +75,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
+        let staging_partition_info = region.manifest_ctx.staging_partition_info();
 
         let staging_partition_expr = staging_partition_info
             .as_ref()

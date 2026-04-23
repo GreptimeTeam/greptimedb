@@ -19,6 +19,7 @@ use store_api::logstore::LogStore;
 use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
 use store_api::storage::RegionId;
 
+use crate::compaction::RequestCancelResult;
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange};
@@ -42,7 +43,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // If the region is already in staging mode, verify the partition directive matches.
         if region.is_staging() {
-            let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
+            let staging_partition_info = region.manifest_ctx.staging_partition_info();
             // If the partition directive mismatches, return error.
             if staging_partition_info
                 .as_ref()
@@ -98,18 +99,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        if self.compaction_scheduler.is_compacting(region_id) {
-            // Safety: region is compacting, add ddl request to pending queue.
-            self.compaction_scheduler
-                .add_ddl_request_to_pending(SenderDdlRequest {
-                    region_id,
-                    sender,
-                    request: DdlRequest::EnterStaging(EnterStagingRequest {
-                        partition_directive,
-                    }),
-                });
+        match self.compaction_scheduler.request_cancel(region_id) {
+            RequestCancelResult::CancelIssued
+            | RequestCancelResult::AlreadyCancelling
+            | RequestCancelResult::TooLateToCancel => {
+                // Safety: region is compacting or has entered the non-cancellable publish stage,
+                // keep the DDL pending until the current task finishes or acknowledges cancellation.
+                self.compaction_scheduler
+                    .add_ddl_request_to_pending(SenderDdlRequest {
+                        region_id,
+                        sender,
+                        request: DdlRequest::EnterStaging(EnterStagingRequest {
+                            partition_directive,
+                        }),
+                    });
 
-            return;
+                return;
+            }
+            RequestCancelResult::NotRunning => {}
         }
 
         self.handle_enter_staging(region, partition_directive, sender);
@@ -279,10 +286,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region: &MitoRegionRef,
         partition_directive: StagingPartitionDirective,
     ) {
-        let mut staging_partition_info = region.staging_partition_info.lock().unwrap();
-        debug_assert!(staging_partition_info.is_none());
-        *staging_partition_info = Some(StagingPartitionInfo::from_partition_directive(
-            partition_directive,
-        ));
+        region.manifest_ctx.set_staging_partition_info(
+            StagingPartitionInfo::from_partition_directive(partition_directive),
+        );
     }
 }

@@ -72,7 +72,6 @@ use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::async_reader::SstAsyncFileReader;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
-    row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -676,7 +675,7 @@ impl ParquetReaderBuilder {
         metrics.rows_total += num_rows as usize;
 
         // Compute skip_fields once for all pruning operations
-        let skip_fields = self.compute_skip_fields(parquet_meta);
+        let skip_fields = self.pre_filter_mode.skip_fields();
 
         let mut output = self.row_groups_by_minmax(
             read_format,
@@ -1110,25 +1109,6 @@ impl ParquetReaderBuilder {
             pruned = true;
         }
         pruned
-    }
-
-    /// Computes whether to skip field columns when building statistics based on PreFilterMode.
-    fn compute_skip_fields(&self, parquet_meta: &ParquetMetaData) -> bool {
-        match self.pre_filter_mode {
-            PreFilterMode::All => false,
-            PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => {
-                // Check if any row group contains delete op
-                let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
-                (0..parquet_meta.num_row_groups()).any(|rg_idx| {
-                    row_group_contains_delete(parquet_meta, rg_idx, &file_path)
-                        .inspect_err(|e| {
-                            warn!(e; "Failed to decode min value of op_type, fallback to not skipping fields");
-                        })
-                        .unwrap_or(false)
-                })
-            }
-        }
     }
 
     /// Computes row groups selection after min-max pruning.
@@ -1955,7 +1935,7 @@ impl ParquetReader {
                 return Ok(None);
             };
 
-            let skip_fields = self.context.should_skip_fields(row_group_idx);
+            let skip_fields = self.context.pre_filter_mode().skip_fields();
             let parquet_reader = self
                 .context
                 .reader_builder()
@@ -1988,7 +1968,7 @@ impl ParquetReader {
         debug_assert!(context.read_format().as_flat().is_some());
         let fetch_metrics = ParquetFetchMetrics::default();
         let reader = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
-            let skip_fields = context.should_skip_fields(row_group_idx);
+            let skip_fields = context.pre_filter_mode().skip_fields();
             let parquet_reader = context
                 .reader_builder()
                 .build(context.build_context(
