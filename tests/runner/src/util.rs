@@ -440,15 +440,43 @@ pub fn get_workspace_root() -> String {
     runner_crate_path.into_os_string().into_string().unwrap()
 }
 
+fn get_target_dir_from_cargo_config() -> Option<PathBuf> {
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        return if target_dir.is_absolute() {
+            Some(target_dir)
+        } else {
+            Some(PathBuf::from(get_workspace_root()).join(target_dir))
+        };
+    }
+
+    let workspace_root = get_workspace_root();
+    let cargo_config = PathBuf::from(&workspace_root).join(".cargo/config.toml");
+    let cargo_config = std::fs::read_to_string(cargo_config).ok()?;
+    let cargo_config: toml::Value = toml::from_str(&cargo_config).ok()?;
+    let target_dir = cargo_config
+        .get("build")?
+        .get("target-dir")?
+        .as_str()?
+        .to_string();
+    let target_dir = PathBuf::from(target_dir);
+
+    if target_dir.is_absolute() {
+        Some(target_dir)
+    } else {
+        Some(PathBuf::from(workspace_root).join(target_dir))
+    }
+}
+
 pub fn get_binary_dir(mode: &str) -> PathBuf {
-    // first go to the workspace root.
-    let mut workspace_root = PathBuf::from(get_workspace_root());
+    let mut binary_dir = get_target_dir_from_cargo_config().unwrap_or_else(|| {
+        let mut workspace_root = PathBuf::from(get_workspace_root());
+        workspace_root.push("target");
+        workspace_root
+    });
 
-    // change directory to target dir (workspace/target/<build mode>/)
-    workspace_root.push("target");
-    workspace_root.push(mode);
-
-    workspace_root
+    binary_dir.push(mode);
+    binary_dir
 }
 
 /// Spin-waiting a socket address is available, or timeout.

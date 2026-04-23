@@ -12547,6 +12547,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-stream",
+ "toml 0.8.23",
 ]
 
 [[package]]

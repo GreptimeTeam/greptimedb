@@ -60,6 +60,7 @@ use frontend::frontend::Frontend;
 use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
+use meta_srv::flow::{PendingFlowReconcileManager, PendingFlowReconcileTicker};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use plugins::PluginOptions;
 use plugins::frontend::context::{
@@ -123,10 +124,42 @@ pub struct Instance {
     datanode: Datanode,
     frontend: Frontend,
     flownode: FlownodeInstance,
+    pending_flow_reconcile_runtime: PendingFlowReconcileRuntime,
     procedure_manager: ProcedureManagerRef,
     wal_provider: WalProviderRef,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
+}
+
+struct PendingFlowReconcileRuntime {
+    manager: Option<PendingFlowReconcileManager>,
+    ticker: PendingFlowReconcileTicker,
+}
+
+impl PendingFlowReconcileRuntime {
+    fn new(ddl_manager: Arc<DdlManager>) -> Self {
+        let (manager, ticker) = PendingFlowReconcileManager::new(ddl_manager);
+        Self {
+            manager: Some(manager),
+            ticker,
+        }
+    }
+
+    fn start(&mut self) -> Result<()> {
+        if let Some(manager) = self.manager.take() {
+            manager
+                .try_start()
+                .map_err(BoxedError::new)
+                .context(OtherSnafu)?;
+            self.ticker.start();
+        }
+
+        Ok(())
+    }
+
+    fn stop(&self) {
+        self.ticker.stop();
+    }
 }
 
 impl Instance {
@@ -177,11 +210,14 @@ impl App for Instance {
             .context(error::StartFrontendSnafu)?;
 
         self.flownode.start().await.context(StartFlownodeSnafu)?;
+        self.pending_flow_reconcile_runtime.start()?;
 
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
+        self.pending_flow_reconcile_runtime.stop();
+
         self.frontend
             .shutdown()
             .await
@@ -557,9 +593,12 @@ impl StartCommand {
             ddl_manager
         };
 
+        let ddl_manager = Arc::new(ddl_manager);
+        let pending_flow_reconcile_runtime = PendingFlowReconcileRuntime::new(ddl_manager.clone());
+
         let procedure_executor = creator
             .procedure_executor_creator
-            .create(Arc::new(ddl_manager), procedure_manager.clone())
+            .create(ddl_manager.clone(), procedure_manager.clone())
             .await?;
 
         let fe_instance = FrontendBuilder::new(
@@ -613,6 +652,7 @@ impl StartCommand {
             datanode,
             frontend,
             flownode,
+            pending_flow_reconcile_runtime,
             procedure_manager,
             wal_provider,
             _guard: vec![],
