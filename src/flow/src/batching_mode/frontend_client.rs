@@ -16,7 +16,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::SystemTime;
 
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
@@ -24,9 +23,7 @@ use api::v1::{CreateTableExpr, QueryRequest};
 use client::{Client, Database};
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_client_tls_config};
-use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
-use common_meta::peer::Peer;
-use common_meta::rpc::store::RangeRequest;
+use common_meta::peer::{Peer, PeerDiscovery};
 use common_query::Output;
 use common_telemetry::warn;
 use meta_client::client::MetaClient;
@@ -200,38 +197,19 @@ impl DatabaseWithPeer {
 
 impl FrontendClient {
     /// scan for available frontend from metadata
-    pub(crate) async fn scan_for_frontend(&self) -> Result<Vec<(NodeInfoKey, NodeInfo)>, Error> {
+    pub(crate) async fn scan_for_frontend(&self) -> Result<Vec<Peer>, Error> {
         let Self::Distributed { meta_client, .. } = self else {
             return Ok(vec![]);
         };
-        let cluster_client = meta_client
-            .cluster_client()
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
 
-        let prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
-        let req = RangeRequest::new().with_prefix(prefix);
-        let resp = cluster_client
-            .range(req)
+        meta_client
+            .active_frontends()
             .await
             .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-        let mut res = Vec::with_capacity(resp.kvs.len());
-        for kv in resp.kvs {
-            let key = NodeInfoKey::try_from(kv.key)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-
-            let val = NodeInfo::try_from(kv.value)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            res.push((key, val));
-        }
-        Ok(res)
+            .context(ExternalSnafu)
     }
 
-    /// Get the frontend with recent enough(less than 1 minute from now) `last_activity_ts`
-    /// and is able to process query
+    /// Get a frontend discovered by metasrv and verified with a query probe.
     async fn get_random_active_frontend(
         &self,
         catalog: &str,
@@ -255,26 +233,11 @@ impl FrontendClient {
         interval.tick().await;
         for retry in 0..batch_opts.experimental_grpc_max_retries {
             let mut frontends = self.scan_for_frontend().await?;
-            let now_in_ms = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
             // shuffle the frontends to avoid always pick the same one
             frontends.shuffle(&mut rng());
 
-            // found node with maximum last_activity_ts
-            for (_, node_info) in frontends
-                .iter()
-                // filter out frontend that have been down for more than 1 min
-                .filter(|(_, node_info)| {
-                    node_info.last_activity_ts
-                        + batch_opts
-                            .experimental_frontend_activity_timeout
-                            .as_millis() as i64
-                        > now_in_ms
-                })
-            {
-                let addr = &node_info.peer.addr;
+            for peer in frontends {
+                let addr = peer.addr.clone();
                 let client = Client::with_manager_and_urls(chnl_mgr.clone(), vec![addr.clone()]);
                 let database = {
                     let mut db = Database::new(catalog, schema, client);
@@ -283,7 +246,7 @@ impl FrontendClient {
                     }
                     db
                 };
-                let db = DatabaseWithPeer::new(database, node_info.peer.clone());
+                let db = DatabaseWithPeer::new(database, peer);
                 match db.try_select_one().await {
                     Ok(_) => return Ok(db),
                     Err(e) => {

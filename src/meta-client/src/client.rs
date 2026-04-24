@@ -557,6 +557,8 @@ impl ClusterInfo for MetaClient {
     }
 }
 
+// TODO(weny): the discovery using client side timestamp may be inaccurate,
+// maybe we need to use the timestamp from metasrv in the future.
 #[async_trait::async_trait]
 impl PeerDiscovery for MetaClient {
     async fn active_frontends(&self) -> MetaResult<Vec<Peer>> {

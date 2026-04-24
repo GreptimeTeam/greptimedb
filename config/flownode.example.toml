@@ -22,10 +22,6 @@ node_id = 14
 ## if failed to find available frontend after frontend_scan_timeout elapsed, return error
 ## which prevent flownode from starting
 #+experimental_frontend_scan_timeout="30s"
-## Frontend activity timeout
-## if frontend is down(not sending heartbeat) for more than frontend_activity_timeout,
-## it will be removed from the list that flownode use to connect
-#+experimental_frontend_activity_timeout="60s"
 ## Maximum number of filters allowed in a single query
 #+experimental_max_filter_num_per_query=20
 ## Time window merge distance
