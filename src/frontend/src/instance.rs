@@ -710,16 +710,14 @@ impl Instance {
         // EXPLAIN / EXPLAIN ANALYZE wrap an inner statement; describe them when the
         // wrapped statement is something we already plan (so that bind parameters
         // in the inner query get their types inferred). See #8029.
-        let plannable = matches!(
-            stmt,
-            Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
-        ) || matches!(
-            &stmt,
-            Statement::Explain(explain) if matches!(
-                explain.statement.as_ref(),
+        let is_inner_plannable = |s: &Statement| {
+            matches!(
+                s,
                 Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
             )
-        );
+        };
+        let plannable = is_inner_plannable(&stmt)
+            || matches!(&stmt, Statement::Explain(explain) if is_inner_plannable(explain.statement.as_ref()));
 
         if plannable {
             self.plugins
