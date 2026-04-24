@@ -95,7 +95,7 @@ parking_lot.workspace = true
 partition.workspace = true
 pg_interval = { version = "0.5.2", package = "pg_interval_2" }
 pgwire = { version = "0.38.3", default-features = false, features = [
-    "server-api-ring",
+    "server-api-aws-lc-rs",
     "pg-ext-types",
 ] }
 pin-project = "1.0"
@@ -111,7 +111,7 @@ regex.workspace = true
 reqwest.workspace = true
 rust-embed = { version = "6.6", optional = true, features = ["debug-embed"] }
 rust_decimal = { workspace = true, features = ["db-postgres"] }
-rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { workspace = true, default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
 serde.workspace = true
@@ -154,7 +154,7 @@ common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
 mysql_async = { version = "0.35", default-features = false, features = [
-    "default-rustls-ring",
+    "default-rustls",
 ] }
 permutation = "0.4"
 rand.workspace = true

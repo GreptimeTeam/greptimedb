@@ -65,7 +65,7 @@ pub(crate) fn ensure_rustls_crypto_provider_installed() -> Result<()> {
             }
 
             match rustls::crypto::CryptoProvider::install_default(
-                rustls::crypto::ring::default_provider(),
+                rustls::crypto::aws_lc_rs::default_provider(),
             ) {
                 Ok(()) => Ok(()),
                 Err(_provider) if rustls::crypto::CryptoProvider::get_default().is_some() => {

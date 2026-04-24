@@ -221,7 +221,6 @@ rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
-# It is worth noting that we should try to avoid using aws-lc-rs until it can be compiled on various platforms.
 hostname = "0.4.0"
 rustls = { version = "0.23.25", default-features = false }
 sea-query = "0.32"
@@ -237,7 +236,8 @@ sqlx = { version = "0.8", default-features = false, features = [
     "any",
     "macros",
     "json",
-    "runtime-tokio-rustls",
+    "runtime-tokio",
+    "tls-rustls-aws-lc-rs",
     "rust_decimal",
 ] }
 strum = { version = "0.27", features = ["derive"] }
@@ -249,7 +249,7 @@ tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
-tonic = { version = "0.14", features = ["tls-ring", "gzip", "zstd"] }
+tonic = { version = "0.14", features = ["tls-aws-lc", "gzip", "zstd"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"

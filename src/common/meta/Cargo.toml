@@ -67,7 +67,7 @@ prost-types = { workspace = true, optional = true }
 rand.workspace = true
 regex.workspace = true
 rskafka.workspace = true
-rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"], optional = true }
+rustls = { workspace = true, default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"], optional = true }
 rustls-native-certs = { version = "0.7", optional = true }
 rustls-pemfile = { version = "2.0", optional = true }
 serde.workspace = true
