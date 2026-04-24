@@ -16,6 +16,7 @@ use api::v1::meta::{HeartbeatRequest, NodeInfo as PbNodeInfo, Role};
 use common_meta::cluster::{
     DatanodeStatus, FlownodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus,
 };
+use common_meta::heartbeat::utils::get_flownode_workloads;
 use common_meta::peer::Peer;
 use common_meta::rpc::store::PutRequest;
 use snafu::ResultExt;
@@ -82,11 +83,14 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
         let Some((key, peer, info)) = extract_base_info(req) else {
             return Ok(HandleControl::Continue);
         };
+        let flownode_workloads = get_flownode_workloads(req.node_workloads.as_ref());
 
         let value = NodeInfo {
             peer,
             last_activity_ts: common_time::util::current_time_millis(),
-            status: NodeStatus::Flownode(FlownodeStatus {}),
+            status: NodeStatus::Flownode(FlownodeStatus {
+                workloads: flownode_workloads,
+            }),
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,

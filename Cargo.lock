@@ -7738,6 +7738,7 @@ dependencies = [
  "common-meta",
  "common-options",
  "common-telemetry",
+ "common-time",
  "datatypes",
  "futures",
  "futures-util",
