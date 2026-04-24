@@ -707,10 +707,21 @@ impl Instance {
     ) -> Result<Option<DescribeResult>> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
 
-        if matches!(
+        // EXPLAIN / EXPLAIN ANALYZE wrap an inner statement; describe them when the
+        // wrapped statement is something we already plan (so that bind parameters
+        // in the inner query get their types inferred). See #8029.
+        let plannable = matches!(
             stmt,
             Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
-        ) {
+        ) || matches!(
+            &stmt,
+            Statement::Explain(explain) if matches!(
+                explain.statement.as_ref(),
+                Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
+            )
+        );
+
+        if plannable {
             self.plugins
                 .get::<PermissionCheckerRef>()
                 .as_ref()
