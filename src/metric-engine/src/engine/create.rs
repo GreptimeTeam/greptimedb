@@ -42,7 +42,6 @@ use store_api::storage::consts::ReservedColumnId;
 use crate::engine::MetricEngineInner;
 use crate::engine::create::extract_new_columns::extract_new_columns;
 use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
-use crate::engine::state::PhysicalColumnInfo;
 use crate::error::{
     ColumnTypeMismatchSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
     InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
@@ -146,16 +145,7 @@ impl MetricEngineInner {
         let physical_columns = create_data_region_request
             .column_metadatas
             .iter()
-            .map(|metadata| {
-                (
-                    metadata.column_schema.name.clone(),
-                    PhysicalColumnInfo {
-                        column_id: metadata.column_id,
-                        data_type: metadata.column_schema.data_type.clone(),
-                        semantic_type: metadata.semantic_type,
-                    },
-                )
-            })
+            .map(|metadata| (metadata.column_schema.name.clone(), metadata.into()))
             .collect::<HashMap<_, _>>();
         let time_index_unit = create_data_region_request
             .column_metadatas
@@ -331,14 +321,7 @@ impl MetricEngineInner {
         let new_add_columns = new_column_names.iter().map(|name| {
             // Safety: previous steps ensure the physical region exist
             let column_metadata = *physical_schema_map.get(name).unwrap();
-            (
-                name.to_string(),
-                PhysicalColumnInfo {
-                    column_id: column_metadata.column_id,
-                    data_type: column_metadata.column_schema.data_type.clone(),
-                    semantic_type: column_metadata.semantic_type,
-                },
-            )
+            (name.to_string(), column_metadata.into())
         });
 
         extension_return_value.insert(

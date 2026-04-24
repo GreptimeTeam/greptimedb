@@ -40,6 +40,26 @@ pub struct PhysicalColumnInfo {
     pub semantic_type: SemanticType,
 }
 
+impl From<&ColumnMetadata> for PhysicalColumnInfo {
+    fn from(metadata: &ColumnMetadata) -> Self {
+        Self {
+            column_id: metadata.column_id,
+            data_type: metadata.column_schema.data_type.clone(),
+            semantic_type: metadata.semantic_type,
+        }
+    }
+}
+
+impl From<ColumnMetadata> for PhysicalColumnInfo {
+    fn from(metadata: ColumnMetadata) -> Self {
+        Self {
+            column_id: metadata.column_id,
+            data_type: metadata.column_schema.data_type,
+            semantic_type: metadata.semantic_type,
+        }
+    }
+}
+
 pub struct PhysicalRegionState {
     logical_regions: HashSet<RegionId>,
     physical_columns: HashMap<String, PhysicalColumnInfo>,

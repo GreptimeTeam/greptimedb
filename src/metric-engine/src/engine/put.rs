@@ -521,7 +521,7 @@ impl MetricEngineInner {
             let info = physical_columns
                 .get(&col.column_name)
                 .context(ColumnNotFoundSnafu {
-                    name: col.column_name.clone(),
+                    name: &col.column_name,
                     region_id: logical_region_id,
                 })?;
 
