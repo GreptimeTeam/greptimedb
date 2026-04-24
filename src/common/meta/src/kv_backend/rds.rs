@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 
 use crate::error::{Error, RdsTransactionRetryFailedSnafu, Result, UnexpectedSnafu};
 use crate::kv_backend::txn::{
@@ -79,7 +79,10 @@ pub(crate) fn ensure_rustls_crypto_provider_installed() -> Result<()> {
             }
         })
         .clone()
-        .map_err(|err_msg| UnexpectedSnafu { err_msg }.build())
+        .map_err(|err_msg| {
+            info!("Failed to install rustls crypto provider: {err_msg}");
+            UnexpectedSnafu { err_msg }.build()
+        })
 }
 
 /// Query executor for rds. It can execute queries or generate a transaction executor.

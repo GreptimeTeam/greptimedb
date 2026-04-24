@@ -360,7 +360,9 @@ impl Server for GrpcServer {
         if let Some(tls_config) = self.tls_config.clone() {
             // tonic builds the underlying rustls server config here, which requires a
             // process-level crypto provider to be installed first.
-            let _ = install_default_crypto_provider();
+            if let Err(err) = install_default_crypto_provider() {
+                warn!("Failed to install default rustls crypto provider: {err}");
+            }
             builder = builder.tls_config(tls_config).context(StartGrpcSnafu)?;
         }
 

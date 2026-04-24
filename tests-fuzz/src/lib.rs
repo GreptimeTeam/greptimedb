@@ -32,7 +32,7 @@ pub fn install_rustls_crypto_provider() {
     RUSTLS_CRYPTO_PROVIDER_INIT.get_or_init(|| {
         if rustls::crypto::CryptoProvider::get_default().is_none() {
             let _ = rustls::crypto::CryptoProvider::install_default(
-                rustls::crypto::ring::default_provider(),
+                rustls::crypto::aws_lc_rs::default_provider(),
             );
         }
     });

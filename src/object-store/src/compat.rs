@@ -344,9 +344,12 @@ impl ArrowObjectStore for OpendalStore {
                 .await
                 .map_err(|err| format_object_store_error(err, &path))?;
 
-            Ok::<_, datafusion_object_store::Error>(stream.then(|res| async {
-                let entry = res.map_err(|err| format_object_store_error(err, ""))?;
-                Ok(format_object_meta(entry.path(), entry.metadata()))
+            Ok::<_, datafusion_object_store::Error>(stream.filter_map(|res| async {
+                match res {
+                    Ok(entry) if entry.metadata().is_dir() => None,
+                    Ok(entry) => Some(Ok(format_object_meta(entry.path(), entry.metadata()))),
+                    Err(err) => Some(Err(format_object_store_error(err, ""))),
+                }
             }))
         };
 
@@ -374,7 +377,11 @@ impl ArrowObjectStore for OpendalStore {
             let meta = entry.metadata();
 
             if meta.is_dir() {
-                common_prefixes.push(entry.path().into());
+                let entry_path = entry.path().trim_end_matches('/');
+                let listed_path = path.trim_end_matches('/');
+                if entry_path != listed_path {
+                    common_prefixes.push(entry_path.into());
+                }
             } else if meta.last_modified().is_some() {
                 objects.push(format_object_meta(entry.path(), meta));
             } else {
@@ -521,4 +528,167 @@ fn timestamp_to_datetime(ts: opendal::raw::Timestamp) -> Option<chrono::DateTime
 
 fn datetime_to_timestamp(dt: chrono::DateTime<chrono::Utc>) -> Option<opendal::raw::Timestamp> {
     opendal::raw::Timestamp::new(dt.timestamp(), dt.timestamp_subsec_nanos() as i32).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use datafusion_object_store::path::Path;
+    use datafusion_object_store::{ObjectStore as ArrowObjectStore, WriteMultipart};
+    use opendal::services::Fs;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn create_test_object_store() -> (TempDir, Arc<dyn ArrowObjectStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy();
+        let atomic_write_dir = dir.path().join("atomic_write");
+        let atomic_write_dir = atomic_write_dir.to_string_lossy();
+        let op = Operator::new(
+            Fs::default()
+                .root(&root)
+                .atomic_write_dir(&atomic_write_dir),
+        )
+        .unwrap()
+        .finish();
+
+        (dir, Arc::new(OpendalStore::new(op)))
+    }
+
+    #[tokio::test]
+    async fn test_basic() {
+        let (_dir, object_store) = create_test_object_store();
+        let path: Path = "data/test.txt".into();
+        let bytes = Bytes::from_static(b"hello, world!");
+
+        object_store.put(&path, bytes.clone().into()).await.unwrap();
+
+        let meta = object_store.head(&path).await.unwrap();
+        assert_eq!(meta.size, 13);
+        assert_eq!(
+            object_store
+                .get(&path)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_put_multipart() {
+        let (_dir, object_store) = create_test_object_store();
+        let path: Path = "data/test_complete.txt".into();
+        let upload = object_store.put_multipart(&path).await.unwrap();
+        let mut write = WriteMultipart::new_with_chunk_size(upload, 4);
+        let bytes = Bytes::from_static(b"hello, multipart world!");
+
+        write.put(bytes.clone());
+        write.finish().await.unwrap();
+
+        let meta = object_store.head(&path).await.unwrap();
+        assert_eq!(meta.size, bytes.len() as u64);
+        assert_eq!(
+            object_store
+                .get(&path)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            bytes
+        );
+
+        let path: Path = "data/test_abort.txt".into();
+        let mut upload = object_store.put_multipart(&path).await.unwrap();
+        upload
+            .put_part(Bytes::from_static(b"aborted").into())
+            .await
+            .unwrap();
+        upload.abort().await.unwrap();
+
+        let err = object_store.head(&path).await.unwrap_err();
+        assert!(matches!(
+            err,
+            datafusion_object_store::Error::NotFound { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_list() {
+        let (_dir, object_store) = create_test_object_store();
+        let nested_path: Path = "data/nested/test.txt".into();
+        let nested_bytes = Bytes::from_static(b"hello, world! I am nested.");
+        let root_path: Path = "data/test.txt".into();
+        let root_bytes = Bytes::from_static(b"hello, world!");
+
+        object_store
+            .put(&nested_path, nested_bytes.clone().into())
+            .await
+            .unwrap();
+        object_store
+            .put(&root_path, root_bytes.clone().into())
+            .await
+            .unwrap();
+
+        let path: Path = "data/".into();
+        let results = object_store.list(Some(&path)).collect::<Vec<_>>().await;
+        assert_eq!(results.len(), 2);
+
+        let mut locations = results
+            .iter()
+            .map(|result| result.as_ref().unwrap().location.as_ref())
+            .collect::<Vec<_>>();
+        locations.sort();
+        assert_eq!(locations, vec!["data/nested/test.txt", "data/test.txt"]);
+
+        assert_eq!(
+            object_store
+                .get(&nested_path)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            nested_bytes
+        );
+        assert_eq!(
+            object_store
+                .get(&root_path)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            root_bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_with_delimiter() {
+        let (_dir, object_store) = create_test_object_store();
+        let nested_path: Path = "data/nested/test.txt".into();
+        let root_path: Path = "data/test.txt".into();
+
+        object_store
+            .put(&nested_path, Bytes::from_static(b"nested").into())
+            .await
+            .unwrap();
+        object_store
+            .put(&root_path, Bytes::from_static(b"root").into())
+            .await
+            .unwrap();
+
+        let path: Path = "data/".into();
+        let result = object_store.list_with_delimiter(Some(&path)).await.unwrap();
+        assert_eq!(result.objects.len(), 1);
+        assert_eq!(result.common_prefixes.len(), 1);
+        assert_eq!(result.objects[0].location.as_ref(), "data/test.txt");
+        assert_eq!(result.common_prefixes[0].as_ref(), "data/nested");
+    }
 }
