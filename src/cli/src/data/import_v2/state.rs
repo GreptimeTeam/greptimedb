@@ -308,10 +308,16 @@ async fn sync_parent_dir(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use chrono::Utc;
     use tempfile::tempdir;
 
     use super::*;
+
+    const CHILD_LOCK_PATH_ENV: &str = "GREPTIME_IMPORT_STATE_LOCK_PATH";
+    const CHILD_LOCK_TEST: &str =
+        "data::import_v2::state::tests::test_try_acquire_import_state_lock_child_process";
 
     #[test]
     fn test_import_state_new_initializes_pending_chunks() {
@@ -435,6 +441,34 @@ mod tests {
         let path = dir.path().join("import_state.json");
 
         let _first = try_acquire_import_state_lock(&path).unwrap();
+        // Import state locking guards concurrent CLI processes, so validate cross-process exclusion.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg(CHILD_LOCK_TEST)
+            .arg("--ignored")
+            .arg("--exact")
+            .env(CHILD_LOCK_PATH_ENV, &path)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child lock test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("1 passed"),
+            "child lock test did not run the expected ignored test\nstdout:\n{stdout}"
+        );
+    }
+
+    #[test]
+    #[ignore = "spawned by test_try_acquire_import_state_lock_rejects_second_holder"]
+    fn test_try_acquire_import_state_lock_child_process() {
+        let path = std::env::var_os(CHILD_LOCK_PATH_ENV)
+            .expect("child lock path must be set by the parent test");
+        let path = PathBuf::from(path);
         let error = try_acquire_import_state_lock(&path).unwrap_err();
 
         assert!(matches!(
