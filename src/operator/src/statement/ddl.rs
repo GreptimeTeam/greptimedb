@@ -678,10 +678,9 @@ impl StatementExecutor {
 
     async fn create_flow_procedure(
         &self,
-        expr: CreateFlowExpr,
+        mut expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let mut expr = expr;
         expr.flow_options = validate_and_normalize_flow_options(expr.flow_options)?;
 
         let flow_type = self
@@ -2445,6 +2444,32 @@ mod test {
             err.to_string()
                 .contains("invalid flow option 'defer_on_missing_source': 'not-a-bool'")
         );
+    }
+
+    #[test]
+    fn test_validate_and_normalize_flow_options_rejects_redacted_invalid_input() {
+        let sql = r"
+CREATE FLOW task_6
+SINK TO schema_1.table_1
+WITH (access_key_id = [true])
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr =
+            expr_helper::to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+        let err = validate_and_normalize_flow_options(expr.flow_options).unwrap_err();
+
+        assert!(err.to_string().contains(
+            "unknown flow option 'access_key_id', supported options: defer_on_missing_source"
+        ));
     }
 
     #[test]

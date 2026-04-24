@@ -68,6 +68,17 @@ pub const VECTOR: &str = "VECTOR";
 
 pub type RawIntervalExpr = String;
 
+// Preserve raw CREATE FLOW option entries until operator-side validation.
+// Do not use `OptionMap::new()` here: it can drop non-string values for
+// redacted keys before the flow option allowlist rejects them.
+fn flow_option_map(options: HashMap<String, OptionValue>) -> OptionMap {
+    let mut flow_options = OptionMap::default();
+    for (key, value) in options {
+        flow_options.insert_options(&key, value);
+    }
+    flow_options
+}
+
 /// Parses create [table] statement
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_create(&mut self) -> Result<Statement> {
@@ -361,7 +372,7 @@ impl<'a> ParserContext<'a> {
             expire_after,
             eval_interval,
             comment,
-            flow_options: OptionMap::new(flow_options),
+            flow_options: flow_option_map(flow_options),
             query,
         }))
     }
