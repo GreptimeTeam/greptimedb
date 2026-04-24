@@ -255,9 +255,12 @@ impl MetricEngineInner {
                     region_id: data_region_id,
                 })?
                 .physical_columns();
-            let name_to_id: HashMap<String, ColumnId> = physical_columns
+            // Borrow the physical column names rather than cloning them: the
+            // state guard is held for the whole block and the map doesn't
+            // outlive this scope.
+            let name_to_id: HashMap<&str, ColumnId> = physical_columns
                 .iter()
-                .map(|(name, info)| (name.clone(), info.column_id))
+                .map(|(name, info)| (name.as_str(), info.column_id))
                 .collect();
 
             let iter = RowsIter::new(
@@ -605,9 +608,11 @@ impl MetricEngineInner {
                     region_id: physical_region_id,
                 })?
                 .physical_columns();
-            let name_to_id: HashMap<String, ColumnId> = physical_columns
+            // Borrow the physical column names rather than cloning them; the
+            // map is scoped to this block and the state guard holds.
+            let name_to_id: HashMap<&str, ColumnId> = physical_columns
                 .iter()
-                .map(|(name, info)| (name.clone(), info.column_id))
+                .map(|(name, info)| (name.as_str(), info.column_id))
                 .collect();
             RowsIter::new(input, &name_to_id)
         };
