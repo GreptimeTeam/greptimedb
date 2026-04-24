@@ -510,13 +510,13 @@ impl MetricEngineInner {
         }
 
         // Type + semantic check on every column in the request schema.
-        let physical_columns = state
+        let physical_state = state
             .physical_region_states()
             .get(&data_region_id)
             .context(PhysicalRegionNotFoundSnafu {
                 region_id: data_region_id,
-            })?
-            .physical_columns();
+            })?;
+        let physical_columns = physical_state.physical_columns();
         for col in &rows.schema {
             let info = physical_columns
                 .get(&col.column_name)
@@ -570,11 +570,8 @@ impl MetricEngineInner {
         // require a specific tag without per-logical-region metadata here;
         // missing tags are handled by mito's default-fill. Field columns are
         // always optional.
-        let time_index_column = physical_columns
-            .iter()
-            .find(|(_, info)| info.semantic_type == api::v1::SemanticType::Timestamp)
-            .map(|(name, _)| name.as_str());
-        if let Some(ts_name) = time_index_column {
+        let ts_name = physical_state.time_index_column_name();
+        if !ts_name.is_empty() {
             let present = rows.schema.iter().any(|col| col.column_name == ts_name);
             ensure!(
                 present,
