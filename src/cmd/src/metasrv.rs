@@ -21,8 +21,8 @@ use clap::Parser;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_meta::distributed_time_constants::init_distributed_time_constants;
-use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
+use common_telemetry::{info, warn};
 use common_version::{short_version, verbose_version};
 use meta_srv::bootstrap::{MetasrvInstance, metasrv_builder};
 use meta_srv::metasrv::BackendImpl;
@@ -248,6 +248,9 @@ impl StartCommand {
             opts.bind_addr.clone_from(addr);
             opts.grpc.bind_addr.clone_from(addr);
         } else if !opts.bind_addr.is_empty() {
+            warn!(
+                "Use the deprecated attribute `MetasrvOptions.bind_addr`, please use `grpc.bind_addr` instead."
+            );
             opts.grpc.bind_addr.clone_from(&opts.bind_addr);
         }
 
@@ -256,6 +259,9 @@ impl StartCommand {
             opts.server_addr.clone_from(addr);
             opts.grpc.server_addr.clone_from(addr);
         } else if !opts.server_addr.is_empty() {
+            warn!(
+                "Use the deprecated attribute `MetasrvOptions.server_addr`, please use `grpc.server_addr` instead."
+            );
             opts.grpc.server_addr.clone_from(&opts.server_addr);
         }
 
