@@ -46,7 +46,7 @@ use crate::error::{
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
 use crate::read::ScannerMetrics;
-use crate::read::pruner::{PartitionPruner, Pruner};
+use crate::read::pruner::{PartitionPruner, Pruner, stats_aware_skip_config};
 use crate::read::scan_region::{ScanInput, StreamContext, scan_input_stats};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_average_batch_size,
@@ -232,6 +232,7 @@ impl SeriesScan {
             final_merge_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
             partitions: self.properties.partitions.clone(),
             pruner: self.pruner.clone(),
+            stats_aware_skip: stats_aware_skip_config(&self.properties),
             senders,
             metrics_set: metrics_set.clone(),
             metrics_list: metrics_list.clone(),
@@ -441,6 +442,8 @@ struct SeriesDistributor {
     partitions: Vec<Vec<PartitionRange>>,
     /// Shared pruner for file range building.
     pruner: Arc<Pruner>,
+    /// Optional stats-aware skip config for aggregate-stats runtime execution.
+    stats_aware_skip: Option<crate::read::pruner::StatsAwareSkipConfig>,
     /// Senders of all partitions.
     senders: SenderList,
     /// Metrics set to report.
@@ -484,6 +487,7 @@ impl SeriesDistributor {
         let partition_pruner = Arc::new(PartitionPruner::new(
             self.pruner.clone(),
             &all_partition_ranges,
+            self.stats_aware_skip.clone(),
         ));
 
         let part_metrics = new_partition_metrics(

@@ -317,8 +317,17 @@ pub struct ScannerProperties {
     /// Whether the scanner is scanning a logical region.
     logical_region: bool,
 
-    /// Whether stats-aware skip mode is enabled for aggregate-stats runtime execution.
-    stats_aware_skip_mode: bool,
+    /// Optimizer-approved aggregate-stats requirements used by stats-aware skip.
+    stats_aware_skip_requirements: Vec<SupportStatAggr>,
+}
+
+/// Aggregate-stats requirement forwarded to scanner prepare / scan paths.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SupportStatAggr {
+    CountRows,
+    CountNonNull { column_name: String },
+    MinValue { column_name: String },
+    MaxValue { column_name: String },
 }
 
 impl ScannerProperties {
@@ -343,7 +352,7 @@ impl ScannerProperties {
             distinguish_partition_range: false,
             target_partitions: 0,
             logical_region: false,
-            stats_aware_skip_mode: false,
+            stats_aware_skip_requirements: Vec::new(),
         }
     }
 
@@ -358,8 +367,8 @@ impl ScannerProperties {
         if let Some(target_partitions) = request.target_partitions {
             self.target_partitions = target_partitions;
         }
-        if let Some(stats_aware_skip_mode) = request.stats_aware_skip_mode {
-            self.stats_aware_skip_mode = stats_aware_skip_mode;
+        if let Some(stats_aware_skip_requirements) = request.stats_aware_skip_requirements {
+            self.stats_aware_skip_requirements = stats_aware_skip_requirements;
         }
     }
 
@@ -376,9 +385,9 @@ impl ScannerProperties {
         self.total_rows
     }
 
-    /// Returns whether stats-aware skip mode is enabled.
-    pub fn stats_aware_skip_mode(&self) -> bool {
-        self.stats_aware_skip_mode
+    /// Returns aggregate-stats requirements attached to stats-aware skip.
+    pub fn stats_aware_skip_requirements(&self) -> &[SupportStatAggr] {
+        &self.stats_aware_skip_requirements
     }
 
     /// Returns whether the scanner is scanning a logical region.
@@ -410,8 +419,8 @@ pub struct PrepareRequest {
     pub distinguish_partition_range: Option<bool>,
     /// The expected number of target partitions.
     pub target_partitions: Option<usize>,
-    /// Whether to enable stats-aware skip mode on the scanner.
-    pub stats_aware_skip_mode: Option<bool>,
+    /// Optimizer-approved aggregate-stats requirements for stats-aware skip.
+    pub stats_aware_skip_requirements: Option<Vec<SupportStatAggr>>,
 }
 
 impl PrepareRequest {
@@ -433,9 +442,12 @@ impl PrepareRequest {
         self
     }
 
-    /// Sets the stats-aware skip mode flag.
-    pub fn with_stats_aware_skip_mode(mut self, stats_aware_skip_mode: bool) -> Self {
-        self.stats_aware_skip_mode = Some(stats_aware_skip_mode);
+    /// Sets optimizer-approved aggregate-stats requirements for stats-aware skip.
+    pub fn with_stats_aware_skip_requirements(
+        mut self,
+        stats_aware_skip_requirements: Vec<SupportStatAggr>,
+    ) -> Self {
+        self.stats_aware_skip_requirements = Some(stats_aware_skip_requirements);
         self
     }
 }

@@ -18,7 +18,7 @@ use api::v1::Rows;
 use common_recordbatch::RecordBatches;
 use datatypes::value::Value;
 use partition::expr::col;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, SupportStatAggr};
 use store_api::region_request::{
     EnterStagingRequest, RegionFlushRequest, RegionRequest, StagingPartitionDirective,
 };
@@ -170,5 +170,95 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
         total_rows, 6,
         "Should see 6 rows after exiting staging (rows 5-10 from staging SST), flat_format: {}",
         flat_format
+    );
+}
+
+#[tokio::test]
+async fn test_stats_aware_skip_requirements_skip_eligible_sst() {
+    test_stats_aware_skip_requirements_skip_eligible_sst_with_format(false).await;
+    test_stats_aware_skip_requirements_skip_eligible_sst_with_format(true).await;
+}
+
+async fn test_stats_aware_skip_requirements_skip_eligible_sst_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1025, 0);
+    let partition_expr = range_expr_string("field_0", 0., 99.);
+    let request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(partition_expr))
+        .build();
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let flushed_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, flushed_rows).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let memtable_rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(3, 5),
+    };
+    put_rows(&engine, region_id, memtable_rows).await;
+
+    let request = ScanRequest {
+        projection_input: Some(vec![1].into()),
+        ..Default::default()
+    };
+
+    let baseline_scanner = engine.scanner(region_id, request.clone()).await.unwrap();
+    let baseline_batches = RecordBatches::try_collect(baseline_scanner.scan().await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        r#"+---------+
+| field_0 |
++---------+
+| 0.0     |
+| 1.0     |
+| 2.0     |
+| 3.0     |
+| 4.0     |
++---------+"#,
+        baseline_batches.pretty_print().unwrap()
+    );
+
+    let mut skip_scanner = engine.scanner(region_id, request).await.unwrap();
+    skip_scanner.set_stats_aware_skip_requirements(vec![SupportStatAggr::CountRows]);
+    let skipped_batches = RecordBatches::try_collect(skip_scanner.scan().await.unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        r#"+---------+
+| field_0 |
++---------+
+| 3.0     |
+| 4.0     |
++---------+"#,
+        skipped_batches.pretty_print().unwrap(),
+        "stats-aware skip should drop the flushed SST rows and only leave memtable rows"
     );
 }

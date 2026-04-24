@@ -22,7 +22,9 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use async_stream::try_stream;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
+use common_query::aggr_stats::StatsCandidateFile;
 use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::tracing::Instrument;
@@ -33,13 +35,14 @@ use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
 use futures::StreamExt;
+use parquet::file::metadata::ParquetMetaData;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::{OptionExt as _, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{
     FileStatsItem, PartitionRange, QueryScanContext, RegionScannerRef, RowGroupStatsItem,
-    SendableFileStatsStream,
+    SendableFileStatsStream, SupportStatAggr,
 };
 use store_api::storage::{
     ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
@@ -52,7 +55,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
-use crate::error::{InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
+use crate::error::{ExternalSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};
@@ -165,6 +168,17 @@ impl Scanner {
         use store_api::region_engine::{PrepareRequest, RegionScanner};
 
         let request = PrepareRequest::default().with_target_partitions(target_partitions);
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.prepare(request).unwrap(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.prepare(request).unwrap(),
+            Scanner::Series(series_scan) => series_scan.prepare(request).unwrap(),
+        }
+    }
+
+    pub(crate) fn set_stats_aware_skip_requirements(&mut self, requirements: Vec<SupportStatAggr>) {
+        use store_api::region_engine::{PrepareRequest, RegionScanner};
+
+        let request = PrepareRequest::default().with_stats_aware_skip_requirements(requirements);
         match self {
             Scanner::Seq(seq_scan) => seq_scan.prepare(request).unwrap(),
             Scanner::Unordered(unordered_scan) => unordered_scan.prepare(request).unwrap(),
@@ -1088,6 +1102,29 @@ impl ScanInput {
         }
     }
 
+    fn should_skip_file_by_stats(
+        &self,
+        file: &FileHandle,
+        parquet_meta: &ParquetMetaData,
+        requirements: &[SupportStatAggr],
+    ) -> Result<bool> {
+        let file_stats = build_file_stats_item(file, parquet_meta)?;
+        let region_partition_expr = self.region_metadata().partition_expr.clone();
+        let candidate = StatsCandidateFile::from_file_stats(
+            &file_stats,
+            region_partition_expr.as_deref(),
+            requirements,
+            &self.region_metadata().schema,
+        )
+        .map_err(|error| {
+            BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
+        })
+        .context(ExternalSnafu {
+            context: "failed to classify file stats for stats-aware skip mode",
+        })?;
+        Ok(candidate.is_some())
+    }
+
     /// Prunes a file to scan and returns the builder to build readers.
     #[tracing::instrument(
         skip_all,
@@ -1101,7 +1138,23 @@ impl ScanInput {
         file: &FileHandle,
         pre_filter_mode: PreFilterMode,
         reader_metrics: &mut ReaderMetrics,
+        stats_aware_skip_requirements: Option<&[SupportStatAggr]>,
     ) -> Result<FileRangeBuilder> {
+        if let Some(requirements) =
+            stats_aware_skip_requirements.filter(|requirements| !requirements.is_empty())
+        {
+            let sst_meta = self
+                .access_layer
+                .read_sst(file.clone())
+                .cache(self.cache_strategy.clone())
+                .expected_metadata(Some(self.region_metadata().clone()))
+                .read_sst_meta()
+                .await?;
+            if self.should_skip_file_by_stats(file, &sst_meta.parquet_metadata(), requirements)? {
+                return Ok(FileRangeBuilder::default());
+            }
+        }
+
         let predicate = self.predicate_for_file(file);
         let decode_pk_values = !self.compaction
             && self
@@ -1454,6 +1507,40 @@ pub struct StreamContext {
     pub(crate) query_start: Instant,
 }
 
+fn build_file_stats_item(
+    file: &FileHandle,
+    parquet_meta: &ParquetMetaData,
+) -> Result<FileStatsItem> {
+    let row_groups = parquet_meta
+        .row_groups()
+        .iter()
+        .enumerate()
+        .map(|(row_group_index, metadata)| RowGroupStatsItem {
+            row_group_index,
+            metadata: Arc::new(metadata.clone()),
+        })
+        .collect();
+
+    let file_partition_expr = file
+        .meta_ref()
+        .partition_expr
+        .as_ref()
+        .map(|expr| expr.as_json_str())
+        .transpose()
+        .map_err(|error| {
+            BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
+        })
+        .context(ExternalSnafu {
+            context: "failed to serialize file partition expr for stats-aware skip mode",
+        })?;
+
+    Ok(FileStatsItem {
+        num_rows: Some(parquet_meta.file_metadata().num_rows() as u64),
+        file_partition_expr,
+        row_groups,
+    })
+}
+
 pub(crate) fn scan_input_stats(
     input: &ScanInput,
     ctx: &QueryScanContext,
@@ -1481,22 +1568,8 @@ pub(crate) fn scan_input_stats(
                 .read_sst_meta()
                 .await
                 .map_err(BoxedError::new)?;
-            let parquet_meta = sst_meta.parquet_metadata();
-            let row_groups = parquet_meta
-                .row_groups()
-                .iter()
-                .enumerate()
-                .map(|(row_group_index, metadata)| RowGroupStatsItem {
-                    row_group_index,
-                    metadata: Arc::new(metadata.clone()),
-                })
-                .collect();
-
-            yield FileStatsItem {
-                num_rows: Some(parquet_meta.file_metadata().num_rows() as u64),
-                file_partition_expr: file.meta_ref().partition_expr.as_ref().map(ToString::to_string),
-                row_groups,
-            };
+            yield build_file_stats_item(&file, &sst_meta.parquet_metadata())
+                .map_err(BoxedError::new)?;
         }
     })
 }
@@ -1842,11 +1915,22 @@ impl PredicateGroup {
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::SemanticType;
+    use bytes::Bytes;
+    use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use datafusion::parquet::file::metadata::ParquetMetaData;
+    use datafusion::parquet::file::properties::WriterProperties;
     use datafusion::physical_plan::expressions::lit as physical_lit;
     use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
+    use datatypes::arrow::array::StringArray;
+    use datatypes::arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
+    use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
     use datatypes::value::Value;
-    use partition::expr::col as partition_col;
+    use partition::expr::{PartitionExpr, col as partition_col};
     use store_api::metadata::RegionMetadataBuilder;
     use store_api::storage::{
         ProjectionInput, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
@@ -1857,6 +1941,8 @@ mod tests {
     use crate::memtable::time_partition::TimePartitions;
     use crate::read::range_cache::ScanRequestFingerprintBuilder;
     use crate::region::version::VersionBuilder;
+    use crate::sst::file::{FileHandle, FileMeta};
+    use crate::sst::file_purger::NoopFilePurger;
     use crate::test_util::memtable_util::{EmptyMemtableBuilder, metadata_with_primary_key};
     use crate::test_util::scheduler_util::SchedulerEnv;
 
@@ -1887,6 +1973,62 @@ mod tests {
                     .build(),
             )))
             .with_files(vec![file])
+    }
+
+    fn metadata_with_partition_expr(partition_expr_json: String) -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(store_api::storage::RegionId::new(1, 1));
+        builder
+            .push_column_metadata(store_api::metadata::ColumnMetadata {
+                column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(store_api::metadata::ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![1])
+            .partition_expr_json(Some(partition_expr_json));
+        Arc::new(builder.build_without_validation().unwrap())
+    }
+
+    fn file_with_partition_expr(partition_expr_json: &str) -> FileHandle {
+        let mut file_meta = FileMeta::default();
+        file_meta.partition_expr = PartitionExpr::from_json_str(partition_expr_json).unwrap();
+        file_meta.num_row_groups = 1;
+        FileHandle::new(file_meta, Arc::new(NoopFilePurger))
+    }
+
+    fn parquet_metadata_for_hosts(hosts: &[Option<&str>]) -> Arc<ParquetMetaData> {
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "host",
+            DataType::Utf8,
+            true,
+        )]));
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        let mut writer = ArrowWriter::try_new(
+            &mut buffer,
+            arrow_schema.clone(),
+            Some(WriterProperties::builder().build()),
+        )
+        .unwrap();
+        let batch = ArrowRecordBatch::try_new(
+            arrow_schema,
+            vec![Arc::new(StringArray::from(hosts.to_vec()))],
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        ParquetRecordBatchReaderBuilder::try_new(Bytes::from(buffer.into_inner()))
+            .unwrap()
+            .metadata()
+            .clone()
     }
 
     #[tokio::test]
@@ -2132,5 +2274,65 @@ mod tests {
 
             assert_eq!(expected_mode, input.range_pre_filter_mode(source_count));
         }
+    }
+
+    #[tokio::test]
+    async fn test_should_skip_file_by_stats_when_shared_classifier_accepts_file() {
+        let partition_expr_json = partition_col("host")
+            .eq(Value::String("foo".into()))
+            .as_json_str()
+            .unwrap();
+        let metadata = metadata_with_partition_expr(partition_expr_json.clone());
+        let env = SchedulerEnv::new().await;
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 1].into_iter()).unwrap();
+        let predicate =
+            PredicateGroup::new(metadata.as_ref(), &[col("host").eq(lit("foo"))]).unwrap();
+        let file = file_with_partition_expr(&partition_expr_json);
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_predicate(predicate)
+            .with_files(vec![file.clone()]);
+        let parquet_meta = parquet_metadata_for_hosts(&[Some("bar"), Some("foo")]);
+
+        let should_skip = input
+            .should_skip_file_by_stats(
+                &file,
+                &parquet_meta,
+                &[SupportStatAggr::MaxValue {
+                    column_name: "host".to_string(),
+                }],
+            )
+            .unwrap();
+
+        assert!(should_skip);
+    }
+
+    #[tokio::test]
+    async fn test_should_not_skip_file_by_stats_when_required_stats_are_missing() {
+        let partition_expr_json = partition_col("host")
+            .eq(Value::String("foo".into()))
+            .as_json_str()
+            .unwrap();
+        let metadata = metadata_with_partition_expr(partition_expr_json.clone());
+        let env = SchedulerEnv::new().await;
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 1].into_iter()).unwrap();
+        let predicate =
+            PredicateGroup::new(metadata.as_ref(), &[col("host").eq(lit("foo"))]).unwrap();
+        let file = file_with_partition_expr(&partition_expr_json);
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_predicate(predicate)
+            .with_files(vec![file.clone()]);
+        let parquet_meta = parquet_metadata_for_hosts(&[None, None]);
+
+        let should_skip = input
+            .should_skip_file_by_stats(
+                &file,
+                &parquet_meta,
+                &[SupportStatAggr::MaxValue {
+                    column_name: "host".to_string(),
+                }],
+            )
+            .unwrap();
+
+        assert!(!should_skip);
     }
 }

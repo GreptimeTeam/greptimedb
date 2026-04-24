@@ -18,67 +18,9 @@ use std::collections::{HashMap, HashSet};
 use datafusion::parquet::file::statistics::Statistics as ParquetStats;
 use datafusion::scalar::ScalarValue;
 use datafusion_common::{DataFusionError, Result};
-use datafusion_expr::utils::COUNT_STAR_EXPANSION;
-use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
-use datafusion_physical_expr::expressions::{Column as PhysicalColumn, Literal};
 use datatypes::schema::SchemaRef as RegionSchemaRef;
 use datatypes::value::Value;
-use store_api::region_engine::FileStatsItem;
-
-/// Runtime requirement that has already been approved by optimizer rewrite checks.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SupportStatAggr {
-    CountRows,
-    CountNonNull { column_name: String },
-    MinValue { column_name: String },
-    MaxValue { column_name: String },
-}
-
-impl SupportStatAggr {
-    pub fn is_count_supported_expr(inputs: &[std::sync::Arc<dyn PhysicalExpr>]) -> bool {
-        match inputs {
-            [] => true,
-            [arg] if let Some(lit) = arg.as_any().downcast_ref::<Literal>() => {
-                lit.value() == &COUNT_STAR_EXPANSION
-            }
-            [arg] => arg.as_any().downcast_ref::<PhysicalColumn>().is_some(),
-            _ => false,
-        }
-    }
-
-    pub fn is_min_max_supported_expr(inputs: &[std::sync::Arc<dyn PhysicalExpr>]) -> bool {
-        match inputs {
-            [arg] => arg.as_any().downcast_ref::<PhysicalColumn>().is_some(),
-            _ => false,
-        }
-    }
-
-    pub fn from_aggr_expr(aggr: &AggregateFunctionExpr) -> Option<Self> {
-        match (aggr.fun().name(), aggr.expressions().as_slice()) {
-            ("count", []) => Some(Self::CountRows),
-            ("count", [arg]) if arg.as_any().downcast_ref::<Literal>().is_some() => {
-                Some(Self::CountRows)
-            }
-            ("count", [arg]) if let Some(col) = arg.as_any().downcast_ref::<PhysicalColumn>() => {
-                Some(Self::CountNonNull {
-                    column_name: col.name().to_string(),
-                })
-            }
-            ("min", [arg]) if let Some(col) = arg.as_any().downcast_ref::<PhysicalColumn>() => {
-                Some(Self::MinValue {
-                    column_name: col.name().to_string(),
-                })
-            }
-            ("max", [arg]) if let Some(col) = arg.as_any().downcast_ref::<PhysicalColumn>() => {
-                Some(Self::MaxValue {
-                    column_name: col.name().to_string(),
-                })
-            }
-            _ => None,
-        }
-    }
-}
+use store_api::region_engine::{FileStatsItem, SupportStatAggr};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FileColumnStats {
@@ -219,6 +161,10 @@ fn collect_one_column_stats(
 }
 
 fn sum_null_counts(file_stats: &FileStatsItem, column_index: usize) -> Result<Option<u64>> {
+    if file_stats.row_groups.is_empty() {
+        return Ok(None);
+    }
+
     let mut total = 0_u64;
     for row_group in &file_stats.row_groups {
         let Some(stats) = row_group.metadata.column(column_index).statistics() else {

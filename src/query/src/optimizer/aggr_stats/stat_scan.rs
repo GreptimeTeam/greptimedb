@@ -320,7 +320,6 @@ mod tests {
 
     use api::v1::SemanticType;
     use bytes::Bytes;
-    use common_query::aggr_stats::SupportStatAggr;
     use datafusion::functions_aggregate::average::avg_udaf;
     use datafusion::functions_aggregate::count::count_udaf;
     use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
@@ -335,6 +334,7 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_engine::{
         FileStatsItem, RowGroupStatsItem, ScannerProperties, SendableFileStatsStream,
+        SupportStatAggr,
     };
     use store_api::storage::RegionId;
 
@@ -801,5 +801,96 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(max_values.value(0), 9);
+    }
+
+    #[tokio::test]
+    async fn stats_scan_exec_emits_no_batches_when_all_files_fallback() {
+        let schema = Arc::new(arrow_schema::Schema::new(vec![single_state_field(
+            "count_state",
+            "count[count]",
+            DataType::Int64,
+            false,
+        )]));
+        let region_metadata = build_region_metadata(Some("host = 'a'"));
+        let scanner = StaticStatsScanner {
+            schema: region_metadata.schema.clone(),
+            metadata: region_metadata,
+            properties: ScannerProperties::default(),
+            files: vec![
+                FileStatsItem {
+                    num_rows: Some(5),
+                    file_partition_expr: Some("host = 'a'".to_string()),
+                    row_groups: vec![],
+                },
+                FileStatsItem {
+                    num_rows: Some(5),
+                    file_partition_expr: Some("host = 'b'".to_string()),
+                    row_groups: build_row_groups(&[vec![Some(1), Some(2), Some(3)]]),
+                },
+            ],
+        };
+
+        let exec = StatsScanExec::new(
+            schema,
+            vec![SupportStatAggr::CountNonNull {
+                column_name: "value".to_string(),
+            }],
+            Arc::new(Mutex::new(Box::new(scanner) as RegionScannerRef)),
+        );
+
+        let stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
+        let batches = stream.map(|batch| batch.unwrap()).collect::<Vec<_>>().await;
+
+        assert!(batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stats_scan_exec_count_rows_uses_file_num_rows_without_row_groups() {
+        let schema = Arc::new(arrow_schema::Schema::new(vec![single_state_field(
+            "count_state",
+            "count[count]",
+            DataType::Int64,
+            false,
+        )]));
+        let region_metadata = build_region_metadata(Some("host = 'a'"));
+        let scanner = StaticStatsScanner {
+            schema: region_metadata.schema.clone(),
+            metadata: region_metadata,
+            properties: ScannerProperties::default(),
+            files: vec![
+                FileStatsItem {
+                    num_rows: Some(7),
+                    file_partition_expr: Some("host = 'a'".to_string()),
+                    row_groups: vec![],
+                },
+                FileStatsItem {
+                    num_rows: Some(3),
+                    file_partition_expr: Some("host = 'a'".to_string()),
+                    row_groups: vec![],
+                },
+            ],
+        };
+
+        let exec = StatsScanExec::new(
+            schema,
+            vec![SupportStatAggr::CountRows],
+            Arc::new(Mutex::new(Box::new(scanner) as RegionScannerRef)),
+        );
+
+        let batch = collect_single_batch(&exec).await;
+        assert_eq!(batch.num_rows(), 2);
+
+        let count_state = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let count_values = count_state
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(count_values.value(0), 7);
+        assert_eq!(count_values.value(1), 3);
     }
 }

@@ -34,7 +34,7 @@ use store_api::region_engine::{
 };
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
-use crate::read::pruner::{PartitionPruner, Pruner};
+use crate::read::pruner::{PartitionPruner, Pruner, stats_aware_skip_config};
 use crate::read::scan_region::{ScanInput, StreamContext, scan_input_stats};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, scan_flat_file_ranges, scan_flat_mem_ranges,
@@ -249,12 +249,14 @@ impl UnorderedScan {
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
         let pruner = self.pruner.clone();
+        let stats_aware_skip = stats_aware_skip_config(&self.properties);
         // Initializes ref counts for the pruner.
         // If we call scan_batch_in_partition() multiple times but don't read all batches from the stream,
         // then the ref count won't be decremented.
         // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
         pruner.add_partition_ranges(&part_ranges);
-        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &part_ranges));
+        let partition_pruner =
+            Arc::new(PartitionPruner::new(pruner, &part_ranges, stats_aware_skip));
 
         let stream = try_stream! {
             part_metrics.on_first_poll();

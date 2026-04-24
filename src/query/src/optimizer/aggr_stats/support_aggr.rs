@@ -12,4 +12,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use common_query::aggr_stats::SupportStatAggr;
+use datafusion_expr::utils::COUNT_STAR_EXPANSION;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
+use datafusion_physical_expr::expressions::{Column as PhysicalColumn, Literal};
+pub use store_api::region_engine::SupportStatAggr;
+
+pub fn support_stat_aggr_from_aggr_expr(
+    aggr: &AggregateFunctionExpr,
+    time_index_column: &str,
+) -> Option<SupportStatAggr> {
+    match (aggr.fun().name(), aggr.expressions().as_slice()) {
+        ("count", []) => Some(SupportStatAggr::CountRows),
+        ("count", [arg])
+            if arg
+                .as_any()
+                .downcast_ref::<Literal>()
+                .is_some_and(|lit| lit.value() == &COUNT_STAR_EXPANSION) =>
+        {
+            Some(SupportStatAggr::CountRows)
+        }
+        ("count", [arg]) if let Some(col) = arg.as_any().downcast_ref::<PhysicalColumn>() => {
+            if col.name() == time_index_column {
+                Some(SupportStatAggr::CountRows)
+            } else {
+                Some(SupportStatAggr::CountNonNull {
+                    column_name: col.name().to_string(),
+                })
+            }
+        }
+        ("min", [arg]) if let Some(col) = arg.as_any().downcast_ref::<PhysicalColumn>() => {
+            Some(SupportStatAggr::MinValue {
+                column_name: col.name().to_string(),
+            })
+        }
+        ("max", [arg]) if let Some(col) = arg.as_any().downcast_ref::<PhysicalColumn>() => {
+            Some(SupportStatAggr::MaxValue {
+                column_name: col.name().to_string(),
+            })
+        }
+        _ => None,
+    }
+}

@@ -46,7 +46,7 @@ use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef, SupportStatAggr,
 };
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
@@ -66,7 +66,7 @@ pub struct RegionScanExec {
     is_partition_set: bool,
     // TODO(ruihang): handle TimeWindowed dist via this parameter
     distribution: Option<TimeSeriesDistribution>,
-    stats_aware_skip_mode: bool,
+    stats_aware_skip_requirements: Vec<SupportStatAggr>,
     explain_verbose: bool,
     query_memory_tracker: Option<QueryMemoryTracker>,
 }
@@ -83,7 +83,10 @@ impl std::fmt::Debug for RegionScanExec {
             .field("total_rows", &self.total_rows)
             .field("is_partition_set", &self.is_partition_set)
             .field("distribution", &self.distribution)
-            .field("stats_aware_skip_mode", &self.stats_aware_skip_mode)
+            .field(
+                "stats_aware_skip_requirements",
+                &self.stats_aware_skip_requirements,
+            )
             .field("explain_verbose", &self.explain_verbose)
             .finish()
     }
@@ -227,7 +230,7 @@ impl RegionScanExec {
             total_rows,
             is_partition_set: false,
             distribution: request.distribution,
-            stats_aware_skip_mode: false,
+            stats_aware_skip_requirements: Vec::new(),
             explain_verbose: false,
             query_memory_tracker,
         })
@@ -305,20 +308,21 @@ impl RegionScanExec {
             total_rows: self.total_rows,
             is_partition_set: true,
             distribution: self.distribution,
-            stats_aware_skip_mode: self.stats_aware_skip_mode,
+            stats_aware_skip_requirements: self.stats_aware_skip_requirements.clone(),
             explain_verbose: self.explain_verbose,
             query_memory_tracker: self.query_memory_tracker.clone(),
         })
     }
 
-    pub fn with_stats_aware_skip_mode(
+    pub fn with_stats_aware_skip_requirements(
         &self,
-        stats_aware_skip_mode: bool,
+        stats_aware_skip_requirements: Vec<SupportStatAggr>,
     ) -> Result<Self, BoxedError> {
         {
             let mut scanner = self.scanner.lock().unwrap();
             scanner.prepare(
-                PrepareRequest::default().with_stats_aware_skip_mode(stats_aware_skip_mode),
+                PrepareRequest::default()
+                    .with_stats_aware_skip_requirements(stats_aware_skip_requirements.clone()),
             )?;
         }
 
@@ -332,14 +336,14 @@ impl RegionScanExec {
             total_rows: self.total_rows,
             is_partition_set: self.is_partition_set,
             distribution: self.distribution,
-            stats_aware_skip_mode,
+            stats_aware_skip_requirements,
             explain_verbose: self.explain_verbose,
             query_memory_tracker: self.query_memory_tracker.clone(),
         })
     }
 
-    pub fn stats_aware_skip_mode(&self) -> bool {
-        self.stats_aware_skip_mode
+    pub fn stats_aware_skip_requirements(&self) -> &[SupportStatAggr] {
+        &self.stats_aware_skip_requirements
     }
 
     pub fn append_mode(&self) -> bool {
@@ -663,6 +667,81 @@ mod test {
         let recordbatches = stream.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(batch1.df_record_batch(), &recordbatches[0]);
         assert_eq!(batch2.df_record_batch(), &recordbatches[1]);
+
+        let result = plan.execute(0, ctx.task_ctx());
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_region_scan_exec_records_stats_aware_skip_requirements() {
+        let ctx = SessionContext::new();
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new(
+                "b",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Vector::from_slice([1, 2])) as _,
+                Arc::new(TimestampMillisecondVector::from_slice([1000, 2000])) as _,
+            ],
+        )
+        .unwrap();
+        let stream = RecordBatches::try_new(schema, vec![batch])
+            .unwrap()
+            .as_stream();
+
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5678));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "b",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![1]);
+        let region_metadata = Arc::new(builder.build().unwrap());
+
+        let scanner = Box::new(SinglePartitionScanner::new(
+            stream,
+            false,
+            region_metadata,
+            None,
+        ));
+        let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
+        let requirements = vec![SupportStatAggr::CountNonNull {
+            column_name: "a".to_string(),
+        }];
+
+        let plan = plan
+            .with_stats_aware_skip_requirements(requirements.clone())
+            .unwrap();
+
+        assert_eq!(
+            plan.stats_aware_skip_requirements(),
+            requirements.as_slice()
+        );
+
+        {
+            let scanner = plan.scanner();
+            let scanner = scanner.lock().unwrap();
+            assert_eq!(
+                scanner.properties().stats_aware_skip_requirements(),
+                requirements.as_slice()
+            );
+        }
 
         let result = plan.execute(0, ctx.task_ctx());
         assert!(result.is_ok());

@@ -22,7 +22,7 @@ use std::time::Instant;
 use common_telemetry::debug;
 use smallvec::SmallVec;
 use snafu::ResultExt;
-use store_api::region_engine::PartitionRange;
+use store_api::region_engine::{PartitionRange, ScannerProperties, SupportStatAggr};
 use store_api::storage::FileId;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -38,6 +38,33 @@ use crate::sst::parquet::reader::ReaderMetrics;
 /// Number of files to pre-fetch ahead of the current position.
 const PREFETCH_COUNT: usize = 8;
 
+#[derive(Clone)]
+pub(crate) struct StatsAwareSkipConfig {
+    requirements: Arc<[SupportStatAggr]>,
+}
+
+impl StatsAwareSkipConfig {
+    fn new(requirements: Vec<SupportStatAggr>) -> Option<Self> {
+        if requirements.is_empty() {
+            None
+        } else {
+            Some(Self {
+                requirements: requirements.into(),
+            })
+        }
+    }
+
+    pub(crate) fn requirements(&self) -> &[SupportStatAggr] {
+        &self.requirements
+    }
+}
+
+pub(crate) fn stats_aware_skip_config(
+    properties: &ScannerProperties,
+) -> Option<StatsAwareSkipConfig> {
+    StatsAwareSkipConfig::new(properties.stats_aware_skip_requirements().to_vec())
+}
+
 /// Local pruner in a partition that supports prefetching files to prune.
 pub struct PartitionPruner {
     pruner: Arc<Pruner>,
@@ -47,11 +74,16 @@ pub struct PartitionPruner {
     pre_filter_modes: Vec<PreFilterMode>,
     /// Current position for tracking pre-fetch progress.
     current_position: AtomicUsize,
+    stats_aware_skip: Option<StatsAwareSkipConfig>,
 }
 
 impl PartitionPruner {
     /// Creates a new `PartitionPruner` for the given partition ranges.
-    pub fn new(pruner: Arc<Pruner>, partition_ranges: &[PartitionRange]) -> Self {
+    pub fn new(
+        pruner: Arc<Pruner>,
+        partition_ranges: &[PartitionRange],
+        stats_aware_skip: Option<StatsAwareSkipConfig>,
+    ) -> Self {
         let num_files = pruner.inner.stream_ctx.input.num_files();
         let mut file_indices = Vec::with_capacity(num_files);
         let mut pre_filter_modes = vec![PreFilterMode::SkipFields; num_files];
@@ -84,6 +116,7 @@ impl PartitionPruner {
             file_indices,
             pre_filter_modes,
             current_position: AtomicUsize::new(0),
+            stats_aware_skip,
         }
     }
 
@@ -103,7 +136,13 @@ impl PartitionPruner {
         // Delegate to underlying Pruner
         let ranges = self
             .pruner
-            .build_file_ranges(index, pre_filter_mode, partition_metrics, reader_metrics)
+            .build_file_ranges(
+                index,
+                pre_filter_mode,
+                partition_metrics,
+                reader_metrics,
+                self.stats_aware_skip.as_ref(),
+            )
             .await?;
 
         // Find position and trigger pre-fetch for upcoming files
@@ -129,6 +168,7 @@ impl PartitionPruner {
                 file_index,
                 pre_filter_mode,
                 Some(partition_metrics.clone()),
+                self.stats_aware_skip.clone(),
             );
         }
     }
@@ -161,11 +201,34 @@ struct PrunerInner {
 struct FileBuilderEntry {
     /// Cached builder after pruning. None if not yet built or already cleared.
     builder: Option<Arc<FileRangeBuilder>>,
+    /// Stats-aware skip requirements used to build the cached builder.
+    stats_aware_skip_requirements: Option<Arc<[SupportStatAggr]>>,
     /// Number of remaining ranges to scan for this file.
     /// When this reaches 0, the builder is dropped for memory cleanup.
     remaining_ranges: usize,
     /// Waiters when pruning is in-progress.
     waiters: Vec<oneshot::Sender<Result<Arc<FileRangeBuilder>>>>,
+}
+
+impl FileBuilderEntry {
+    fn clear_builder_if_skip_requirements_changed(
+        &mut self,
+        stats_aware_skip: Option<&StatsAwareSkipConfig>,
+    ) {
+        if self.builder.is_some() && !self.matches_skip_requirements(stats_aware_skip) {
+            self.builder = None;
+            self.stats_aware_skip_requirements = None;
+            PRUNER_ACTIVE_BUILDERS.dec();
+        }
+    }
+
+    fn matches_skip_requirements(&self, stats_aware_skip: Option<&StatsAwareSkipConfig>) -> bool {
+        match (&self.stats_aware_skip_requirements, stats_aware_skip) {
+            (None, None) => true,
+            (Some(cached), Some(current)) => cached.as_ref() == current.requirements(),
+            _ => false,
+        }
+    }
 }
 
 /// Request to prune a file.
@@ -178,6 +241,8 @@ struct PruneRequest {
     response_tx: Option<oneshot::Sender<Result<Arc<FileRangeBuilder>>>>,
     /// Partition metrics for merging reader metrics.
     partition_metrics: Option<PartitionMetrics>,
+    /// Optional stats-aware skip config for this request.
+    stats_aware_skip: Option<StatsAwareSkipConfig>,
 }
 
 impl Pruner {
@@ -191,6 +256,7 @@ impl Pruner {
             .map(|_| {
                 Mutex::new(FileBuilderEntry {
                     builder: None,
+                    stats_aware_skip_requirements: None,
                     remaining_ranges: 0,
                     waiters: Vec::new(),
                 })
@@ -254,6 +320,7 @@ impl Pruner {
         pre_filter_mode: PreFilterMode,
         partition_metrics: &PartitionMetrics,
         reader_metrics: &mut ReaderMetrics,
+        stats_aware_skip: Option<&StatsAwareSkipConfig>,
     ) -> Result<SmallVec<[FileRange; 2]>> {
         let file_index = index.index - self.inner.stream_ctx.input.num_memtables();
 
@@ -264,6 +331,7 @@ impl Pruner {
                 pre_filter_mode,
                 partition_metrics,
                 reader_metrics,
+                stats_aware_skip,
             )
             .await?;
 
@@ -284,10 +352,12 @@ impl Pruner {
         pre_filter_mode: PreFilterMode,
         partition_metrics: &PartitionMetrics,
         reader_metrics: &mut ReaderMetrics,
+        stats_aware_skip: Option<&StatsAwareSkipConfig>,
     ) -> Result<Arc<FileRangeBuilder>> {
         // Fast path: checks cache
         {
-            let entry = self.inner.file_entries[file_index].lock().unwrap();
+            let mut entry = self.inner.file_entries[file_index].lock().unwrap();
+            entry.clear_builder_if_skip_requirements_changed(stats_aware_skip);
             if let Some(builder) = &entry.builder {
                 reader_metrics.filter_metrics.pruner_cache_hit += 1;
                 return Ok(builder.clone());
@@ -306,13 +376,19 @@ impl Pruner {
             pre_filter_mode,
             response_tx: Some(response_tx),
             partition_metrics: Some(partition_metrics.clone()),
+            stats_aware_skip: stats_aware_skip.cloned(),
         };
 
         let result = if self.worker_senders[worker_idx].send(request).await.is_err() {
             common_telemetry::warn!("Worker channel closed, falling back to direct pruning");
             // Worker channel closed, falls back to direct pruning
-            self.prune_file_directly(file_index, pre_filter_mode, reader_metrics)
-                .await
+            self.prune_file_directly(
+                file_index,
+                pre_filter_mode,
+                reader_metrics,
+                stats_aware_skip,
+            )
+            .await
         } else {
             // Waits for response
             match response_rx.await {
@@ -322,8 +398,13 @@ impl Pruner {
                         "Response channel closed, falling back to direct pruning"
                     );
                     // Channel closed, falls back to direct pruning
-                    self.prune_file_directly(file_index, pre_filter_mode, reader_metrics)
-                        .await
+                    self.prune_file_directly(
+                        file_index,
+                        pre_filter_mode,
+                        reader_metrics,
+                        stats_aware_skip,
+                    )
+                    .await
                 }
             }
         };
@@ -337,10 +418,12 @@ impl Pruner {
         file_index: usize,
         pre_filter_mode: PreFilterMode,
         partition_metrics: Option<PartitionMetrics>,
+        stats_aware_skip: Option<StatsAwareSkipConfig>,
     ) {
         // Fast path: checks cache
         {
-            let entry = self.inner.file_entries[file_index].lock().unwrap();
+            let mut entry = self.inner.file_entries[file_index].lock().unwrap();
+            entry.clear_builder_if_skip_requirements_changed(stats_aware_skip.as_ref());
             if entry.builder.is_some() {
                 return;
             }
@@ -355,6 +438,7 @@ impl Pruner {
             pre_filter_mode,
             response_tx: None,
             partition_metrics,
+            stats_aware_skip,
         };
 
         // Sends request to worker
@@ -373,13 +457,19 @@ impl Pruner {
         file_index: usize,
         pre_filter_mode: PreFilterMode,
         reader_metrics: &mut ReaderMetrics,
+        stats_aware_skip: Option<&StatsAwareSkipConfig>,
     ) -> Result<Arc<FileRangeBuilder>> {
         let file = &self.inner.stream_ctx.input.files[file_index];
         let builder = self
             .inner
             .stream_ctx
             .input
-            .prune_file(file, pre_filter_mode, reader_metrics)
+            .prune_file(
+                file,
+                pre_filter_mode,
+                reader_metrics,
+                stats_aware_skip.map(StatsAwareSkipConfig::requirements),
+            )
             .await?;
 
         let arc_builder = Arc::new(builder);
@@ -391,6 +481,8 @@ impl Pruner {
                 reader_metrics.metadata_mem_size += arc_builder.memory_size() as isize;
                 reader_metrics.num_range_builders += 1;
                 entry.builder = Some(arc_builder.clone());
+                entry.stats_aware_skip_requirements =
+                    stats_aware_skip.map(|config| config.requirements.clone());
                 PRUNER_ACTIVE_BUILDERS.inc();
             }
         }
@@ -406,6 +498,7 @@ impl Pruner {
         if entry.remaining_ranges == 0
             && let Some(builder) = entry.builder.take()
         {
+            entry.stats_aware_skip_requirements = None;
             PRUNER_ACTIVE_BUILDERS.dec();
             reader_metrics.metadata_mem_size -= builder.memory_size() as isize;
             reader_metrics.num_range_builders -= 1;
@@ -428,11 +521,13 @@ impl Pruner {
                 pre_filter_mode,
                 response_tx,
                 partition_metrics,
+                stats_aware_skip,
             } = request;
 
             // Check if already cached or in-progress
             {
-                let entry = inner.file_entries[file_index].lock().unwrap();
+                let mut entry = inner.file_entries[file_index].lock().unwrap();
+                entry.clear_builder_if_skip_requirements_changed(stats_aware_skip.as_ref());
                 if let Some(builder) = &entry.builder {
                     // Cache hit - send immediately
                     if let Some(response_tx) = response_tx {
@@ -451,7 +546,14 @@ impl Pruner {
             let result = inner
                 .stream_ctx
                 .input
-                .prune_file(file, pre_filter_mode, &mut metrics)
+                .prune_file(
+                    file,
+                    pre_filter_mode,
+                    &mut metrics,
+                    stats_aware_skip
+                        .as_ref()
+                        .map(StatsAwareSkipConfig::requirements),
+                )
                 .await;
 
             // Update state and notify waiters
@@ -459,8 +561,13 @@ impl Pruner {
             match result {
                 Ok(builder) => {
                     let arc_builder = Arc::new(builder);
-                    entry.builder = Some(arc_builder.clone());
-                    PRUNER_ACTIVE_BUILDERS.inc();
+                    if entry.builder.is_none() {
+                        entry.builder = Some(arc_builder.clone());
+                        entry.stats_aware_skip_requirements = stats_aware_skip
+                            .as_ref()
+                            .map(|config| config.requirements.clone());
+                        PRUNER_ACTIVE_BUILDERS.inc();
+                    }
 
                     // Notify all waiters
                     for waiter in entry.waiters.drain(..) {
