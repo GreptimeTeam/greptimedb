@@ -214,6 +214,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 url = "2.3"
 # Branch: feat/request-timeout
+hostname = "0.4.0"
 rskafka = { git = "https://github.com/GreptimeTeam/rskafka.git", rev = "f5688f83e7da591cda3f2674c2408b4c0ed4ed50", features = [
     "transport-tls",
 ] }
@@ -221,7 +222,6 @@ rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
-hostname = "0.4.0"
 rustls = { version = "0.23.25", default-features = false }
 sea-query = "0.32"
 serde = { version = "1.0", features = ["derive"] }
