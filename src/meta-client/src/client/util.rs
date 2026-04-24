@@ -70,7 +70,7 @@ pub(crate) fn alive_datanodes(
         .filter(|node| is_active_node(timer, node, active_duration))
         .filter_map(|node| match node.status {
             NodeStatus::Datanode(status) => {
-                let workloads = NodeWorkloads::Datanode(status.workloads.clone());
+                let workloads = NodeWorkloads::Datanode(status.workloads);
                 filter(&workloads).then_some(node.peer)
             }
             _ => None,
@@ -91,7 +91,7 @@ pub(crate) fn alive_flownodes(
         .filter(|node| is_active_node(timer, node, active_duration))
         .filter_map(|node| match node.status {
             NodeStatus::Flownode(status) => {
-                let workloads = NodeWorkloads::Flownode(status.workloads.clone());
+                let workloads = NodeWorkloads::Flownode(status.workloads);
                 filter(&workloads).then_some(node.peer)
             }
             _ => None,
