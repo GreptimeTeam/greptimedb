@@ -35,7 +35,7 @@ use crate::error::{
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::read::Batch;
-use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
+use crate::sst::{internal_fields, tag_maybe_to_dictionary_field, with_field_id};
 
 /// Adapts a [`BoxedBatchIterator`] into an `Iterator<Item = Result<RecordBatch>>`
 /// producing flat-format record batches.
@@ -222,28 +222,31 @@ fn compute_output_arrow_schema(
         } else {
             field
         };
-        fields.push(field);
+        fields.push(Arc::new(with_field_id(&field, column_metadata.column_id)));
     }
 
     for column_metadata in metadata.field_columns() {
         if !read_column_id_set.contains(&column_metadata.column_id) {
             continue;
         }
-        let field = Arc::new(Field::new(
+        let field = Field::new(
             &column_metadata.column_schema.name,
             column_metadata.column_schema.data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
-        ));
-        fields.push(field);
+        );
+        fields.push(Arc::new(with_field_id(&field, column_metadata.column_id)));
     }
 
     let time_index = metadata.time_index_column();
-    let time_index_field = Arc::new(Field::new(
+    let time_index_field = Field::new(
         &time_index.column_schema.name,
         time_index.column_schema.data_type.as_arrow_type(),
         time_index.column_schema.is_nullable(),
-    ));
-    fields.push(time_index_field);
+    );
+    fields.push(Arc::new(with_field_id(
+        &time_index_field,
+        time_index.column_id,
+    )));
     fields.extend(internal_fields().iter().cloned());
 
     Arc::new(datatypes::arrow::datatypes::Schema::new(fields))

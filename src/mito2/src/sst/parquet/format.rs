@@ -799,7 +799,7 @@ mod tests {
     use crate::sst::parquet::flat_format::{
         FlatReadFormat, FlatWriteFormat, sequence_column_index,
     };
-    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema, with_field_id};
 
     const TEST_SEQUENCE: u64 = 1;
     const TEST_OP_TYPE: u8 = OpType::Put as u8;
@@ -850,23 +850,25 @@ mod tests {
 
     fn build_test_arrow_schema() -> SchemaRef {
         let fields = vec![
-            Field::new("field1", ArrowDataType::Int64, true),
-            Field::new("field0", ArrowDataType::Int64, true),
-            Field::new(
+            make_field("field1", ArrowDataType::Int64, true, Some(4)),
+            make_field("field0", ArrowDataType::Int64, true, Some(2)),
+            make_field(
                 "ts",
                 ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
                 false,
+                Some(5),
             ),
-            Field::new(
+            make_field(
                 "__primary_key",
                 ArrowDataType::Dictionary(
                     Box::new(ArrowDataType::UInt32),
                     Box::new(ArrowDataType::Binary),
                 ),
                 false,
+                None,
             ),
-            Field::new("__sequence", ArrowDataType::UInt64, false),
-            Field::new("__op_type", ArrowDataType::UInt8, false),
+            make_field("__sequence", ArrowDataType::UInt64, false, None),
+            make_field("__op_type", ArrowDataType::UInt8, false, None),
         ];
         Arc::new(Schema::new(fields))
     }
@@ -1065,6 +1067,14 @@ mod tests {
         );
     }
 
+    fn make_field(name: &str, dt: ArrowDataType, nullable: bool, field_id: Option<u32>) -> Field {
+        let mut field = Field::new(name, dt, nullable);
+        if let Some(id) = field_id {
+            field = with_field_id(&field, id);
+        }
+        field
+    }
+
     fn build_test_flat_sst_schema() -> SchemaRef {
         let fields = vec![
             Field::new("tag0", ArrowDataType::Int64, true), // primary key columns first
@@ -1090,11 +1100,37 @@ mod tests {
         Arc::new(Schema::new(fields))
     }
 
+    fn build_test_flat_sst_schema_with_field_ids() -> SchemaRef {
+        let ids = [
+            Some(1u32),
+            Some(3),
+            Some(4),
+            Some(2),
+            Some(5),
+            None,
+            None,
+            None,
+        ];
+        let fields: Vec<_> = build_test_flat_sst_schema()
+            .fields()
+            .iter()
+            .zip(ids)
+            .map(|(f, id)| match id {
+                Some(id) => Arc::new(with_field_id(f, id)) as _,
+                None => f.clone(),
+            })
+            .collect();
+        Arc::new(Schema::new(fields))
+    }
+
     #[test]
     fn test_flat_to_sst_arrow_schema() {
         let metadata = build_test_region_metadata();
         let format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
-        assert_eq!(&build_test_flat_sst_schema(), format.arrow_schema());
+        assert_eq!(
+            &build_test_flat_sst_schema_with_field_ids(),
+            format.arrow_schema()
+        );
     }
 
     fn input_columns_for_flat_batch(num_rows: usize) -> Vec<ArrayRef> {
@@ -1117,8 +1153,11 @@ mod tests {
 
         let num_rows = 4;
         let columns: Vec<ArrayRef> = input_columns_for_flat_batch(num_rows);
-        let batch = RecordBatch::try_new(build_test_flat_sst_schema(), columns.clone()).unwrap();
-        let expect_record = RecordBatch::try_new(build_test_flat_sst_schema(), columns).unwrap();
+        let batch =
+            RecordBatch::try_new(build_test_flat_sst_schema_with_field_ids(), columns.clone())
+                .unwrap();
+        let expect_record =
+            RecordBatch::try_new(build_test_flat_sst_schema_with_field_ids(), columns).unwrap();
 
         let actual = format.convert_batch(&batch).unwrap();
         assert_eq!(expect_record, actual);
@@ -1132,7 +1171,8 @@ mod tests {
 
         let num_rows = 4;
         let columns: Vec<ArrayRef> = input_columns_for_flat_batch(num_rows);
-        let batch = RecordBatch::try_new(build_test_flat_sst_schema(), columns).unwrap();
+        let batch =
+            RecordBatch::try_new(build_test_flat_sst_schema_with_field_ids(), columns).unwrap();
 
         let expected_columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1; num_rows])), // tag0
@@ -1144,8 +1184,11 @@ mod tests {
             Arc::new(UInt64Array::from(vec![415411; num_rows])), // overridden sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
-        let expected_record =
-            RecordBatch::try_new(build_test_flat_sst_schema(), expected_columns).unwrap();
+        let expected_record = RecordBatch::try_new(
+            build_test_flat_sst_schema_with_field_ids(),
+            expected_columns,
+        )
+        .unwrap();
 
         let actual = format.convert_batch(&batch).unwrap();
         assert_eq!(expected_record, actual);
@@ -1431,26 +1474,7 @@ mod tests {
         ];
 
         // Create schema for old format (without primary key columns)
-        let old_format_fields = vec![
-            Field::new("field1", ArrowDataType::Int64, true),
-            Field::new("field0", ArrowDataType::Int64, true),
-            Field::new(
-                "ts",
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "__primary_key",
-                ArrowDataType::Dictionary(
-                    Box::new(ArrowDataType::UInt32),
-                    Box::new(ArrowDataType::Binary),
-                ),
-                false,
-            ),
-            Field::new("__sequence", ArrowDataType::UInt64, false),
-            Field::new("__op_type", ArrowDataType::UInt8, false),
-        ];
-        let old_schema = Arc::new(Schema::new(old_format_fields));
+        let old_schema = build_test_arrow_schema();
         let record_batch = RecordBatch::try_new(old_schema, columns).unwrap();
 
         // Test conversion with dense encoding
@@ -1467,8 +1491,11 @@ mod tests {
             Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
-        let expected_record_batch =
-            RecordBatch::try_new(build_test_flat_sst_schema(), expected_columns).unwrap();
+        let expected_record_batch = RecordBatch::try_new(
+            build_test_flat_sst_schema_with_field_ids(),
+            expected_columns,
+        )
+        .unwrap();
 
         // Compare the actual result with the expected record batch
         assert_eq!(expected_record_batch, result);
@@ -1519,26 +1546,7 @@ mod tests {
         ];
 
         // Create schema for old format (without primary key columns)
-        let old_format_fields = vec![
-            Field::new("field1", ArrowDataType::Int64, true),
-            Field::new("field0", ArrowDataType::Int64, true),
-            Field::new(
-                "ts",
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "__primary_key",
-                ArrowDataType::Dictionary(
-                    Box::new(ArrowDataType::UInt32),
-                    Box::new(ArrowDataType::Binary),
-                ),
-                false,
-            ),
-            Field::new("__sequence", ArrowDataType::UInt64, false),
-            Field::new("__op_type", ArrowDataType::UInt8, false),
-        ];
-        let old_schema = Arc::new(Schema::new(old_format_fields));
+        let old_schema = build_test_arrow_schema();
         let record_batch = RecordBatch::try_new(old_schema, columns).unwrap();
 
         // Test conversion with sparse encoding

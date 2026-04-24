@@ -37,6 +37,7 @@ use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
     FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
+    with_field_id,
 };
 
 /// Handles projection and converts batches in flat format with correct schema.
@@ -395,17 +396,20 @@ pub(crate) fn compute_input_arrow_schema(
     let mut new_fields = Vec::with_capacity(batch_schema.len() + 3);
     for (column_id, _) in batch_schema {
         let column_metadata = metadata.column_by_id(*column_id).unwrap();
-        let field = Arc::new(Field::new(
+        let field = Field::new(
             &column_metadata.column_schema.name,
             column_metadata.column_schema.data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
-        ));
+        );
         let field = if column_metadata.semantic_type == SemanticType::Tag {
-            tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, &field)
+            tag_maybe_to_dictionary_field(
+                &column_metadata.column_schema.data_type,
+                &Arc::new(field),
+            )
         } else {
-            field
+            Arc::new(field)
         };
-        new_fields.push(field);
+        new_fields.push(Arc::new(with_field_id(&field, *column_id)));
     }
     new_fields.extend_from_slice(&internal_fields());
 
