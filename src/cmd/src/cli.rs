@@ -162,7 +162,7 @@ mod tests {
             &*output_dir.path().to_string_lossy(),
             "--http-addr",
             &http_addr,
-            "--rpc-bind-addr",
+            "--grpc-bind-addr",
             &rpc_addr,
             "--mysql-addr",
             &mysql_addr,

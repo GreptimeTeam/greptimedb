@@ -212,8 +212,8 @@ impl App for Instance {
 pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
-    #[clap(long, alias = "rpc-addr")]
-    rpc_bind_addr: Option<String>,
+    #[clap(long = "grpc-bind-addr", alias = "rpc-bind-addr", alias = "rpc-addr")]
+    grpc_bind_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
     #[clap(long)]
@@ -299,7 +299,7 @@ impl StartCommand {
                 .to_string();
         }
 
-        if let Some(addr) = &self.rpc_bind_addr {
+        if let Some(addr) = &self.grpc_bind_addr {
             // frontend grpc addr conflict with datanode default grpc addr
             let datanode_grpc_addr = DatanodeOptions::default().grpc.bind_addr;
             if addr.eq(&datanode_grpc_addr) {
@@ -755,6 +755,7 @@ mod tests {
     use std::time::Duration;
 
     use auth::{Identity, Password, UserProviderRef};
+    use clap::{CommandFactory, Parser};
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
@@ -998,6 +999,35 @@ mod tests {
                 assert_eq!(fe_opts.grpc.bind_addr, GrpcOptions::default().bind_addr);
             },
         );
+    }
+
+    #[test]
+    fn test_parse_grpc_bind_addr_aliases() {
+        let command =
+            StartCommand::try_parse_from(["standalone", "--grpc-bind-addr", "127.0.0.1:14001"])
+                .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:14001"));
+
+        let command =
+            StartCommand::try_parse_from(["standalone", "--rpc-bind-addr", "127.0.0.1:24001"])
+                .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:24001"));
+
+        let command =
+            StartCommand::try_parse_from(["standalone", "--rpc-addr", "127.0.0.1:34001"]).unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:34001"));
+    }
+
+    #[test]
+    fn test_help_uses_grpc_option_names() {
+        let mut cmd = StartCommand::command();
+        let mut help = Vec::new();
+        cmd.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("--grpc-bind-addr"));
+        assert!(!help.contains("--rpc-bind-addr"));
+        assert!(!help.contains("--rpc-addr"));
     }
 
     #[test]

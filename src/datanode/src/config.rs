@@ -84,9 +84,9 @@ pub struct DatanodeOptions {
     pub memory: MemoryOptions,
 
     /// Deprecated options, please use the new options instead.
-    #[deprecated(note = "Please use `grpc.addr` instead.")]
+    #[deprecated(note = "Please use `grpc.bind_addr` instead.")]
     pub rpc_addr: Option<String>,
-    #[deprecated(note = "Please use `grpc.hostname` instead.")]
+    #[deprecated(note = "Please use `grpc.server_addr` instead.")]
     pub rpc_hostname: Option<String>,
     #[deprecated(note = "Please use `grpc.runtime_size` instead.")]
     pub rpc_runtime_size: Option<usize>,

@@ -21,8 +21,8 @@ use clap::Parser;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_meta::distributed_time_constants::init_distributed_time_constants;
-use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
+use common_telemetry::{info, warn};
 use common_version::{short_version, verbose_version};
 use meta_srv::bootstrap::{MetasrvInstance, metasrv_builder};
 use meta_srv::metasrv::BackendImpl;
@@ -141,13 +141,17 @@ impl SubCommand {
 #[derive(Default, Parser)]
 pub struct StartCommand {
     /// The address to bind the gRPC server.
-    #[clap(long, alias = "bind-addr")]
-    rpc_bind_addr: Option<String>,
+    #[clap(long = "grpc-bind-addr", alias = "rpc-bind-addr", alias = "bind-addr")]
+    grpc_bind_addr: Option<String>,
     /// The communication server address for the frontend and datanode to connect to metasrv.
     /// If left empty or unset, the server will automatically use the IP address of the first network interface
-    /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
-    #[clap(long, alias = "server-addr")]
-    rpc_server_addr: Option<String>,
+    /// on the host, with the same port number as the one specified in `grpc_bind_addr`.
+    #[clap(
+        long = "grpc-server-addr",
+        alias = "rpc-server-addr",
+        alias = "server-addr"
+    )]
+    grpc_server_addr: Option<String>,
     #[clap(long, alias = "store-addr", value_delimiter = ',', num_args = 1..)]
     store_addrs: Option<Vec<String>>,
     #[clap(short, long)]
@@ -179,8 +183,8 @@ pub struct StartCommand {
 impl Debug for StartCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StartCommand")
-            .field("rpc_bind_addr", &self.rpc_bind_addr)
-            .field("rpc_server_addr", &self.rpc_server_addr)
+            .field("grpc_bind_addr", &self.grpc_bind_addr)
+            .field("grpc_server_addr", &self.grpc_server_addr)
             .field("store_addrs", &self.sanitize_store_addrs())
             .field("config_file", &self.config_file)
             .field("selector", &self.selector)
@@ -240,18 +244,24 @@ impl StartCommand {
         };
 
         #[allow(deprecated)]
-        if let Some(addr) = &self.rpc_bind_addr {
+        if let Some(addr) = &self.grpc_bind_addr {
             opts.bind_addr.clone_from(addr);
             opts.grpc.bind_addr.clone_from(addr);
         } else if !opts.bind_addr.is_empty() {
+            warn!(
+                "Use the deprecated attribute `MetasrvOptions.bind_addr`, please use `grpc.bind_addr` instead."
+            );
             opts.grpc.bind_addr.clone_from(&opts.bind_addr);
         }
 
         #[allow(deprecated)]
-        if let Some(addr) = &self.rpc_server_addr {
+        if let Some(addr) = &self.grpc_server_addr {
             opts.server_addr.clone_from(addr);
             opts.grpc.server_addr.clone_from(addr);
         } else if !opts.server_addr.is_empty() {
+            warn!(
+                "Use the deprecated attribute `MetasrvOptions.server_addr`, please use `grpc.server_addr` instead."
+            );
             opts.grpc.server_addr.clone_from(&opts.server_addr);
         }
 
@@ -353,6 +363,7 @@ impl StartCommand {
 mod tests {
     use std::io::Write;
 
+    use clap::{CommandFactory, Parser};
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
@@ -363,8 +374,8 @@ mod tests {
     #[test]
     fn test_read_from_cmd() {
         let cmd = StartCommand {
-            rpc_bind_addr: Some("127.0.0.1:3002".to_string()),
-            rpc_server_addr: Some("127.0.0.1:3002".to_string()),
+            grpc_bind_addr: Some("127.0.0.1:3002".to_string()),
+            grpc_server_addr: Some("127.0.0.1:3002".to_string()),
             store_addrs: Some(vec!["127.0.0.1:2380".to_string()]),
             selector: Some("LoadBased".to_string()),
             ..Default::default()
@@ -432,8 +443,8 @@ mod tests {
     #[test]
     fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
-            rpc_bind_addr: Some("127.0.0.1:3002".to_string()),
-            rpc_server_addr: Some("127.0.0.1:3002".to_string()),
+            grpc_bind_addr: Some("127.0.0.1:3002".to_string()),
+            grpc_server_addr: Some("127.0.0.1:3002".to_string()),
             store_addrs: Some(vec!["127.0.0.1:2380".to_string()]),
             selector: Some("LoadBased".to_string()),
             ..Default::default()
@@ -519,5 +530,56 @@ mod tests {
                 assert_eq!(opts.store_addrs, vec!["127.0.0.1:2379".to_string()]);
             },
         );
+    }
+
+    #[test]
+    fn test_parse_grpc_cli_aliases() {
+        let command = StartCommand::try_parse_from([
+            "metasrv",
+            "--grpc-bind-addr",
+            "127.0.0.1:13002",
+            "--grpc-server-addr",
+            "10.0.0.1:13002",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:13002"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.1:13002"));
+
+        let command = StartCommand::try_parse_from([
+            "metasrv",
+            "--rpc-bind-addr",
+            "127.0.0.1:23002",
+            "--rpc-server-addr",
+            "10.0.0.2:23002",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:23002"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.2:23002"));
+
+        let command = StartCommand::try_parse_from([
+            "metasrv",
+            "--bind-addr",
+            "127.0.0.1:33002",
+            "--server-addr",
+            "10.0.0.3:33002",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:33002"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.3:33002"));
+    }
+
+    #[test]
+    fn test_help_uses_grpc_option_names() {
+        let mut cmd = StartCommand::command();
+        let mut help = Vec::new();
+        cmd.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("--grpc-bind-addr"));
+        assert!(help.contains("--grpc-server-addr"));
+        assert!(!help.contains("--rpc-bind-addr"));
+        assert!(!help.contains("--rpc-server-addr"));
+        assert!(!help.contains("--bind-addr"));
+        assert!(!help.contains("--server-addr"));
     }
 }

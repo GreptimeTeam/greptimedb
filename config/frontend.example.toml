@@ -100,7 +100,7 @@ watch = false
 bind_addr = "127.0.0.1:4010"
 ## The address advertised to the metasrv, and used for connections from outside the host.
 ## If left empty or unset, the server will automatically use the IP address of the first network interface
-## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+## on the host, with the same port number as the one specified in `internal_grpc.bind_addr`.
 server_addr = "127.0.0.1:4010"
 ## The number of server worker threads.
 runtime_size = 8
