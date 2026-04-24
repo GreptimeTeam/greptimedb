@@ -83,6 +83,7 @@ use crate::selector::{RegionStatAwareSelector, Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::{StateRef, become_follower, become_leader};
+use crate::utils::database::DatabaseOperatorRef;
 
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
@@ -570,6 +571,7 @@ pub struct Metasrv {
     reconciliation_manager: ReconciliationManagerRef,
     resource_stat: ResourceStatRef,
     gc_ticker: Option<GcTickerRef>,
+    database_operator: DatabaseOperatorRef,
 
     plugins: Plugins,
 }
@@ -867,6 +869,10 @@ impl Metasrv {
 
     pub fn reconciliation_manager(&self) -> &ReconciliationManagerRef {
         &self.reconciliation_manager
+    }
+
+    pub fn database_operator(&self) -> &DatabaseOperatorRef {
+        &self.database_operator
     }
 
     pub fn plugins(&self) -> &Plugins {
