@@ -1,0 +1,565 @@
+CREATE TABLE reduce_aggregate_repartition (
+  a STRING NULL,
+  b STRING NULL,
+  c STRING NULL,
+  ts TIMESTAMP TIME INDEX,
+  val BIGINT NULL,
+  PRIMARY KEY (a, b, c)
+) PARTITION ON COLUMNS (a, b, c) (
+  a < 'm',
+  a >= 'm'
+);
+
+Affected Rows: 0
+
+INSERT INTO reduce_aggregate_repartition VALUES
+  ('a', 'x', 'u', 1000, 10),
+  ('a', 'x', 'v', 2000, 5),
+  ('a', 'y', 'u', 3000, 7),
+  ('n', 'x', 'u', 4000, 4),
+  ('n', 'x', 'v', 5000, 8),
+  ('n', 'y', 'u', 6000, 3);
+
+Affected Rows: 6
+
+-- Keep the outer aggregate on `sum` so this case isolates
+-- ReduceAggregateRepartition rather than the min/max combiner rule.
+SELECT a, b, sum(m)
+FROM (
+  SELECT a, b, c, min(val) AS m
+  FROM reduce_aggregate_repartition
+  GROUP BY a, b, c
+) s
+GROUP BY b, a
+ORDER BY a, b;
+
++---+---+----------+
+| a | b | sum(s.m) |
++---+---+----------+
+| a | x | 15       |
+| a | y | 7        |
+| n | x | 12       |
+| n | y | 3        |
++---+---+----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN VERBOSE
+SELECT a, b, sum(m)
+FROM (
+  SELECT a, b, c, min(val) AS m
+  FROM reduce_aggregate_repartition
+  GROUP BY a, b, c
+) s
+GROUP BY b, a;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| initial_logical_plan_| Projection: s.a, s.b, sum(s.m)_|
+|_|_Aggregate: groupBy=[[s.b, s.a]], aggr=[[sum(s.m)]]_|
+|_|_SubqueryAlias: s_|
+|_|_Projection: reduce_aggregate_repartition.a, reduce_aggregate_repartition.b, reduce_aggregate_repartition.c, min(reduce_aggregate_repartition.val) AS m_|
+|_|_Aggregate: groupBy=[[reduce_aggregate_repartition.a, reduce_aggregate_repartition.b, reduce_aggregate_repartition.c]], aggr=[[min(reduce_aggregate_repartition.val)]] |
+|_|_TableScan: reduce_aggregate_repartition_|
+| logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
+| logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
+| logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
+| logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
+| logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
+| logical_plan after DistPlannerAnalyzer_| Projection: s.a, s.b, sum(s.m)_|
+|_|_Projection: s.b, s.a, sum(s.m)_|
+|_|_Aggregate: groupBy=[[s.b, s.a]], aggr=[[__sum_merge(__sum_state(s.m)) AS sum(s.m)]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[s.b, s.a]], aggr=[[__sum_state(s.m)]]_|
+|_|_SubqueryAlias: s_|
+|_|_Projection: reduce_aggregate_repartition.a, reduce_aggregate_repartition.b, reduce_aggregate_repartition.c, min(reduce_aggregate_repartition.val) AS m_|
+|_|_Aggregate: groupBy=[[reduce_aggregate_repartition.a, reduce_aggregate_repartition.b, reduce_aggregate_repartition.c]], aggr=[[min(reduce_aggregate_repartition.val)]]_|
+|_|_TableScan: reduce_aggregate_repartition_|
+|_| ]]_|
+| logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
+| analyzed_logical_plan_| SAME TEXT AS ABOVE_|
+| logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
+| logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
+| logical_plan after filter_null_join_keys_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_outer_join_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_projections_| Projection: s.a, s.b, sum(s.m)_|
+|_|_Aggregate: groupBy=[[s.b, s.a]], aggr=[[__sum_merge(__sum_state(s.m)) AS sum(s.m)]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[s.b, s.a]], aggr=[[__sum_state(s.m)]]_|
+|_|_SubqueryAlias: s_|
+|_|_Projection: reduce_aggregate_repartition.a, reduce_aggregate_repartition.b, reduce_aggregate_repartition.c, min(reduce_aggregate_repartition.val) AS m_|
+|_|_Aggregate: groupBy=[[reduce_aggregate_repartition.a, reduce_aggregate_repartition.b, reduce_aggregate_repartition.c]], aggr=[[min(reduce_aggregate_repartition.val)]]_|
+|_|_TableScan: reduce_aggregate_repartition_|
+|_| ]]_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
+| logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
+| logical_plan after filter_null_join_keys_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_outer_join_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan_| Projection: s.a, s.b, sum(s.m)_|
+|_|_Aggregate: groupBy=[[s.b, s.a]], aggr=[[__sum_merge(__sum_state(s.m)) AS sum(s.m)]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[s.b, s.a]], aggr=[[__sum_state(s.m)]]_|
+|_|_SubqueryAlias: s_|
+|_|_Projection: reduce_aggregate_repartition.a, reduce_aggregate_repartition.b, reduce_aggregate_repartition.c, min(reduce_aggregate_repartition.val) AS m_|
+|_|_Aggregate: groupBy=[[reduce_aggregate_repartition.a, reduce_aggregate_repartition.b, reduce_aggregate_repartition.c]], aggr=[[min(reduce_aggregate_repartition.val)]]_|
+|_|_TableScan: reduce_aggregate_repartition_|
+|_| ]]_|
+| initial_physical_plan_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
+|_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| initial_physical_plan_with_stats_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| initial_physical_plan_with_schema_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)], schema=[a:Utf8;N, b:Utf8;N, sum(s.m):Int64;N]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], schema=[b:Utf8;N, a:Utf8;N, sum(s.m):Int64;N]_|
+|_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], schema=[b:Utf8;N, a:Utf8;N, sum(s.m)[sum]:Int64;N]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
+|_|_ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
+|_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
+| physical_plan after join_selection_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after parallelize_scan_| SAME TEXT AS ABOVE_|
+| physical_plan after PassDistributionRule_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceDistribution_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
+|_|_ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
+| physical_plan after ReduceAggregateRepartition_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
+| physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after OutputRequirements_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after PushdownSort_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureCooperative_| SAME TEXT AS ABOVE_|
+| physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
+| physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
+| physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
+| physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
+| physical_plan_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan_with_stats_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan_with_schema_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)], schema=[a:Utf8;N, b:Utf8;N, sum(s.m):Int64;N]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], schema=[b:Utf8;N, a:Utf8;N, sum(s.m):Int64;N]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], schema=[b:Utf8;N, a:Utf8;N, sum(s.m)[sum]:Int64;N]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE
+SELECT a, b, sum(m)
+FROM (
+  SELECT a, b, c, min(val) AS m
+  FROM reduce_aggregate_repartition
+  GROUP BY a, b, c
+) s
+GROUP BY b, a;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=Final, gby=[b@0 as b, a@1 as a], aggr=[__sum_state(s.m)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[b@1 as b, a@0 as a], aggr=[__sum_state(s.m)] REDACTED
+|_|_|_ProjectionExec: expr=[a@0 as a, b@1 as b, min(reduce_aggregate_repartition.val)@3 as m] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=Final, gby=[b@0 as b, a@1 as a], aggr=[__sum_state(s.m)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[b@1 as b, a@0 as a], aggr=[__sum_state(s.m)] REDACTED
+|_|_|_ProjectionExec: expr=[a@0 as a, b@1 as b, min(reduce_aggregate_repartition.val)@3 as m] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Another grouped SQL reduction case to keep the rule coverage centered on SQL,
+-- not just TQL/PromQL planning.
+SELECT a, count(m)
+FROM (
+  SELECT a, b, c, min(val) AS m
+  FROM reduce_aggregate_repartition
+  GROUP BY a, b, c
+) s
+GROUP BY a
+ORDER BY a;
+
++---+------------+
+| a | count(s.m) |
++---+------------+
+| a | 3          |
+| n | 3          |
++---+------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE
+SELECT a, count(m)
+FROM (
+  SELECT a, b, c, min(val) AS m
+  FROM reduce_aggregate_repartition
+  GROUP BY a, b, c
+) s
+GROUP BY a;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_AggregateExec: mode=SinglePartitioned, gby=[a@0 as a], aggr=[count(s.m)] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=Final, gby=[a@0 as a], aggr=[__count_state(s.m)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[__count_state(s.m)] REDACTED
+|_|_|_ProjectionExec: expr=[a@0 as a, min(reduce_aggregate_repartition.val)@3 as m] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=Final, gby=[a@0 as a], aggr=[__count_state(s.m)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[__count_state(s.m)] REDACTED
+|_|_|_ProjectionExec: expr=[a@0 as a, min(reduce_aggregate_repartition.val)@3 as m] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+-- Zero-key reduction should rewrite SinglePartitioned to Single.
+SELECT sum(m)
+FROM (
+  SELECT a, b, c, min(val) AS m
+  FROM reduce_aggregate_repartition
+  GROUP BY a, b, c
+) s;
+
++----------+
+| sum(s.m) |
++----------+
+| 37       |
++----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE
+SELECT sum(m)
+FROM (
+  SELECT a, b, c, min(val) AS m
+  FROM reduce_aggregate_repartition
+  GROUP BY a, b, c
+) s;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[sum(s.m)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(s.m)] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_state(s.m)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__sum_state(s.m)] REDACTED
+|_|_|_ProjectionExec: expr=[min(reduce_aggregate_repartition.val)@3 as m] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_state(s.m)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__sum_state(s.m)] REDACTED
+|_|_|_ProjectionExec: expr=[min(reduce_aggregate_repartition.val)@3 as m] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(reduce_aggregate_repartition.val)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+DROP TABLE reduce_aggregate_repartition;
+
+Affected Rows: 0
+
+CREATE TABLE reduce_aggregate_repartition_non_subset (
+  a STRING NULL,
+  b STRING NULL,
+  ts TIMESTAMP TIME INDEX,
+  val BIGINT NULL,
+  PRIMARY KEY (a, b)
+) PARTITION ON COLUMNS (a) (
+  a < 'm',
+  a >= 'm'
+);
+
+Affected Rows: 0
+
+INSERT INTO reduce_aggregate_repartition_non_subset VALUES
+  ('a', 'x', 1000, 10),
+  ('n', 'x', 2000, 5),
+  ('a', 'y', 3000, 7),
+  ('n', 'y', 4000, 3);
+
+Affected Rows: 4
+
+-- Changing the group key from `a` to `b` is not a reduction, so the
+-- repartition must remain in place.
+SELECT b, sum(val)
+FROM reduce_aggregate_repartition_non_subset
+GROUP BY b
+ORDER BY b;
+
++---+--------------------------------------------------+
+| b | sum(reduce_aggregate_repartition_non_subset.val) |
++---+--------------------------------------------------+
+| x | 15                                               |
+| y | 10                                               |
++---+--------------------------------------------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE
+SELECT b, sum(val)
+FROM reduce_aggregate_repartition_non_subset
+GROUP BY b;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b], aggr=[sum(reduce_aggregate_repartition_non_subset.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[b@0 as b], aggr=[sum(reduce_aggregate_repartition_non_subset.val)] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b], aggr=[__sum_state(reduce_aggregate_repartition_non_subset.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[b@0 as b], aggr=[__sum_state(reduce_aggregate_repartition_non_subset.val)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b], aggr=[__sum_state(reduce_aggregate_repartition_non_subset.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[b@0 as b], aggr=[__sum_state(reduce_aggregate_repartition_non_subset.val)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+DROP TABLE reduce_aggregate_repartition_non_subset;
+
+Affected Rows: 0
+
+CREATE TABLE reduce_aggregate_repartition_metric (
+  ts TIMESTAMP(3) TIME INDEX,
+  job STRING,
+  instance STRING,
+  greptime_value DOUBLE,
+  PRIMARY KEY(job, instance),
+);
+
+Affected Rows: 0
+
+INSERT INTO reduce_aggregate_repartition_metric VALUES
+  (0, 'job1', 'instance1', 1),
+  (0, 'job1', 'instance2', 2),
+  (0, 'job2', 'instance1', 3),
+  (5000, 'job1', 'instance1', 4),
+  (5000, 'job1', 'instance2', 5),
+  (5000, 'job2', 'instance1', 6),
+  (10000, 'job1', 'instance1', 7),
+  (10000, 'job1', 'instance2', 8),
+  (10000, 'job2', 'instance1', 9);
+
+Affected Rows: 9
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+TQL ANALYZE (0, 10, '5s')
+count(count(reduce_aggregate_repartition_metric) by (job));
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[false] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[ts@0 as ts], aggr=[count(count(reduce_aggregate_repartition_metric.greptime_value))] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[count(count(reduce_aggregate_repartition_metric.greptime_value))] REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts, job@1 as job], aggr=[], ordering_mode=PartiallySorted([1]) REDACTED
+|_|_|_SortExec: expr=[job@1 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[ts@0 as ts, job@1 as job], aggr=[], ordering_mode=PartiallySorted([1]) REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, job@1 as job] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["job", "instance"] REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+TQL ANALYZE (0, 10, '5s')
+count(count(rate(reduce_aggregate_repartition_metric[5s])) by (job));
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[false] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[ts@0 as ts], aggr=[count(count(prom_rate(ts_range,greptime_value,ts,Int64(5000))))] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[count(count(prom_rate(ts_range,greptime_value,ts,Int64(5000))))] REDACTED
+|_|_|_ProjectionExec: expr=[ts@1 as ts, count(prom_rate(ts_range,greptime_value,ts,Int64(5000)))@2 as count(prom_rate(ts_range,greptime_value,ts,Int64(5000)))] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[job@0 as job, ts@1 as ts], aggr=[count(prom_rate(ts_range,greptime_value,ts,Int64(5000)))] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[job@2 as job, ts@0 as ts], aggr=[count(prom_rate(ts_range,greptime_value,ts,Int64(5000)))] REDACTED
+|_|_|_FilterExec: prom_rate(ts_range,greptime_value,ts,Int64(5000))@1 IS NOT NULL REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, prom_rate(ts_range@4, greptime_value@3, ts@0, 5000) as prom_rate(ts_range,greptime_value,ts,Int64(5000)), job@1 as job] REDACTED
+|_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["job", "instance"] REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+DROP TABLE reduce_aggregate_repartition_metric;
+
+Affected Rows: 0
+
