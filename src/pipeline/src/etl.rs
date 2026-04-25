@@ -482,6 +482,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::Rows;
+    use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
     use greptime_proto::v1::value::ValueData;
     use greptime_proto::v1::{self, ColumnDataType, SemanticType};
     use vrl::prelude::Bytes;
@@ -1466,5 +1467,89 @@ transform:
 
         // Empty array should produce empty HashMap
         assert_eq!(rows_by_context.len(), 0);
+    }
+
+    #[test]
+    fn test_pipeline_detailed_index_options_roundtrip() {
+        let pipeline_yaml = r#"
+transform:
+  - field: message
+    type: string
+    index:
+      type: fulltext
+      options:
+        analyzer: Chinese
+        case_sensitive: true
+        backend: tantivy
+  - field: trace_id
+    type: int64
+    index:
+      type: skipping
+      options:
+        granularity: 2048
+        false_positive_rate: 0.02
+        type: BLOOM
+  - field: ts
+    type: timestamp, ns
+    index: time
+"#;
+
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let schema = pipeline.schemas().unwrap().clone();
+
+        let message = schema
+            .iter()
+            .find(|column| column.column_name == "message")
+            .unwrap();
+        let trace_id = schema
+            .iter()
+            .find(|column| column.column_name == "trace_id")
+            .unwrap();
+        let message_options = message.options.clone();
+        let trace_id_options = trace_id.options.clone();
+
+        let fulltext: FulltextOptions = serde_json::from_str(
+            message
+                .options
+                .as_ref()
+                .unwrap()
+                .options
+                .get("fulltext")
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(fulltext.enable);
+        assert_eq!(fulltext.analyzer.to_string(), "Chinese");
+        assert!(fulltext.case_sensitive);
+        assert_eq!(fulltext.backend.to_string(), "tantivy");
+
+        let skipping: SkippingIndexOptions = serde_json::from_str(
+            trace_id
+                .options
+                .as_ref()
+                .unwrap()
+                .options
+                .get("skipping_index")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(skipping.granularity, 2048);
+        assert_eq!(skipping.false_positive_rate(), 0.02);
+        assert_eq!(skipping.index_type.to_string(), "BLOOM");
+
+        let roundtrip_schema = SchemaInfo::from_schema_list(schema)
+            .column_schemas()
+            .unwrap();
+        let roundtrip_message = roundtrip_schema
+            .iter()
+            .find(|column| column.column_name == "message")
+            .unwrap();
+        let roundtrip_trace_id = roundtrip_schema
+            .iter()
+            .find(|column| column.column_name == "trace_id")
+            .unwrap();
+
+        assert_eq!(message_options, roundtrip_message.options);
+        assert_eq!(trace_id_options, roundtrip_trace_id.options);
     }
 }

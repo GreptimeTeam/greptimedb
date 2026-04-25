@@ -389,6 +389,61 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Transform index `type` must be set."))]
+    TransformIndexTypeMustBeSet {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Unsupported field in transform index config: {field}"))]
+    TransformIndexUnsupportedField {
+        field: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "Transform index option `{field}` must be a string, boolean, integer, or real scalar"
+    ))]
+    TransformIndexOptionMustBeScalar {
+        field: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Index type `{index}` does not support options in pipeline config"))]
+    TransformIndexOptionsUnsupported {
+        index: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Unsupported option `{key}` for `{index}` index"))]
+    TransformIndexOptionUnsupported {
+        index: String,
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Index `{index}` only supports {expected} columns, but got {actual}"))]
+    TransformIndexTypeMismatch {
+        index: String,
+        expected: String,
+        actual: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid options for `{index}` index"))]
+    TransformIndexOption {
+        index: String,
+        #[snafu(source)]
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Transform index `{index}` does not match options declared for `{options}`"))]
+    TransformIndexStateMismatch {
+        index: String,
+        options: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Column name must be unique, but got duplicated: {duplicates}"))]
     TransformColumnNameMustBeUnique {
         duplicates: String,
@@ -897,6 +952,14 @@ impl ErrorExt for Error {
             | TransformElementMustBeMap { .. }
             | TransformFieldMustBeSet { .. }
             | TransformTypeMustBeSet { .. }
+            | TransformIndexTypeMustBeSet { .. }
+            | TransformIndexUnsupportedField { .. }
+            | TransformIndexOptionMustBeScalar { .. }
+            | TransformIndexOptionsUnsupported { .. }
+            | TransformIndexOptionUnsupported { .. }
+            | TransformIndexTypeMismatch { .. }
+            | TransformIndexOption { .. }
+            | TransformIndexStateMismatch { .. }
             | TransformColumnNameMustBeUnique { .. }
             | TransformMultipleTimestampIndex { .. }
             | TransformTimestampIndexCount { .. }
