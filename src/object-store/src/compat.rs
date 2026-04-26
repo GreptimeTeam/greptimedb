@@ -637,7 +637,7 @@ impl MultipartUpload for OpendalMultipartUpload {
 
             let mut writer = writer.lock().await;
             let result = writer
-                .write(Buffer::from_iter(data.into_iter()))
+                .write(Buffer::from_iter(data))
                 .await
                 .map_err(|err| format_object_store_error(err, location.as_ref()));
 
@@ -793,9 +793,9 @@ mod tests {
         let mut write = WriteMultipart::new(upload);
 
         let mut all_bytes = vec![];
-        let round = rng.gen_range(1..=1024);
+        let round = rng.random_range(1..=1024);
         for _ in 0..round {
-            let size = rng.gen_range(1..=1024);
+            let size = rng.random_range(1..=1024);
             let mut bytes = vec![0; size];
             rng.fill_bytes(&mut bytes);
 
