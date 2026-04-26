@@ -47,5 +47,6 @@ arrow_object_store.workspace = true
 common-telemetry.workspace = true
 common-test-util.workspace = true
 object_store_opendal.workspace = true
+rand.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

@@ -8909,6 +8909,7 @@ dependencies = [
  "object_store_opendal",
  "opendal",
  "prometheus 0.14.0",
+ "rand 0.9.1",
  "reqwest 0.13.2",
  "serde",
  "snafu 0.8.6",
