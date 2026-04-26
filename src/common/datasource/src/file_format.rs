@@ -42,7 +42,6 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
-use object_store_opendal::OpendalStore;
 use snafu::ResultExt;
 use tokio::io::AsyncWriteExt;
 use tokio_util::compat::FuturesAsyncWriteCompatExt;
@@ -317,7 +316,7 @@ pub async fn file_to_stream(
             .with_file_compression_type(df_compression)
             .build();
 
-    let store = Arc::new(OpendalStore::new(store.clone()));
+    let store = Arc::new(object_store::compat::OpendalStore::new(store.clone()));
     let file_opener = config.file_source().create_file_opener(store, &config, 0)?;
     let stream = FileStream::new(&config, 0, file_opener, &ExecutionPlanMetricsSet::new())?;
 

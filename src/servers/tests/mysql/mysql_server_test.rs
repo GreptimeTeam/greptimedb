@@ -27,7 +27,7 @@ use datatypes::value::Value;
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, SslOpts};
 use servers::error::Result;
-use servers::install_ring_crypto_provider;
+use servers::install_default_crypto_provider;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
@@ -45,7 +45,7 @@ struct MysqlOpts<'a> {
 }
 
 fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
-    let _ = install_ring_crypto_provider();
+    let _ = install_default_crypto_provider();
     let query_handler = create_testing_sql_query_handler(table);
     let io_runtime = RuntimeBuilder::default()
         .worker_threads(4)

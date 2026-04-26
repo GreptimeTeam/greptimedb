@@ -131,7 +131,7 @@ pub fn normalize_path(path: &str) -> String {
 pub fn with_instrument_layers(object_store: ObjectStore, path_label: bool) -> ObjectStore {
     object_store
         .layer(LoggingLayer::new(DefaultLoggingInterceptor))
-        .layer(TracingLayer)
+        .layer(TracingLayer::new())
         .layer(crate::layers::build_prometheus_metrics_layer(path_label))
 }
 

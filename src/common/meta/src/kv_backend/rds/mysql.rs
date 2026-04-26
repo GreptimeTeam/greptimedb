@@ -32,6 +32,7 @@ use crate::kv_backend::rds::{
     Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
     RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
     RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
+    ensure_rustls_crypto_provider_installed,
 };
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -620,6 +621,7 @@ impl MySqlStore {
 
     /// Create [MySqlStore] impl of [KvBackendRef] from url.
     pub async fn with_url(url: &str, table_name: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
+        ensure_rustls_crypto_provider_installed()?;
         let pool = MySqlPool::connect(url)
             .await
             .context(CreateMySqlPoolSnafu)?;
@@ -687,6 +689,7 @@ mod tests {
         if endpoints.is_empty() {
             return None;
         }
+        ensure_rustls_crypto_provider_installed().unwrap();
         Some(MySqlPool::connect(&endpoints).await.unwrap())
     }
 
@@ -984,6 +987,7 @@ mod tests {
     async fn test_mysql_with_tls() {
         common_telemetry::init_default_ut_logging();
         maybe_skip_mysql_integration_test!();
+        ensure_rustls_crypto_provider_installed().unwrap();
         let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
 
         let opts = endpoint
@@ -998,6 +1002,7 @@ mod tests {
     async fn test_mysql_with_mtls() {
         common_telemetry::init_default_ut_logging();
         maybe_skip_mysql_integration_test!();
+        ensure_rustls_crypto_provider_installed().unwrap();
         let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
         let certs_dir = test_certs_dir();
 
@@ -1015,6 +1020,7 @@ mod tests {
     async fn test_mysql_with_tls_verify_ca() {
         common_telemetry::init_default_ut_logging();
         maybe_skip_mysql_integration_test!();
+        ensure_rustls_crypto_provider_installed().unwrap();
         let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
         let certs_dir = test_certs_dir();
 
@@ -1033,6 +1039,7 @@ mod tests {
     async fn test_mysql_with_tls_verify_ident() {
         common_telemetry::init_default_ut_logging();
         maybe_skip_mysql_integration_test!();
+        ensure_rustls_crypto_provider_installed().unwrap();
         let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
         let certs_dir = test_certs_dir();
 

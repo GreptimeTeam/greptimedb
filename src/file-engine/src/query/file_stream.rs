@@ -61,7 +61,7 @@ fn build_record_batch_stream(
             .with_file_group(FileGroup::new(files))
             .build();
 
-    let store = Arc::new(object_store_opendal::OpendalStore::new(
+    let store = Arc::new(object_store::compat::OpendalStore::new(
         scan_plan_config.store.clone(),
     ));
 

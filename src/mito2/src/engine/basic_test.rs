@@ -970,6 +970,8 @@ async fn test_list_ssts_with_format(
         .map(|mut e| {
             let i = e.file_path.rfind('/').unwrap();
             e.file_path.replace_range(i..(i + 37), "/<file_id>");
+            e.file_size = None;
+            e.last_modified_ms = None;
             format!("\n{:?}", e)
         })
         .sorted()
