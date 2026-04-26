@@ -377,11 +377,7 @@ impl ArrowObjectStore for OpendalStore {
             let meta = entry.metadata();
 
             if meta.is_dir() {
-                let entry_path = entry.path().trim_end_matches('/');
-                let listed_path = path.trim_end_matches('/');
-                if entry_path != listed_path {
-                    common_prefixes.push(entry_path.into());
-                }
+                common_prefixes.push(entry.path().into());
             } else if meta.last_modified().is_some() {
                 objects.push(format_object_meta(entry.path(), meta));
             } else {
@@ -684,11 +680,12 @@ mod tests {
             .await
             .unwrap();
 
-        let path: Path = "data/".into();
+        let path: Path = "data".into();
         let result = object_store.list_with_delimiter(Some(&path)).await.unwrap();
         assert_eq!(result.objects.len(), 1);
-        assert_eq!(result.common_prefixes.len(), 1);
+        assert_eq!(result.common_prefixes.len(), 2);
         assert_eq!(result.objects[0].location.as_ref(), "data/test.txt");
-        assert_eq!(result.common_prefixes[0].as_ref(), "data/nested");
+        assert_eq!(result.common_prefixes[0].as_ref(), "data");
+        assert_eq!(result.common_prefixes[1].as_ref(), "data/nested");
     }
 }
