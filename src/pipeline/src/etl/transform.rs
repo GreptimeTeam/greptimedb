@@ -372,6 +372,28 @@ fn validate_index_option_keys(
     Ok(())
 }
 
+fn lower_typed_transform_index_options<T>(
+    index: Index,
+    index_options: Option<HashMap<String, String>>,
+    validate: fn(&str) -> bool,
+    wrap: fn(T) -> TransformIndexOptions,
+) -> Result<Option<TransformIndexOptions>>
+where
+    T: TryFrom<HashMap<String, String>, Error = datatypes::error::Error>,
+{
+    index_options
+        .map(|opts| {
+            validate_index_option_keys(index, &opts, validate)?;
+
+            let options = opts.try_into().context(TransformIndexOptionSnafu {
+                index: index.to_string(),
+            })?;
+
+            Ok(wrap(options))
+        })
+        .transpose()
+}
+
 fn lower_transform_index_options(
     index: Index,
     column_type: &ColumnDataType,
@@ -388,43 +410,19 @@ fn lower_transform_index_options(
                 }
             );
 
-            let Some(index_options) = index_options else {
-                return Ok(None);
-            };
-
-            validate_index_option_keys(
+            lower_typed_transform_index_options(
                 index,
-                &index_options,
+                index_options,
                 validate_column_fulltext_create_option,
-            )?;
-
-            let options = index_options
-                .try_into()
-                .context(TransformIndexOptionSnafu {
-                    index: index.to_string(),
-                })?;
-
-            Ok(Some(TransformIndexOptions::Fulltext(options)))
+                TransformIndexOptions::Fulltext,
+            )
         }
-        Index::Skipping => {
-            let Some(index_options) = index_options else {
-                return Ok(None);
-            };
-
-            validate_index_option_keys(
-                index,
-                &index_options,
-                validate_column_skipping_index_create_option,
-            )?;
-
-            let options = index_options
-                .try_into()
-                .context(TransformIndexOptionSnafu {
-                    index: index.to_string(),
-                })?;
-
-            Ok(Some(TransformIndexOptions::Skipping(options)))
-        }
+        Index::Skipping => lower_typed_transform_index_options(
+            index,
+            index_options,
+            validate_column_skipping_index_create_option,
+            TransformIndexOptions::Skipping,
+        ),
         Index::Inverted | Index::Time | Index::Tag => {
             ensure!(
                 index_options.is_none(),
@@ -436,7 +434,6 @@ fn lower_transform_index_options(
         }
     }
 }
-
 impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
     type Error = Error;
 
