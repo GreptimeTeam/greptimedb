@@ -50,6 +50,7 @@ use tonic::{Request, Response, Status};
 use tonic_reflection::server::v1::{ServerReflection, ServerReflectionServer};
 
 use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
+use crate::install_default_crypto_provider;
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
@@ -357,6 +358,11 @@ impl Server for GrpcServer {
 
         let mut builder = tonic::transport::Server::builder().layer(metrics_layer);
         if let Some(tls_config) = self.tls_config.clone() {
+            // tonic builds the underlying rustls server config here, which requires a
+            // process-level crypto provider to be installed first.
+            if let Err(err) = install_default_crypto_provider() {
+                warn!("Failed to install default rustls crypto provider: {err}");
+            }
             builder = builder.tls_config(tls_config).context(StartGrpcSnafu)?;
         }
 

@@ -142,10 +142,11 @@ impl InstrumentedStore {
         Ok(list)
     }
 
-    /// Proxies to [`ObjectStore::remove_all`].
+    /// Recursively deletes all objects under the given path.
     pub async fn remove_all(&self, path: &str) -> Result<()> {
         self.object_store
-            .remove_all(path)
+            .delete_with(path)
+            .recursive(true)
             .await
             .context(OpenDalSnafu)
     }

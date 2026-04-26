@@ -1007,7 +1007,7 @@ async fn preload_parquet_meta_cache_for_files(
         return 0;
     }
 
-    let allow_direct_load = matches!(object_store.info().scheme(), object_store::Scheme::Fs);
+    let allow_direct_load = object_store.info().scheme() == object_store::services::FS_SCHEME;
 
     // Sort by time range so we can prefer preloading newer files first.
     files.sort_by_key(|b| std::cmp::Reverse(b.meta_ref().time_range.1));

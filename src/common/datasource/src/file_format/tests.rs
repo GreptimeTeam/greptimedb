@@ -44,7 +44,7 @@ struct Test<'a> {
 
 impl Test<'_> {
     async fn run(self, store: &ObjectStore) {
-        let store = Arc::new(object_store_opendal::OpendalStore::new(store.clone()));
+        let store = Arc::new(object_store::compat::OpendalStore::new(store.clone()));
         let file_opener = self
             .file_source
             .create_file_opener(store, &self.config, 0)

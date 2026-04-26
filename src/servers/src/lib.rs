@@ -64,13 +64,13 @@ pub struct SqlPlan {
     schema: Option<Schema>,
 }
 
-/// Install the ring crypto provider for rustls process-wide. see:
+/// Install the default crypto provider for rustls process-wide. see:
 ///
 ///  https://docs.rs/rustls/latest/rustls/crypto/struct.CryptoProvider.html#using-the-per-process-default-cryptoprovider
 ///
 /// for more information.
-pub fn install_ring_crypto_provider() -> Result<(), String> {
-    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+pub fn install_default_crypto_provider() -> Result<(), String> {
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
         .map_err(|ret| {
             format!(
                 "CryptoProvider already installed as: {:?}, but providing {:?}",

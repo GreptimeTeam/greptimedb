@@ -52,6 +52,8 @@ const GT_MYSQL_ADDR: &str = "GT_MYSQL_ADDR";
 
 /// Connects to GreptimeDB via env variables.
 pub async fn init_greptime_connections_via_env() -> Connections {
+    crate::install_rustls_crypto_provider();
+
     let _ = dotenv::dotenv();
     let mysql = if let Ok(addr) = env::var(GT_MYSQL_ADDR) {
         Some(addr)

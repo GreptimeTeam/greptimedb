@@ -15,12 +15,14 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 
-use crate::error::{Error, RdsTransactionRetryFailedSnafu, Result};
+use crate::error::{Error, RdsTransactionRetryFailedSnafu, Result, UnexpectedSnafu};
 use crate::kv_backend::txn::{
     Compare, Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse,
 };
@@ -50,6 +52,38 @@ mod mysql;
 pub use mysql::MySqlStore;
 
 const RDS_STORE_TXN_RETRY_COUNT: usize = 3;
+
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+static RUSTLS_CRYPTO_PROVIDER_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+pub(crate) fn ensure_rustls_crypto_provider_installed() -> Result<()> {
+    RUSTLS_CRYPTO_PROVIDER_INIT
+        .get_or_init(|| {
+            if rustls::crypto::CryptoProvider::get_default().is_some() {
+                return Ok(());
+            }
+
+            match rustls::crypto::CryptoProvider::install_default(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            ) {
+                Ok(()) => Ok(()),
+                Err(_provider) if rustls::crypto::CryptoProvider::get_default().is_some() => {
+                    Ok(())
+                }
+                Err(provider) => Err(format!(
+                    "Failed to install rustls CryptoProvider, existing default: {:?}, attempted provider: {:?}",
+                    rustls::crypto::CryptoProvider::get_default(),
+                    provider
+                )),
+            }
+        })
+        .clone()
+        .map_err(|err_msg| {
+            info!("Failed to install rustls crypto provider: {err_msg}");
+            UnexpectedSnafu { err_msg }.build()
+        })
+}
 
 /// Query executor for rds. It can execute queries or generate a transaction executor.
 #[async_trait::async_trait]
