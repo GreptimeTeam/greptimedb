@@ -69,7 +69,7 @@ pub struct ReadColumns {
 }
 
 impl ReadColumns {
-    pub fn from_dedeuped_column_ids<I>(column_ids: I) -> Self
+    pub fn from_deduped_column_ids<I>(column_ids: I) -> Self
     where
         I: IntoIterator<Item = ColumnId>,
     {
@@ -224,21 +224,14 @@ pub fn read_columns_from_projection(
             continue;
         }
 
-        let col_id = metadata
+        let col = metadata
             .column_metadatas
             .get(root_idx)
             .with_context(|| InvalidRequestSnafu {
                 region_id: metadata.region_id,
                 reason: format!("projection index {} is out of bound", root_idx),
-            })
-            .map(|col| col.column_id)?;
-
-        let col = metadata
-            .column_by_id(col_id)
-            .with_context(|| InvalidRequestSnafu {
-                region_id: metadata.region_id,
-                reason: format!("read column id {} does not exist in metadata", col_id),
             })?;
+        let col_id = col.column_id;
 
         let nested_paths = paths_by_col
             .remove(&col.column_schema.name)
@@ -396,10 +389,15 @@ mod tests {
 
         let read_columns = read_columns_from_predicate(&predicate, &metadata);
 
-        let expected = ReadColumns {
-            cols: vec![ReadColumn::new(0, vec![]), ReadColumn::new(3, vec![])],
-        };
-        assert_eq!(expected, read_columns);
+        let mut actual_ids = read_columns.column_ids();
+        actual_ids.sort_unstable();
+        assert_eq!(vec![0, 3], actual_ids);
+        assert!(
+            read_columns
+                .columns()
+                .iter()
+                .all(|col| col.nested_paths().is_empty())
+        );
     }
 
     #[test]
