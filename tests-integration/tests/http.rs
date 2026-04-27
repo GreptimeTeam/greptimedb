@@ -135,6 +135,7 @@ macro_rules! http_tests {
                 test_pipeline_skip_error,
                 test_pipeline_filter,
                 test_pipeline_create_table,
+                test_pipeline_index_options,
 
                 test_otlp_metrics_new,
                 test_otlp_traces_v0,
@@ -3072,6 +3073,82 @@ transform:
         "CREATE TABLE IF NOT EXISTS `logs1` (\n  `timestamp` TIMESTAMP(9) NOT NULL,\n  `ip_address` STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  `username` STRING NULL,\n  `http_method` STRING NULL INVERTED INDEX,\n  `request_line` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),\n  `protocol` STRING NULL,\n  `status_code` INT NULL INVERTED INDEX,\n  `response_size` BIGINT NULL,\n  `message` STRING NULL,\n  TIME INDEX (`timestamp`),\n  PRIMARY KEY (`username`, `status_code`)\n)\nENGINE=mito\nWITH(\n  append_mode = 'true'\n)",
         sql
     );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_index_options(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_index_options").await;
+
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: ts
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - field: message
+    type: string
+    index:
+      type: fulltext
+      options:
+        analyzer: Chinese
+        case_sensitive: true
+        backend: bloom
+        granularity: 2048
+        false_positive_rate: 0.02
+  - field: trace_id
+    type: int64
+    index:
+      type: skipping
+      options:
+        granularity: 1024
+        false_positive_rate: 0.05
+        type: BLOOM
+  - field: ts
+    type: time
+    index: timestamp
+"#;
+
+    let res = client
+        .post("/v1/pipelines/index_options")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let data_body = r#"
+[
+  {
+    "message": "hello greptime",
+    "trace_id": 42,
+    "ts": "2024-05-25 20:16:37.217"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/ingest?db=public&table=pipeline_index_options&pipeline_name=index_options")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let expected_schema = "[[\"pipeline_index_options\",\"CREATE TABLE IF NOT EXISTS \\\"pipeline_index_options\\\" (\\n  \\\"message\\\" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true', false_positive_rate = '0.02', granularity = '2048'),\\n  \\\"trace_id\\\" BIGINT NULL SKIPPING INDEX WITH(false_positive_rate = '0.05', granularity = '1024', type = 'BLOOM'),\\n  \\\"ts\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"ts\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true'\\n)\"]]";
+    validate_data(
+        "pipeline_index_options_schema",
+        &client,
+        "show create table pipeline_index_options",
+        expected_schema,
+    )
+    .await;
 
     guard.remove_all().await;
 }

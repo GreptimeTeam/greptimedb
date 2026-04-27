@@ -162,6 +162,7 @@ impl TransformIndexOptions {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn as_fulltext(&self) -> Option<&FulltextOptions> {
         match self {
             TransformIndexOptions::Fulltext(options) => Some(options),
@@ -169,6 +170,7 @@ impl TransformIndexOptions {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn as_skipping(&self) -> Option<&SkippingIndexOptions> {
         match self {
             TransformIndexOptions::Skipping(options) => Some(options),
@@ -281,44 +283,42 @@ fn parse_transform_index(
             let index_str = yaml_string(value, TRANSFORM_INDEX)?;
             Ok((index_str.try_into()?, None))
         }
-        yaml_rust::Yaml::Hash(hash) => parse_transform_index_map(hash),
+        yaml_rust::Yaml::Hash(hash) => {
+            let mut index = None;
+            let mut index_options = None;
+
+            for (k, v) in hash {
+                let key = k
+                    .as_str()
+                    .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
+                match key {
+                    TRANSFORM_TYPE => {
+                        let index_str = yaml_string(v, TRANSFORM_INDEX_TYPE_FIELD)?;
+                        index = Some(index_str.try_into()?);
+                    }
+                    TRANSFORM_INDEX_OPTIONS => {
+                        index_options = Some(parse_transform_index_options(v)?);
+                    }
+                    _ => {
+                        return TransformIndexUnsupportedFieldSnafu {
+                            field: key.to_string(),
+                        }
+                        .fail();
+                    }
+                }
+            }
+
+            Ok((
+                index.context(TransformIndexTypeMustBeSetSnafu)?,
+                index_options,
+            ))
+        }
         _ => FieldMustBeTypeSnafu {
             field: TRANSFORM_INDEX,
             ty: "string or map",
         }
         .fail(),
     }
-}
-
-fn parse_transform_index_map(
-    hash: &yaml_rust::yaml::Hash,
-) -> Result<(Index, Option<HashMap<String, String>>)> {
-    let mut index = None;
-    let mut index_options = None;
-
-    for (k, v) in hash {
-        let key = k
-            .as_str()
-            .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
-        match key {
-            TRANSFORM_TYPE => {
-                let index_str = yaml_string(v, TRANSFORM_INDEX_TYPE_FIELD)?;
-                index = Some(index_str.try_into()?);
-            }
-            TRANSFORM_INDEX_OPTIONS => {
-                index_options = Some(parse_transform_index_options(v)?);
-            }
-            _ => {
-                return TransformIndexUnsupportedFieldSnafu {
-                    field: key.to_string(),
-                }
-                .fail();
-            }
-        }
-    }
-
-    let index = index.context(TransformIndexTypeMustBeSetSnafu)?;
-    Ok((index, index_options))
 }
 
 fn parse_transform_index_options(value: &yaml_rust::Yaml) -> Result<HashMap<String, String>> {
@@ -332,44 +332,21 @@ fn parse_transform_index_options(value: &yaml_rust::Yaml) -> Result<HashMap<Stri
         let key = k
             .as_str()
             .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
-        options.insert(
-            key.to_string(),
-            yaml_scalar_to_string(v, &format!("{TRANSFORM_INDEX_OPTIONS_FIELD}.{key}"))?,
-        );
+
+        let field = format!("{TRANSFORM_INDEX_OPTIONS_FIELD}.{key}");
+        let value = match v {
+            yaml_rust::Yaml::String(v) => v.clone(),
+            yaml_rust::Yaml::Boolean(v) => v.to_string(),
+            yaml_rust::Yaml::Integer(v) => v.to_string(),
+            yaml_rust::Yaml::Real(v) => v.clone(),
+            _ => {
+                return TransformIndexOptionMustBeScalarSnafu { field }.fail();
+            }
+        };
+        options.insert(key.to_string(), value);
     }
 
     Ok(options)
-}
-
-fn yaml_scalar_to_string(value: &yaml_rust::Yaml, field: &str) -> Result<String> {
-    match value {
-        yaml_rust::Yaml::String(v) => Ok(v.clone()),
-        yaml_rust::Yaml::Boolean(v) => Ok(v.to_string()),
-        yaml_rust::Yaml::Integer(v) => Ok(v.to_string()),
-        yaml_rust::Yaml::Real(v) => Ok(v.clone()),
-        _ => TransformIndexOptionMustBeScalarSnafu {
-            field: field.to_string(),
-        }
-        .fail(),
-    }
-}
-
-fn validate_index_option_keys(
-    index: Index,
-    options: &HashMap<String, String>,
-    validate: fn(&str) -> bool,
-) -> Result<()> {
-    for key in options.keys() {
-        ensure!(
-            validate(key),
-            TransformIndexOptionUnsupportedSnafu {
-                index: index.to_string(),
-                key: key.clone(),
-            }
-        );
-    }
-
-    Ok(())
 }
 
 fn lower_typed_transform_index_options<T>(
@@ -383,7 +360,15 @@ where
 {
     index_options
         .map(|opts| {
-            validate_index_option_keys(index, &opts, validate)?;
+            for key in opts.keys() {
+                ensure!(
+                    validate(key),
+                    TransformIndexOptionUnsupportedSnafu {
+                        index: index.to_string(),
+                        key: key.clone(),
+                    }
+                );
+            }
 
             let options = opts.try_into().context(TransformIndexOptionSnafu {
                 index: index.to_string(),
