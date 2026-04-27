@@ -570,6 +570,8 @@ impl PeerDiscovery for MetaClient {
         Ok(util::alive_frontends(
             &DefaultSystemTimer,
             nodes,
+            // TODO(weny): the heartbeat interval should be received from metasrv
+            // instead of using the default value.
             default_distributed_time_constants().frontend_heartbeat_interval,
         ))
     }
