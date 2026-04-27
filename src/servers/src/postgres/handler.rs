@@ -365,7 +365,7 @@ impl QueryParser for DefaultQueryParser {
                 .map(|DescribeResult { logical_plan }| logical_plan)
             {
                 Ok(PgSqlPlan {
-                    plan: SqlPlan::Plan(logical_plan, sql),
+                    plan: SqlPlan::Plan(logical_plan, stmt),
                     copy_to_stdout_format,
                 })
             } else {
@@ -442,7 +442,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                     return Ok(Response::EmptyQuery);
                 }
             }
-            SqlPlan::Plan(plan, query) => {
+            SqlPlan::Plan(plan, stmt) => {
                 let values = parameters_to_scalar_values(plan, portal)?;
                 let plan = plan
                     .clone()
@@ -452,7 +452,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                     .context(DataFusionSnafu)
                     .map_err(convert_err)?;
                 self.query_handler
-                    .do_exec_plan(plan, query.clone(), query_ctx.clone())
+                    .do_exec_plan(plan, Some(stmt.clone()), query_ctx.clone())
                     .await
             }
             SqlPlan::Statement(_stmt, query) => {

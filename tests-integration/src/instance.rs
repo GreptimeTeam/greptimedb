@@ -33,7 +33,7 @@ mod tests {
     use datafusion_expr::LogicalPlan;
     use frontend::error::{Error, Result};
     use frontend::instance::Instance;
-    use query::parser::QueryLanguageParser;
+    use query::parser::{QueryLanguageParser, QueryStatement};
     use query::query_engine::DefaultSerializer;
     use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
     use servers::query_handler::sql::SqlQueryHandler;
@@ -379,6 +379,82 @@ mod tests {
             OutputData::AffectedRows(rows) => assert_eq!(rows, 10),
             _ => unreachable!(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exec_plan_interceptor_plugin() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Default)]
+        struct ExecPlanHook {
+            pub(crate) pre_execute_called: AtomicBool,
+            pub(crate) post_execute_called: AtomicBool,
+        }
+
+        impl SqlQueryInterceptor for ExecPlanHook {
+            type Error = Error;
+
+            fn pre_execute(
+                &self,
+                _statement: &Statement,
+                _plan: Option<&LogicalPlan>,
+                _query_ctx: QueryContextRef,
+            ) -> Result<()> {
+                self.pre_execute_called.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+
+            fn post_execute(&self, output: Output, _query_ctx: QueryContextRef) -> Result<Output> {
+                self.post_execute_called.store(true, Ordering::Relaxed);
+                Ok(output)
+            }
+        }
+
+        let plugins = Plugins::new();
+        let hook = Arc::new(ExecPlanHook::default());
+        plugins.insert::<SqlQueryInterceptorRef<Error>>(hook.clone());
+
+        let standalone = GreptimeDbStandaloneBuilder::new("test_exec_plan_interceptor_plugin")
+            .with_plugin(plugins)
+            .build()
+            .await;
+        let instance = standalone.fe_instance().clone();
+
+        let sql = r#"CREATE TABLE demo(
+                            host STRING,
+                            ts TIMESTAMP,
+                            cpu DOUBLE NULL,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito;"#;
+        SqlQueryHandler::do_query(&*instance, sql, QueryContext::arc())
+            .await
+            .remove(0)
+            .unwrap();
+
+        let query_ctx = QueryContext::arc();
+        let stmt = QueryLanguageParser::parse_sql("SELECT * FROM demo", &query_ctx).unwrap();
+        let plan = instance
+            .statement_executor()
+            .plan(&stmt, query_ctx.clone())
+            .await
+            .unwrap();
+        let QueryStatement::Sql(sql_stmt) = stmt else {
+            unreachable!()
+        };
+
+        SqlQueryHandler::do_exec_plan(&*instance, plan, Some(sql_stmt), query_ctx.clone())
+            .await
+            .unwrap();
+
+        assert!(
+            hook.pre_execute_called.load(Ordering::Relaxed),
+            "pre_execute should be called for do_exec_plan"
+        );
+        assert!(
+            hook.post_execute_called.load(Ordering::Relaxed),
+            "post_execute should be called for do_exec_plan"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -33,7 +33,7 @@ pub trait SqlQueryHandler {
     async fn do_exec_plan(
         &self,
         plan: LogicalPlan,
-        query: String,
+        stmt: Option<Statement>,
         query_ctx: QueryContextRef,
     ) -> Result<Output>;
 

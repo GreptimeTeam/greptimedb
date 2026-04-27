@@ -630,12 +630,24 @@ impl Instance {
     async fn do_exec_plan_inner(
         &self,
         plan: LogicalPlan,
-        query: String,
+        stmt: Option<Statement>,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
 
-        if is_readonly_plan(&plan) {
+        let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let query_interceptor = query_interceptor_opt.as_ref();
+
+        if let Some(ref s) = stmt {
+            query_interceptor.pre_execute(s, Some(&plan), query_ctx.clone())?;
+        }
+
+        let query = stmt
+            .as_ref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| plan.display_indent().to_string());
+
+        let result = if is_readonly_plan(&plan) {
             let slow_query_timer = self
                 .slow_query_options
                 .enable
@@ -660,7 +672,7 @@ impl Instance {
                 slow_query_timer,
             );
 
-            let query_fut = self.exec_plan_with_timeout(plan, query_ctx);
+            let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone());
 
             CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
@@ -677,8 +689,10 @@ impl Instance {
                     Output { data, meta }
                 })
         } else {
-            self.exec_plan_with_timeout(plan, query_ctx).await
-        }
+            self.exec_plan_with_timeout(plan, query_ctx.clone()).await
+        };
+
+        result.and_then(|output| query_interceptor.post_execute(output, query_ctx))
     }
 
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_promql_query")]
@@ -767,10 +781,10 @@ impl SqlQueryHandler for Instance {
     async fn do_exec_plan(
         &self,
         plan: LogicalPlan,
-        query: String,
+        stmt: Option<Statement>,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        self.do_exec_plan_inner(plan, query, query_ctx)
+        self.do_exec_plan_inner(plan, stmt, query_ctx)
             .await
             .map_err(BoxedError::new)
             .context(server_error::ExecutePlanSnafu)
