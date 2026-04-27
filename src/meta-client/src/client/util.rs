@@ -37,11 +37,11 @@ pub(crate) fn is_not_leader(header: &Option<ResponseHeader>) -> bool {
 
 fn is_active_node(
     timer: &impl SystemTimer,
-    node: &NodeInfo,
+    last_activity_ts: i64,
     active_duration: std::time::Duration,
 ) -> bool {
     let now = timer.current_time_millis();
-    let elapsed = now.checked_sub(node.last_activity_ts).unwrap_or(0) as u64;
+    let elapsed = now.checked_sub(last_activity_ts).unwrap_or(0) as u64;
     elapsed < active_duration.as_millis() as u64
 }
 
@@ -52,8 +52,15 @@ pub(crate) fn alive_frontends(
 ) -> Vec<Peer> {
     nodes
         .into_iter()
-        .filter(|node| is_active_node(timer, node, active_duration))
-        .filter_map(|node| matches!(node.status, NodeStatus::Frontend(_)).then_some(node.peer))
+        .filter_map(|node| {
+            if matches!(node.status, NodeStatus::Frontend(_))
+                && is_active_node(timer, node.last_activity_ts, active_duration)
+            {
+                Some(node.peer)
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -67,13 +74,15 @@ pub(crate) fn alive_datanodes(
 
     nodes
         .into_iter()
-        .filter(|node| is_active_node(timer, node, active_duration))
-        .filter_map(|node| match node.status {
-            NodeStatus::Datanode(status) => {
+        .filter_map(|node| {
+            if let NodeStatus::Datanode(status) = node.status
+                && is_active_node(timer, node.last_activity_ts, active_duration)
+            {
                 let workloads = NodeWorkloads::Datanode(status.workloads);
                 filter(&workloads).then_some(node.peer)
+            } else {
+                None
             }
-            _ => None,
         })
         .collect()
 }
@@ -88,13 +97,15 @@ pub(crate) fn alive_flownodes(
 
     nodes
         .into_iter()
-        .filter(|node| is_active_node(timer, node, active_duration))
-        .filter_map(|node| match node.status {
-            NodeStatus::Flownode(status) => {
+        .filter_map(|node| {
+            if let NodeStatus::Flownode(status) = node.status
+                && is_active_node(timer, node.last_activity_ts, active_duration)
+            {
                 let workloads = NodeWorkloads::Flownode(status.workloads);
                 filter(&workloads).then_some(node.peer)
+            } else {
+                None
             }
-            _ => None,
         })
         .collect()
 }
