@@ -271,9 +271,10 @@ fn is_time_index_column(
     if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
         let schema = plan.schema();
         let column_field = schema.field(column_expr.index());
+        let time_index = region_scan_exec.time_index();
         return Ok(
             matches!(column_field.data_type(), DataType::Timestamp(_, _))
-                && column_field.name().as_ref() == region_scan_exec.time_index(),
+                && column_field.name() == time_index.as_str(),
         );
     }
 
