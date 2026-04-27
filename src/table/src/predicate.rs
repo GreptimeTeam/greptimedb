@@ -323,7 +323,7 @@ fn get_casted_timestamp_filter(
 ) -> Option<TimestampRange> {
     let (lit, op) = match (left, right) {
         (expr, Expr::Literal(scalar, _)) if is_casted_time_index(expr, ts_col_name) => {
-            (scalar, op.clone())
+            (scalar, *op)
         }
         (Expr::Literal(scalar, _), expr) if is_casted_time_index(expr, ts_col_name) => {
             (scalar, reverse_operator(op)?)

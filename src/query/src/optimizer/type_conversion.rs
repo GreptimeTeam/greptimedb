@@ -309,9 +309,12 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use datafusion_common::arrow::datatypes::Field;
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion_common::arrow::datatypes::{Field, TimeUnit as ArrowTimeUnit};
     use datafusion_common::{Column, DFSchema};
+    use datafusion_expr::simplify::SimplifyContext;
     use datafusion_expr::{Literal, LogicalPlanBuilder};
+    use datafusion_optimizer::simplify_expressions::ExprSimplifier;
     use datafusion_sql::TableReference;
     use session::context::QueryContext;
 
@@ -381,6 +384,102 @@ mod tests {
         assert_eq!(
             timestamp_to_timestamp_ms_expr(123_000_000, TimeUnit::Nanosecond),
             ScalarValue::TimestampMillisecond(Some(123), None).lit()
+        );
+    }
+
+    /// TODO(discord9): update this once datafusion update and fixes lossy downcast problem
+    #[test]
+    fn test_datafusion_simplifier_unwraps_timestamp_precision_cast_comparisons() {
+        let schema = Arc::new(
+            DFSchema::from_unqualified_fields(
+                vec![Arc::new(Field::new(
+                    "ts",
+                    DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                    false,
+                ))]
+                .into(),
+                HashMap::new(),
+            )
+            .unwrap(),
+        );
+        let simplifier = ExprSimplifier::new(SimplifyContext::default().with_schema(schema));
+
+        let ts = Expr::Column(Column::from_name("ts"));
+        let cast_ts = Expr::Cast(datafusion_expr::Cast {
+            expr: Box::new(ts.clone()),
+            data_type: DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+        });
+        let ms_lit = ScalarValue::TimestampMillisecond(Some(1000), None).lit();
+        let ns_lit = ScalarValue::TimestampNanosecond(Some(1_000_000_000), None).lit();
+
+        let simplify = |expr| simplifier.simplify(expr).unwrap();
+
+        assert_eq!(
+            simplify(cast_ts.clone().eq(ms_lit.clone())),
+            ts.clone().eq(ns_lit.clone()),
+        );
+        assert_eq!(
+            simplify(cast_ts.clone().not_eq(ms_lit.clone())),
+            ts.clone().not_eq(ns_lit.clone()),
+        );
+        assert_eq!(
+            simplify(cast_ts.clone().lt(ms_lit.clone())),
+            ts.clone().lt(ns_lit.clone()),
+        );
+        assert_eq!(
+            simplify(cast_ts.clone().lt_eq(ms_lit.clone())),
+            ts.clone().lt_eq(ns_lit.clone()),
+        );
+        assert_eq!(
+            simplify(cast_ts.clone().gt(ms_lit.clone())),
+            ts.clone().gt(ns_lit.clone()),
+        );
+        assert_eq!(
+            simplify(cast_ts.clone().gt_eq(ms_lit.clone())),
+            ts.clone().gt_eq(ns_lit.clone()),
+        );
+        assert_eq!(simplify(ms_lit.lt(cast_ts)), ts.gt(ns_lit),);
+    }
+
+    #[test]
+    fn test_datafusion_optimizer_pushes_filter_through_timestamp_cast_projection() {
+        let cast_ts = Expr::Cast(datafusion_expr::Cast {
+            expr: Box::new(Expr::Column(Column::from_name("column1"))),
+            data_type: DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+        });
+        let plan = LogicalPlanBuilder::values(vec![vec![
+            ScalarValue::TimestampNanosecond(Some(1_000_000_123), None).lit(),
+            1_i64.lit(),
+        ]])
+        .unwrap()
+        .project(vec![
+            cast_ts.alias("ts_ms"),
+            Expr::Column(Column::from_name("column2")).alias("val"),
+        ])
+        .unwrap()
+        .filter(
+            Expr::Column(Column::from_name("ts_ms")).eq(ScalarValue::TimestampMillisecond(
+                Some(1000),
+                None,
+            )
+            .lit()),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let optimized_plan = session_state.optimize(&plan).unwrap();
+        let optimized = optimized_plan.display_indent().to_string();
+
+        assert!(optimized.contains("Projection:"), "{optimized}");
+        assert!(
+            optimized.contains("Filter: column1 = TimestampNanosecond(1000000000, None)"),
+            "{optimized}"
+        );
+        assert!(
+            optimized.find("Projection:") < optimized.find("Filter:"),
+            "{optimized}"
         );
     }
 
