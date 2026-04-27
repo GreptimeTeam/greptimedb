@@ -69,7 +69,7 @@ pub struct ReadColumns {
 }
 
 impl ReadColumns {
-    pub fn from_column_ids<I>(column_ids: I) -> Self
+    pub fn from_dedeuped_column_ids<I>(column_ids: I) -> Self
     where
         I: IntoIterator<Item = ColumnId>,
     {
@@ -140,15 +140,6 @@ impl ReadColumn {
                         + path.iter().map(|node| node.capacity()).sum::<usize>()
                 })
                 .sum::<usize>()
-    }
-}
-
-impl<I> From<I> for ReadColumns
-where
-    I: IntoIterator<Item = ColumnId>,
-{
-    fn from(col_ids: I) -> Self {
-        ReadColumns::from_column_ids(col_ids)
     }
 }
 
@@ -227,7 +218,12 @@ pub fn read_columns_from_projection(
     }
 
     let mut read_cols = Vec::with_capacity(root_indices.len());
+    let mut seen = HashSet::with_capacity(root_indices.len());
     for root_idx in root_indices {
+        if !seen.insert(root_idx) {
+            continue;
+        }
+
         let col_id = metadata
             .column_metadatas
             .get(root_idx)
@@ -245,8 +241,7 @@ pub fn read_columns_from_projection(
             })?;
 
         let nested_paths = paths_by_col
-            .get(&col.column_schema.name)
-            .cloned()
+            .remove(&col.column_schema.name)
             .unwrap_or_default();
 
         read_cols.push(ReadColumn {
@@ -272,7 +267,7 @@ pub fn read_columns_from_predicate(
             if expr_to_columns(expr, &mut columns).is_err() {
                 continue;
             }
-            root_names.extend(columns.iter().map(|column| column.name.clone()));
+            root_names.extend(columns.drain().map(|column| column.name));
         }
     }
 
@@ -282,12 +277,12 @@ pub fn read_columns_from_predicate(
 
     // TODO(fys): Parse nested paths from predicate expressions and attach them
     // to read columns instead of always reading the whole root column.
-    let cols = metadata
-        .column_metadatas
-        .iter()
-        .filter(|column| root_names.contains(column.column_schema.name.as_str()))
-        .map(|column| ReadColumn::new(column.column_id, vec![]))
-        .collect();
+    let mut cols = Vec::with_capacity(root_names.len());
+    for name in root_names {
+        if let Some(column) = metadata.column_by_name(&name) {
+            cols.push(ReadColumn::new(column.column_id, vec![]));
+        }
+    }
 
     ReadColumns { cols }
 }
@@ -350,6 +345,31 @@ mod tests {
             ],
         };
         assert_eq!(expected, read_columns,);
+    }
+
+    #[test]
+    fn test_read_columns_from_projection_dedups_duplicate_indices() {
+        let metadata = new_test_metadata();
+        let projection = ProjectionInput::new(vec![1, 1, 0]).with_nested_paths(vec![
+            nested_path(&["field_0", "a"]),
+            nested_path(&["field_0", "b", "c"]),
+        ]);
+
+        let read_columns = read_columns_from_projection(projection, &metadata).unwrap();
+
+        let expected = ReadColumns {
+            cols: vec![
+                ReadColumn::new(
+                    3,
+                    vec![
+                        nested_path(&["field_0", "a"]),
+                        nested_path(&["field_0", "b", "c"]),
+                    ],
+                ),
+                ReadColumn::new(0, vec![]),
+            ],
+        };
+        assert_eq!(expected, read_columns);
     }
 
     #[test]

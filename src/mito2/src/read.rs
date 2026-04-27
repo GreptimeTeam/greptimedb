@@ -29,13 +29,13 @@ pub mod range;
 pub mod range_cache;
 #[cfg(not(feature = "test"))]
 pub(crate) mod range_cache;
+pub(crate) mod read_columns;
 pub mod scan_region;
 pub mod scan_util;
 pub(crate) mod seq_scan;
 pub mod series_scan;
 pub mod stream;
 pub(crate) mod unordered_scan;
-pub(crate) mod read_columns;
 
 use std::collections::HashMap;
 use std::sync::Arc;
