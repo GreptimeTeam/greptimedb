@@ -41,7 +41,7 @@ fn is_active_node(
     active_duration: std::time::Duration,
 ) -> bool {
     let now = timer.current_time_millis();
-    let elapsed = now.saturating_sub(node.last_activity_ts) as u64;
+    let elapsed = now.checked_sub(node.last_activity_ts).unwrap_or(0) as u64;
     elapsed < active_duration.as_millis() as u64
 }
 
