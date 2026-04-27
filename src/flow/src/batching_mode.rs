@@ -48,10 +48,6 @@ pub struct BatchingModeOptions {
     /// which prevent flownode from starting
     #[serde(with = "humantime_serde")]
     pub experimental_frontend_scan_timeout: Duration,
-    /// Frontend activity timeout
-    /// if frontend is down(not sending heartbeat) for more than frontend_activity_timeout, it will be removed from the list that flownode use to connect
-    #[serde(with = "humantime_serde")]
-    pub experimental_frontend_activity_timeout: Duration,
     /// Maximum number of filters allowed in a single query
     pub experimental_max_filter_num_per_query: usize,
     /// Time window merge distance
@@ -71,7 +67,6 @@ impl Default for BatchingModeOptions {
             grpc_conn_timeout: Duration::from_secs(5),
             experimental_grpc_max_retries: 3,
             experimental_frontend_scan_timeout: Duration::from_secs(30),
-            experimental_frontend_activity_timeout: Duration::from_secs(60),
             experimental_max_filter_num_per_query: 20,
             experimental_time_window_merge_threshold: 3,
             read_preference: Default::default(),

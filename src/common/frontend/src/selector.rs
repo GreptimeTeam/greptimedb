@@ -16,7 +16,7 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::cluster::{ClusterInfo, NodeInfo, Role};
+use common_meta::peer::{Peer, PeerDiscovery};
 use greptime_proto::v1::frontend::{
     KillProcessRequest, KillProcessResponse, ListProcessRequest, ListProcessResponse,
     frontend_client,
@@ -62,7 +62,7 @@ impl FrontendClient for frontend_client::FrontendClient<tonic::transport::channe
 pub trait FrontendSelector {
     async fn select<F>(&self, predicate: F) -> Result<Vec<FrontendClientPtr>>
     where
-        F: Fn(&NodeInfo) -> bool + Send;
+        F: Fn(&Peer) -> bool + Send;
 }
 
 #[derive(Debug, Clone)]
@@ -75,22 +75,22 @@ pub struct MetaClientSelector {
 impl FrontendSelector for MetaClientSelector {
     async fn select<F>(&self, predicate: F) -> Result<Vec<FrontendClientPtr>>
     where
-        F: Fn(&NodeInfo) -> bool + Send,
+        F: Fn(&Peer) -> bool + Send,
     {
-        let nodes = self
+        let peers = self
             .meta_client
-            .list_nodes(Some(Role::Frontend))
+            .active_frontends()
             .await
             .map_err(Box::new)
             .context(MetaSnafu)?;
 
-        nodes
+        peers
             .into_iter()
             .filter(predicate)
-            .map(|node| {
+            .map(|peer| {
                 let channel = self
                     .channel_manager
-                    .get(node.peer.addr)
+                    .get(peer.addr)
                     .map_err(Box::new)
                     .context(error::CreateChannelSnafu)?;
                 let client = frontend_client::FrontendClient::new(channel);
