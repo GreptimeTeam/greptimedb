@@ -184,13 +184,35 @@ impl PrimaryKeyFilter for CachedPrimaryKeyFilter {
     }
 }
 
+/// How the bulk-memtable read should apply each predicate.
+///
+/// Unlike the parquet reader, the bulk path has no prefilter pass; predicates
+/// either run row-wise inside the iterator or are pushed down to encoded-PK
+/// matching when the batch still carries the primary-key column.
 pub(crate) struct BulkFilterPlan {
+    /// Simple filters the iterator still has to evaluate row-wise on each batch.
     pub(crate) remaining_simple_filters: Vec<SimpleFilterContext>,
+    /// Tag predicates lowered to encoded-PK filters. `None` when the batch
+    /// already exposes raw tag columns or there are no tag predicates.
     pub(crate) pk_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
 }
 
+/// How the parquet reader should apply each predicate.
+///
+/// The reader runs in two phases. Predicates routed into `prefilter_builder`
+/// execute on a reduced column set first to compute a refined row selection;
+/// `remaining_simple_filters` execute alongside the full projection on the
+/// normal read path. The contract for what is precise vs best-effort is
+/// documented on [`build_reader_filter_plan`].
 pub(crate) struct ReaderFilterPlan {
+    /// Simple filters that must run on the normal read path: predicates with
+    /// `Matched` / `Pruned` outcomes (which carry expected-metadata
+    /// compatibility decisions later phases rely on), and predicates whose
+    /// column cannot be read directly during the prefilter pass.
     pub(crate) remaining_simple_filters: Vec<SimpleFilterContext>,
+    /// Pre-built state for the prefilter pass, or `None` when prefiltering is
+    /// not worthwhile (no prefilter columns selected, or the prefilter
+    /// projection would cover nearly the full read).
     pub(crate) prefilter_builder: Option<PrefilterContextBuilder>,
 }
 
@@ -244,6 +266,20 @@ pub(crate) fn build_bulk_filter_plan(
     }
 }
 
+/// Splits a query [`Predicate`] into a [`ReaderFilterPlan`]: predicates that can run
+/// during the prefilter pass (on a reduced projection, to compute a refined row
+/// selection) versus predicates that must run on the normal read path (alongside the
+/// full projection).
+///
+/// The prefilter pass is *best-effort pruning*: a physical-filter predicate is silently
+/// dropped when [`PhysicalFilterContext::new_opt`] returns `None` (column not in the
+/// projected arrow schema). This is safe because the DataFusion `FilterExec` above the
+/// reader always re-applies the original predicate, so the prefilter pass is purely a
+/// pruning hint.
+///
+/// Tag and timestamp predicates that lower to [`SimpleFilterEvaluator`] are an
+/// exception — the engine enforces them precisely, so the prefilter pass is the only
+/// place they execute. They are never silently dropped.
 pub(crate) fn build_reader_filter_plan(
     predicate: Option<&Predicate>,
     expected_metadata: Option<&RegionMetadata>,
@@ -324,9 +360,10 @@ pub(crate) fn build_reader_filter_plan(
             continue;
         }
 
-        // `PhysicalFilterContext::new_opt` returns `None` when the column is
-        // not in the projected arrow schema, so no extra `column_with_name`
-        // check is needed here.
+        // Best-effort physical-filter prefilter (see fn-level doc): `new_opt`
+        // returning `None` means the column is not in the projected arrow
+        // schema, and dropping the predicate is safe because the upper
+        // `FilterExec` re-applies it.
         if let Some(filter) =
             PhysicalFilterContext::new_opt(metadata, expected_metadata, read_format, expr)
             && can_direct_prefilter(filter.semantic_type())

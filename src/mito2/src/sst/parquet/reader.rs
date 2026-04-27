@@ -1672,6 +1672,19 @@ impl RowGroupReaderBuilder {
     /// If prefiltering is applicable (based on `build_ctx`), this performs a two-phase read:
     /// 1. Reads only the prefilter columns (e.g. PK column), applies filters to get a refined row selection
     /// 2. Reads the full projection with the refined row selection
+    ///
+    /// The prefilter pass is *best-effort pruning*, not the precise filter for the query.
+    /// Predicates that cannot be lowered to prefilter columns (column not projected,
+    /// expression not supported, etc.) are silently skipped. Correctness rests on the
+    /// DataFusion `FilterExec` above this reader, which always re-applies the original
+    /// predicate. Tag and timestamp predicates that flow through [`SimpleFilterEvaluator`]
+    /// are an exception — the engine enforces them precisely, so the prefilter pass is the
+    /// only place they execute. See [`build_reader_filter_plan`] for the bucketing rules.
+    ///
+    /// When the prefilter result selects no rows, the second read still issues but
+    /// parquet-rs short-circuits before any column-chunk IO: the row-group state machine
+    /// jumps to `Finished` once it sees `num_rows_selected() == 0`, so no fast path is
+    /// added here.
     pub(crate) async fn build(
         &self,
         build_ctx: RowGroupBuildContext<'_>,
