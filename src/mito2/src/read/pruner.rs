@@ -625,3 +625,67 @@ impl Pruner {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_builder_entry_with_cached_builder(
+        requirements: Option<Arc<[SupportStatAggr]>>,
+    ) -> FileBuilderEntry {
+        FileBuilderEntry {
+            builder: Some(Arc::new(FileRangeBuilder::default())),
+            stats_aware_skip_requirements: requirements,
+            remaining_ranges: 1,
+            waiters: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn keeps_cached_builder_when_stats_aware_skip_requirements_match() {
+        let requirements = vec![SupportStatAggr::CountRows];
+        let skip_config = StatsAwareSkipConfig::new(requirements.clone()).unwrap();
+        let mut entry = file_builder_entry_with_cached_builder(Some(requirements.into()));
+        let cached_builder = entry.builder.as_ref().unwrap().clone();
+
+        entry.clear_builder_if_skip_requirements_changed(Some(&skip_config));
+
+        assert!(entry.builder.is_some());
+        assert!(Arc::ptr_eq(
+            entry.builder.as_ref().unwrap(),
+            &cached_builder
+        ));
+        assert_eq!(
+            entry.stats_aware_skip_requirements.as_deref(),
+            Some(skip_config.requirements())
+        );
+    }
+
+    #[test]
+    fn clears_cached_builder_when_stats_aware_skip_requirements_change() {
+        let old_requirements = vec![SupportStatAggr::CountRows];
+        let new_requirements = vec![SupportStatAggr::CountNonNull {
+            column_name: "value".to_string(),
+        }];
+        let skip_config = StatsAwareSkipConfig::new(new_requirements).unwrap();
+        let mut entry = file_builder_entry_with_cached_builder(Some(old_requirements.into()));
+
+        PRUNER_ACTIVE_BUILDERS.inc();
+        entry.clear_builder_if_skip_requirements_changed(Some(&skip_config));
+
+        assert!(entry.builder.is_none());
+        assert!(entry.stats_aware_skip_requirements.is_none());
+    }
+
+    #[test]
+    fn clears_cached_builder_when_stats_aware_skip_is_removed() {
+        let old_requirements = vec![SupportStatAggr::CountRows];
+        let mut entry = file_builder_entry_with_cached_builder(Some(old_requirements.into()));
+
+        PRUNER_ACTIVE_BUILDERS.inc();
+        entry.clear_builder_if_skip_requirements_changed(None);
+
+        assert!(entry.builder.is_none());
+        assert!(entry.stats_aware_skip_requirements.is_none());
+    }
+}

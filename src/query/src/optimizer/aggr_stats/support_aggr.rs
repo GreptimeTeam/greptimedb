@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use datafusion_expr::utils::COUNT_STAR_EXPANSION;
-use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datafusion_physical_expr::expressions::{Column as PhysicalColumn, Literal};
 pub use store_api::region_engine::SupportStatAggr;

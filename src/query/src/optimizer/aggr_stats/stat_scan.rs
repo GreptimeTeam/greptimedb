@@ -66,16 +66,27 @@ fn build_state_scalar(
     field: &Field,
     requirement: &SupportStatAggr,
 ) -> Result<ScalarValue> {
-    let DataType::Struct(state_fields) = field.data_type() else {
+    let Some(value) = candidate.stat_value(requirement)? else {
         return Err(DataFusionError::Internal(format!(
-            "StatsScanExec expects struct state field, got {:?} for {}",
-            field.data_type(),
-            field.name()
+            "StatsScanExec built an ineligible stats candidate for requirement {:?}",
+            requirement
         )));
     };
+
+    let DataType::Struct(state_fields) = field.data_type() else {
+        let output_type = ConcreteDataType::from_arrow_type(field.data_type());
+        return value.try_to_scalar_value(&output_type).map_err(|error| {
+            DataFusionError::Internal(format!(
+                "StatsScanExec failed to convert state value for {}: {}",
+                field.name(),
+                error
+            ))
+        });
+    };
+
     if state_fields.len() != 1 {
         return Err(DataFusionError::Internal(format!(
-            "StatsScanExec only supports single-field state in v1, got {} fields for {}",
+            "StatsScanExec only supports single-field state, got {} fields for {}",
             state_fields.len(),
             field.name()
         )));
@@ -83,12 +94,6 @@ fn build_state_scalar(
 
     let inner_field = state_fields[0].as_ref();
     let output_type = ConcreteDataType::from_arrow_type(inner_field.data_type());
-    let Some(value) = candidate.stat_value(requirement)? else {
-        return Err(DataFusionError::Internal(format!(
-            "StatsScanExec built an ineligible stats candidate for requirement {:?}",
-            requirement
-        )));
-    };
 
     let scalar = value.try_to_scalar_value(&output_type).map_err(|error| {
         DataFusionError::Internal(format!(
@@ -422,19 +427,6 @@ mod tests {
         }
     }
 
-    fn single_state_field(
-        name: &str,
-        inner_name: &str,
-        inner_type: DataType,
-        inner_nullable: bool,
-    ) -> Field {
-        Field::new(
-            name,
-            DataType::Struct(vec![Field::new(inner_name, inner_type, inner_nullable)].into()),
-            true,
-        )
-    }
-
     fn build_region_metadata(partition_expr: Option<&str>) -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         builder.push_column_metadata(ColumnMetadata {
@@ -521,21 +513,6 @@ mod tests {
         batches.into_iter().next().unwrap()
     }
 
-    fn assert_struct_state_matches_field<'a>(
-        batch: &'a RecordBatch,
-        column_index: usize,
-        expected_field: &Field,
-    ) -> &'a StructArray {
-        let struct_array = batch
-            .column(column_index)
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .unwrap();
-        assert_eq!(struct_array.fields().len(), 1);
-        assert_eq!(struct_array.fields()[0].as_ref(), expected_field);
-        struct_array
-    }
-
     #[tokio::test]
     async fn stats_scan_exec_matches_datafusion_count_state_field() {
         let aggr_expr = build_datafusion_aggr_expr(count_udaf(), "count(value)");
@@ -543,12 +520,7 @@ mod tests {
         assert_eq!(state_fields.len(), 1);
 
         let inner_field = state_fields[0].as_ref().clone();
-        let schema = Arc::new(arrow_schema::Schema::new(vec![single_state_field(
-            "count_state",
-            inner_field.name(),
-            inner_field.data_type().clone(),
-            inner_field.is_nullable(),
-        )]));
+        let schema = Arc::new(arrow_schema::Schema::new(vec![inner_field.clone()]));
         let region_metadata = build_region_metadata(Some("host = 'a'"));
         let scanner = StaticStatsScanner {
             schema: region_metadata.schema.clone(),
@@ -571,8 +543,8 @@ mod tests {
 
         let batch = collect_single_batch(&exec).await;
 
-        let struct_array = assert_struct_state_matches_field(&batch, 0, &inner_field);
-        let values = struct_array
+        assert_eq!(batch.schema().field(0).as_ref(), &inner_field);
+        let values = batch
             .column(0)
             .as_any()
             .downcast_ref::<Int64Array>()
@@ -587,12 +559,7 @@ mod tests {
         assert_eq!(state_fields.len(), 1);
 
         let inner_field = state_fields[0].as_ref().clone();
-        let schema = Arc::new(arrow_schema::Schema::new(vec![single_state_field(
-            "min_state",
-            inner_field.name(),
-            inner_field.data_type().clone(),
-            inner_field.is_nullable(),
-        )]));
+        let schema = Arc::new(arrow_schema::Schema::new(vec![inner_field.clone()]));
         let region_metadata = build_region_metadata(Some("host = 'a'"));
         let scanner = StaticStatsScanner {
             schema: region_metadata.schema.clone(),
@@ -618,8 +585,8 @@ mod tests {
 
         let batch = collect_single_batch(&exec).await;
 
-        let struct_array = assert_struct_state_matches_field(&batch, 0, &inner_field);
-        let values = struct_array
+        assert_eq!(batch.schema().field(0).as_ref(), &inner_field);
+        let values = batch
             .column(0)
             .as_any()
             .downcast_ref::<Int64Array>()
@@ -634,12 +601,7 @@ mod tests {
         assert_eq!(state_fields.len(), 1);
 
         let inner_field = state_fields[0].as_ref().clone();
-        let schema = Arc::new(arrow_schema::Schema::new(vec![single_state_field(
-            "max_state",
-            inner_field.name(),
-            inner_field.data_type().clone(),
-            inner_field.is_nullable(),
-        )]));
+        let schema = Arc::new(arrow_schema::Schema::new(vec![inner_field.clone()]));
         let region_metadata = build_region_metadata(Some("host = 'a'"));
         let scanner = StaticStatsScanner {
             schema: region_metadata.schema.clone(),
@@ -665,8 +627,8 @@ mod tests {
 
         let batch = collect_single_batch(&exec).await;
 
-        let struct_array = assert_struct_state_matches_field(&batch, 0, &inner_field);
-        let values = struct_array
+        assert_eq!(batch.schema().field(0).as_ref(), &inner_field);
+        let values = batch
             .column(0)
             .as_any()
             .downcast_ref::<Int64Array>()
@@ -680,17 +642,12 @@ mod tests {
         let state_fields = aggr_expr.state_fields().unwrap();
         assert!(state_fields.len() > 1);
 
-        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
-            "avg_state",
-            DataType::Struct(
-                state_fields
-                    .iter()
-                    .map(|field| field.as_ref().clone())
-                    .collect::<Vec<_>>()
-                    .into(),
-            ),
-            true,
-        )]));
+        let schema = Arc::new(arrow_schema::Schema::new(
+            state_fields
+                .iter()
+                .map(|field| field.as_ref().clone())
+                .collect::<Vec<_>>(),
+        ));
         let region_metadata = build_region_metadata(Some("host = 'a'"));
         let scanner = StaticStatsScanner {
             schema: region_metadata.schema.clone(),
@@ -714,18 +671,14 @@ mod tests {
         let mut stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
         let error = stream.next().await.unwrap().unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("only supports single-field state in v1")
-        );
+        assert!(error.to_string().contains("schema/requirement mismatch"));
     }
 
     #[tokio::test]
     async fn stats_scan_exec_emits_state_rows_for_eligible_files() {
         let schema = Arc::new(arrow_schema::Schema::new(vec![
-            single_state_field("count_state", "count[count]", DataType::Int64, false),
-            single_state_field("max_state", "max[max]", DataType::Int64, true),
+            Field::new("count[count]", DataType::Int64, false),
+            Field::new("max[max]", DataType::Int64, true),
         ]));
         let requirements = vec![
             SupportStatAggr::CountNonNull {
@@ -778,25 +731,15 @@ mod tests {
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 1);
 
-        let count_state = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .unwrap();
-        let count_values = count_state
+        let count_values = batch
             .column(0)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(count_values.value(0), 7);
 
-        let max_state = batch
+        let max_values = batch
             .column(1)
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .unwrap();
-        let max_values = max_state
-            .column(0)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
@@ -805,8 +748,7 @@ mod tests {
 
     #[tokio::test]
     async fn stats_scan_exec_emits_no_batches_when_all_files_fallback() {
-        let schema = Arc::new(arrow_schema::Schema::new(vec![single_state_field(
-            "count_state",
+        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
             "count[count]",
             DataType::Int64,
             false,
@@ -846,8 +788,7 @@ mod tests {
 
     #[tokio::test]
     async fn stats_scan_exec_count_rows_uses_file_num_rows_without_row_groups() {
-        let schema = Arc::new(arrow_schema::Schema::new(vec![single_state_field(
-            "count_state",
+        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
             "count[count]",
             DataType::Int64,
             false,
@@ -880,12 +821,7 @@ mod tests {
         let batch = collect_single_batch(&exec).await;
         assert_eq!(batch.num_rows(), 2);
 
-        let count_state = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .unwrap();
-        let count_values = count_state
+        let count_values = batch
             .column(0)
             .as_any()
             .downcast_ref::<Int64Array>()

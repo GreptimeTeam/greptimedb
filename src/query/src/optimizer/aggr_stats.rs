@@ -222,22 +222,170 @@ impl<'a> RewriteTarget<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+    use std::sync::{Arc, Mutex};
+
     use api::v1::SemanticType;
-    use common_recordbatch::EmptyRecordBatchStream;
+    use bytes::Bytes;
+    use common_error::ext::BoxedError;
+    use common_query::aggr_stats::StatsCandidateFile;
+    use common_recordbatch::{
+        EmptyRecordBatchStream, RecordBatch, RecordBatches, SendableRecordBatchStream,
+    };
     use datafusion::functions_aggregate::average::avg_udaf;
     use datafusion::functions_aggregate::count::count_udaf;
+    use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use datafusion::parquet::file::properties::WriterProperties;
     use datafusion::physical_plan::aggregates::PhysicalGroupBy;
+    use datafusion::physical_plan::collect;
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion::scalar::ScalarValue;
     use datafusion_expr::utils::COUNT_STAR_EXPANSION;
     use datafusion_physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
     use datafusion_physical_expr::expressions::{Column as PhysicalColumn, Literal};
+    use datatypes::arrow::array::Float64Array;
+    use datatypes::arrow::datatypes::DataType;
+    use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
     use datatypes::data_type::ConcreteDataType;
+    use datatypes::prelude::VectorRef;
     use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::region_engine::SinglePartitionScanner;
+    use store_api::region_engine::{
+        FileStatsItem, PrepareRequest, QueryScanContext, RegionScanner, RowGroupStatsItem,
+        ScannerProperties, SendableFileStatsStream, SinglePartitionScanner,
+    };
     use store_api::storage::{RegionId, ScanRequest};
 
     use super::*;
+
+    #[derive(Clone, Debug)]
+    struct ScanTestFile {
+        id: String,
+        stats: FileStatsItem,
+        batch: RecordBatch,
+    }
+
+    #[derive(Debug)]
+    struct RecordingStatsScanner {
+        schema: Arc<Schema>,
+        metadata: store_api::metadata::RegionMetadataRef,
+        properties: ScannerProperties,
+        files: Vec<ScanTestFile>,
+        scanned_file_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingStatsScanner {
+        fn new(
+            schema: Arc<Schema>,
+            metadata: store_api::metadata::RegionMetadataRef,
+            files: Vec<ScanTestFile>,
+            scanned_file_ids: Arc<Mutex<Vec<String>>>,
+        ) -> Self {
+            let total_rows = files.iter().map(|file| file.batch.num_rows()).sum();
+            Self {
+                schema,
+                metadata,
+                properties: ScannerProperties::default()
+                    .with_append_mode(true)
+                    .with_total_rows(total_rows),
+                files,
+                scanned_file_ids,
+            }
+        }
+
+        fn should_skip_file(&self, file: &ScanTestFile) -> bool {
+            let requirements = self.properties.stats_aware_skip_requirements();
+            !requirements.is_empty()
+                && StatsCandidateFile::from_file_stats(
+                    &file.stats,
+                    self.metadata.partition_expr.as_deref(),
+                    requirements,
+                    &self.metadata.schema,
+                )
+                .unwrap()
+                .is_some()
+        }
+    }
+
+    impl RegionScanner for RecordingStatsScanner {
+        fn name(&self) -> &str {
+            "RecordingStatsScanner"
+        }
+
+        fn properties(&self) -> &ScannerProperties {
+            &self.properties
+        }
+
+        fn schema(&self) -> Arc<Schema> {
+            self.schema.clone()
+        }
+
+        fn metadata(&self) -> store_api::metadata::RegionMetadataRef {
+            self.metadata.clone()
+        }
+
+        fn prepare(&mut self, request: PrepareRequest) -> std::result::Result<(), BoxedError> {
+            self.properties.prepare(request);
+            Ok(())
+        }
+
+        fn scan_partition(
+            &self,
+            _ctx: &QueryScanContext,
+            _metrics_set: &ExecutionPlanMetricsSet,
+            _partition: usize,
+        ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+            let batches = self
+                .files
+                .iter()
+                .filter(|file| !self.should_skip_file(file))
+                .map(|file| {
+                    self.scanned_file_ids.lock().unwrap().push(file.id.clone());
+                    file.batch.clone()
+                })
+                .collect::<Vec<_>>();
+
+            Ok(RecordBatches::try_new(self.schema.clone(), batches)
+                .unwrap()
+                .as_stream())
+        }
+
+        fn scan_stats(
+            &self,
+            _ctx: &QueryScanContext,
+        ) -> std::result::Result<SendableFileStatsStream, BoxedError> {
+            Ok(Box::pin(futures::stream::iter(
+                self.files.clone().into_iter().map(|file| Ok(file.stats)),
+            )))
+        }
+
+        fn has_predicate_without_region(&self) -> bool {
+            false
+        }
+
+        fn add_dyn_filter_to_predicate(
+            &mut self,
+            filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
+        ) -> Vec<bool> {
+            vec![false; filter_exprs.len()]
+        }
+
+        fn set_logical_region(&mut self, logical_region: bool) {
+            self.properties.set_logical_region(logical_region);
+        }
+    }
+
+    impl datafusion::physical_plan::DisplayAs for RecordingStatsScanner {
+        fn fmt_as(
+            &self,
+            _t: datafusion::physical_plan::DisplayFormatType,
+            f: &mut std::fmt::Formatter<'_>,
+        ) -> std::fmt::Result {
+            write!(f, "RecordingStatsScanner")
+        }
+    }
 
     fn build_count_expr(schema: arrow_schema::SchemaRef) -> Arc<AggregateFunctionExpr> {
         Arc::new(
@@ -338,6 +486,124 @@ mod tests {
             append_mode,
             metadata,
             None,
+        ));
+        Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap())
+    }
+
+    fn build_region_metadata(
+        partition_expr: Option<&str>,
+    ) -> store_api::metadata::RegionMetadataRef {
+        let mut metadata_builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        metadata_builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![]);
+        let mut metadata = metadata_builder.build().unwrap();
+        metadata.set_partition_expr(partition_expr.map(str::to_string));
+        Arc::new(metadata)
+    }
+
+    fn build_float_row_groups(chunks: &[Vec<Option<f64>>]) -> Vec<RowGroupStatsItem> {
+        let arrow_schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "v0",
+            DataType::Float64,
+            true,
+        )]));
+        let mut buffer = Cursor::new(Vec::new());
+        let props = WriterProperties::builder().build();
+        let mut writer =
+            ArrowWriter::try_new(&mut buffer, arrow_schema.clone(), Some(props)).unwrap();
+
+        for chunk in chunks {
+            let batch = ArrowRecordBatch::try_new(
+                arrow_schema.clone(),
+                vec![Arc::new(Float64Array::from(chunk.clone()))],
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+        }
+        writer.close().unwrap();
+
+        let metadata = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(buffer.into_inner()))
+            .unwrap()
+            .metadata()
+            .clone();
+        metadata
+            .row_groups()
+            .iter()
+            .enumerate()
+            .map(|(row_group_index, metadata)| RowGroupStatsItem {
+                row_group_index,
+                metadata: Arc::new(metadata.clone()),
+            })
+            .collect()
+    }
+
+    fn build_scan_test_file(
+        schema: Arc<Schema>,
+        id: &str,
+        partition_expr: &str,
+        values: Vec<Option<f64>>,
+        with_row_groups: bool,
+        ts_start: i64,
+    ) -> ScanTestFile {
+        let batch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(Float64Vector::from(values.clone())) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_values(
+                    (0..values.len()).map(|offset| ts_start + offset as i64),
+                )) as VectorRef,
+            ],
+        )
+        .unwrap();
+
+        ScanTestFile {
+            id: id.to_string(),
+            stats: FileStatsItem {
+                num_rows: Some(values.len() as u64),
+                file_partition_expr: Some(partition_expr.to_string()),
+                row_groups: if with_row_groups {
+                    build_float_row_groups(&[values])
+                } else {
+                    vec![]
+                },
+            },
+            batch,
+        }
+    }
+
+    fn build_recording_region_scan(
+        files: Vec<ScanTestFile>,
+        scanned_file_ids: Arc<Mutex<Vec<String>>>,
+    ) -> Arc<RegionScanExec> {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let metadata = build_region_metadata(Some("host = 'a'"));
+        let scanner = Box::new(RecordingStatsScanner::new(
+            schema,
+            metadata,
+            files,
+            scanned_file_ids,
         ));
         Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap())
     }
@@ -514,6 +780,70 @@ mod tests {
             .unwrap();
 
         assert_final_over_partial_without_union(&optimized);
+    }
+
+    #[tokio::test]
+    async fn rewrite_mixed_plan_returns_correct_result_and_scans_only_fallback_files() {
+        let scanned_file_ids = Arc::new(Mutex::new(Vec::new()));
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let region_scan = build_recording_region_scan(
+            vec![
+                build_scan_test_file(
+                    schema.clone(),
+                    "eligible-a",
+                    "host = 'a'",
+                    vec![Some(1.0), None, Some(2.0)],
+                    true,
+                    0,
+                ),
+                build_scan_test_file(
+                    schema.clone(),
+                    "eligible-b",
+                    "host = 'a'",
+                    vec![Some(3.0), Some(4.0)],
+                    true,
+                    10,
+                ),
+                build_scan_test_file(
+                    schema,
+                    "fallback-c",
+                    "host = 'a'",
+                    vec![Some(5.0), None, Some(6.0)],
+                    false,
+                    20,
+                ),
+            ],
+            scanned_file_ids.clone(),
+        );
+
+        let plan = build_final_over_partial_plan_with(region_scan, build_count_expr, None);
+        let optimized = AggrStatsPhysicalRule
+            .optimize(plan, &ConfigOptions::default())
+            .unwrap();
+
+        let batches = collect(
+            optimized,
+            Arc::new(datafusion::execution::TaskContext::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(batches.len(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 6);
+
+        let scanned = scanned_file_ids.lock().unwrap().clone();
+        assert_eq!(scanned, vec!["fallback-c".to_string()]);
     }
 
     fn assert_rewritten_stats_requirement(
