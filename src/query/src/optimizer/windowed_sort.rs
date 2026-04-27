@@ -273,7 +273,7 @@ fn is_time_index_column(
         let column_field = schema.field(column_expr.index());
         return Ok(
             matches!(column_field.data_type(), DataType::Timestamp(_, _))
-                && column_field.name() == region_scan_exec.time_index(),
+                && *column_field.name() == region_scan_exec.time_index(),
         );
     }
 
