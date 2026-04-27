@@ -16,6 +16,7 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_FLOW_TABLE_ID;
 use common_error::ext::BoxedError;
+use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::FlowId;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_info::FlowInfoValue;
@@ -168,6 +169,10 @@ impl InformationSchemaFlows {
             expire_after: flow_info.expire_after(),
             eval_interval: flow_info.eval_interval(),
             comment,
+            flow_options: sql::statements::OptionMap::from_filtered_string_map(
+                flow_info.options(),
+                &[FlowType::FLOW_TYPE_KEY],
+            ),
             query,
         };
 

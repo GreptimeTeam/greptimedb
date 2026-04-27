@@ -1047,8 +1047,20 @@ pub fn to_create_flow_task_expr(
         eval_interval: eval_interval.map(|seconds| api::v1::EvalInterval { seconds }),
         comment: create_flow.comment.unwrap_or_default(),
         sql: create_flow.query.to_string(),
-        flow_options: Default::default(),
+        flow_options: stringify_flow_options(create_flow.flow_options)?,
     })
+}
+
+fn stringify_flow_options(flow_options: OptionMap) -> Result<HashMap<String, String>> {
+    let options_len = flow_options.len();
+    let flow_options = flow_options.into_map();
+    ensure!(
+        flow_options.len() == options_len,
+        InvalidSqlSnafu {
+            err_msg: "flow options only support scalar string-compatible values".to_string(),
+        }
+    );
+    Ok(flow_options)
 }
 
 /// sanitize the flow name, remove possible quotes
@@ -1065,6 +1077,8 @@ fn sanitize_flow_name(mut flow_name: ObjectName) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use api::v1::{SetDatabaseOptions, UnsetDatabaseOptions};
     use datatypes::value::Value;
     use session::context::{QueryContext, QueryContextBuilder};
@@ -1327,6 +1341,75 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             to_dot_sep(expr.source_table_names[0].clone())
         );
         assert_eq!("SELECT max(c1), min(c2) FROM schema_2.table_2", expr.sql);
+        assert!(expr.flow_options.is_empty());
+
+        let sql = r"
+CREATE FLOW task_3
+SINK TO schema_1.table_1
+WITH (defer_on_missing_source = 'true', foo = 'bar')
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+        assert_eq!(
+            expr.flow_options,
+            HashMap::from([
+                ("defer_on_missing_source".to_string(), "true".to_string()),
+                ("foo".to_string(), "bar".to_string()),
+            ])
+        );
+
+        let sql = r"
+CREATE FLOW task_4
+SINK TO schema_1.table_1
+WITH (defer_on_missing_source = true)
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+        assert_eq!(
+            expr.flow_options,
+            HashMap::from([("defer_on_missing_source".to_string(), "true".to_string(),)])
+        );
+
+        let sql = r"
+CREATE FLOW task_5
+SINK TO schema_1.table_1
+WITH (defer_on_missing_source = [true])
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let res = to_create_flow_task_expr(create_flow, &QueryContext::arc());
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("flow options only support scalar string-compatible values")
+        );
 
         let sql = r"
 CREATE FLOW abc.`task_2`
