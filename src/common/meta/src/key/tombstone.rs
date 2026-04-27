@@ -15,13 +15,17 @@
 use std::collections::HashMap;
 
 use common_telemetry::debug;
+use futures_util::stream::BoxStream;
 use snafu::ensure;
 
 use crate::error::{self, Result};
+use crate::key::TABLE_NAME_KEY_PREFIX;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
-use crate::rpc::store::{BatchDeleteRequest, BatchGetRequest};
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
+use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchDeleteRequest, BatchGetRequest, RangeRequest};
 
 /// [TombstoneManager] provides the ability to:
 /// - logically delete values
@@ -54,6 +58,49 @@ impl TombstoneManager {
 
     pub fn to_tombstone(&self, key: &[u8]) -> Vec<u8> {
         [self.tombstone_prefix.as_bytes(), key].concat()
+    }
+
+    /// Removes the tombstone prefix from a tombstoned key.
+    pub fn strip_tombstone_prefix<'a>(&self, tombstone_key: &'a [u8]) -> Result<&'a [u8]> {
+        ensure!(
+            tombstone_key.starts_with(self.tombstone_prefix.as_bytes()),
+            error::UnexpectedSnafu {
+                err_msg: format!(
+                    "The key '{}' does not start with tombstone prefix '{}'.",
+                    String::from_utf8_lossy(tombstone_key),
+                    self.tombstone_prefix
+                ),
+            }
+        );
+
+        Ok(&tombstone_key[self.tombstone_prefix.len()..])
+    }
+
+    /// Gets a single tombstoned value by its original key.
+    pub async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
+        let tombstone_key = self.to_tombstone(key);
+        self.kv_backend.get(&tombstone_key).await
+    }
+
+    /// Streams all tombstoned key-value pairs.
+    pub fn tombstones(&self) -> BoxStream<'static, Result<KeyValue>> {
+        self.scan_prefix(self.tombstone_prefix.as_bytes().to_vec())
+    }
+
+    /// Streams tombstoned table-name entries only.
+    pub fn tombstoned_table_names(&self) -> BoxStream<'static, Result<KeyValue>> {
+        self.scan_prefix(
+            format!("{}{}/", self.tombstone_prefix, TABLE_NAME_KEY_PREFIX).into_bytes(),
+        )
+    }
+
+    /// Streams tombstoned entries under the provided prefix.
+    fn scan_prefix(&self, prefix: Vec<u8>) -> BoxStream<'static, Result<KeyValue>> {
+        let req = RangeRequest::new().with_prefix(prefix);
+        let stream = PaginationStream::new(self.kv_backend.clone(), req, DEFAULT_PAGE_SIZE, Ok)
+            .into_stream();
+
+        Box::pin(stream)
     }
 
     #[cfg(test)]
