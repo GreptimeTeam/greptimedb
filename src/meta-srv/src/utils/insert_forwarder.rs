@@ -15,10 +15,8 @@
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
-use client::error::{ExternalSnafu, Result as ClientResult};
+use client::error::Result as ClientResult;
 use client::inserter::{Context, InsertOptions, Inserter};
-use common_error::ext::BoxedError;
-use snafu::ResultExt;
 
 use crate::utils::database::{DatabaseContext, DatabaseOperatorRef};
 
@@ -32,7 +30,8 @@ pub struct InsertForwarder {
 }
 
 impl InsertForwarder {
-    /// Creates a new InsertForwarder with the given peer lookup service.
+    /// Creates a new [`InsertForwarder`] with the given shared database operator
+    /// and optional insert options.
     pub fn new(database_operator: DatabaseOperatorRef, options: Option<InsertOptions>) -> Self {
         Self {
             database_operator,
@@ -60,9 +59,7 @@ impl Inserter for InsertForwarder {
                     .map(|(k, v)| (*k, v.as_str()))
                     .collect::<Vec<_>>(),
             )
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+            .await?;
 
         Ok(())
     }

@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use client::error::{ExternalSnafu, Result as ClientResult};
 use client::{Client, Database, Output};
 use common_error::ext::BoxedError;
 use common_meta::peer::PeerDiscoveryRef;
@@ -21,7 +22,7 @@ use common_telemetry::{debug, warn};
 use snafu::{ResultExt, ensure};
 use tokio::sync::RwLock;
 
-use crate::error::{ListActiveFrontendsSnafu, NoAvailableFrontendSnafu, OtherSnafu, Result};
+use crate::error::{ListActiveFrontendsSnafu, NoAvailableFrontendSnafu, Result};
 
 pub type DatabaseOperatorRef = Arc<DatabaseOperator>;
 
@@ -62,17 +63,13 @@ impl DatabaseOperator {
         ctx: &DatabaseContext<'_>,
         requests: api::v1::RowInsertRequests,
         hints: &[(&str, &str)],
-    ) -> Result<u32> {
+    ) -> ClientResult<u32> {
         let client = self.maybe_init_client().await?;
         let database = Database::new(ctx.catalog, ctx.schema, client);
 
-        let result = database
-            .row_inserts_with_hints(requests, hints)
-            .await
-            .map_err(BoxedError::new)
-            .context(OtherSnafu);
+        let result = database.row_inserts_with_hints(requests, hints).await;
 
-        if result.is_err() {
+        if should_reset_client(&result) {
             self.reset_client().await;
         }
 
@@ -80,17 +77,17 @@ impl DatabaseOperator {
     }
 
     /// Executes a serialized logical plan on an available frontend.
-    pub async fn logical_plan(&self, ctx: &DatabaseContext<'_>, plan: Vec<u8>) -> Result<Output> {
+    pub async fn logical_plan(
+        &self,
+        ctx: &DatabaseContext<'_>,
+        plan: Vec<u8>,
+    ) -> ClientResult<Output> {
         let client = self.maybe_init_client().await?;
         let database = Database::new(ctx.catalog, ctx.schema, client);
 
-        let result = database
-            .logical_plan(plan)
-            .await
-            .map_err(BoxedError::new)
-            .context(OtherSnafu);
+        let result = database.logical_plan(plan).await;
 
-        if result.is_err() {
+        if should_reset_client(&result) {
             self.reset_client().await;
         }
 
@@ -116,13 +113,22 @@ impl DatabaseOperator {
         Ok(Client::with_urls(urls))
     }
 
-    async fn maybe_init_client(&self) -> Result<Client> {
+    async fn maybe_init_client(&self) -> ClientResult<Client> {
+        if let Some(client) = self.client.read().await.as_ref() {
+            return Ok(client.clone());
+        }
+
+        let client = self
+            .build_client()
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
         let mut guard = self.client.write().await;
         if let Some(client) = guard.as_ref() {
             return Ok(client.clone());
         }
 
-        let client = self.build_client().await?;
         *guard = Some(client.clone());
         Ok(client)
     }
@@ -132,4 +138,12 @@ impl DatabaseOperator {
         let mut guard = self.client.write().await;
         guard.take();
     }
+}
+
+fn should_reset_client<T>(result: &client::error::Result<T>) -> bool {
+    result
+        .as_ref()
+        .err()
+        .map(|err| err.is_connection_error())
+        .unwrap_or(false)
 }
