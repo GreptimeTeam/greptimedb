@@ -649,6 +649,7 @@ pub(crate) async fn build_flat_sources(
     let mut ordered_sources = Vec::with_capacity(num_indices);
     ordered_sources.resize_with(num_indices, || None);
     let mut file_scan_tasks = Vec::new();
+    let pre_filter_mode = stream_ctx.range_pre_filter_mode(part_range);
 
     for (position, index) in range_meta.row_group_indices.iter().enumerate() {
         if stream_ctx.is_mem_range_index(*index) {
@@ -692,8 +693,13 @@ pub(crate) async fn build_flat_sources(
                 ordered_sources[position] = Some(Box::pin(stream) as _);
             }
         } else {
-            let stream =
-                scan_util::maybe_scan_flat_other_ranges(stream_ctx, *index, part_metrics).await?;
+            let stream = scan_util::maybe_scan_flat_other_ranges(
+                stream_ctx,
+                *index,
+                part_metrics,
+                pre_filter_mode,
+            )
+            .await?;
             ordered_sources[position] = Some(stream);
         }
     }
