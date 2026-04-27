@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(fys): remove it until this module is used
+// TODO(fys): remove this once the module is used
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashSet};
@@ -195,6 +195,12 @@ fn merge_nested_paths(merged: &mut Vec<NestedPath>, incoming: Vec<NestedPath>) {
 /// Note: If `projection.projection` is empty, this function still reads the
 /// time index column so the scan can preserve row counts for empty-output
 /// queries such as `SELECT COUNT(*)`.
+///
+/// Order:
+/// - This function keeps the first-seen order from `projection.projection`
+///   (duplicate indices are skipped).
+/// - Keeping a stable order makes [`ReadColumns`] comparisons deterministic
+///   (`Eq`/`Hash`) and avoids cache-key instability in upper layers.
 pub fn read_columns_from_projection(
     projection: ProjectionInput,
     metadata: &RegionMetadataRef,
@@ -229,7 +235,7 @@ pub fn read_columns_from_projection(
             .get(root_idx)
             .with_context(|| InvalidRequestSnafu {
                 region_id: metadata.region_id,
-                reason: format!("projection index {} is out of bound", root_idx),
+                reason: format!("projection index {} is out of bounds", root_idx),
             })?;
         let col_id = col.column_id;
 
@@ -247,6 +253,12 @@ pub fn read_columns_from_projection(
 }
 
 /// Build [`ReadColumns`] from [`PredicateGroup`].
+///
+/// Order:
+/// - This function follows `metadata.column_metadatas` order when materializing
+///   columns from predicate-referenced names.
+/// - Using metadata order keeps the output deterministic for [`ReadColumns`]
+///   equality/hash checks and for cache keys derived from read columns.
 pub fn read_columns_from_predicate(
     predicate: &PredicateGroup,
     metadata: &RegionMetadataRef,
@@ -271,8 +283,8 @@ pub fn read_columns_from_predicate(
     // TODO(fys): Parse nested paths from predicate expressions and attach them
     // to read columns instead of always reading the whole root column.
     let mut cols = Vec::with_capacity(root_names.len());
-    for name in root_names {
-        if let Some(column) = metadata.column_by_name(&name) {
+    for column in &metadata.column_metadatas {
+        if root_names.contains(&column.column_schema.name) {
             cols.push(ReadColumn::new(column.column_id, vec![]));
         }
     }
@@ -389,15 +401,10 @@ mod tests {
 
         let read_columns = read_columns_from_predicate(&predicate, &metadata);
 
-        let mut actual_ids = read_columns.column_ids();
-        actual_ids.sort_unstable();
-        assert_eq!(vec![0, 3], actual_ids);
-        assert!(
-            read_columns
-                .columns()
-                .iter()
-                .all(|col| col.nested_paths().is_empty())
-        );
+        let expected = ReadColumns {
+            cols: vec![ReadColumn::new(0, vec![]), ReadColumn::new(3, vec![])],
+        };
+        assert_eq!(expected, read_columns);
     }
 
     #[test]
