@@ -30,6 +30,26 @@ use crate::rpc::store::{BatchDeleteRequest, BatchGetRequest, RangeRequest};
 /// [TombstoneManager] provides the ability to:
 /// - logically delete values
 /// - restore the deleted values
+///
+/// The tombstone mechanism is primarily used for table metadata deletion.
+/// When a table is logically deleted, its associated metadata keys are moved
+/// to a tombstone area by prepending a prefix (default is `__tombstone/`).
+///
+/// All involved keys in the tombstone mechanism:
+/// - `__table_name/{catalog}/{schema}/{table_name}`: Maps table name to table ID.
+/// - `__table_info/{table_id}`: Stores table information/metadata.
+/// - `__table_route/{table_id}`: Stores table routing information.
+/// - `__table_repart/{table_id}`: Stores table repartition information.
+/// - `__dn_table/{datanode_id}/{table_id}`: Maps datanodes to table regions.
+/// - `__topic_region/{topic_name}/{region_id}`: Maps regions to WAL topics.
+///
+/// These keys are moved to:
+/// - `__tombstone/__table_name/...`
+/// - `__tombstone/__table_info/...`
+/// - `__tombstone/__table_route/...`
+/// - `__tombstone/__table_repart/...`
+/// - `__tombstone/__dn_table/...`
+/// - `__tombstone/__topic_region/...`
 pub struct TombstoneManager {
     kv_backend: KvBackendRef,
     tombstone_prefix: String,
