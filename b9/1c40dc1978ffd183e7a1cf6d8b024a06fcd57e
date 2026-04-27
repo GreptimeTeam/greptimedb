@@ -1,0 +1,14 @@
+src/meta-srv/src/utils/database.rs
+  h_6bf4f2d0301578 126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "b91c40dc1978ffd183e7a1cf6d8b024a06fcd57e",
+  "prompts": {},
+  "humans": {
+    "h_6bf4f2d0301578": {
+      "author": "WenyXu"
+    }
+  }
+}
