@@ -35,9 +35,9 @@ use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{
     Channel, QueryContextBuilder, QueryContextRef, REMOTE_QUERY_ID_EXTENSION_KEY,
-    generate_remote_query_id, is_reserved_extension_key,
+    generate_remote_query_id,
 };
-use session::hints::READ_PREFERENCE_HINT;
+use session::hints::{READ_PREFERENCE_HINT, is_reserved_extension_key};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -239,6 +239,10 @@ pub(crate) fn create_query_context(
 
     for (key, value) in extensions {
         if is_reserved_extension_key(&key) {
+            debug!(
+                key = key.as_str(),
+                "Ignoring reserved external query context extension key"
+            );
             continue;
         }
         ctx_builder = ctx_builder.set_extension(key, value);
