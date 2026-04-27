@@ -32,6 +32,7 @@ use datafusion_common::config::ConfigOptions;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
+pub use crate::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
 use crate::protocol_ctx::ProtocolCtx;
 use crate::query_id::QueryId;
 use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
@@ -41,11 +42,6 @@ pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
 const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
-pub const REMOTE_QUERY_ID_EXTENSION_KEY: &str = "remote_query_id";
-
-pub fn is_reserved_extension_key(key: &str) -> bool {
-    key == REMOTE_QUERY_ID_EXTENSION_KEY
-}
 
 pub fn generate_remote_query_id() -> String {
     generate_remote_query_id_value().to_string()
@@ -793,7 +789,15 @@ mod test {
         assert_eq!(roundtrip_api.current_catalog, api_ctx.current_catalog);
         assert_eq!(roundtrip_api.current_schema, api_ctx.current_schema);
         assert_eq!(roundtrip_api.timezone, api_ctx.timezone);
-        assert_eq!(roundtrip_api.extensions, api_ctx.extensions);
+        assert_eq!(
+            roundtrip_api.extensions.get("flow.return_region_seq"),
+            Some(&"true".to_string())
+        );
+        assert!(
+            roundtrip_api
+                .extensions
+                .contains_key(REMOTE_QUERY_ID_EXTENSION_KEY)
+        );
         assert_eq!(roundtrip_api.channel, api_ctx.channel);
         assert_eq!(roundtrip_api.snapshot_seqs, api_ctx.snapshot_seqs);
     }

@@ -16,58 +16,65 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::middleware::Next;
 use axum::response::Response;
-use session::context::{QueryContext, REMOTE_QUERY_ID_EXTENSION_KEY, is_reserved_extension_key};
+use common_telemetry::debug;
+use session::context::QueryContext;
+use session::hints::is_reserved_extension_key;
 
 use crate::hint_headers;
 
 pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
     let hints = hint_headers::extract_hints(request.headers());
     if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
-        for (key, value) in hints {
-            apply_hint(query_ctx, key, value);
-        }
+        apply_hints(query_ctx, hints);
     }
     next.run(request).await
 }
 
-fn apply_hint(query_ctx: &mut QueryContext, key: String, value: String) {
-    if is_reserved_extension_key(&key) {
-        return;
+fn apply_hints(query_ctx: &mut QueryContext, hints: Vec<(String, String)>) {
+    for (key, value) in hints {
+        if is_reserved_extension_key(&key) {
+            debug!(
+                key = key.as_str(),
+                "Ignoring reserved external query context extension key"
+            );
+            continue;
+        }
+        query_ctx.set_extension(key, value);
     }
-    query_ctx.set_extension(key, value);
 }
 
 #[cfg(test)]
 mod tests {
     use session::context::{QueryContextBuilder, generate_remote_query_id};
+    use session::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
 
-    use super::*;
+    use super::apply_hints;
 
     #[test]
-    fn test_apply_hint_ignores_remote_query_id() {
-        let expected_remote_query_id = generate_remote_query_id();
+    fn test_apply_hints_ignores_reserved_extension_keys() {
+        let original_query_id = generate_remote_query_id();
         let mut query_ctx = QueryContextBuilder::default()
             .set_extension(
                 REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
-                expected_remote_query_id.clone(),
+                original_query_id.clone(),
             )
             .build();
 
-        apply_hint(
+        apply_hints(
             &mut query_ctx,
-            REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
-            "spoofed-query-id".to_string(),
-        );
-        apply_hint(
-            &mut query_ctx,
-            "auto_create_table".to_string(),
-            "true".to_string(),
+            vec![
+                (
+                    REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                    "spoofed".to_string(),
+                ),
+                ("ttl".to_string(), "7d".to_string()),
+            ],
         );
 
         assert_eq!(
             query_ctx.remote_query_id(),
-            Some(expected_remote_query_id.as_str())
+            Some(original_query_id.as_str())
         );
-        assert_eq!(query_ctx.extension("auto_create_table"), Some("true"));
+        assert_eq!(query_ctx.extension("ttl"), Some("7d"));
     }
 }
