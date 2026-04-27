@@ -1134,7 +1134,9 @@ impl TableMetadataManager {
             .remap_table_route(&mut table_route_value)
             .await?;
 
-        let region_wal_options = self.dropped_region_wal_options(table_id).await?;
+        let region_wal_options = self
+            .dropped_region_wal_options(table_id, &table_route_value)
+            .await?;
 
         Ok(Some(DroppedTableMetadata {
             table_id,
@@ -1149,20 +1151,26 @@ impl TableMetadataManager {
     async fn dropped_region_wal_options(
         &self,
         table_id: TableId,
+        table_route_value: &TableRouteValue,
     ) -> Result<HashMap<RegionNumber, WalOptions>> {
-        let mut stream = self.tombstone_manager.tombstones();
         let mut region_wal_options = HashMap::new();
+        let datanode_table_keys = region_distribution(table_route_value.region_routes()?)
+            .into_keys()
+            .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
+            .collect::<Vec<_>>();
+        let datanode_table_key_bytes = datanode_table_keys
+            .iter()
+            .map(|key| key.to_bytes())
+            .collect::<Vec<_>>();
+        let datanode_table_values = self
+            .tombstone_manager
+            .batch_get(&datanode_table_key_bytes)
+            .await?;
 
-        while let Some(kv) = stream.try_next().await? {
-            let raw_key = self.tombstone_manager.strip_tombstone_prefix(&kv.key)?;
-            if !raw_key.starts_with(format!("{DATANODE_TABLE_KEY_PREFIX}/").as_bytes()) {
+        for datanode_table_key in datanode_table_keys {
+            let Some(kv) = datanode_table_values.get(&datanode_table_key.to_bytes()) else {
                 continue;
-            }
-
-            let datanode_table_key = DatanodeTableKey::from_bytes(raw_key)?;
-            if datanode_table_key.table_id != table_id {
-                continue;
-            }
+            };
 
             let datanode_table_value = DatanodeTableValue::try_from_raw_value(&kv.value)?;
             for (region_number, wal_options) in &datanode_table_value.region_info.region_wal_options
@@ -3050,6 +3058,81 @@ mod tests {
         assert_eq!(dropped_tables.len(), 1);
         assert_eq!(dropped_tables[0].table_id, dropped_table_id);
         assert_eq!(dropped_tables[0].table_name, dropped_table_name);
+    }
+
+    #[tokio::test]
+    async fn test_dropped_table_lookup_ignores_unrelated_malformed_datanode_tombstones() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
+        let table_id = 1025;
+        let table_name = "foo";
+        let task = test_create_table_task(table_name, table_id);
+        let table_info = task.table_info.clone();
+        let options = create_mixed_region_wal_options();
+        let serialized_options = options
+            .iter()
+            .map(|(k, v)| (*k, serde_json::to_string(v).unwrap()))
+            .collect::<HashMap<_, _>>();
+        table_metadata_manager
+            .create_table_metadata(
+                table_info.clone(),
+                TableRouteValue::physical(vec![
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(table_id, 1)),
+                        leader_peer: Some(Peer::empty(1)),
+                        follower_peers: vec![Peer::empty(5)],
+                        leader_state: None,
+                        leader_down_since: None,
+                        write_route_policy: None,
+                    },
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(table_id, 2)),
+                        leader_peer: Some(Peer::empty(2)),
+                        follower_peers: vec![Peer::empty(4)],
+                        leader_state: None,
+                        leader_down_since: None,
+                        write_route_policy: None,
+                    },
+                ]),
+                serialized_options,
+            )
+            .await
+            .unwrap();
+
+        let table_route_value = table_metadata_manager
+            .table_route_manager
+            .table_route_storage()
+            .get_with_raw_bytes(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let region_routes = table_route_value.region_routes().unwrap();
+        let table_name = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name);
+        let table_route_value = TableRouteValue::physical(region_routes.clone());
+
+        table_metadata_manager
+            .delete_table_metadata(table_id, &table_name, &table_route_value, &options)
+            .await
+            .unwrap();
+
+        mem_kv
+            .put(
+                PutRequest::new()
+                    .with_key("__tombstone/__dn_table/not-a-datanode-table-key")
+                    .with_value("malformed"),
+            )
+            .await
+            .unwrap();
+
+        let dropped_table = table_metadata_manager
+            .get_dropped_table(&table_name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(dropped_table.table_id, table_id);
+        assert_eq!(dropped_table.table_name, table_name);
+        assert_eq!(dropped_table.table_info_value.table_info, table_info);
+        assert_eq!(dropped_table.region_wal_options, options);
     }
 
     #[tokio::test]

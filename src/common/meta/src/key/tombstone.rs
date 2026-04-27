@@ -102,6 +102,23 @@ impl TombstoneManager {
         self.kv_backend.get(&tombstone_key).await
     }
 
+    /// Gets tombstoned values by their original keys.
+    pub async fn batch_get(&self, keys: &[Vec<u8>]) -> Result<HashMap<Vec<u8>, KeyValue>> {
+        let tombstone_keys = keys
+            .iter()
+            .map(|key| self.to_tombstone(key))
+            .collect::<Vec<_>>();
+        let resp = self
+            .kv_backend
+            .batch_get(BatchGetRequest::new().with_keys(tombstone_keys))
+            .await?;
+
+        resp.kvs
+            .into_iter()
+            .map(|kv| Ok((self.strip_tombstone_prefix(&kv.key)?.to_vec(), kv)))
+            .collect::<Result<HashMap<_, _>>>()
+    }
+
     /// Streams all tombstoned key-value pairs.
     pub fn tombstones(&self) -> BoxStream<'static, Result<KeyValue>> {
         self.scan_prefix(self.tombstone_prefix.as_bytes().to_vec())
@@ -466,6 +483,35 @@ mod tests {
             .await
             .unwrap();
         assert!(kv_backend.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_tombstones() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        kv_backend
+            .put(PutRequest::new().with_key("bar").with_value("baz"))
+            .await
+            .unwrap();
+        kv_backend
+            .put(PutRequest::new().with_key("foo").with_value("hi"))
+            .await
+            .unwrap();
+
+        tombstone_manager
+            .create(vec![b"bar".to_vec(), b"foo".to_vec()])
+            .await
+            .unwrap();
+
+        let kvs = tombstone_manager
+            .batch_get(&[b"bar".to_vec(), b"foo".to_vec(), b"missing".to_vec()])
+            .await
+            .unwrap();
+
+        assert_eq!(kvs.len(), 2);
+        assert_eq!(kvs.get(b"bar".as_slice()).unwrap().value, b"baz");
+        assert_eq!(kvs.get(b"foo".as_slice()).unwrap().value, b"hi");
+        assert!(!kvs.contains_key(b"missing".as_slice()));
     }
 
     #[tokio::test]
