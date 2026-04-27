@@ -1165,7 +1165,8 @@ impl TableMetadataManager {
             }
 
             let datanode_table_value = DatanodeTableValue::try_from_raw_value(&kv.value)?;
-            for (region_number, wal_options) in &datanode_table_value.region_info.region_wal_options {
+            for (region_number, wal_options) in &datanode_table_value.region_info.region_wal_options
+            {
                 region_wal_options.insert(
                     *region_number,
                     serde_json::from_str(wal_options).context(error::SerdeJsonSnafu)?,
@@ -1759,10 +1760,20 @@ mod tests {
 
     fn create_mixed_region_wal_options() -> HashMap<RegionNumber, WalOptions> {
         HashMap::from([
-            (0, WalOptions::Kafka(KafkaWalOptions { topic: "greptimedb_topic0".to_string() })),
+            (
+                0,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "greptimedb_topic0".to_string(),
+                }),
+            ),
             (1, WalOptions::RaftEngine),
             (2, WalOptions::Noop),
-            (3, WalOptions::Kafka(KafkaWalOptions { topic: "greptimedb_topic1".to_string() })),
+            (
+                3,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "greptimedb_topic1".to_string(),
+                }),
+            ),
         ])
     }
 
