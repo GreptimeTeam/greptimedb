@@ -100,13 +100,7 @@ impl Display for IndexTarget {
                 path,
                 value_type,
             } => {
-                write!(
-                    f,
-                    "sub:{}:{}:{}",
-                    column_id,
-                    value_type,
-                    encode_path(path)
-                )
+                write!(f, "sub:{}:{}:{}", column_id, value_type, encode_path(path))
             }
         }
     }

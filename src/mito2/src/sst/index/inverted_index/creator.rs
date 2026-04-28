@@ -22,8 +22,8 @@ use common_telemetry::{debug, warn};
 use common_time::{Date, Timestamp};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::vectors::Helper;
 use datatypes::value::{Value, ValueRef};
+use datatypes::vectors::Helper;
 use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
@@ -384,63 +384,63 @@ impl InvertedIndexer {
                 };
                 let target_key = &indexed_target.target_key;
                 match self.codec.pk_col_info(col_id) {
-                // pk
-                Some(col_info) => {
-                    let pk_idx = col_info.idx;
-                    let field = &col_info.field;
-                    let value = batch
-                        .pk_col_value(self.codec.decoder(), pk_idx, col_id)?
-                        .filter(|v| !v.is_null())
-                        .map(|v| {
-                            self.value_buf.clear();
-                            IndexValueCodec::encode_nonnull_value(
-                                v.as_value_ref(),
-                                field,
-                                &mut self.value_buf,
-                            )
-                            .context(EncodeSnafu)?;
-                            Ok(self.value_buf.as_slice())
-                        })
-                        .transpose()?;
+                    // pk
+                    Some(col_info) => {
+                        let pk_idx = col_info.idx;
+                        let field = &col_info.field;
+                        let value = batch
+                            .pk_col_value(self.codec.decoder(), pk_idx, col_id)?
+                            .filter(|v| !v.is_null())
+                            .map(|v| {
+                                self.value_buf.clear();
+                                IndexValueCodec::encode_nonnull_value(
+                                    v.as_value_ref(),
+                                    field,
+                                    &mut self.value_buf,
+                                )
+                                .context(EncodeSnafu)?;
+                                Ok(self.value_buf.as_slice())
+                            })
+                            .transpose()?;
 
-                    self.index_creator
-                        .push_with_name_n(target_key, value, n)
-                        .await
-                        .context(PushIndexValueSnafu)?;
-                }
-                // fields
-                None => {
-                    let Some(values) = batch.field_col_value(col_id) else {
-                        debug!(
-                            "Column {} not found in the batch during building inverted index",
-                            col_id
-                        );
-                        continue;
-                    };
-                    let sort_field = SortField::new(values.data.data_type());
-                    for i in 0..n {
-                        self.value_buf.clear();
-                        let value = values.data.get_ref(i);
-                        if value.is_null() {
-                            self.index_creator
-                                .push_with_name(target_key, None)
-                                .await
-                                .context(PushIndexValueSnafu)?;
-                        } else {
-                            IndexValueCodec::encode_nonnull_value(
-                                value,
-                                &sort_field,
-                                &mut self.value_buf,
-                            )
-                            .context(EncodeSnafu)?;
-                            self.index_creator
-                                .push_with_name(target_key, Some(&self.value_buf))
-                                .await
-                                .context(PushIndexValueSnafu)?;
+                        self.index_creator
+                            .push_with_name_n(target_key, value, n)
+                            .await
+                            .context(PushIndexValueSnafu)?;
+                    }
+                    // fields
+                    None => {
+                        let Some(values) = batch.field_col_value(col_id) else {
+                            debug!(
+                                "Column {} not found in the batch during building inverted index",
+                                col_id
+                            );
+                            continue;
+                        };
+                        let sort_field = SortField::new(values.data.data_type());
+                        for i in 0..n {
+                            self.value_buf.clear();
+                            let value = values.data.get_ref(i);
+                            if value.is_null() {
+                                self.index_creator
+                                    .push_with_name(target_key, None)
+                                    .await
+                                    .context(PushIndexValueSnafu)?;
+                            } else {
+                                IndexValueCodec::encode_nonnull_value(
+                                    value,
+                                    &sort_field,
+                                    &mut self.value_buf,
+                                )
+                                .context(EncodeSnafu)?;
+                                self.index_creator
+                                    .push_with_name(target_key, Some(&self.value_buf))
+                                    .await
+                                    .context(PushIndexValueSnafu)?;
+                            }
                         }
                     }
                 }
-            }
             } else {
                 let (col_id, path, value_type) = match &indexed_target.target {
                     IndexTarget::ColumnId(_) => unreachable!(),
@@ -553,10 +553,12 @@ impl InvertedIndexer {
     }
 
     pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.indexed_targets.iter().map(|indexed_target| match &indexed_target.target {
-            IndexTarget::ColumnId(col_id) => *col_id,
-            IndexTarget::SubField { column_id, .. } => *column_id,
-        })
+        self.indexed_targets
+            .iter()
+            .map(|indexed_target| match &indexed_target.target {
+                IndexTarget::ColumnId(col_id) => *col_id,
+                IndexTarget::SubField { column_id, .. } => *column_id,
+            })
     }
 
     pub fn memory_usage(&self) -> usize {
@@ -657,8 +659,8 @@ mod tests {
     use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use object_store::ObjectStore;
     use object_store::services::Memory;
-    use puffin::puffin_manager::{PuffinManager, PuffinReader};
     use puffin::puffin_manager::cache::PuffinMetadataCache;
+    use puffin::puffin_manager::{PuffinManager, PuffinReader};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::region_request::PathType;
     use store_api::storage::RegionId;
@@ -722,13 +724,15 @@ mod tests {
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
                     "field_obj",
-                    ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![StructField::new(
-                        "a",
-                        ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![
-                            StructField::new("b", ConcreteDataType::string_datatype(), true),
-                        ]))),
-                        true,
-                    )]))),
+                    ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![
+                        StructField::new(
+                            "a",
+                            ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![
+                                StructField::new("b", ConcreteDataType::string_datatype(), true),
+                            ]))),
+                            true,
+                        ),
+                    ]))),
                     true,
                 ),
                 semantic_type: SemanticType::Field,
@@ -1100,10 +1104,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_subfield_index_target_only() {
-        let (d, factory) = PuffinManagerFactory::new_for_test_async(
-            "test_create_subfield_index_target_only_",
-        )
-        .await;
+        let (d, factory) =
+            PuffinManagerFactory::new_for_test_async("test_create_subfield_index_target_only_")
+                .await;
         let table_dir = "table0".to_string();
         let sst_file_id = FileId::random();
         let object_store = mock_object_store();
