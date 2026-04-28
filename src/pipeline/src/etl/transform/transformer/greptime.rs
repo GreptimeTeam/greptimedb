@@ -151,6 +151,7 @@ impl GreptimeTransformer {
             type_,
             default,
             index: Some(Index::Time),
+            index_options: None,
             on_failure: Some(crate::etl::transform::OnFailure::Default),
             tag: false,
         };

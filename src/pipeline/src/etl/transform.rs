@@ -15,15 +15,24 @@
 pub mod index;
 pub mod transformer;
 
+use std::collections::HashMap;
+
 use api::v1::ColumnDataType;
 use api::v1::value::ValueData;
 use chrono::Utc;
-use snafu::{OptionExt, ensure};
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
+use snafu::{OptionExt, ResultExt, ensure};
+use sql::parsers::utils::{
+    validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
+};
 
 use crate::error::{
-    Error, KeyMustBeStringSnafu, Result, TransformElementMustBeMapSnafu,
-    TransformFieldMustBeSetSnafu, TransformOnFailureInvalidValueSnafu, TransformTypeMustBeSetSnafu,
-    UnsupportedTypeInPipelineSnafu,
+    Error, FieldMustBeTypeSnafu, KeyMustBeStringSnafu, Result, TransformElementMustBeMapSnafu,
+    TransformFieldMustBeSetSnafu, TransformIndexOptionMustBeScalarSnafu, TransformIndexOptionSnafu,
+    TransformIndexOptionUnsupportedSnafu, TransformIndexOptionsUnsupportedSnafu,
+    TransformIndexTypeMismatchSnafu, TransformIndexTypeMustBeSetSnafu,
+    TransformIndexUnsupportedFieldSnafu, TransformOnFailureInvalidValueSnafu,
+    TransformTypeMustBeSetSnafu, UnsupportedTypeInPipelineSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{yaml_bool, yaml_new_field, yaml_new_fields, yaml_string};
@@ -34,6 +43,9 @@ const TRANSFORM_FIELD: &str = "field";
 const TRANSFORM_FIELDS: &str = "fields";
 const TRANSFORM_TYPE: &str = "type";
 const TRANSFORM_INDEX: &str = "index";
+const TRANSFORM_INDEX_TYPE_FIELD: &str = "index.type";
+const TRANSFORM_INDEX_OPTIONS: &str = "options";
+const TRANSFORM_INDEX_OPTIONS_FIELD: &str = "index.options";
 const TRANSFORM_TAG: &str = "tag";
 const TRANSFORM_DEFAULT: &str = "default";
 const TRANSFORM_ON_FAILURE: &str = "on_failure";
@@ -131,8 +143,40 @@ pub struct Transform {
     pub type_: ColumnDataType,
     pub default: Option<ValueData>,
     pub index: Option<Index>,
+    pub index_options: Option<TransformIndexOptions>,
     pub tag: bool,
     pub on_failure: Option<OnFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransformIndexOptions {
+    Fulltext(FulltextOptions),
+    Skipping(SkippingIndexOptions),
+}
+
+impl TransformIndexOptions {
+    pub(crate) fn index(&self) -> Index {
+        match self {
+            TransformIndexOptions::Fulltext(_) => Index::Fulltext,
+            TransformIndexOptions::Skipping(_) => Index::Skipping,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_fulltext(&self) -> Option<&FulltextOptions> {
+        match self {
+            TransformIndexOptions::Fulltext(options) => Some(options),
+            TransformIndexOptions::Skipping(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_skipping(&self) -> Option<&SkippingIndexOptions> {
+        match self {
+            TransformIndexOptions::Skipping(options) => Some(options),
+            TransformIndexOptions::Fulltext(_) => None,
+        }
+    }
 }
 
 // valid types
@@ -231,13 +275,157 @@ fn get_default_for_type(ty: &ColumnDataType) -> Result<ValueData> {
     Ok(v)
 }
 
+fn parse_transform_index(
+    value: &yaml_rust::Yaml,
+) -> Result<(Index, Option<HashMap<String, String>>)> {
+    match value {
+        yaml_rust::Yaml::String(_) => {
+            let index_str = yaml_string(value, TRANSFORM_INDEX)?;
+            Ok((index_str.try_into()?, None))
+        }
+        yaml_rust::Yaml::Hash(hash) => {
+            let mut index = None;
+            let mut index_options = None;
+
+            for (k, v) in hash {
+                let key = k
+                    .as_str()
+                    .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
+                match key {
+                    TRANSFORM_TYPE => {
+                        let index_str = yaml_string(v, TRANSFORM_INDEX_TYPE_FIELD)?;
+                        index = Some(index_str.try_into()?);
+                    }
+                    TRANSFORM_INDEX_OPTIONS => {
+                        index_options = Some(parse_transform_index_options(v)?);
+                    }
+                    _ => {
+                        return TransformIndexUnsupportedFieldSnafu {
+                            field: key.to_string(),
+                        }
+                        .fail();
+                    }
+                }
+            }
+
+            Ok((
+                index.context(TransformIndexTypeMustBeSetSnafu)?,
+                index_options,
+            ))
+        }
+        _ => FieldMustBeTypeSnafu {
+            field: TRANSFORM_INDEX,
+            ty: "string or map",
+        }
+        .fail(),
+    }
+}
+
+fn parse_transform_index_options(value: &yaml_rust::Yaml) -> Result<HashMap<String, String>> {
+    let hash = value.as_hash().context(FieldMustBeTypeSnafu {
+        field: TRANSFORM_INDEX_OPTIONS_FIELD,
+        ty: "map",
+    })?;
+    let mut options = HashMap::with_capacity(hash.len());
+
+    for (k, v) in hash {
+        let key = k
+            .as_str()
+            .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
+
+        let field = format!("{TRANSFORM_INDEX_OPTIONS_FIELD}.{key}");
+        let value = match v {
+            yaml_rust::Yaml::String(v) => v.clone(),
+            yaml_rust::Yaml::Boolean(v) => v.to_string(),
+            yaml_rust::Yaml::Integer(v) => v.to_string(),
+            yaml_rust::Yaml::Real(v) => v.clone(),
+            _ => {
+                return TransformIndexOptionMustBeScalarSnafu { field }.fail();
+            }
+        };
+        options.insert(key.to_string(), value);
+    }
+
+    Ok(options)
+}
+
+fn lower_typed_transform_index_options<T>(
+    index: Index,
+    index_options: Option<HashMap<String, String>>,
+    validate: fn(&str) -> bool,
+    wrap: fn(T) -> TransformIndexOptions,
+) -> Result<Option<TransformIndexOptions>>
+where
+    T: TryFrom<HashMap<String, String>, Error = datatypes::error::Error>,
+{
+    index_options
+        .map(|opts| {
+            for key in opts.keys() {
+                ensure!(
+                    validate(key),
+                    TransformIndexOptionUnsupportedSnafu {
+                        index: index.to_string(),
+                        key: key.clone(),
+                    }
+                );
+            }
+
+            let options = opts.try_into().context(TransformIndexOptionSnafu {
+                index: index.to_string(),
+            })?;
+
+            Ok(wrap(options))
+        })
+        .transpose()
+}
+
+fn lower_transform_index_options(
+    index: Index,
+    column_type: &ColumnDataType,
+    index_options: Option<HashMap<String, String>>,
+) -> Result<Option<TransformIndexOptions>> {
+    match index {
+        Index::Fulltext => {
+            ensure!(
+                *column_type == ColumnDataType::String,
+                TransformIndexTypeMismatchSnafu {
+                    index: index.to_string(),
+                    expected: ColumnDataType::String.as_str_name().to_string(),
+                    actual: column_type.as_str_name().to_string(),
+                }
+            );
+
+            lower_typed_transform_index_options(
+                index,
+                index_options,
+                validate_column_fulltext_create_option,
+                TransformIndexOptions::Fulltext,
+            )
+        }
+        Index::Skipping => lower_typed_transform_index_options(
+            index,
+            index_options,
+            validate_column_skipping_index_create_option,
+            TransformIndexOptions::Skipping,
+        ),
+        Index::Inverted | Index::Time | Index::Tag => {
+            ensure!(
+                index_options.is_none(),
+                TransformIndexOptionsUnsupportedSnafu {
+                    index: index.to_string(),
+                }
+            );
+            Ok(None)
+        }
+    }
+}
 impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
     type Error = Error;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
         let mut default = None;
-        let mut index = None;
+        let mut index_value = None;
         let mut tag = false;
         let mut on_failure = None;
 
@@ -262,8 +450,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
                 }
 
                 TRANSFORM_INDEX => {
-                    let index_str = yaml_string(v, TRANSFORM_INDEX)?;
-                    index = Some(index_str.try_into()?);
+                    index_value = Some(v);
                 }
 
                 TRANSFORM_TAG => {
@@ -299,6 +486,16 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
             fields: format!("{:?}", fields),
         })?;
 
+        let (index, index_options) = match index_value {
+            Some(value) => {
+                let (index, raw_index_options) = parse_transform_index(value)?;
+                let index_options =
+                    lower_transform_index_options(index, &type_, raw_index_options)?;
+                (Some(index), index_options)
+            }
+            None => (None, None),
+        };
+
         let final_default = if let Some(default_value) = default {
             let target = parse_str_value(&type_, &default_value)?;
             on_failure = Some(OnFailure::Default);
@@ -312,10 +509,222 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
             type_,
             default: final_default,
             index,
+            index_options,
             on_failure,
             tag,
         };
 
         Ok(builder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use yaml_rust::YamlLoader;
+
+    use super::*;
+
+    fn parse_transform(yaml: &str) -> Result<Transform> {
+        let docs = YamlLoader::load_from_str(yaml).unwrap();
+        docs[0].as_hash().unwrap().try_into()
+    }
+
+    #[test]
+    fn test_transform_parses_legacy_string_index() {
+        let transform = parse_transform(
+            r#"
+field: message
+type: string
+index: fulltext
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(transform.index, Some(Index::Fulltext));
+        assert!(transform.index_options.is_none());
+    }
+
+    #[test]
+    fn test_transform_parses_index_object_without_options() {
+        let transform = parse_transform(
+            r#"
+field: message
+type: string
+index:
+  type: inverted
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(transform.index, Some(Index::Inverted));
+        assert!(transform.index_options.is_none());
+    }
+
+    #[test]
+    fn test_transform_parses_index_object_with_scalar_options() {
+        let transform = parse_transform(
+            r#"
+field: message
+type: string
+index:
+  type: fulltext
+  options:
+    analyzer: English
+    case_sensitive: false
+    granularity: 2048
+    false_positive_rate: 0.02
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(transform.index, Some(Index::Fulltext));
+        let options = transform.index_options.as_ref().unwrap();
+        let fulltext = options.as_fulltext().unwrap();
+        assert!(fulltext.enable);
+        assert_eq!(fulltext.analyzer.to_string(), "English");
+        assert!(!fulltext.case_sensitive);
+        assert_eq!(fulltext.granularity, 2048);
+        assert_eq!(fulltext.false_positive_rate(), 0.02);
+    }
+
+    #[test]
+    fn test_transform_rejects_invalid_index_options_type() {
+        let result = parse_transform(
+            r#"
+field: message
+type: string
+index:
+  type: fulltext
+  options: invalid
+"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transform_rejects_non_scalar_index_option_value() {
+        let result = parse_transform(
+            r#"
+field: message
+type: string
+index:
+  type: fulltext
+  options:
+    analyzer:
+      kind: English
+"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transform_rejects_unknown_index_field() {
+        let result = parse_transform(
+            r#"
+field: message
+type: string
+index:
+  type: fulltext
+  config: {}
+"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transform_rejects_unsupported_fulltext_option_key() {
+        let result = parse_transform(
+            r#"
+field: message
+type: string
+index:
+  type: fulltext
+  options:
+    tokenizer: english
+"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transform_rejects_options_for_inverted_index() {
+        let result = parse_transform(
+            r#"
+field: message
+type: string
+index:
+  type: inverted
+  options:
+    backend: bloom
+"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transform_rejects_empty_options_for_unsupported_indexes() {
+        for index in ["inverted", "time", "tag"] {
+            let yaml = format!(
+                r#"
+field: message
+type: string
+index:
+  type: {index}
+  options: {{}}
+"#
+            );
+
+            let result = parse_transform(&yaml);
+            assert!(
+                result.is_err(),
+                "expected `{index}` to reject empty options"
+            );
+        }
+    }
+
+    #[test]
+    fn test_transform_rejects_fulltext_index_on_non_string_column() {
+        let result = parse_transform(
+            r#"
+field: count
+type: int64
+index: fulltext
+"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transform_allows_skipping_index_on_numeric_column() {
+        let transform = parse_transform(
+            r#"
+field: count
+type: int64
+index:
+  type: skipping
+  options:
+    granularity: 2048
+    false_positive_rate: 0.02
+    type: BLOOM
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(transform.index, Some(Index::Skipping));
+        let skipping = transform
+            .index_options
+            .as_ref()
+            .unwrap()
+            .as_skipping()
+            .unwrap();
+        assert_eq!(skipping.granularity, 2048);
+        assert_eq!(skipping.false_positive_rate(), 0.02);
+        assert_eq!(skipping.index_type.to_string(), "BLOOM");
     }
 }
