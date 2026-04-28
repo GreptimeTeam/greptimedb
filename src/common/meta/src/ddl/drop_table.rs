@@ -149,6 +149,14 @@ impl DropTableProcedure {
     /// Broadcasts invalidate table cache instruction.
     async fn on_broadcast(&mut self) -> Result<Status> {
         self.executor.invalidate_table_cache(&self.context).await?;
+
+        // Soft-drop keeps tombstoned metadata in place for later recovery/purge work,
+        // so the procedure stops before any datanode region deletion.
+        if self.data.task.soft_drop {
+            self.dropping_regions.clear();
+            return Ok(Status::done());
+        }
+
         self.data.state = DropTableState::DatanodeDropRegions;
 
         Ok(Status::executing(true))

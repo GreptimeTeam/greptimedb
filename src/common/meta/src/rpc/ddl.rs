@@ -46,7 +46,7 @@ use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use table::metadata::{TableId, TableInfo};
 use table::requests::validate_database_option;
 use table::table_name::TableName;
@@ -141,6 +141,7 @@ impl DdlTask {
             table,
             table_id,
             drop_if_exists,
+            soft_drop: false,
         })
     }
 
@@ -326,7 +327,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
     fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
         let task = match request.task {
             DdlTask::CreateTable(task) => Task::CreateTableTask(task.try_into()?),
-            DdlTask::DropTable(task) => Task::DropTableTask(task.into()),
+            DdlTask::DropTable(task) => Task::DropTableTask(task.try_into()?),
             DdlTask::AlterTable(task) => Task::AlterTableTask(task.try_into()?),
             DdlTask::TruncateTable(task) => Task::TruncateTableTask(task.try_into()?),
             DdlTask::CreateLogicalTables(tasks) => {
@@ -340,8 +341,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::DropLogicalTables(tasks) => {
                 let tasks = tasks
                     .into_iter()
-                    .map(|task| task.into())
-                    .collect::<Vec<_>>();
+                    .map(|task| task.try_into())
+                    .collect::<Result<Vec<_>>>()?;
 
                 Task::DropTableTasks(PbDropTableTasks { tasks })
             }
@@ -586,6 +587,8 @@ pub struct DropTableTask {
     pub table_id: TableId,
     #[serde(default)]
     pub drop_if_exists: bool,
+    #[serde(default)]
+    pub soft_drop: bool,
 }
 
 impl DropTableTask {
@@ -625,13 +628,25 @@ impl TryFrom<PbDropTableTask> for DropTableTask {
                 })?
                 .id,
             drop_if_exists: drop_table.drop_if_exists,
+            soft_drop: false,
         })
     }
 }
 
-impl From<DropTableTask> for PbDropTableTask {
-    fn from(task: DropTableTask) -> Self {
-        PbDropTableTask {
+impl TryFrom<DropTableTask> for PbDropTableTask {
+    type Error = error::Error;
+
+    /// Soft-drop is intentionally not serialized through protobuf yet.
+    /// Callers must use local in-process task execution until proto support is added.
+    fn try_from(task: DropTableTask) -> Result<Self> {
+        ensure!(
+            !task.soft_drop,
+            error::UnsupportedSnafu {
+                operation: "submit soft drop table task over protobuf before proto support"
+            }
+        );
+
+        Ok(PbDropTableTask {
             drop_table: Some(DropTableExpr {
                 catalog_name: task.catalog,
                 schema_name: task.schema,
@@ -639,7 +654,7 @@ impl From<DropTableTask> for PbDropTableTask {
                 table_id: Some(api::v1::TableId { id: task.table_id }),
                 drop_if_exists: task.drop_if_exists,
             }),
-        }
+        })
     }
 }
 
@@ -1902,5 +1917,38 @@ mod tests {
         assert_eq!(pb_roundtrip.extensions, pb.extensions);
         assert_eq!(pb_roundtrip.channel, pb.channel);
         assert_eq!(pb_roundtrip.snapshot_seqs, pb.snapshot_seqs);
+    }
+
+    #[test]
+    fn test_submit_drop_table_task_rejects_soft_drop_proto_conversion() {
+        let request = SubmitDdlTaskRequest::new(
+            QueryContext::default(),
+            DdlTask::DropTable(DropTableTask {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table: "foo".to_string(),
+                table_id: 1024,
+                drop_if_exists: false,
+                soft_drop: true,
+            }),
+        );
+
+        let err = PbDdlTaskRequest::try_from(request).unwrap_err();
+        assert!(matches!(err, error::Error::Unsupported { .. }));
+    }
+
+    #[test]
+    fn test_drop_table_task_rejects_soft_drop_direct_proto_conversion() {
+        let task = DropTableTask {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table: "foo".to_string(),
+            table_id: 1024,
+            drop_if_exists: false,
+            soft_drop: true,
+        };
+
+        let err = PbDropTableTask::try_from(task).unwrap_err();
+        assert!(matches!(err, error::Error::Unsupported { .. }));
     }
 }

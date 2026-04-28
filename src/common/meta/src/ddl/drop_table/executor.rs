@@ -82,6 +82,8 @@ impl DropTableExecutor {
     /// Checks whether table exists.
     /// - Early returns if table not exists and `drop_if_exists` is `true`.
     /// - Throws an error if table not exists and `drop_if_exists` is `false`.
+    /// - Rejects dropping a recreated live table while an older tombstone still owns the same
+    ///   fully qualified name.
     pub async fn on_prepare(&self, ctx: &DdlContext) -> Result<Control<()>> {
         let table_ref = self.table.table_ref();
 
@@ -105,6 +107,20 @@ impl DropTableExecutor {
                 table_name: table_ref.to_string()
             }
         );
+
+        if let Some(dropped_table) = ctx
+            .table_metadata_manager
+            .get_dropped_table(&self.table)
+            .await?
+            && dropped_table.table_id != self.table_id
+        {
+            return error::TableNameTombstoneConflictSnafu {
+                table_name: table_ref.to_string(),
+                existing_table_id: dropped_table.table_id,
+                dropping_table_id: self.table_id,
+            }
+            .fail();
+        }
 
         Ok(Control::Continue(()))
     }
