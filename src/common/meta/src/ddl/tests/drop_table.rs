@@ -240,7 +240,8 @@ async fn test_soft_drop_stops_after_cache_invalidation_without_datanode_requests
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
-    let ddl_context = new_ddl_context(node_manager);
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
     let table_id = 1024;
     let table_name = "foo";
     let task = test_create_table_task(table_name, table_id);
@@ -261,8 +262,7 @@ async fn test_soft_drop_stops_after_cache_invalidation_without_datanode_requests
         .await
         .unwrap();
 
-    let mut task = new_drop_table_task(table_name, table_id, false);
-    task.soft_drop = true;
+    let task = new_drop_table_task(table_name, table_id, false);
     let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
 
     execute_procedure_until_done(&mut procedure).await;
@@ -335,7 +335,8 @@ async fn test_hard_drop_keeps_delete_tombstone_flow() {
 #[tokio::test]
 async fn test_create_table_succeeds_while_tombstone_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(node_manager);
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
     let dropped_table_id = 1024;
     let table_name = "foo";
     let task = test_create_table_task(table_name, dropped_table_id);
@@ -349,8 +350,7 @@ async fn test_create_table_succeeds_while_tombstone_exists() {
         .await
         .unwrap();
 
-    let mut drop_task = new_drop_table_task(table_name, dropped_table_id, false);
-    drop_task.soft_drop = true;
+    let drop_task = new_drop_table_task(table_name, dropped_table_id, false);
     let mut drop_procedure = DropTableProcedure::new(drop_task, ddl_context.clone());
     execute_procedure_until_done(&mut drop_procedure).await;
 
@@ -384,7 +384,8 @@ async fn test_create_table_succeeds_while_tombstone_exists() {
 #[tokio::test]
 async fn test_drop_recreated_table_fails_when_previous_tombstone_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(node_manager);
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
     let original_table_id = 1024;
     let recreated_table_id = 1025;
     let table_name = "foo";
@@ -399,8 +400,7 @@ async fn test_drop_recreated_table_fails_when_previous_tombstone_exists() {
         .await
         .unwrap();
 
-    let mut drop_task = new_drop_table_task(table_name, original_table_id, false);
-    drop_task.soft_drop = true;
+    let drop_task = new_drop_table_task(table_name, original_table_id, false);
     let mut drop_procedure = DropTableProcedure::new(drop_task, ddl_context.clone());
     execute_procedure_until_done(&mut drop_procedure).await;
 
@@ -491,7 +491,6 @@ fn new_drop_table_task(table_name: &str, table_id: TableId, drop_if_exists: bool
         table: table_name.to_string(),
         table_id,
         drop_if_exists,
-        soft_drop: false,
     }
 }
 

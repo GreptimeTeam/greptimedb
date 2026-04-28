@@ -112,6 +112,8 @@ pub struct DdlContext {
     pub flow_metadata_allocator: FlowMetadataAllocatorRef,
     /// controller of region failure detector.
     pub region_failure_detector_controller: RegionFailureDetectorControllerRef,
+    /// Whether table drops should stop after tombstoning metadata.
+    pub soft_drop_enabled: bool,
 }
 
 impl DdlContext {

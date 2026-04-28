@@ -152,7 +152,7 @@ impl DropTableProcedure {
 
         // Soft-drop keeps tombstoned metadata in place for later recovery/purge work,
         // so the procedure stops before any datanode region deletion.
-        if self.data.task.soft_drop {
+        if self.context.soft_drop_enabled {
             self.dropping_regions.clear();
             return Ok(Status::done());
         }
