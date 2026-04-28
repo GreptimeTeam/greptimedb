@@ -23,7 +23,6 @@ mod test {
     use auth::user_provider_from_option;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_error::ext::ErrorExt;
     use common_grpc::flight::do_put::DoPutMetadata;
     use common_grpc::flight::{FlightEncoder, FlightMessage};
     use common_query::OutputData;
