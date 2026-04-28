@@ -23,6 +23,7 @@ use api::v1::{ColumnDataType, Row, Rows, SemanticType, Value};
 use common_error::ext::ErrorExt;
 use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
 use common_recordbatch::RecordBatches;
+use common_wal::options::WAL_OPTIONS_KEY;
 use datafusion_expr::col;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions};
@@ -1969,4 +1970,67 @@ async fn test_alter_region_skip_wal() {
 
     check_wal_options(&engine, &WalOptions::default());
     check_skip_wal(&engine, false);
+}
+
+#[tokio::test]
+async fn test_alter_region_enable_wal_on_legacy_noop_region_fails() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let wal_options = WalOptions::Noop;
+    let mut request = CreateRequestBuilder::new().build();
+    request.options.insert(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&wal_options).unwrap(),
+    );
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let check_wal_options = |engine: &MitoEngine, expected: &WalOptions| {
+        let wal_mode = &engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .wal_options;
+        assert_eq!(wal_mode, expected);
+    };
+
+    let check_skip_wal = |engine: &MitoEngine, expected: bool| {
+        let skip_wal = &engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .skip_wal;
+        assert_eq!(*skip_wal, expected);
+    };
+
+    check_wal_options(&engine, &WalOptions::Noop);
+    check_skip_wal(&engine, false);
+
+    // Try to enable WAL for a legacy noop region
+    let alter_request = RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::SkipWal(false)],
+        },
+    };
+
+    let err = engine
+        .handle_request(region_id, RegionRequest::Alter(alter_request))
+        .await
+        .unwrap_err();
+
+    let msg = err.to_string();
+
+    assert!(
+        msg.contains("Cannot enable WAL for legacy regions with noop wal_options"),
+        "unexpected error: {msg}"
+    );
 }

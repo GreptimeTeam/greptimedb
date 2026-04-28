@@ -243,3 +243,76 @@ async fn test_close_region_after_truncate_skip_wal() {
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(3, total_rows);
 }
+#[tokio::test]
+async fn test_close_region_skip_wal_with_pending_data_via_skip_flag() {
+    test_close_region_skip_wal_via_skip_flag(true).await;
+}
+
+async fn test_close_region_skip_wal_via_skip_flag(insert: bool) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix(&format!("close-skip-wal-flag-{}", insert)).await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    let wal_options = WalOptions::RaftEngine;
+    request.options.insert(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&wal_options).unwrap(),
+    );
+    request
+        .options
+        .insert("skip_wal".to_string(), "true".to_string());
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(region.version().options.wal_options, WalOptions::RaftEngine);
+    assert!(region.version().options.skip_wal);
+    if insert {
+        let column_schemas = rows_schema(&request);
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 3),
+        };
+        put_rows(&engine, region_id, rows).await;
+    }
+    let region = engine.get_region(region_id).unwrap();
+    if insert {
+        assert!(!region.version().memtables.is_empty());
+    } else {
+        assert!(region.version().memtables.is_empty());
+    }
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir: request.table_dir.clone(),
+                path_type: store_api::region_request::PathType::Bare,
+                options: request.options.clone(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = common_recordbatch::RecordBatches::try_collect(stream)
+        .await
+        .unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    if insert {
+        assert_eq!(3, total_rows);
+    } else {
+        assert_eq!(0, total_rows);
+    }
+}

@@ -40,6 +40,7 @@ use store_api::mito_engine_options::{
     TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
     is_mito_engine_option_key,
 };
+use store_api::path_utils::WAL_DIR;
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
 use crate::error::{ParseTableOptionSnafu, Result};
@@ -224,7 +225,7 @@ impl fmt::Display for TableOptions {
 
 impl From<&TableOptions> for HashMap<String, String> {
     fn from(opts: &TableOptions) -> Self {
-        let mut res = HashMap::with_capacity(2 + opts.extra_options.len());
+        let mut res = HashMap::with_capacity(3 + opts.extra_options.len());
         if let Some(write_buffer_size) = opts.write_buffer_size {
             let _ = res.insert(
                 WRITE_BUFFER_SIZE_KEY.to_string(),
@@ -234,6 +235,7 @@ impl From<&TableOptions> for HashMap<String, String> {
         if let Some(ttl_str) = opts.ttl.map(|ttl| ttl.to_string()) {
             let _ = res.insert(TTL_KEY.to_string(), ttl_str);
         }
+        let _ = res.insert(SKIP_WAL_KEY.to_string(), opts.skip_wal.to_string());
         res.extend(
             opts.extra_options
                 .iter()

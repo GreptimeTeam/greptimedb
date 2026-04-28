@@ -376,9 +376,6 @@ impl TableMeta {
                     }
                 }
                 SetRegionOption::SkipWal(value) => {
-                    new_options
-                        .extra_options
-                        .insert(SKIP_WAL_KEY.to_string(), value.to_string());
                     new_options.skip_wal = *value;
                 }
             }

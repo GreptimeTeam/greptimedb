@@ -236,6 +236,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     }
                 }
                 SetRegionOption::SkipWal(skip_wal) => {
+                    // Validates: don't allow no-op regions to enable WAL
+                    ensure!(
+                        !(current_options.wal_options == WalOptions::Noop && !skip_wal),
+                        store_api::metadata::InvalidRegionRequestSnafu {
+                            region_id: region.region_id,
+                            err: "Cannot enable WAL for legacy regions with noop wal_options",
+                        }
+                    );
                     if current_options.skip_wal != skip_wal {
                         current_options.skip_wal = skip_wal;
                         all_options_altered = false;
