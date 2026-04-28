@@ -572,8 +572,6 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
-    use common_error::ext::PlainError;
-    use common_error::status_code::StatusCode;
     use common_query::{Output, OutputData};
     use common_recordbatch::adapter::RecordBatchMetrics;
     use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
@@ -581,7 +579,6 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures::StreamExt;
-    use snafu::GenerateImplicitData;
     use tokio::time::timeout;
 
     use super::*;
