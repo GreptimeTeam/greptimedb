@@ -71,6 +71,7 @@ AGENTS.md
 .codex
 .gemini
 .opencode
+.worktrees/
 
 # local design docs
 docs/specs/

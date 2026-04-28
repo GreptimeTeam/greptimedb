@@ -15,17 +15,41 @@
 use std::collections::HashMap;
 
 use common_telemetry::debug;
+use futures_util::stream::BoxStream;
 use snafu::ensure;
 
 use crate::error::{self, Result};
+use crate::key::TABLE_NAME_KEY_PREFIX;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
-use crate::rpc::store::{BatchDeleteRequest, BatchGetRequest};
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
+use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchDeleteRequest, BatchGetRequest, RangeRequest};
 
 /// [TombstoneManager] provides the ability to:
 /// - logically delete values
 /// - restore the deleted values
+///
+/// The tombstone mechanism is primarily used for table metadata deletion.
+/// When a table is logically deleted, its associated metadata keys are moved
+/// to a tombstone area by prepending a prefix (default is `__tombstone/`).
+///
+/// All involved keys in the tombstone mechanism:
+/// - `__table_name/{catalog}/{schema}/{table_name}`: Maps table name to table ID.
+/// - `__table_info/{table_id}`: Stores table information/metadata.
+/// - `__table_route/{table_id}`: Stores table routing information.
+/// - `__table_repart/{table_id}`: Stores table repartition information.
+/// - `__dn_table/{datanode_id}/{table_id}`: Maps datanodes to table regions.
+/// - `__topic_region/{topic_name}/{region_id}`: Maps regions to WAL topics.
+///
+/// These keys are moved to:
+/// - `__tombstone/__table_name/...`
+/// - `__tombstone/__table_info/...`
+/// - `__tombstone/__table_route/...`
+/// - `__tombstone/__table_repart/...`
+/// - `__tombstone/__dn_table/...`
+/// - `__tombstone/__topic_region/...`
 pub struct TombstoneManager {
     kv_backend: KvBackendRef,
     tombstone_prefix: String,
@@ -54,6 +78,66 @@ impl TombstoneManager {
 
     pub fn to_tombstone(&self, key: &[u8]) -> Vec<u8> {
         [self.tombstone_prefix.as_bytes(), key].concat()
+    }
+
+    /// Removes the tombstone prefix from a tombstoned key.
+    pub fn strip_tombstone_prefix<'a>(&self, tombstone_key: &'a [u8]) -> Result<&'a [u8]> {
+        ensure!(
+            tombstone_key.starts_with(self.tombstone_prefix.as_bytes()),
+            error::UnexpectedSnafu {
+                err_msg: format!(
+                    "The key '{}' does not start with tombstone prefix '{}'.",
+                    String::from_utf8_lossy(tombstone_key),
+                    self.tombstone_prefix
+                ),
+            }
+        );
+
+        Ok(&tombstone_key[self.tombstone_prefix.len()..])
+    }
+
+    /// Gets a single tombstoned value by its original key.
+    pub async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
+        let tombstone_key = self.to_tombstone(key);
+        self.kv_backend.get(&tombstone_key).await
+    }
+
+    /// Gets tombstoned values by their original keys.
+    pub async fn batch_get(&self, keys: &[Vec<u8>]) -> Result<HashMap<Vec<u8>, KeyValue>> {
+        let tombstone_keys = keys
+            .iter()
+            .map(|key| self.to_tombstone(key))
+            .collect::<Vec<_>>();
+        let resp = self
+            .kv_backend
+            .batch_get(BatchGetRequest::new().with_keys(tombstone_keys))
+            .await?;
+
+        resp.kvs
+            .into_iter()
+            .map(|kv| Ok((self.strip_tombstone_prefix(&kv.key)?.to_vec(), kv)))
+            .collect::<Result<HashMap<_, _>>>()
+    }
+
+    /// Streams all tombstoned key-value pairs.
+    pub fn tombstones(&self) -> BoxStream<'static, Result<KeyValue>> {
+        self.scan_prefix(self.tombstone_prefix.as_bytes().to_vec())
+    }
+
+    /// Streams tombstoned table-name entries only.
+    pub fn tombstoned_table_names(&self) -> BoxStream<'static, Result<KeyValue>> {
+        self.scan_prefix(
+            format!("{}{}/", self.tombstone_prefix, TABLE_NAME_KEY_PREFIX).into_bytes(),
+        )
+    }
+
+    /// Streams tombstoned entries under the provided prefix.
+    fn scan_prefix(&self, prefix: Vec<u8>) -> BoxStream<'static, Result<KeyValue>> {
+        let req = RangeRequest::new().with_prefix(prefix);
+        let stream = PaginationStream::new(self.kv_backend.clone(), req, DEFAULT_PAGE_SIZE, Ok)
+            .into_stream();
+
+        Box::pin(stream)
     }
 
     #[cfg(test)]
@@ -399,6 +483,35 @@ mod tests {
             .await
             .unwrap();
         assert!(kv_backend.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_tombstones() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        kv_backend
+            .put(PutRequest::new().with_key("bar").with_value("baz"))
+            .await
+            .unwrap();
+        kv_backend
+            .put(PutRequest::new().with_key("foo").with_value("hi"))
+            .await
+            .unwrap();
+
+        tombstone_manager
+            .create(vec![b"bar".to_vec(), b"foo".to_vec()])
+            .await
+            .unwrap();
+
+        let kvs = tombstone_manager
+            .batch_get(&[b"bar".to_vec(), b"foo".to_vec(), b"missing".to_vec()])
+            .await
+            .unwrap();
+
+        assert_eq!(kvs.len(), 2);
+        assert_eq!(kvs.get(b"bar".as_slice()).unwrap().value, b"baz");
+        assert_eq!(kvs.get(b"foo".as_slice()).unwrap().value, b"hi");
+        assert!(!kvs.contains_key(b"missing".as_slice()));
     }
 
     #[tokio::test]
