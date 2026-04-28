@@ -147,7 +147,10 @@ impl FlatCompatBatch {
                     &expect_column.column_schema.data_type,
                     column_field,
                 );
-                fields.push(Arc::new(with_field_id((*field).clone(), expect_column.column_id)));
+                fields.push(Arc::new(with_field_id(
+                    (*field).clone(),
+                    expect_column.column_id,
+                )));
             } else {
                 fields.push(Arc::new(with_field_id(
                     (**column_field).clone(),
