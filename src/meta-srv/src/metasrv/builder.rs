@@ -84,6 +84,7 @@ use crate::selector::round_robin::RoundRobinSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::State;
+use crate::utils::database::DatabaseOperator;
 use crate::utils::insert_forwarder::InsertForwarder;
 
 /// The time window for twcs compaction of the region stats table.
@@ -206,9 +207,10 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
+        let database_operator = Arc::new(DatabaseOperator::new(meta_peer_client.clone()));
 
         let event_inserter = Box::new(InsertForwarder::new(
-            meta_peer_client.clone(),
+            database_operator.clone(),
             Some(InsertOptions {
                 ttl: options.event_recorder.ttl,
                 append_mode: true,
@@ -501,7 +503,7 @@ impl MetasrvBuilder {
 
         let persist_region_stats_handler = if !options.stats_persistence.ttl.is_zero() {
             let inserter = Box::new(InsertForwarder::new(
-                meta_peer_client.clone(),
+                database_operator.clone(),
                 Some(InsertOptions {
                     ttl: options.stats_persistence.ttl,
                     append_mode: true,
@@ -600,6 +602,7 @@ impl MetasrvBuilder {
             topic_stats_registry,
             resource_stat: Arc::new(resource_stat),
             gc_ticker,
+            database_operator,
         })
     }
 }
