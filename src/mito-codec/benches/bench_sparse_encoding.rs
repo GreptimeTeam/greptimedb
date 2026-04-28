@@ -220,15 +220,17 @@ fn bench_inline_threshold(c: &mut Criterion) {
     }
 }
 
-/// PoC: lookup-strategy comparison for `SparseValues`-shaped collections.
+/// Lookup-strategy comparison for `SparseValues`-shaped collections.
 ///
-/// `SparseValues` is currently a `HashMap<ColumnId, Value>`. The companion
-/// `SparseOffsetsCache` switched to a small-vec fast path with
-/// `SPARSE_OFFSETS_INLINE_CAP = 32` entries, but its payload is `usize` —
-/// `Value` is a much fatter enum, so the linear-scan-vs-HashMap crossover
-/// will likely land at a different inline cap. The benches below measure
-/// both the crossover (`bench_sparse_values_threshold`) and the workload
-/// impact at realistic primary-key widths (`bench_sparse_values_lookup`).
+/// `SparseValues` is now a `Vec<(ColumnId, Value)>` with linear-scan lookups;
+/// these benches keep the `HashMap` and `HybridValues<CAP>` baselines around
+/// to track the crossover and to make it easy to revisit the choice later.
+/// The companion `SparseOffsetsCache` uses a small-vec fast path with
+/// `SPARSE_OFFSETS_INLINE_CAP = 32` entries against a `usize` payload;
+/// `Value` is a much fatter enum, so its crossover may land elsewhere.
+/// The benches measure both the crossover (`bench_sparse_values_threshold`)
+/// and the workload impact at realistic primary-key widths
+/// (`bench_sparse_values_lookup`).
 fn sample_value(idx: u32) -> Value {
     Value::String(idx.to_string().repeat(10).into())
 }
@@ -309,7 +311,7 @@ impl<const CAP: usize> ValueLookup for HybridValues<CAP> {
 }
 
 fn build_sparse_values(pairs: &[(ColumnId, Value)]) -> SparseValues {
-    let mut sv = SparseValues::new(HashMap::with_capacity(pairs.len()));
+    let mut sv = SparseValues::with_capacity(pairs.len());
     for (c, v) in pairs {
         sv.insert(*c, v.clone());
     }
@@ -320,9 +322,7 @@ fn build_vec_values(pairs: &[(ColumnId, Value)]) -> Vec<(ColumnId, Value)> {
     pairs.to_vec()
 }
 
-fn build_hybrid_values<const CAP: usize>(
-    pairs: &[(ColumnId, Value)],
-) -> HybridValues<CAP> {
+fn build_hybrid_values<const CAP: usize>(pairs: &[(ColumnId, Value)]) -> HybridValues<CAP> {
     let mut h = HybridValues::<CAP>::new();
     for (c, v) in pairs {
         h.insert(*c, v.clone());
@@ -448,10 +448,10 @@ fn bench_sparse_values_threshold(c: &mut Criterion) {
 }
 
 /// Workload comparison at realistic primary-key widths. Compares the current
-/// `HashMap`-backed `SparseValues` against a pure `Vec` linear scan and two
-/// hybrid candidates. The hybrid caps are picked to bracket the likely
-/// crossover (smaller than the offsets-cache's 32, since `Value` is fatter
-/// than `usize`); refine after reading `bench_sparse_values_threshold`.
+/// `Vec`-backed `SparseValues` against a `HashMap` and two hybrid candidates.
+/// The hybrid caps are picked to bracket the likely crossover (smaller than
+/// the offsets-cache's 32, since `Value` is fatter than `usize`); refine
+/// after reading `bench_sparse_values_threshold`.
 fn bench_sparse_values_lookup(c: &mut Criterion) {
     for size in [2usize, 4, 8, 16, 32, 50] {
         let pairs: Vec<(ColumnId, Value)> = (0..size as u32)
@@ -472,14 +472,9 @@ fn bench_sparse_values_lookup(c: &mut Criterion) {
             || build_sparse_values(&pairs),
         );
 
-        run_lookup_workloads(
-            &mut group,
-            "vec",
-            &column_ids,
-            last_id,
-            missing_id,
-            || build_vec_values(&pairs),
-        );
+        run_lookup_workloads(&mut group, "vec", &column_ids, last_id, missing_id, || {
+            build_vec_values(&pairs)
+        });
 
         run_lookup_workloads(
             &mut group,

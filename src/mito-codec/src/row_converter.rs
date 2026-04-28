@@ -65,6 +65,10 @@ pub enum CompositeValues {
 
 impl CompositeValues {
     /// Extends the composite values with the given values.
+    ///
+    /// Append-only: `values` must not contain a column id already present in
+    /// the composite; otherwise the duplicate would shadow the new entry on
+    /// `SparseValues` lookup.
     pub fn extend(&mut self, values: &[(ColumnId, Value)]) {
         match self {
             CompositeValues::Dense(dense_values) => {
