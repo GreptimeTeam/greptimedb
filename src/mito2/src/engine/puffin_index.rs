@@ -370,6 +370,14 @@ fn decode_target_info(target_key: &str) -> (String, String) {
             TARGET_TYPE_COLUMN.to_string(),
             json!({ "column": id }).to_string(),
         ),
+        Ok(IndexTarget::SubField {
+            column_id,
+            path,
+            value_type,
+        }) => (
+            "subfield".to_string(),
+            json!({ "column": column_id, "path": path, "type": value_type }).to_string(),
+        ),
         _ => (
             TARGET_TYPE_UNKNOWN.to_string(),
             json!({ "error": "failed_to_decode" }).to_string(),
@@ -380,6 +388,7 @@ fn decode_target_info(target_key: &str) -> (String, String) {
 fn decode_column_id(target_key: &str) -> Option<ColumnId> {
     match IndexTarget::decode(target_key) {
         Ok(IndexTarget::ColumnId(id)) => Some(id),
+        Ok(IndexTarget::SubField { column_id, .. }) => Some(column_id),
         _ => None,
     }
 }

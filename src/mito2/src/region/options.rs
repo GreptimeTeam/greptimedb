@@ -28,6 +28,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use serde_with::{DisplayFromStr, NoneAsEmptyString, serde_as, with_prefix};
 use snafu::{ResultExt, ensure};
+use index::target::IndexValueType;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::mito_engine_options::COMPACTION_OVERRIDE;
 use store_api::storage::ColumnId;
@@ -317,6 +318,13 @@ pub struct InvertedIndexOptions {
     /// The number of rows in a segment.
     #[serde_as(as = "DisplayFromStr")]
     pub segment_row_count: usize,
+
+    /// Nested sub-field index targets encoded as JSON string.
+    /// Example:
+    /// `[{"column_id":1,"path":["a","b"],"value_type":"string"}]`
+    #[serde(deserialize_with = "deserialize_sub_fields")]
+    #[serde(serialize_with = "serialize_sub_fields")]
+    pub sub_fields: Vec<InvertedSubfieldIndexOption>,
 }
 
 impl Default for InvertedIndexOptions {
@@ -324,8 +332,16 @@ impl Default for InvertedIndexOptions {
         Self {
             ignore_column_ids: Vec::new(),
             segment_row_count: DEFAULT_INDEX_SEGMENT_ROW_COUNT,
+            sub_fields: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvertedSubfieldIndexOption {
+    pub column_id: ColumnId,
+    pub path: Vec<String>,
+    pub value_type: IndexValueType,
 }
 
 /// Options for region level memtable.
@@ -412,6 +428,30 @@ where
         .map(|id| id.to_string())
         .collect::<Vec<_>>()
         .join(",");
+    serializer.serialize_str(&s)
+}
+
+fn deserialize_sub_fields<'de, D>(
+    deserializer: D,
+) -> Result<Vec<InvertedSubfieldIndexOption>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: String = Deserialize::deserialize(deserializer)?;
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&s).map_err(D::Error::custom)
+}
+
+fn serialize_sub_fields<S>(
+    sub_fields: &[InvertedSubfieldIndexOption],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let s = serde_json::to_string(sub_fields).map_err(serde::ser::Error::custom)?;
     serializer.serialize_str(&s)
 }
 
@@ -560,11 +600,27 @@ mod tests {
                 inverted_index: InvertedIndexOptions {
                     ignore_column_ids: vec![1, 2, 3],
                     segment_row_count: 512,
+                    sub_fields: vec![],
                 },
             },
             ..Default::default()
         };
         assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_with_inverted_index_sub_fields() {
+        let sub_fields = r#"[{"column_id":1,"path":["a","b"],"value_type":"string"}]"#;
+        let map = make_map(&[("index.inverted_index.sub_fields", sub_fields)]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert_eq!(
+            vec![InvertedSubfieldIndexOption {
+                column_id: 1,
+                path: vec!["a".to_string(), "b".to_string()],
+                value_type: IndexValueType::String,
+            }],
+            options.index_options.inverted_index.sub_fields
+        );
     }
 
     // No need to add compatible tests for RegionOptions since the above tests already check for compatibility.
@@ -667,6 +723,7 @@ mod tests {
                 inverted_index: InvertedIndexOptions {
                     ignore_column_ids: vec![1, 2, 3],
                     segment_row_count: 512,
+                    sub_fields: vec![],
                 },
             },
             memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
@@ -702,6 +759,7 @@ mod tests {
                 inverted_index: InvertedIndexOptions {
                     ignore_column_ids: vec![1, 2, 3],
                     segment_row_count: 512,
+                    sub_fields: vec![],
                 },
             },
             memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
@@ -767,6 +825,7 @@ mod tests {
                 inverted_index: InvertedIndexOptions {
                     ignore_column_ids: vec![],
                     segment_row_count: 512,
+                    sub_fields: vec![],
                 },
             },
             memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
