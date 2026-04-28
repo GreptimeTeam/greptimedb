@@ -18,18 +18,78 @@ use std::sync::Arc;
 use arrow::compute;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use arrow_array::cast::AsArray;
+use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
 use arrow_schema::{DataType, FieldRef};
+use serde_json::Value;
 use snafu::{OptionExt, ResultExt, ensure};
 
-use crate::arrow_array::StringArray;
-use crate::error::{AlignJsonArraySnafu, ArrowComputeSnafu, Result};
+use crate::arrow_array::{StringArray, binary_array_value, string_array_value};
+use crate::error::{
+    AlignJsonArraySnafu, ArrowComputeSnafu, DeserializeSnafu, InvalidJsonSnafu, Result,
+};
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
 }
 
 impl JsonArray<'_> {
+    /// Try to get the value (as a [Value]) at the index `i`.
+    pub fn try_get_value(&self, i: usize) -> Result<Value> {
+        let array = self.inner;
+        if array.is_null(i) {
+            return Ok(Value::Null);
+        }
+
+        let value = match array.data_type() {
+            DataType::Null => Value::Null,
+            DataType::Boolean => Value::Bool(array.as_boolean().value(i)),
+            DataType::Int64 => Value::from(array.as_primitive::<Int64Type>().value(i)),
+            DataType::UInt64 => Value::from(array.as_primitive::<UInt64Type>().value(i)),
+            DataType::Float64 => Value::from(array.as_primitive::<Float64Type>().value(i)),
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
+                Value::String(string_array_value(array, i).to_string())
+            }
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
+                let bytes = binary_array_value(array, i);
+                serde_json::from_slice(bytes).with_context(|_| DeserializeSnafu {
+                    json: String::from_utf8_lossy(bytes),
+                })?
+            }
+            DataType::Struct(_) => {
+                let structs = array.as_struct();
+                let object = structs
+                    .fields()
+                    .iter()
+                    .zip(structs.columns())
+                    .map(|(field, column)| {
+                        JsonArray::from(column)
+                            .try_get_value(i)
+                            .map(|v| (field.name().clone(), v))
+                    })
+                    .collect::<Result<_>>()?;
+                Value::Object(object)
+            }
+            DataType::List(_) => {
+                let lists = array.as_list::<i32>();
+                let list = lists.value(i);
+                let list = JsonArray::from(&list);
+                let mut values = Vec::with_capacity(list.inner.len());
+                for i in 0..list.inner.len() {
+                    values.push(list.try_get_value(i)?);
+                }
+                Value::Array(values)
+            }
+            t => {
+                return InvalidJsonSnafu {
+                    value: format!("unknown JSON type {t}"),
+                }
+                .fail();
+            }
+        };
+        Ok(value)
+    }
+
     /// Align a JSON array to the `expect` data type. The `expect` data type is often the "largest"
     /// JSON type after some insertions in the table schema, while the JSON array previously
     /// written in the SST could be lagged behind it. So it's important to "align" the JSON array by
@@ -189,10 +249,89 @@ impl<'a> From<&'a ArrayRef> for JsonArray<'a> {
 #[cfg(test)]
 mod test {
     use arrow_array::types::Int64Type;
-    use arrow_array::{BooleanArray, Float64Array, Int64Array, ListArray};
+    use arrow_array::{BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray};
     use arrow_schema::{Field, Fields};
+    use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn test_try_get_value() -> Result<()> {
+        let nulls = new_null_array(&DataType::Null, 2);
+        assert_eq!(JsonArray::from(&nulls).try_get_value(0)?, Value::Null);
+
+        let bools: ArrayRef = Arc::new(BooleanArray::from(vec![Some(true), None]));
+        assert_eq!(JsonArray::from(&bools).try_get_value(0)?, json!(true));
+        assert_eq!(JsonArray::from(&bools).try_get_value(1)?, Value::Null);
+
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![Some(-7), None]));
+        assert_eq!(JsonArray::from(&ints).try_get_value(0)?, json!(-7));
+        assert_eq!(JsonArray::from(&ints).try_get_value(1)?, Value::Null);
+
+        let floats: ArrayRef = Arc::new(Float64Array::from(vec![Some(1.5)]));
+        assert_eq!(JsonArray::from(&floats).try_get_value(0)?, json!(1.5));
+
+        let strings: ArrayRef = Arc::new(StringArray::from(vec![Some("hello"), None]));
+        assert_eq!(JsonArray::from(&strings).try_get_value(0)?, json!("hello"));
+        assert_eq!(JsonArray::from(&strings).try_get_value(1)?, Value::Null);
+
+        let binaries: ArrayRef = Arc::new(BinaryArray::from(vec![
+            br#"{"nested":[1,null,"x"]}"#.as_slice(),
+            b"null".as_slice(),
+        ]));
+        assert_eq!(
+            JsonArray::from(&binaries).try_get_value(0)?,
+            json!({"nested": [1, null, "x"]})
+        );
+        assert_eq!(JsonArray::from(&binaries).try_get_value(1)?, Value::Null);
+
+        let lists: ArrayRef = Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
+            Some(vec![Some(1), None, Some(3)]),
+            None,
+        ]));
+        assert_eq!(
+            JsonArray::from(&lists).try_get_value(0)?,
+            json!([1, null, 3])
+        );
+        assert_eq!(JsonArray::from(&lists).try_get_value(1)?, Value::Null);
+
+        let structs: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("flag", DataType::Boolean, true)),
+                Arc::new(BooleanArray::from(vec![Some(true), None])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new_list(
+                    "items",
+                    Field::new_list_field(DataType::Int64, true),
+                    true,
+                )),
+                Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
+                    Some(vec![Some(1), None]),
+                    Some(vec![Some(2)]),
+                ])) as ArrayRef,
+            ),
+        ]));
+        assert_eq!(
+            JsonArray::from(&structs).try_get_value(0)?,
+            json!({"flag": true, "items": [1, null]})
+        );
+        assert_eq!(
+            JsonArray::from(&structs).try_get_value(1)?,
+            json!({"flag": null, "items": [2]})
+        );
+
+        let unsupported: ArrayRef = Arc::new(Int32Array::from(vec![1]));
+        assert_eq!(
+            JsonArray::from(&unsupported)
+                .try_get_value(0)
+                .unwrap_err()
+                .to_string(),
+            "Invalid JSON: unknown JSON type Int32"
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn test_align_json_array() -> Result<()> {
