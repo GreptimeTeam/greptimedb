@@ -531,6 +531,7 @@ impl StartCommand {
             flow_metadata_manager: flow_metadata_manager.clone(),
             flow_metadata_allocator: flow_metadata_allocator.clone(),
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+            soft_drop_enabled: false,
         };
 
         let ddl_manager = DdlManager::try_new(

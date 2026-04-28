@@ -242,6 +242,7 @@ impl GreptimeDbStandaloneBuilder {
                     flow_metadata_manager,
                     flow_metadata_allocator,
                     region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+                    soft_drop_enabled: false,
                 },
                 procedure_manager.clone(),
                 repartition_procedure_factory,

@@ -149,6 +149,7 @@ impl DropTableProcedure {
     /// Broadcasts invalidate table cache instruction.
     async fn on_broadcast(&mut self) -> Result<Status> {
         self.executor.invalidate_table_cache(&self.context).await?;
+
         self.data.state = DropTableState::DatanodeDropRegions;
 
         Ok(Status::executing(true))
@@ -172,6 +173,18 @@ impl DropTableProcedure {
                 .await?;
         }
 
+        if self.context.soft_drop_enabled {
+            self.executor
+                .on_close_regions(
+                    &self.context.node_manager,
+                    &self.context.leader_region_registry,
+                    &self.data.physical_region_routes,
+                )
+                .await?;
+            self.dropping_regions.clear();
+            return Ok(Status::done());
+        }
+
         self.executor
             .on_drop_regions(
                 &self.context.node_manager,
@@ -182,6 +195,7 @@ impl DropTableProcedure {
                 false,
             )
             .await?;
+
         self.data.state = DropTableState::DeleteTombstone;
         Ok(Status::executing(true))
     }
