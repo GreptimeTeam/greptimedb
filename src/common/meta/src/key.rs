@@ -1125,7 +1125,7 @@ impl TableMetadataManager {
             .tombstone_manager
             .get(&table_route_key.to_bytes())
             .await?
-            .context(error::UnexpectedSnafu {
+            .with_context(|| error::UnexpectedSnafu {
                 err_msg: format!("Missing tombstoned table route metadata for table id {table_id}"),
             })?;
         let mut table_route_value = TableRouteValue::try_from_raw_value(&table_route_kv.value)?;
