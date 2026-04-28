@@ -24,7 +24,7 @@ derive_builder = { workspace = true, optional = true }
 futures.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
-opendal = { git = "https://github.com/apache/opendal.git", tag = "v0.56.0-rc.2", features = [
+opendal = { git = "https://github.com/GreptimeTeam/opendal.git", branch = "0.56rc2_patch", features = [
     "layers-tracing",
     "layers-prometheus",
     "services-azblob",

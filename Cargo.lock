@@ -8967,7 +8967,7 @@ dependencies = [
 [[package]]
 name = "object_store_opendal"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9055,7 +9055,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "opendal"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "ctor",
  "opendal-core",
@@ -9076,7 +9076,7 @@ dependencies = [
 [[package]]
 name = "opendal-core"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -9103,7 +9103,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-concurrent-limit"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "futures",
  "http 1.3.1",
@@ -9114,7 +9114,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-logging"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "log",
  "opendal-core",
@@ -9123,7 +9123,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-observe-metrics-common"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "futures",
  "http 1.3.1",
@@ -9133,7 +9133,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-prometheus"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "opendal-core",
  "opendal-layer-observe-metrics-common",
@@ -9143,7 +9143,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-retry"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "backon",
  "log",
@@ -9153,7 +9153,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-timeout"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "opendal-core",
  "tokio",
@@ -9162,7 +9162,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-tracing"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "futures",
  "http 1.3.1",
@@ -9173,7 +9173,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-azblob"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -9193,7 +9193,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-azure-common"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "http 1.3.1",
  "opendal-core",
@@ -9202,7 +9202,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-fs"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "bytes",
  "log",
@@ -9215,7 +9215,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-gcs"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9235,7 +9235,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-http"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "http 1.3.1",
  "log",
@@ -9246,7 +9246,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-oss"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "bytes",
  "http 1.3.1",
@@ -9262,7 +9262,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-s3"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "git+https://github.com/GreptimeTeam/opendal.git?branch=0.56rc2_patch#24881a71870a4047473d74168830c90bf5d41047"
 dependencies = [
  "base64 0.22.1",
  "bytes",
