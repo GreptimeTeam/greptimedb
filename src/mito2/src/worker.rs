@@ -63,7 +63,7 @@ use crate::compaction::CompactionScheduler;
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
-use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
+use crate::flush::{FlushReason, FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
@@ -1095,10 +1095,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         for ddl in ddl_requests.drain(..) {
+            match self.maybe_schedule_soft_drop_flush(&ddl) {
+                Ok(true) => {
+                    // Keep the original DDL sender pending. The caller won't receive
+                    // the drop response until the flush finishes and replays this DDL.
+                    self.flush_scheduler.add_ddl_request_to_pending(ddl);
+                    continue;
+                }
+                Ok(false) => (),
+                Err(err) => {
+                    ddl.sender.send(Err(err));
+                    continue;
+                }
+            };
+
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(req) => {
-                    self.handle_drop_request(ddl.region_id, req.partial_drop)
+                    self.handle_drop_request(ddl.region_id, req.partial_drop, req.soft_drop)
                         .await
                 }
                 DdlRequest::Open((req, wal_entry_receiver)) => {
@@ -1157,6 +1171,52 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             ddl.sender.send(res);
         }
+    }
+
+    /// Schedules a flush before soft-dropping a region with pending memtables.
+    ///
+    /// Returns `true` when the caller should put the original drop DDL into the
+    /// flush scheduler's pending queue and stop handling it for now. The DDL is
+    /// replayed after `handle_flush_finished()` observes a successful flush, so
+    /// the external drop request does not return success until the memtables are
+    /// durable. We must not await the flush here because flush completion is
+    /// delivered back through this same worker loop.
+    fn maybe_schedule_soft_drop_flush(&mut self, ddl: &SenderDdlRequest) -> Result<bool> {
+        let DdlRequest::Drop(req) = &ddl.request else {
+            return Ok(false);
+        };
+        if !req.soft_drop {
+            return Ok(false);
+        }
+
+        let Some(region) = self.regions.get_region(ddl.region_id) else {
+            return Ok(false);
+        };
+        if region
+            .version_control
+            .current()
+            .version
+            .memtables
+            .is_empty()
+        {
+            return Ok(false);
+        }
+
+        info!(
+            "Region {} has pending data, flushing before soft drop",
+            ddl.region_id
+        );
+        let task = self.new_flush_task(
+            &region,
+            FlushReason::SoftDropping,
+            None,
+            self.config.clone(),
+        );
+        // Do not await here: flush completion is delivered back to this worker.
+        // The pending DDL queue above is what makes the external drop request wait.
+        self.flush_scheduler
+            .schedule_flush(region.region_id, &region.version_control, task)?;
+        Ok(true)
     }
 
     /// Handle periodical tasks such as region auto flush.

@@ -289,6 +289,10 @@ impl TestEnv {
             .map(|manager| manager.default_object_store().clone())
     }
 
+    pub(crate) fn set_file_ref_gc_enabled(&mut self, gc_enabled: bool) {
+        self.file_ref_manager = Arc::new(FileReferenceManager::with_gc_enabled(None, gc_enabled));
+    }
+
     pub fn data_home(&self) -> &Path {
         self.data_home.path()
     }

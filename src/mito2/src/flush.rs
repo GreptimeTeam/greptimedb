@@ -221,6 +221,8 @@ pub enum FlushReason {
     EnterStaging,
     /// Flush when region is closing.
     Closing,
+    /// Flush before soft-dropping a region.
+    SoftDropping,
 }
 
 impl FlushReason {

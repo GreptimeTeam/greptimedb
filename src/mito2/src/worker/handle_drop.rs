@@ -42,6 +42,7 @@ where
         &mut self,
         region_id: RegionId,
         partial_drop: bool,
+        soft_drop: bool,
     ) -> Result<AffectedRows> {
         let region = self.regions.writable_region(region_id)?;
 
@@ -97,8 +98,8 @@ where
             .on_region_dropped(region_id)
             .await;
 
-        // Marks region version as dropped
-        region.version_control.mark_dropped();
+        // Marks region version as dropped. Soft-drop keeps flushed SSTs for recovery.
+        region.version_control.mark_dropped(!soft_drop);
         info!(
             "Region {} is dropped logically, but some files are not deleted yet",
             region_id
@@ -112,7 +113,6 @@ where
         let intm_manager = self.intermediate_manager.clone();
         let cache_manager = self.cache_manager.clone();
         let gc_enabled = self.file_ref_manager.is_gc_enabled();
-
         common_runtime::spawn_global(async move {
             let removed = if gc_enabled {
                 later_drop_task_with_global_gc(
@@ -122,6 +122,7 @@ where
                     object_store,
                     dropping_regions,
                     partial_drop,
+                    soft_drop,
                 )
                 .await
             } else {
@@ -230,12 +231,13 @@ async fn later_drop_task_with_global_gc(
     object_store: ObjectStore,
     dropping_regions: RegionMapRef,
     partial_drop: bool,
+    soft_drop: bool,
 ) -> bool {
     // For metadata regions or regions marked for full deletion (such as when dropping a table)
     // the region directory is forcefully removed immediately.
     //
     // TODO(discord9): Evaluate removing files instantly rather than waiting for the GC period.
-    if path_type == PathType::Metadata || !partial_drop {
+    if !should_defer_region_file_deletion(path_type, partial_drop, soft_drop) {
         remove_region_with_retry(
             region_id,
             region_path,
@@ -250,6 +252,18 @@ async fn later_drop_task_with_global_gc(
         dropping_regions.remove_region(region_id);
         true
     }
+}
+
+fn should_defer_region_file_deletion(
+    path_type: PathType,
+    partial_drop: bool,
+    soft_drop: bool,
+) -> bool {
+    if soft_drop {
+        return true;
+    }
+
+    partial_drop && path_type != PathType::Metadata
 }
 
 // TODO(ruihang): place the marker in a separate dir
@@ -297,5 +311,21 @@ pub(crate) async fn remove_region_dir_once(
         Ok(true)
     } else {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use store_api::region_request::PathType;
+
+    use super::*;
+
+    #[test]
+    fn test_should_defer_region_file_deletion_for_soft_drop_metadata_region() {
+        assert!(should_defer_region_file_deletion(
+            PathType::Metadata,
+            false,
+            true
+        ));
     }
 }

@@ -160,8 +160,8 @@ impl VersionControl {
         version_data.version = new_version;
     }
 
-    /// Mark all opened files as deleted and set the delete marker in [VersionControlData]
-    pub(crate) fn mark_dropped(&self) {
+    /// Sets the delete marker in [VersionControlData].
+    pub(crate) fn mark_dropped(&self, delete_ssts: bool) {
         let version = self.current().version;
         let memtable_builder = version.memtables.mutable.memtable_builder().clone();
         let new_mutable =
@@ -169,7 +169,9 @@ impl VersionControl {
 
         let mut data = self.data.write().unwrap();
         data.is_dropped = true;
-        data.version.ssts.mark_all_deleted();
+        if delete_ssts {
+            data.version.ssts.mark_all_deleted();
+        }
         // Reset version so we can release the reference to memtables and SSTs.
         let new_version =
             Arc::new(VersionBuilder::new(version.metadata.clone(), new_mutable).build());

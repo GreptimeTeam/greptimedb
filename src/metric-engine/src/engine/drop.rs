@@ -36,6 +36,7 @@ impl MetricEngineInner {
         let data_region_id = utils::to_data_region_id(region_id);
         let fast_path = req.fast_path;
         let force = req.force;
+        let soft_drop = req.soft_drop;
 
         // enclose the guard in a block to prevent the guard from polluting the async context
         let (is_physical_region, is_physical_region_busy) = {
@@ -75,7 +76,7 @@ impl MetricEngineInner {
                 info!("Dropping physical region {} with force", data_region_id);
             }
             return self
-                .drop_physical_region(data_region_id, req.partial_drop)
+                .drop_physical_region(data_region_id, req.partial_drop, soft_drop)
                 .await;
         }
 
@@ -111,6 +112,7 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         partial_drop: bool,
+        soft_drop: bool,
     ) -> Result<AffectedRows> {
         let data_region_id = utils::to_data_region_id(region_id);
         let metadata_region_id = utils::to_metadata_region_id(region_id);
@@ -125,6 +127,7 @@ impl MetricEngineInner {
                     fast_path: false,
                     force: false,
                     partial_drop,
+                    soft_drop,
                 }),
             )
             .await
@@ -136,6 +139,7 @@ impl MetricEngineInner {
                     fast_path: false,
                     force: false,
                     partial_drop,
+                    soft_drop,
                 }),
             )
             .await

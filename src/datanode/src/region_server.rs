@@ -1766,6 +1766,7 @@ mod tests {
                     fast_path: false,
                     force: false,
                     partial_drop: false,
+                    soft_drop: false,
                 }),
             )
             .await
@@ -1868,6 +1869,7 @@ mod tests {
                     fast_path: false,
                     force: false,
                     partial_drop: false,
+                    soft_drop: false,
                 }),
             )
             .await

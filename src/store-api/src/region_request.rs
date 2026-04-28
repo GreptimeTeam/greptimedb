@@ -282,6 +282,7 @@ fn parse_region_drop(drop: DropRequest) -> Result<(RegionId, RegionDropRequest)>
             fast_path: drop.fast_path,
             force: drop.force,
             partial_drop: drop.partial_drop,
+            soft_drop: drop.soft_drop,
         },
     ))
 }
@@ -562,6 +563,9 @@ pub struct RegionDropRequest {
     /// If true, indicates that only a portion of the region is being dropped, and files may still be referenced by other regions.
     /// This is used to prevent deletion of files that are still in use by other regions.
     pub partial_drop: bool,
+
+    /// If true, flushes memtables before dropping the region from memory and defers region file deletion.
+    pub soft_drop: bool,
 }
 
 /// Open region request.
@@ -1573,6 +1577,23 @@ mod tests {
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
+
+    #[test]
+    fn test_parse_region_drop_preserves_soft_drop() {
+        let region_id = RegionId::new(1, 1);
+        let drop = DropRequest {
+            region_id: region_id.as_u64(),
+            fast_path: false,
+            force: false,
+            partial_drop: false,
+            soft_drop: true,
+        };
+
+        let (parsed_region_id, request) = parse_region_drop(drop).unwrap();
+
+        assert_eq!(parsed_region_id, region_id);
+        assert!(request.soft_drop);
+    }
 
     #[test]
     fn test_from_proto_location() {

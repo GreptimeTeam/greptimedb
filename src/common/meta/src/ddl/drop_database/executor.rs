@@ -142,6 +142,7 @@ impl State for DropDatabaseExecutor {
                 true,
                 false,
                 false,
+                false,
             )
             .await?;
         info!("Table: {}({}) is dropped", self.table_name, self.table_id);

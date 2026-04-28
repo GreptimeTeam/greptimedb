@@ -188,6 +188,7 @@ impl DropTableProcedure {
                 false,
                 false,
                 false,
+                false,
             )
             .await?;
         self.data.state = DropTableState::DeleteTombstone;

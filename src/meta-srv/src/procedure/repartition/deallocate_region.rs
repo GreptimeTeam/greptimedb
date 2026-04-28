@@ -135,6 +135,7 @@ impl DeallocateRegion {
                 false,
                 true,
                 true,
+                false,
             )
             .await
             .context(error::DeallocateRegionsSnafu { table_id })?;
