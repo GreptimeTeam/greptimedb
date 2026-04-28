@@ -23,10 +23,12 @@ mod test {
     use auth::user_provider_from_option;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_error::ext::ErrorExt;
     use common_grpc::flight::do_put::DoPutMetadata;
     use common_grpc::flight::{FlightEncoder, FlightMessage};
     use common_query::OutputData;
     use common_recordbatch::RecordBatch;
+    use common_recordbatch::adapter::RegionWatermarkEntry;
     use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int32Vector, StringVector, TimestampMillisecondVector};
@@ -129,6 +131,104 @@ mod test {
 | 1970-01-01T00:00:00.009 | -9 | s9 |
 +-------------------------+----+----+";
         query_and_expect(db.fe_instance().as_ref(), sql, expected).await;
+
+        let output = client.sql(sql).await.unwrap();
+        let OutputData::Stream(mut stream) = output.data else {
+            panic!("expected stream output");
+        };
+        while let Some(batch) = stream.next().await {
+            batch.unwrap();
+        }
+        let metrics = stream.metrics().expect("expected terminal metrics");
+        assert!(metrics.region_watermarks.is_empty());
+
+        let result = client
+            .sql_with_terminal_metrics(sql, &[("flow.return_region_seq", "true")])
+            .await
+            .unwrap();
+        let terminal_metrics = result.metrics.clone();
+        let OutputData::Stream(mut stream) = result.output.data else {
+            panic!("expected stream output");
+        };
+        while let Some(batch) = stream.next().await {
+            batch.unwrap();
+        }
+        assert!(terminal_metrics.is_ready());
+        let regions = db.list_all_regions().await;
+        assert_eq!(regions.len(), 1);
+        let (region_id, region) = regions.into_iter().next().unwrap();
+        let expected_watermark = (region_id.as_u64(), region.find_committed_sequence());
+        assert_eq!(
+            terminal_metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([expected_watermark]))
+        );
+
+        let output = client
+            .sql_with_hint(sql, &[("flow.return_region_seq", "true")])
+            .await
+            .unwrap();
+        let OutputData::Stream(mut stream) = output.data else {
+            panic!("expected stream output");
+        };
+
+        let mut row_count = 0;
+        while let Some(batch) = stream.next().await {
+            let batch = batch.unwrap();
+            row_count += batch.num_rows();
+        }
+        assert_eq!(row_count, 9);
+
+        let metrics = stream.metrics().expect("expected terminal metrics");
+        let region_watermarks = metrics.region_watermarks;
+        assert_eq!(
+            region_watermarks,
+            vec![RegionWatermarkEntry {
+                region_id: expected_watermark.0,
+                watermark: Some(expected_watermark.1),
+            }]
+        );
+
+        let previous_watermark = expected_watermark;
+
+        create_table_named(&client, "bar").await;
+        let result = client
+            .sql_with_terminal_metrics("insert into bar select ts, a, `B` from foo", &[])
+            .await
+            .unwrap();
+        let OutputData::AffectedRows(affected_rows) = result.output.data else {
+            panic!("expected affected rows output");
+        };
+        assert_eq!(affected_rows, 9);
+        assert!(result.metrics.is_ready());
+        assert!(result.region_watermark_map().is_none());
+
+        let err = client
+            .sql_with_terminal_metrics(
+                "insert into bar select ts, a, `B` from foo",
+                &[("flow.return_region_seq", "not-a-bool")],
+            )
+            .await
+            .unwrap_err();
+        let err_msg = format!("{err:?}");
+        assert!(err_msg.contains("Invalid value for flow.return_region_seq"));
+
+        client.sql("truncate table bar").await.unwrap();
+
+        let result = client
+            .sql_with_terminal_metrics(
+                "insert into bar select ts, a, `B` from foo",
+                &[("flow.return_region_seq", "true")],
+            )
+            .await
+            .unwrap();
+        let OutputData::AffectedRows(affected_rows) = result.output.data else {
+            panic!("expected affected rows output");
+        };
+        assert_eq!(affected_rows, 9);
+        assert_eq!(
+            result.region_watermark_map(),
+            Some(std::collections::HashMap::from([previous_watermark]))
+        );
     }
 
     async fn test_put_record_batches(client: &Database, record_batches: Vec<RecordBatch>) {
@@ -224,6 +324,10 @@ mod test {
     }
 
     async fn create_table(client: &Database) {
+        create_table_named(client, "foo").await;
+    }
+
+    async fn create_table_named(client: &Database, table_name: &str) {
         // create table foo (
         //   ts timestamp time index,
         //   a int primary key,
@@ -232,7 +336,7 @@ mod test {
         let output = client
             .create(CreateTableExpr {
                 schema_name: "public".to_string(),
-                table_name: "foo".to_string(),
+                table_name: table_name.to_string(),
                 column_defs: vec![
                     ColumnDef {
                         name: "ts".to_string(),
