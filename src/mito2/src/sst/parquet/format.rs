@@ -1070,7 +1070,7 @@ mod tests {
     fn make_field(name: &str, dt: ArrowDataType, nullable: bool, field_id: Option<u32>) -> Field {
         let mut field = Field::new(name, dt, nullable);
         if let Some(id) = field_id {
-            field = with_field_id(&field, id);
+            field = with_field_id(field, id);
         }
         field
     }
@@ -1116,7 +1116,7 @@ mod tests {
             .iter()
             .zip(ids)
             .map(|(f, id)| match id {
-                Some(id) => Arc::new(with_field_id(f, id)) as _,
+                Some(id) => Arc::new(with_field_id((**f).clone(), id)) as _,
                 None => f.clone(),
             })
             .collect();

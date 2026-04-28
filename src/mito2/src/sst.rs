@@ -63,12 +63,11 @@ pub enum FormatType {
 pub const PARQUET_FIELD_ID_KEY: &str = "PARQUET:field_id";
 
 /// Adds `PARQUET:field_id` metadata to an Arrow field.
-pub fn with_field_id(field: &Field, column_id: u32) -> Field {
-    let mut new_field = field.clone();
-    new_field
+pub fn with_field_id(mut field: Field, column_id: u32) -> Field {
+    field
         .metadata_mut()
         .insert(PARQUET_FIELD_ID_KEY.to_string(), column_id.to_string());
-    new_field
+    field
 }
 
 /// Gets the arrow schema to store in parquet.
@@ -82,14 +81,17 @@ pub fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
             .zip(&metadata.column_metadatas)
             .filter_map(|(field, column_meta)| {
                 if column_meta.semantic_type == SemanticType::Field {
-                    Some(Arc::new(with_field_id(field, column_meta.column_id)))
+                    Some(Arc::new(with_field_id(
+                        (**field).clone(),
+                        column_meta.column_id,
+                    )))
                 } else {
                     // We have fixed positions for tags (primary key) and time index.
                     None
                 }
             })
             .chain([Arc::new(with_field_id(
-                &metadata.time_index_field(),
+                (*metadata.time_index_field()).clone(),
                 metadata.time_index_column().column_id,
             ))])
             .chain(internal_fields()),
@@ -157,7 +159,7 @@ pub fn to_flat_sst_arrow_schema(
                     &metadata.column_metadatas[pk_index].column_schema.data_type,
                     old_field,
                 );
-                fields.push(Arc::new(with_field_id(&new_field, column_id)));
+                fields.push(Arc::new(with_field_id((*new_field).clone(), column_id)));
             }
         }
     }
@@ -167,13 +169,16 @@ pub fn to_flat_sst_arrow_schema(
         .zip(&metadata.column_metadatas)
         .filter_map(|(field, column_meta)| {
             if column_meta.semantic_type == SemanticType::Field {
-                Some(Arc::new(with_field_id(field, column_meta.column_id)))
+                Some(Arc::new(with_field_id(
+                    (**field).clone(),
+                    column_meta.column_id,
+                )))
             } else {
                 None
             }
         })
         .chain([Arc::new(with_field_id(
-            &metadata.time_index_field(),
+            (*metadata.time_index_field()).clone(),
             metadata.time_index_column().column_id,
         ))])
         .chain(internal_fields());
@@ -198,12 +203,21 @@ pub fn flat_sst_arrow_schema_column_num(
 
 /// Helper function to create a dictionary field from a field.
 fn to_dictionary_field(field: &Field) -> Field {
-    Field::new_dictionary(
+    let mut new_field = Field::new_dictionary(
         field.name(),
         datatypes::arrow::datatypes::DataType::UInt32,
         field.data_type().clone(),
         field.is_nullable(),
-    )
+    );
+
+    // retain field_id metadata
+    if let Some(field_id) = field.metadata().get(PARQUET_FIELD_ID_KEY) {
+        new_field
+            .metadata_mut()
+            .insert(PARQUET_FIELD_ID_KEY.to_string(), field_id.clone());
+    }
+
+    new_field
 }
 
 /// Helper function to create a dictionary field from a field if it is a string column.

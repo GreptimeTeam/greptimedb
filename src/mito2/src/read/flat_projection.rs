@@ -396,20 +396,20 @@ pub(crate) fn compute_input_arrow_schema(
     let mut new_fields = Vec::with_capacity(batch_schema.len() + 3);
     for (column_id, _) in batch_schema {
         let column_metadata = metadata.column_by_id(*column_id).unwrap();
-        let field = Field::new(
+        let mut field = Field::new(
             &column_metadata.column_schema.name,
             column_metadata.column_schema.data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
         );
-        let field = if column_metadata.semantic_type == SemanticType::Tag {
-            tag_maybe_to_dictionary_field(
+        field = with_field_id(field, *column_id);
+        if column_metadata.semantic_type == SemanticType::Tag {
+            new_fields.push(tag_maybe_to_dictionary_field(
                 &column_metadata.column_schema.data_type,
                 &Arc::new(field),
-            )
+            ));
         } else {
-            Arc::new(field)
-        };
-        new_fields.push(Arc::new(with_field_id(&field, *column_id)));
+            new_fields.push(Arc::new(field));
+        }
     }
     new_fields.extend_from_slice(&internal_fields());
 

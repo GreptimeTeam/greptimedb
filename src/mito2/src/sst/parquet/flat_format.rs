@@ -764,7 +764,7 @@ impl FlatConvertFormat {
             let old_field = &self.metadata.schema.arrow_schema().fields()[*column_index];
             let field =
                 tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, old_field);
-            new_fields.push(Arc::new(with_field_id(&field, *column_id)));
+            new_fields.push(Arc::new(with_field_id((*field).clone(), *column_id)));
         }
         new_fields.extend(batch.schema().fields().iter().cloned());
 

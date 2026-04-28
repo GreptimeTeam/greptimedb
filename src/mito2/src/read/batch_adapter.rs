@@ -212,17 +212,21 @@ fn compute_output_arrow_schema(
         if !read_column_id_set.contains(&column_metadata.column_id) {
             continue;
         }
-        let field = Arc::new(Field::new(
+        let mut field = Field::new(
             &column_metadata.column_schema.name,
             column_metadata.column_schema.data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
-        ));
-        let field = if column_metadata.semantic_type == SemanticType::Tag {
-            tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, &field)
+        );
+        field = with_field_id(field, column_metadata.column_id);
+
+        if column_metadata.semantic_type == SemanticType::Tag {
+            fields.push(tag_maybe_to_dictionary_field(
+                &column_metadata.column_schema.data_type,
+                &Arc::new(field),
+            ));
         } else {
-            field
-        };
-        fields.push(Arc::new(with_field_id(&field, column_metadata.column_id)));
+            fields.push(Arc::new(field));
+        }
     }
 
     for column_metadata in metadata.field_columns() {
@@ -234,7 +238,7 @@ fn compute_output_arrow_schema(
             column_metadata.column_schema.data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
         );
-        fields.push(Arc::new(with_field_id(&field, column_metadata.column_id)));
+        fields.push(Arc::new(with_field_id(field, column_metadata.column_id)));
     }
 
     let time_index = metadata.time_index_column();
@@ -244,7 +248,7 @@ fn compute_output_arrow_schema(
         time_index.column_schema.is_nullable(),
     );
     fields.push(Arc::new(with_field_id(
-        &time_index_field,
+        time_index_field,
         time_index.column_id,
     )));
     fields.extend(internal_fields().iter().cloned());
