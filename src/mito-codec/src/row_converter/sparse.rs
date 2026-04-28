@@ -364,7 +364,7 @@ impl SparsePrimaryKeyCodec {
     /// Decodes the given bytes into a [`SparseValues`].
     fn decode_sparse(&self, bytes: &[u8]) -> Result<SparseValues> {
         let mut deserializer = Deserializer::new(bytes);
-        let mut values = SparseValues::new();
+        let mut values = SparseValues::with_capacity(16);
 
         let column_id = u32::deserialize(&mut deserializer).context(DeserializeFieldSnafu)?;
         let value = self.inner.table_id_field.deserialize(&mut deserializer)?;
