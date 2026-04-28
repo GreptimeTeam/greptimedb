@@ -25,6 +25,7 @@ ADMIN FLUSH_TABLE ('cast_time_index_filter_pushdown');
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE (files.*) REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT ts_ms, val
 FROM (
