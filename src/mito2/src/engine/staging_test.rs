@@ -402,9 +402,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -610,9 +608,7 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -703,9 +699,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -720,9 +714,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();

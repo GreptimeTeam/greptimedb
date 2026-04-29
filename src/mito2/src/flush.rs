@@ -221,6 +221,12 @@ pub enum FlushReason {
     EnterStaging,
     /// Flush when region is closing.
     Closing,
+    /// Flush triggered before region migration.
+    RegionMigration,
+    /// Flush triggered by repartition procedure.
+    Repartition,
+    /// Flush triggered by remote WAL pruning.
+    RemoteWalPrune,
 }
 
 impl FlushReason {

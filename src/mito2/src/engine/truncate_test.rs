@@ -217,9 +217,7 @@ async fn test_engine_truncate_after_flush_with_format(flat_format: bool) {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -395,9 +393,7 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
         engine_cloned
             .handle_request(
                 region_id,
-                RegionRequest::Flush(RegionFlushRequest {
-                    row_group_size: None,
-                }),
+                RegionRequest::Flush(RegionFlushRequest::default()),
             )
             .await
     });

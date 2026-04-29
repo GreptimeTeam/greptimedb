@@ -230,9 +230,7 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
         engine
             .handle_request(
                 region_id,
-                RegionRequest::Flush(RegionFlushRequest {
-                    row_group_size: None,
-                }),
+                RegionRequest::Flush(RegionFlushRequest::default()),
             )
             .await
             .unwrap();
@@ -503,9 +501,7 @@ async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_fo
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -624,9 +620,7 @@ async fn test_apply_staging_manifest_preserves_unflushed_memtable_with_format(fl
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -733,9 +727,7 @@ async fn test_split_repartition_causes_duplicate_data() {
     engine
         .handle_request(
             source_region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -928,9 +920,7 @@ async fn test_merge_repartition_data_integrity() {
     engine
         .handle_request(
             source_region_id_1,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -944,9 +934,7 @@ async fn test_merge_repartition_data_integrity() {
     engine
         .handle_request(
             source_region_id_2,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();

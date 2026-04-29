@@ -55,9 +55,7 @@ pub(crate) async fn put_and_flush(
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -68,9 +66,7 @@ async fn flush(engine: &MitoEngine, region_id: RegionId) {
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -116,9 +112,7 @@ pub(crate) async fn delete_and_flush(
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();

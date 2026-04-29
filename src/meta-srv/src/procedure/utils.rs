@@ -20,6 +20,7 @@ use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
 use snafu::ResultExt;
+use store_api::region_request::RegionFlushReason;
 use store_api::storage::RegionId;
 use tokio::time::Instant;
 
@@ -99,11 +100,14 @@ pub(crate) async fn flush_region(
     datanode: &Peer,
     timeout: Duration,
     error_strategy: ErrorStrategy,
+    reason: Option<RegionFlushReason>,
 ) -> Result<()> {
-    let flush_instruction = Instruction::FlushRegions(FlushRegions::sync_batch(
-        region_ids.to_vec(),
-        FlushErrorStrategy::TryAll,
-    ));
+    let mut flush_regions =
+        FlushRegions::sync_batch(region_ids.to_vec(), FlushErrorStrategy::TryAll);
+    if let Some(reason) = reason {
+        flush_regions = flush_regions.with_reason(reason);
+    }
+    let flush_instruction = Instruction::FlushRegions(flush_regions);
 
     let tracing_ctx = TracingContext::from_current_span();
     let msg = MailboxMessage::json_message(
@@ -305,6 +309,70 @@ pub mod mock {
                 metadata: Vec::new(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_meta::instruction::{FlushStrategy, Instruction};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::sequence::SequenceBuilder;
+
+    use super::*;
+    use crate::procedure::test_util::{MailboxContext, new_flush_region_reply_for_region};
+
+    #[tokio::test]
+    async fn test_flush_region_payload_includes_reason() {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let mailbox_sequence = SequenceBuilder::new("test_flush_region_reason", kv_backend).build();
+        let mut mailbox_ctx = MailboxContext::new(mailbox_sequence);
+
+        let datanode = Peer::new(1, "127.0.0.1:4001");
+        let region_id = RegionId::new(1024, 1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(datanode.id), tx)
+            .await;
+
+        let mailbox = mailbox_ctx.mailbox().clone();
+        let reply_mailbox = mailbox.clone();
+        let reply_task = tokio::spawn(async move {
+            let response = rx.recv().await.unwrap().unwrap();
+            let msg = response.mailbox_message.unwrap();
+            let instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
+            let Instruction::FlushRegions(flush_regions) = instruction else {
+                panic!("Expected FlushRegions instruction");
+            };
+
+            assert_eq!(flush_regions.region_ids, vec![region_id]);
+            assert_eq!(flush_regions.strategy, FlushStrategy::Sync);
+            assert_eq!(flush_regions.reason, Some(RegionFlushReason::Repartition));
+
+            reply_mailbox
+                .on_recv(
+                    msg.id,
+                    Ok(new_flush_region_reply_for_region(
+                        msg.id, region_id, true, None,
+                    )),
+                )
+                .await
+                .unwrap();
+        });
+
+        flush_region(
+            &mailbox,
+            "127.0.0.1:3002",
+            &[region_id],
+            &datanode,
+            Duration::from_secs(5),
+            ErrorStrategy::Retry,
+            Some(RegionFlushReason::Repartition),
+        )
+        .await
+        .unwrap();
+        reply_task.await.unwrap();
     }
 }
 

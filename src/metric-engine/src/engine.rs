@@ -688,9 +688,7 @@ mod test {
         metric_engine
             .handle_request(
                 physical_region_id,
-                RegionRequest::Flush(RegionFlushRequest {
-                    row_group_size: None,
-                }),
+                RegionRequest::Flush(RegionFlushRequest::default()),
             )
             .await
             .unwrap();

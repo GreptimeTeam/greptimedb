@@ -50,9 +50,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             info!("Region {} has pending data, waiting for flush", region_id);
             self.handle_flush_request(
                 region_id,
-                RegionFlushRequest {
-                    row_group_size: None,
-                },
+                RegionFlushRequest::default(),
                 Some(FlushReason::Closing),
                 sender,
             );

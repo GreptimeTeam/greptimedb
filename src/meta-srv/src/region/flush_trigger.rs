@@ -31,6 +31,7 @@ use common_wal::config::kafka::common::{
     DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE,
 };
 use snafu::{OptionExt, ResultExt};
+use store_api::region_request::RegionFlushReason;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -336,7 +337,8 @@ impl RegionFlushTrigger {
 
         // Sends flush instructions to datanodes.
         if !regions_to_flush.is_empty() {
-            self.send_flush_instructions(&regions_to_flush).await?;
+            self.send_remote_wal_prune_flush_instructions(&regions_to_flush)
+                .await?;
             debug!(
                 "Sent {} flush instructions to datanodes for topic: '{}', regions: {:?}",
                 regions_to_flush.len(),
@@ -352,14 +354,19 @@ impl RegionFlushTrigger {
         Ok(())
     }
 
-    async fn send_flush_instructions(&self, regions_to_flush: &[RegionId]) -> Result<()> {
+    async fn send_remote_wal_prune_flush_instructions(
+        &self,
+        regions_to_flush: &[RegionId],
+    ) -> Result<()> {
         let leader_to_region_ids =
             group_regions_by_leader(&self.table_metadata_manager, regions_to_flush).await?;
         let flush_instructions = leader_to_region_ids
             .into_iter()
             .map(|(leader, region_ids)| {
-                let flush_instruction =
-                    Instruction::FlushRegions(FlushRegions::async_batch(region_ids));
+                let flush_instruction = Instruction::FlushRegions(
+                    FlushRegions::async_batch(region_ids)
+                        .with_reason(RegionFlushReason::RemoteWalPrune),
+                );
                 (leader, flush_instruction)
             });
 
@@ -502,11 +509,20 @@ fn is_recent(timestamp: i64, now: i64, duration: Duration) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use common_base::readable_size::ReadableSize;
-    use common_meta::region_registry::LeaderRegionManifestInfo;
+    use common_meta::instruction::FlushStrategy;
+    use common_meta::key::TableMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::region_registry::{LeaderRegionManifestInfo, LeaderRegionRegistry};
+    use common_meta::sequence::SequenceBuilder;
+    use common_meta::stats::topic::TopicStatsRegistry;
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::handler::HeartbeatMailbox;
+    use crate::procedure::test_util::{MailboxContext, new_wal_prune_metadata};
 
     #[test]
     fn test_is_recent() {
@@ -721,5 +737,62 @@ mod tests {
         let result =
             should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(90, Some(10))));
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_send_remote_wal_prune_flush_instructions_payload_includes_reason() {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let leader_region_registry = Arc::new(LeaderRegionRegistry::new());
+        let topic_stats_registry = Arc::new(TopicStatsRegistry::default());
+        let mailbox_sequence =
+            SequenceBuilder::new("test_remote_wal_prune_flush_reason", kv_backend).build();
+        let mut mailbox_ctx = MailboxContext::new(mailbox_sequence);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(1), tx)
+            .await;
+
+        let (trigger, _ticker) = RegionFlushTrigger::new(
+            table_metadata_manager.clone(),
+            leader_region_registry.clone(),
+            topic_stats_registry,
+            mailbox_ctx.mailbox().clone(),
+            "127.0.0.1:3002".to_string(),
+            ReadableSize(1),
+            ReadableSize(1),
+        );
+
+        let topic = "test_topic".to_string();
+        new_wal_prune_metadata(
+            table_metadata_manager,
+            leader_region_registry,
+            1,
+            1,
+            &[0],
+            topic,
+        )
+        .await;
+
+        let region_id = RegionId::new(0, 0);
+        trigger
+            .send_remote_wal_prune_flush_instructions(&[region_id])
+            .await
+            .unwrap();
+
+        let response = rx.recv().await.unwrap().unwrap();
+        let msg = response.mailbox_message.unwrap();
+        let instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
+        let Instruction::FlushRegions(flush_regions) = instruction else {
+            panic!("Expected FlushRegions instruction");
+        };
+
+        assert_eq!(flush_regions.region_ids, vec![region_id]);
+        assert_eq!(flush_regions.strategy, FlushStrategy::Async);
+        assert_eq!(
+            flush_regions.reason,
+            Some(RegionFlushReason::RemoteWalPrune)
+        );
     }
 }

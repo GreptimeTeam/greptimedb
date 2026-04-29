@@ -113,9 +113,7 @@ impl DowngradeRegionsHandler {
                     region_server_moved
                         .handle_request(
                             region_id,
-                            RegionRequest::Flush(RegionFlushRequest {
-                                row_group_size: None,
-                            }),
+                            RegionRequest::Flush(RegionFlushRequest::default()),
                         )
                         .await?;
 
