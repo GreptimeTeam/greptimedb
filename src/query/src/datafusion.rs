@@ -60,7 +60,8 @@ use crate::error::{
     TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
-use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
+use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED, RegionWatermarkMetricsStream};
+use crate::options::FlowQueryExtensions;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -101,8 +102,10 @@ impl DatafusionQueryEngine {
             optimized_physical_plan
         };
 
+        let stream = self.execute_stream(&ctx, &physical_plan)?;
+
         Ok(Output::new(
-            OutputData::Stream(self.execute_stream(&ctx, &physical_plan)?),
+            OutputData::Stream(stream),
             OutputMeta::new_with_plan(physical_plan),
         ))
     }
@@ -129,10 +132,10 @@ impl DatafusionQueryEngine {
         let table_name = dml.table_name.resolve(default_catalog, default_schema);
         let table = self.find_table(&table_name, &query_ctx).await?;
 
-        let output = self
+        let Output { data, meta } = self
             .exec_query_plan((*dml.input).clone(), query_ctx.clone())
             .await?;
-        let mut stream = match output.data {
+        let mut stream = match data {
             OutputData::RecordBatches(batches) => batches.as_stream(),
             OutputData::Stream(stream) => stream,
             _ => unreachable!(),
@@ -168,7 +171,7 @@ impl DatafusionQueryEngine {
         }
         Ok(Output::new(
             OutputData::AffectedRows(affected_rows),
-            OutputMeta::new_with_cost(insert_cost),
+            OutputMeta::new(meta.plan, insert_cost),
         ))
     }
 
@@ -545,6 +548,9 @@ impl QueryExecutor for DatafusionQueryEngine {
         plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<SendableRecordBatchStream> {
         let explain_verbose = ctx.query_ctx().explain_verbose();
+        let should_collect_region_watermark =
+            FlowQueryExtensions::parse_flow_extensions(&ctx.query_ctx().extensions())?
+                .is_some_and(|extensions| extensions.should_collect_region_watermark());
         let output_partitions = plan.properties().output_partitioning().partition_count();
         if explain_verbose {
             common_telemetry::info!("Executing query plan, output_partitions: {output_partitions}");
@@ -580,7 +586,14 @@ impl QueryExecutor for DatafusionQueryEngine {
                         );
                     }
                 });
-                Ok(Box::pin(stream))
+                if should_collect_region_watermark {
+                    Ok(Box::pin(RegionWatermarkMetricsStream::new(
+                        Box::pin(stream),
+                        plan.clone(),
+                    )))
+                } else {
+                    Ok(Box::pin(stream))
+                }
             }
             _ => {
                 // merge into a single partition
@@ -609,7 +622,14 @@ impl QueryExecutor for DatafusionQueryEngine {
                         );
                     }
                 });
-                Ok(Box::pin(stream))
+                if should_collect_region_watermark {
+                    Ok(Box::pin(RegionWatermarkMetricsStream::new(
+                        Box::pin(stream),
+                        plan.clone(),
+                    )))
+                } else {
+                    Ok(Box::pin(stream))
+                }
             }
         }
     }

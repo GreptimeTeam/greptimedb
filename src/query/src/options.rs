@@ -177,8 +177,29 @@ impl FlowQueryExtensions {
     }
 
     pub fn should_collect_region_watermark(&self) -> bool {
-        self.return_region_seq || self.incremental_after_seqs.is_some()
+        should_collect_region_watermark(
+            self.return_region_seq,
+            self.incremental_after_seqs.is_some(),
+        )
     }
+}
+
+pub fn should_collect_region_watermark_from_extensions(
+    extensions: &HashMap<String, String>,
+) -> bool {
+    let return_region_seq = extensions
+        .get(FLOW_RETURN_REGION_SEQ)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let has_incremental_after_seqs = extensions.contains_key(FLOW_INCREMENTAL_AFTER_SEQS);
+
+    should_collect_region_watermark(return_region_seq, has_incremental_after_seqs)
+}
+
+fn should_collect_region_watermark(
+    return_region_seq: bool,
+    has_incremental_after_seqs: bool,
+) -> bool {
+    return_region_seq || has_incremental_after_seqs
 }
 
 fn parse_incremental_after_seqs(value: &str) -> Result<HashMap<u64, u64>> {
@@ -418,6 +439,24 @@ mod flow_extension_tests {
             ..Default::default()
         };
         assert!(parsed.should_collect_region_watermark());
+    }
+
+    #[test]
+    fn test_should_collect_region_watermark_from_extensions() {
+        let exts = HashMap::from([(FLOW_RETURN_REGION_SEQ.to_string(), "true".to_string())]);
+        assert!(should_collect_region_watermark_from_extensions(&exts));
+
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"1":10}"#.to_string(),
+        )]);
+        assert!(should_collect_region_watermark_from_extensions(&exts));
+
+        let exts = HashMap::from([(FLOW_RETURN_REGION_SEQ.to_string(), "false".to_string())]);
+        assert!(!should_collect_region_watermark_from_extensions(&exts));
+        assert!(!should_collect_region_watermark_from_extensions(
+            &HashMap::new()
+        ));
     }
 
     #[test]
