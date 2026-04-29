@@ -233,7 +233,7 @@ async fn later_drop_task_with_global_gc(
     partial_drop: bool,
     soft_drop: bool,
 ) -> bool {
-    /// Forcefully remove the region directory immediately only when deletion is not deferred by
+    // Forcefully remove the region directory immediately only when deletion is not deferred by
     // `should_defer_region_file_deletion(path_type, partial_drop, soft_drop)`. In particular,
     // soft-drop flows may defer deletion even for metadata regions or full-drop cases.
     // TODO(discord9): Evaluate removing files instantly rather than waiting for the GC period.
