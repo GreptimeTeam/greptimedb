@@ -234,7 +234,7 @@ pub(crate) fn try_acquire_import_state_lock(path: &Path) -> Result<ImportStateLo
             path: lock_path.display().to_string(),
         })?;
     file.try_lock_exclusive().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::WouldBlock {
+        if is_lock_contention(&error) {
             ImportStateLockedSnafu {
                 path: lock_path.display().to_string(),
             }
@@ -248,6 +248,11 @@ pub(crate) fn try_acquire_import_state_lock(path: &Path) -> Result<ImportStateLo
     })?;
 
     Ok(ImportStateLockGuard { file })
+}
+
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 fn unique_tmp_path(path: &Path) -> PathBuf {
@@ -433,6 +438,13 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".tmp")
         );
+    }
+
+    #[test]
+    fn test_lock_contention_detection_accepts_platform_error() {
+        let error = fs2::lock_contended_error();
+
+        assert!(is_lock_contention(&error));
     }
 
     #[test]
