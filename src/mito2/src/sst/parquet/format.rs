@@ -620,10 +620,9 @@ impl FormatProjection {
         for (col_id, index_of_sst, nested_paths) in projected_columns {
             Self::merge_or_push_parquet_column(&mut parquet_read_cols, index_of_sst, nested_paths);
 
-            if !column_id_to_projected_index.contains_key(&col_id) {
-                let projected_index = parquet_read_cols.len() - 1;
-                column_id_to_projected_index.insert(col_id, projected_index);
-            }
+            column_id_to_projected_index
+                .entry(col_id)
+                .or_insert_with(|| parquet_read_cols.len() - 1);
         }
 
         Self::append_fixed_root_columns(&mut parquet_read_cols, sst_column_num);
