@@ -150,13 +150,6 @@ impl DropTableProcedure {
     async fn on_broadcast(&mut self) -> Result<Status> {
         self.executor.invalidate_table_cache(&self.context).await?;
 
-        // Soft-drop keeps tombstoned metadata in place for later recovery/purge work,
-        // so the procedure stops before any datanode region deletion.
-        if self.context.soft_drop_enabled {
-            self.dropping_regions.clear();
-            return Ok(Status::done());
-        }
-
         self.data.state = DropTableState::DatanodeDropRegions;
 
         Ok(Status::executing(true))
@@ -188,9 +181,15 @@ impl DropTableProcedure {
                 false,
                 false,
                 false,
-                false,
+                self.context.soft_drop_enabled,
             )
             .await?;
+
+        if self.context.soft_drop_enabled {
+            self.dropping_regions.clear();
+            return Ok(Status::done());
+        }
+
         self.data.state = DropTableState::DeleteTombstone;
         Ok(Status::executing(true))
     }

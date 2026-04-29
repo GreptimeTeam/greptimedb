@@ -236,7 +236,7 @@ async fn test_on_datanode_drop_regions_remaps_addresses_when_retrying() {
 }
 
 #[tokio::test]
-async fn test_soft_drop_stops_after_cache_invalidation_without_datanode_requests() {
+async fn test_soft_drop_sends_soft_drop_region_requests_and_keeps_tombstone() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
@@ -269,6 +269,15 @@ async fn test_soft_drop_stops_after_cache_invalidation_without_datanode_requests
 
     assert!(procedure.dropping_regions.is_empty());
     assert_eq!(ddl_context.memory_region_keeper.len(), 0);
+
+    let (peer, request) = rx.try_recv().unwrap();
+    assert_eq!(peer.id, 1);
+    let Some(region_request::Body::Drop(req)) = request.body else {
+        unreachable!();
+    };
+    assert_eq!(req.region_id, RegionId::new(table_id, 1));
+    assert!(req.soft_drop);
+    assert!(!req.partial_drop);
     assert!(rx.try_recv().is_err());
 
     let table_name = procedure.data.task.table_name();
