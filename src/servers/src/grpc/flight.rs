@@ -26,6 +26,7 @@ use arrow_flight::{
 };
 use async_trait::async_trait;
 use bytes::{self, Bytes};
+use common_error::ext::ErrorExt;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_memory_manager::MemoryGuard;
@@ -201,7 +202,7 @@ impl FlightCraft for GreptimeRequestHandler {
         // This does not authorize or execute anything; `handle_request()` below still performs
         // the normal frontend handling and auth checks before query execution.
         FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            .map_err(|e| Status::invalid_argument(e.output_msg()))?;
 
         // The Grpc protocol pass query by Flight. It needs to be wrapped under a span, in order to record stream
         let span = info_span!(
@@ -549,7 +550,6 @@ fn to_flight_data_stream(
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {
-            let affected_rows = FlightEncoder::default().encode(FlightMessage::AffectedRows(rows));
             let should_emit_terminal_metrics =
                 FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
                     .expect("flow extensions must be validated before Flight serialization")
@@ -558,13 +558,12 @@ fn to_flight_data_stream(
                 .then_some(output.meta.plan)
                 .flatten()
                 .and_then(terminal_recordbatch_metrics_from_plan)
-                .and_then(|metrics| serde_json::to_string(&metrics).ok())
-                .map(FlightMessage::Metrics)
-                .map(|message| FlightEncoder::default().encode(message))
-                .into_iter()
-                .flatten();
-            let stream =
-                tokio_stream::iter(affected_rows.into_iter().chain(terminal_metrics).map(Ok));
+                .and_then(|metrics| serde_json::to_string(&metrics).ok());
+            let affected_rows = FlightEncoder::default().encode(FlightMessage::AffectedRows {
+                rows,
+                metrics: terminal_metrics,
+            });
+            let stream = tokio_stream::iter(affected_rows.into_iter().map(Ok));
             Box::pin(stream) as _
         }
     }
