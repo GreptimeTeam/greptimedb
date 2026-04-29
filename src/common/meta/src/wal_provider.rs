@@ -74,7 +74,7 @@ impl WalProvider {
     }
 
     /// Allocates a batch of wal options where each wal options goes to a region.
-    /// If skip_wal is true, the wal options will be set to Noop regardless of the provider type.
+    /// skip_wal does not affect provider allocation.
     pub fn alloc_batch(&self, num_regions: usize, _skip_wal: bool) -> Result<Vec<WalOptions>> {
         match self {
             WalProvider::RaftEngine => Ok(vec![WalOptions::RaftEngine; num_regions]),

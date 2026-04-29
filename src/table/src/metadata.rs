@@ -1619,16 +1619,12 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(
-            Some("true"),
-            new_meta
-                .options
-                .extra_options
-                .get(SKIP_WAL_KEY)
-                .map(String::as_str)
-        );
-
         assert!(new_meta.options.skip_wal);
+
+        assert_eq!(
+            Some(&"true".to_string()),
+            HashMap::from(&new_meta.options).get(SKIP_WAL_KEY)
+        );
     }
 
     #[test]
@@ -1653,16 +1649,12 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(
-            Some("false"),
-            new_meta
-                .options
-                .extra_options
-                .get(SKIP_WAL_KEY)
-                .map(String::as_str)
-        );
-
         assert!(!new_meta.options.skip_wal);
+
+        assert_eq!(
+            Some(&"false".to_string()),
+            HashMap::from(&new_meta.options).get(SKIP_WAL_KEY)
+        );
     }
 
     #[test]

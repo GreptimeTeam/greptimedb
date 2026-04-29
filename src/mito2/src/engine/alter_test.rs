@@ -2027,7 +2027,7 @@ async fn test_alter_region_enable_wal_on_legacy_noop_region_fails() {
         .await
         .unwrap_err();
 
-    let msg = err.to_string();
+    let msg = err.output_msg();
 
     assert!(
         msg.contains("Cannot enable WAL for legacy regions with noop wal_options"),

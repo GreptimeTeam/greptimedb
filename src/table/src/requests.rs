@@ -40,7 +40,6 @@ use store_api::mito_engine_options::{
     TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
     is_mito_engine_option_key,
 };
-use store_api::path_utils::WAL_DIR;
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
 use crate::error::{ParseTableOptionSnafu, Result};
@@ -193,7 +192,7 @@ impl TableOptions {
 
         options.extra_options = HashMap::from_iter(
             kvs.into_iter()
-                .filter(|(k, _)| k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY),
+                .filter(|(k, _)| k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY && k != SKIP_WAL_KEY),
         );
 
         Ok(options)
