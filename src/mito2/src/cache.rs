@@ -57,6 +57,7 @@ use crate::read::Batch;
 use crate::read::range_cache::{RangeScanCacheKey, RangeScanCacheValue};
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::parquet::PARQUET_METADATA_KEY;
+use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// Metrics type key for sst meta.
@@ -1223,24 +1224,27 @@ pub enum SelectorResult {
 pub struct SelectorResultValue {
     /// Batches of rows selected by the selector.
     pub result: SelectorResult,
-    /// Projection of rows.
-    pub projection: Vec<usize>,
+    /// The read columns of rows.
+    pub read_cols: ParquetReadColumns,
 }
 
 impl SelectorResultValue {
     /// Creates a new selector result value with primary key format.
-    pub fn new(result: Vec<Batch>, projection: Vec<usize>) -> SelectorResultValue {
+    pub fn new(result: Vec<Batch>, read_cols: ParquetReadColumns) -> SelectorResultValue {
         SelectorResultValue {
             result: SelectorResult::PrimaryKey(result),
-            projection,
+            read_cols,
         }
     }
 
     /// Creates a new selector result value with flat format.
-    pub fn new_flat(result: Vec<RecordBatch>, projection: Vec<usize>) -> SelectorResultValue {
+    pub fn new_flat(
+        result: Vec<RecordBatch>,
+        read_cols: ParquetReadColumns,
+    ) -> SelectorResultValue {
         SelectorResultValue {
             result: SelectorResult::Flat(result),
-            projection,
+            read_cols,
         }
     }
 
@@ -1442,7 +1446,10 @@ mod tests {
             selector: TimeSeriesRowSelector::LastRow,
         };
         assert!(cache.get_selector_result(&key).is_none());
-        let result = Arc::new(SelectorResultValue::new(Vec::new(), Vec::new()));
+        let result = Arc::new(SelectorResultValue::new(
+            Vec::new(),
+            ParquetReadColumns::from_deduped(Vec::new()),
+        ));
         cache.put_selector_result(key, result);
         assert!(cache.get_selector_result(&key).is_some());
     }
@@ -1459,7 +1466,7 @@ mod tests {
             region_id: RegionId::new(1, 1),
             row_groups: vec![(FileId::random(), 0)],
             scan: ScanRequestFingerprintBuilder {
-                read_column_ids: vec![],
+                read_columns: vec![].into(),
                 read_column_types: vec![],
                 filters: vec!["tag_0 = 1".to_string()],
                 time_filters: vec![],

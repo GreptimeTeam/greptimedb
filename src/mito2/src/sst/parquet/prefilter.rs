@@ -474,7 +474,10 @@ impl PrefilterContextBuilder {
             return None;
         }
 
-        let total_count = read_format.projection_indices().len();
+        let total_count = read_format
+            .parquet_read_columns()
+            .root_indices_iter()
+            .count();
         let remaining_count = total_count.saturating_sub(prefilter_count);
         if pk_filters.is_none() && prefilter_count >= total_count {
             return None;
@@ -734,6 +737,7 @@ mod tests {
     use store_api::codec::PrimaryKeyEncoding;
 
     use super::*;
+    use crate::read::read_columns::ReadColumns;
     use crate::sst::internal_fields;
     use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
     use crate::test_util::sst_util::{
@@ -979,14 +983,11 @@ mod tests {
     fn test_prefilter_builder_returns_none_without_selected_filters() {
         let metadata: RegionMetadataRef =
             Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
+        let read_cols = ReadColumns::from_deduped_column_ids(
             metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        );
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", false).unwrap();
         let codec = build_primary_key_codec(metadata.as_ref());
         let parquet_schema = parquet_schema(&read_format);
 
@@ -1015,14 +1016,11 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         ));
-        let legacy_read_format = FlatReadFormat::new(
-            metadata.clone(),
+        let read_cols = ReadColumns::from_deduped_column_ids(
             metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "memtable",
-            false,
-        )
-        .unwrap();
+        );
+        let legacy_read_format =
+            FlatReadFormat::new(metadata.clone(), &read_cols, None, "memtable", false).unwrap();
         assert!(!legacy_read_format.batch_has_raw_pk_columns());
 
         let plan = build_bulk_filter_plan(
@@ -1042,14 +1040,11 @@ mod tests {
         );
 
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let raw_pk_read_format = FlatReadFormat::new(
-            metadata.clone(),
+        let read_cols = ReadColumns::from_deduped_column_ids(
             metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "memtable",
-            true,
-        )
-        .unwrap();
+        );
+        let raw_pk_read_format =
+            FlatReadFormat::new(metadata.clone(), &read_cols, None, "memtable", true).unwrap();
         assert!(raw_pk_read_format.batch_has_raw_pk_columns());
 
         let tag_only_plan = build_bulk_filter_plan(
@@ -1076,14 +1071,11 @@ mod tests {
     #[test]
     fn test_build_reader_filter_plan_classifies_filters_for_prefilter_modes() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let full_read_format = FlatReadFormat::new(
-            metadata.clone(),
+        let read_cols = ReadColumns::from_deduped_column_ids(
             metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
+        );
+        let full_read_format =
+            FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", true).unwrap();
         let full_parquet_schema = parquet_schema(&full_read_format);
         let codec = build_primary_key_codec(metadata.as_ref());
 
@@ -1106,14 +1098,9 @@ mod tests {
 
         let field_0 = metadata.column_by_name("field_0").unwrap().column_id;
         let ts = metadata.time_index_column().column_id;
-        let projected_read_format = FlatReadFormat::new(
-            metadata.clone(),
-            [field_0, ts].into_iter(),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
+        let read_cols = ReadColumns::from_deduped_column_ids([field_0, ts]);
+        let projected_read_format =
+            FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", true).unwrap();
         let projected_parquet_schema = parquet_schema(&projected_read_format);
         let pk_prefilter_plan = build_reader_filter_plan(
             Some(&Predicate::new(vec![col("tag_0").eq(lit("a"))])),
@@ -1159,14 +1146,11 @@ mod tests {
     fn test_apply_filters_to_batch_evaluates_physical_filters() {
         let metadata: RegionMetadataRef =
             Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
+        let read_cols = ReadColumns::from_deduped_column_ids(
             metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        );
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", false).unwrap();
         let expr = col("field_0").in_list(vec![lit(11_u64)], false);
         let physical_filters = new_physical_filter_contexts(&metadata, &read_format, &[expr]);
         let pk = new_primary_key(&["a", "x"]);

@@ -15,14 +15,18 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use datatypes::arrow::array::new_null_array;
-use datatypes::arrow::datatypes::SchemaRef;
+use datafusion_common::cast_column;
+use datafusion_common::format::DEFAULT_CAST_OPTIONS;
+use datatypes::arrow::array::{ArrayRef, new_null_array};
+use datatypes::arrow::datatypes::{DataType, FieldRef, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
 use parquet::arrow::async_reader::ParquetRecordBatchStream;
 use snafu::{IntoError, ResultExt, ensure};
 
-use crate::error::{NewRecordBatchSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
+use crate::error::{
+    CastColumnSnafu, NewRecordBatchSnafu, ReadParquetSnafu, Result, UnexpectedSnafu,
+};
 use crate::sst::parquet::async_reader::SstAsyncFileReader;
 
 /// Wraps a parquet record batch stream and fills missing projected root columns.
@@ -45,7 +49,8 @@ pub struct MissingColFiller<S> {
     all_matched: bool,
 }
 
-pub(crate) type ProjectedRecordBatchStream = MissingColFiller<ParquetErrorAdapter>;
+pub(crate) type ProjectedRecordBatchStream =
+    NestedSchemaAligner<MissingColFiller<ParquetErrorAdapter>>;
 
 impl<S> MissingColFiller<S>
 where
@@ -146,6 +151,82 @@ fn fill_missing_cols(
     RecordBatch::try_new(output_schema.clone(), cols).context(NewRecordBatchSnafu)
 }
 
+/// Aligns nested arrays in projected batches to the expected output schema.
+///
+/// Parquet nested projection can return a root column whose nested fields are a
+/// subset of the expected logical schema. This wrapper normalizes those arrays
+/// so all projected batches share the same schema before entering upper readers.
+pub struct NestedSchemaAligner<S> {
+    inner: S,
+    output_schema: SchemaRef,
+}
+
+impl<S> NestedSchemaAligner<S>
+where
+    S: Stream<Item = Result<RecordBatch>>,
+{
+    pub fn new(inner: S, output_schema: SchemaRef) -> Self {
+        Self {
+            inner,
+            output_schema,
+        }
+    }
+}
+
+impl<S> Stream for NestedSchemaAligner<S>
+where
+    S: Stream<Item = Result<RecordBatch>> + Unpin,
+{
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(rb))) => {
+                Poll::Ready(Some(align_batch_to_schema(rb, &this.output_schema)))
+            }
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+fn align_batch_to_schema(rb: RecordBatch, output_schema: &SchemaRef) -> Result<RecordBatch> {
+    ensure!(
+        rb.num_columns() == output_schema.fields().len(),
+        UnexpectedSnafu {
+            reason: format!(
+                "NestedSchemaAligner expected {} columns but got {}",
+                output_schema.fields().len(),
+                rb.num_columns()
+            ),
+        }
+    );
+
+    let columns = rb
+        .columns()
+        .iter()
+        .zip(output_schema.fields())
+        .map(|(array, field)| align_array_to_field(array, field))
+        .collect::<Result<Vec<_>>>()?;
+
+    RecordBatch::try_new(output_schema.clone(), columns).context(NewRecordBatchSnafu)
+}
+
+fn align_array_to_field(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
+    if array.data_type() == field.data_type() {
+        return Ok(array.clone());
+    }
+
+    if !matches!(field.data_type(), DataType::Struct(_)) {
+        return Ok(array.clone());
+    }
+
+    cast_column(array, field.as_ref(), &DEFAULT_CAST_OPTIONS).context(CastColumnSnafu)
+}
+
 /// Maps parquet stream errors into mito errors before batches enter the filler.
 pub(crate) struct ParquetErrorAdapter {
     inner: ParquetRecordBatchStream<SstAsyncFileReader>,
@@ -181,7 +262,7 @@ impl Stream for ParquetErrorAdapter {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{Array, ArrayRef, Int64Array, StringArray};
+    use datatypes::arrow::array::{Array, ArrayRef, Int64Array, StringArray, StructArray};
     use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema};
     use futures::{StreamExt, stream};
 
@@ -298,6 +379,43 @@ mod tests {
             err.to_string()
                 .contains("expected 2 input columns but got 1")
         );
+    }
+
+    #[tokio::test]
+    async fn test_nested_schema_aligner_aligns_struct_field() {
+        let output_schema = schema([Field::new(
+            "nested",
+            DataType::Struct(Fields::from(vec![
+                Field::new("x", DataType::Int64, true),
+                Field::new("y", DataType::Utf8, true),
+            ])),
+            true,
+        )]);
+        let input = RecordBatch::try_new(
+            schema([Field::new(
+                "nested",
+                DataType::Struct(Fields::from(vec![Field::new("x", DataType::Int64, true)])),
+                true,
+            )]),
+            vec![Arc::new(StructArray::from(vec![(
+                Arc::new(Field::new("x", DataType::Int64, true)),
+                int_array([1, 2]),
+            )]))],
+        )
+        .unwrap();
+
+        let mut aligner =
+            NestedSchemaAligner::new(stream::iter([Ok(input)]), output_schema.clone());
+        let output = aligner.next().await.unwrap().unwrap();
+
+        assert_eq!(output_schema, output.schema());
+        let nested = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(2, nested.columns().len());
+        assert_eq!(2, nested.column(1).null_count());
     }
 
     fn schema(fields: impl IntoIterator<Item = Field>) -> SchemaRef {

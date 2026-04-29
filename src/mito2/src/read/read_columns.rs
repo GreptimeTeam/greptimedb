@@ -106,6 +106,15 @@ impl ReadColumns {
     }
 }
 
+impl<I> From<I> for ReadColumns
+where
+    I: IntoIterator<Item = ColumnId>,
+{
+    fn from(col_ids: I) -> Self {
+        ReadColumns::from_deduped_column_ids(col_ids)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumn {
     column_id: ColumnId,

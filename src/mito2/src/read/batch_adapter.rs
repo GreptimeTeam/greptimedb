@@ -681,7 +681,7 @@ mod tests {
             BatchToRecordBatchAdapter::new(iter, metadata.clone(), codec, &read_column_ids);
         let rb = adapter.into_iter().next().unwrap().unwrap();
 
-        let mapper = FlatProjectionMapper::new(&metadata, [0, 3].into_iter()).unwrap();
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 3]).unwrap();
         assert_eq!(rb.schema(), mapper.input_arrow_schema(false));
         // tag_0 + field_1 + ts + 3 internal columns.
         assert_eq!(6, rb.num_columns());

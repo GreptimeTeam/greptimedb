@@ -48,6 +48,7 @@ use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
+use self::stream::{NestedSchemaAligner, ParquetErrorAdapter, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
@@ -59,6 +60,7 @@ use crate::metrics::{
 };
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
+use crate::read::read_columns::ReadColumns;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierRef, BloomFilterIndexApplyMetrics,
@@ -82,10 +84,7 @@ use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
-use crate::sst::parquet::read_columns::{
-    ParquetReadColumns, ProjectionMaskPlan, build_projection_plan,
-};
-use crate::sst::parquet::reader::stream::{ParquetErrorAdapter, ProjectedRecordBatchStream};
+use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_plan};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -127,11 +126,11 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     /// Predicate to push down.
     predicate: Option<Predicate>,
-    /// Metadata of columns to read.
+    /// The columns to read.
     ///
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
-    projection: Option<Vec<ColumnId>>,
+    read_cols: Option<ReadColumns>,
     /// Strategy to cache SST data.
     cache_strategy: CacheStrategy,
     /// Index appliers.
@@ -171,7 +170,7 @@ impl ParquetReaderBuilder {
             file_handle,
             object_store,
             predicate: None,
-            projection: None,
+            read_cols: None,
             cache_strategy: CacheStrategy::Disabled,
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
@@ -199,8 +198,8 @@ impl ParquetReaderBuilder {
     ///
     /// The reader only applies the projection to fields.
     #[must_use]
-    pub fn projection(mut self, projection: Option<Vec<ColumnId>>) -> ParquetReaderBuilder {
-        self.projection = projection;
+    pub fn projection(mut self, read_cols: Option<ReadColumns>) -> ParquetReaderBuilder {
+        self.read_cols = read_cols;
         self
     }
 
@@ -377,30 +376,25 @@ impl ParquetReaderBuilder {
             None
         };
 
-        let mut read_format = if let Some(column_ids) = &self.projection {
-            FlatReadFormat::new(
-                region_meta.clone(),
-                column_ids.iter().copied(),
-                Some(parquet_meta.file_metadata().schema_descr().num_columns()),
-                &file_path,
-                skip_auto_convert,
-            )?
+        let read_cols = if let Some(read_cols) = &self.read_cols {
+            read_cols.clone()
         } else {
-            // Lists all column ids to read, we always use the expected metadata if possible.
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
-            let column_ids: Vec<_> = expected_meta
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .collect();
-            FlatReadFormat::new(
-                region_meta.clone(),
-                column_ids.iter().copied(),
-                Some(parquet_meta.file_metadata().schema_descr().num_columns()),
-                &file_path,
-                skip_auto_convert,
-            )?
+            // Lists all column ids to read, we always use the expected metadata if possible.
+            ReadColumns::from_deduped_column_ids(
+                expected_meta
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id),
+            )
         };
+        let mut read_format = FlatReadFormat::new(
+            region_meta.clone(),
+            &read_cols,
+            Some(parquet_meta.file_metadata().schema_descr().num_columns()),
+            &file_path,
+            skip_auto_convert,
+        )?;
         if need_override_sequence(&parquet_meta) {
             read_format
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
@@ -408,12 +402,8 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let parquet_read_cols = ParquetReadColumns::from_deduped_root_indices(
-            read_format.projection_indices().iter().copied(),
-        );
-
-        let projection_plan = build_projection_plan(&parquet_read_cols, parquet_schema_desc);
-
+        let parquet_read_cols = read_format.parquet_read_columns();
+        let projection_plan = build_projection_plan(parquet_read_cols, parquet_schema_desc);
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
@@ -1730,11 +1720,12 @@ impl RowGroupReaderBuilder {
         stream: ParquetRecordBatchStream<SstAsyncFileReader>,
     ) -> Result<ProjectedRecordBatchStream> {
         let stream = ParquetErrorAdapter::new(stream, self.file_path.clone());
-        ProjectedRecordBatchStream::new(
+        let stream = stream::MissingColFiller::new(
             stream,
             self.projection.projected_root_presence.clone(),
             self.output_schema.clone(),
-        )
+        )?;
+        Ok(NestedSchemaAligner::new(stream, self.output_schema.clone()))
     }
 
     /// Builds a [ParquetRecordBatchStream] with a custom projection mask.
@@ -2220,17 +2211,15 @@ mod tests {
         object_store.write(&file_path, parquet_bytes).await.unwrap();
 
         let region_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = FlatReadFormat::new(
-            region_metadata.clone(),
+        let read_cols = ReadColumns::from_deduped_column_ids(
             region_metadata
                 .column_metadatas
                 .iter()
                 .map(|column| column.column_id),
-            None,
-            &file_path,
-            false,
-        )
-        .unwrap();
+        );
+        let read_format =
+            FlatReadFormat::new(region_metadata.clone(), &read_cols, None, &file_path, false)
+                .unwrap();
 
         let mut cache_metrics = MetadataCacheMetrics::default();
         let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
@@ -2326,14 +2315,11 @@ mod tests {
     fn test_physical_filter_context_skips_renamed_column() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
+        let read_cols = ReadColumns::from_deduped_column_ids(
             metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
+        );
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", true).unwrap();
 
         let ctx = PhysicalFilterContext::new_opt(
             &metadata,
@@ -2348,14 +2334,11 @@ mod tests {
     #[test]
     fn test_physical_filter_context_only_accepts_prefilter_candidates() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
+        let read_cols = ReadColumns::from_deduped_column_ids(
             metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
+        );
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", true).unwrap();
 
         // InList is on the allowlist — should build a context.
         let in_list = col("tag_0").in_list(vec![lit("a"), lit("b")], false);
