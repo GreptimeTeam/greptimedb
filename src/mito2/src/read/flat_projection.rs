@@ -87,7 +87,6 @@ impl FlatProjectionMapper {
         projection: Vec<usize>,
         read_cols: impl Into<ReadColumns>,
     ) -> Result<Self> {
-        let projection: Vec<_> = projection.into_iter().collect();
         let read_cols = read_cols.into();
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();

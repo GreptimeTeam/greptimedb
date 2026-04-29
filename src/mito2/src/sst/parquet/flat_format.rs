@@ -169,7 +169,6 @@ impl FlatReadFormat {
         file_path: &str,
         skip_auto_convert: bool,
     ) -> Result<FlatReadFormat> {
-        let read_cols = read_cols.into();
         let is_legacy = match num_columns {
             Some(num) => Self::is_legacy_format(&metadata, num, file_path)?,
             None => metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,

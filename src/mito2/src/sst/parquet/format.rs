@@ -621,7 +621,7 @@ impl FormatProjection {
             Self::merge_or_push_parquet_column(&mut parquet_read_cols, index_of_sst, nested_paths);
 
             if !column_id_to_projected_index.contains_key(&col_id) {
-                let projected_index = column_id_to_projected_index.len();
+                let projected_index = parquet_read_cols.len() - 1;
                 column_id_to_projected_index.insert(col_id, projected_index);
             }
         }
