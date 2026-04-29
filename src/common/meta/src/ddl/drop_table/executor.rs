@@ -227,7 +227,19 @@ impl DropTableExecutor {
         Ok(())
     }
 
-    /// Drops region on datanode.
+    /// Drops regions on datanodes.
+    ///
+    /// Arguments:
+    /// - `node_manager`: resolves datanode clients from peers in `region_routes`.
+    /// - `leader_region_registry`: tracks in-flight leader region operations.
+    /// - `region_routes`: table region placement; leaders receive drop requests and followers
+    ///   receive close requests.
+    /// - `fast_path`: forwards to datanode drop requests to skip extra cleanup when safe.
+    /// - `force`: forwards to datanode drop requests to allow forced region removal.
+    /// - `partial_drop`: forwards to datanode drop requests for partial table/region drops.
+    /// - `soft_drop`: forwards to datanode drop requests to flush/unregister regions while
+    ///   preserving files for later undrop or purge.
+    #[allow(clippy::too_many_arguments)]
     pub async fn on_drop_regions(
         &self,
         node_manager: &NodeManagerRef,
