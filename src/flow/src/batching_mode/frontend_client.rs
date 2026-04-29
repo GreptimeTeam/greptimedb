@@ -356,18 +356,13 @@ impl FrontendClient {
                 query, batch_opts, ..
             } => {
                 let query_parallelism = query.parallelism.to_string();
-                let mut hints = vec![
+                let hints = vec![
                     (QUERY_PARALLELISM_HINT, query_parallelism.as_str()),
                     (READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref()),
                 ];
-                // PR2b only sends simple flow hint values such as
-                // `flow.return_region_seq=true`. The distributed client forwards
-                // hints through `x-greptime-hints`, whose existing comma-separated
-                // encoding is not suitable for comma-bearing values.
-                hints.extend_from_slice(extensions);
                 let db = self.get_random_active_frontend(catalog, schema).await?;
                 db.database
-                    .query_with_terminal_metrics(request, &hints)
+                    .query_with_terminal_metrics_and_flow_extensions(request, &hints, extensions)
                     .await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)
