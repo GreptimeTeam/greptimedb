@@ -151,11 +151,12 @@ fn fill_missing_cols(
     RecordBatch::try_new(output_schema.clone(), cols).context(NewRecordBatchSnafu)
 }
 
-/// Aligns nested arrays in projected batches to the expected output schema.
+/// Aligns struct arrays in projected batches to the expected output schema.
 ///
-/// Parquet nested projection can return a root column whose nested fields are a
-/// subset of the expected logical schema. This wrapper normalizes those arrays
-/// so all projected batches share the same schema before entering upper readers.
+/// After nested-path filtering, returned struct arrays may contain only a
+/// subset of fields, so their schema can differ from the expected output
+/// schema. This stream aligns those struct arrays to keep projected batches
+/// schema-consistent before entering upper readers.
 pub struct NestedSchemaAligner<S> {
     inner: S,
     output_schema: SchemaRef,
@@ -209,13 +210,13 @@ fn align_batch_to_schema(rb: RecordBatch, output_schema: &SchemaRef) -> Result<R
         .columns()
         .iter()
         .zip(output_schema.fields())
-        .map(|(array, field)| align_array_to_field(array, field))
+        .map(|(array, field)| align_array(array, field))
         .collect::<Result<Vec<_>>>()?;
 
     RecordBatch::try_new(output_schema.clone(), columns).context(NewRecordBatchSnafu)
 }
 
-fn align_array_to_field(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
+fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
     if array.data_type() == field.data_type() {
         return Ok(array.clone());
     }

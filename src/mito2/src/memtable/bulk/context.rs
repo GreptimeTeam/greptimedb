@@ -77,7 +77,7 @@ impl BulkIterContext {
         };
         let read_format = FlatReadFormat::new(
             region_metadata.clone(),
-            &read_cols,
+            read_cols,
             None,
             "memtable",
             skip_auto_convert,

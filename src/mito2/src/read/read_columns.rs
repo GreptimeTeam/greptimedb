@@ -62,7 +62,7 @@ use crate::read::scan_region::PredicateGroup;
 /// If `nested_paths` is empty, the whole column will be read.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumns {
-    cols: Vec<ReadColumn>,
+    pub cols: Vec<ReadColumn>,
 }
 
 impl ReadColumns {
@@ -82,7 +82,7 @@ impl ReadColumns {
     }
 
     pub fn column_ids_iter(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.cols.iter().map(|column| column.column_id())
+        self.cols.iter().map(|column| column.column_id)
     }
 
     pub fn column_ids(&self) -> Vec<ColumnId> {
@@ -114,10 +114,10 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumn {
-    column_id: ColumnId,
+    pub column_id: ColumnId,
     /// Nested field paths under this column.
     /// Empty means reading the whole column.
-    nested_paths: Vec<NestedPath>,
+    pub nested_paths: Vec<NestedPath>,
 }
 
 impl ReadColumn {
@@ -126,10 +126,6 @@ impl ReadColumn {
             column_id,
             nested_paths,
         }
-    }
-
-    pub fn column_id(&self) -> ColumnId {
-        self.column_id
     }
 
     pub fn nested_paths(&self) -> &[NestedPath] {

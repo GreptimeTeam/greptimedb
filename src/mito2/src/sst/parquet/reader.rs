@@ -390,7 +390,7 @@ impl ParquetReaderBuilder {
         };
         let mut read_format = FlatReadFormat::new(
             region_meta.clone(),
-            &read_cols,
+            read_cols,
             Some(parquet_meta.file_metadata().schema_descr().num_columns()),
             &file_path,
             skip_auto_convert,
@@ -2211,15 +2211,17 @@ mod tests {
         object_store.write(&file_path, parquet_bytes).await.unwrap();
 
         let region_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_cols = ReadColumns::from_deduped_column_ids(
+        let read_format = FlatReadFormat::new(
+            region_metadata.clone(),
             region_metadata
                 .column_metadatas
                 .iter()
                 .map(|column| column.column_id),
-        );
-        let read_format =
-            FlatReadFormat::new(region_metadata.clone(), &read_cols, None, &file_path, false)
-                .unwrap();
+            None,
+            &file_path,
+            false,
+        )
+        .unwrap();
 
         let mut cache_metrics = MetadataCacheMetrics::default();
         let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
@@ -2315,11 +2317,14 @@ mod tests {
     fn test_physical_filter_context_skips_renamed_column() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
-        let read_cols = ReadColumns::from_deduped_column_ids(
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
             metadata.column_metadatas.iter().map(|c| c.column_id),
-        );
-        let read_format =
-            FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", true).unwrap();
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
 
         let ctx = PhysicalFilterContext::new_opt(
             &metadata,
@@ -2334,11 +2339,14 @@ mod tests {
     #[test]
     fn test_physical_filter_context_only_accepts_prefilter_candidates() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_cols = ReadColumns::from_deduped_column_ids(
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
             metadata.column_metadatas.iter().map(|c| c.column_id),
-        );
-        let read_format =
-            FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", true).unwrap();
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
 
         // InList is on the allowlist — should build a context.
         let in_list = col("tag_0").in_list(vec![lit("a"), lit("b")], false);
