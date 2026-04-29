@@ -1236,6 +1236,9 @@ async fn flush_batch(
     } else {
         FLUSH_TOTAL.inc();
         FLUSH_ROWS.observe(total_row_count as f64);
+        operator::metrics::DIST_INGEST_ROW_COUNT
+            .with_label_values(&[ctx.get_db_string().as_str()])
+            .inc_by(total_row_count as u64);
     }
 
     debug!(
