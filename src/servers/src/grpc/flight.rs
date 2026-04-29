@@ -58,6 +58,8 @@ use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::request_memory_metrics::RequestMemoryMetrics;
 use crate::{error, hint_headers};
 
+const FLOW_EXTENSIONS_METADATA_KEY: &str = "x-greptime-flow-extensions";
+
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
 
 /// A subset of [FlightService]
@@ -191,7 +193,8 @@ impl FlightCraft for GreptimeRequestHandler {
         &self,
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
-        let hints = hint_headers::extract_hints(request.metadata());
+        let mut hints = hint_headers::extract_hints(request.metadata());
+        hints.extend(extract_flow_extensions(request.metadata())?);
 
         let ticket = request.into_inner().ticket;
         let request =
@@ -524,6 +527,26 @@ impl Stream for PutRecordBatchRequestStream {
     }
 }
 
+fn extract_flow_extensions(
+    metadata: &tonic::metadata::MetadataMap,
+) -> TonicResult<Vec<(String, String)>> {
+    let Some(value) = metadata.get(FLOW_EXTENSIONS_METADATA_KEY) else {
+        return Ok(vec![]);
+    };
+
+    let value = value.to_str().map_err(|e| {
+        Status::invalid_argument(format!(
+            "Invalid {FLOW_EXTENSIONS_METADATA_KEY} metadata value: {e}"
+        ))
+    })?;
+
+    serde_json::from_str::<Vec<(String, String)>>(value).map_err(|e| {
+        Status::invalid_argument(format!(
+            "Invalid {FLOW_EXTENSIONS_METADATA_KEY} metadata JSON: {e}"
+        ))
+    })
+}
+
 fn to_flight_data_stream(
     output: Output,
     tracing_context: TracingContext,
@@ -566,5 +589,48 @@ fn to_flight_data_stream(
             let stream = tokio_stream::iter(affected_rows.into_iter().map(Ok));
             Box::pin(stream) as _
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tonic::metadata::{AsciiMetadataValue, MetadataMap};
+
+    use super::*;
+
+    #[test]
+    fn test_extract_flow_extensions_preserves_comma_bearing_values() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            FLOW_EXTENSIONS_METADATA_KEY,
+            AsciiMetadataValue::try_from(
+                r#"[["flow.return_region_seq","true"],["flow.incremental_after_seqs","{\"1\":10,\"2\":20}"]]"#,
+            )
+            .unwrap(),
+        );
+
+        let extensions = extract_flow_extensions(&metadata).unwrap();
+        assert_eq!(
+            extensions,
+            vec![
+                ("flow.return_region_seq".to_string(), "true".to_string()),
+                (
+                    "flow.incremental_after_seqs".to_string(),
+                    r#"{"1":10,"2":20}"#.to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extract_flow_extensions_rejects_invalid_json() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            FLOW_EXTENSIONS_METADATA_KEY,
+            AsciiMetadataValue::try_from("not-json").unwrap(),
+        );
+
+        let err = extract_flow_extensions(&metadata).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }

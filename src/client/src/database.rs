@@ -61,6 +61,8 @@ type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
 type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>>>>;
 
+const FLOW_EXTENSIONS_METADATA_KEY: &str = "x-greptime-flow-extensions";
+
 #[derive(Debug, Clone, Default)]
 pub struct OutputMetrics {
     metrics: Arc<RwLock<Option<RecordBatchMetrics>>>,
@@ -528,6 +530,22 @@ impl Database {
         Ok(())
     }
 
+    fn put_flow_extensions(
+        metadata: &mut MetadataMap,
+        flow_extensions: &[(&str, &str)],
+    ) -> Result<()> {
+        if flow_extensions.is_empty() {
+            return Ok(());
+        }
+
+        let value = serde_json::to_string(&flow_extensions.to_vec())
+            .expect("flow extension pairs should serialize");
+        let key = AsciiMetadataKey::from_static(FLOW_EXTENSIONS_METADATA_KEY);
+        let value = AsciiMetadataValue::from_str(&value).context(InvalidTonicMetadataValueSnafu)?;
+        metadata.insert(key, value);
+        Ok(())
+    }
+
     /// Make a request to the database.
     pub async fn handle(&self, request: Request) -> Result<u32> {
         let mut client = make_database_client(&self.client)?;
@@ -623,7 +641,7 @@ impl Database {
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(sql.as_ref().to_string())),
         });
-        self.do_get(request, hints)
+        self.do_get(request, hints, &[])
             .await
             .map(OutputWithMetrics::into_output)
     }
@@ -662,7 +680,18 @@ impl Database {
         request: QueryRequest,
         hints: &[(&str, &str)],
     ) -> Result<OutputWithMetrics> {
-        self.do_get(Request::Query(request), hints).await
+        self.query_with_terminal_metrics_and_flow_extensions(request, hints, &[])
+            .await
+    }
+
+    pub async fn query_with_terminal_metrics_and_flow_extensions(
+        &self,
+        request: QueryRequest,
+        hints: &[(&str, &str)],
+        flow_extensions: &[(&str, &str)],
+    ) -> Result<OutputWithMetrics> {
+        self.do_get(Request::Query(request), hints, flow_extensions)
+            .await
     }
 
     /// Creates a new table using the provided table expression.
@@ -670,7 +699,7 @@ impl Database {
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(expr)),
         });
-        self.do_get(request, &[])
+        self.do_get(request, &[], &[])
             .await
             .map(OutputWithMetrics::into_output)
     }
@@ -680,19 +709,26 @@ impl Database {
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::AlterTable(expr)),
         });
-        self.do_get(request, &[])
+        self.do_get(request, &[], &[])
             .await
             .map(OutputWithMetrics::into_output)
     }
 
-    async fn do_get(&self, request: Request, hints: &[(&str, &str)]) -> Result<OutputWithMetrics> {
+    async fn do_get(
+        &self,
+        request: Request,
+        hints: &[(&str, &str)],
+        flow_extensions: &[(&str, &str)],
+    ) -> Result<OutputWithMetrics> {
         let request = self.to_rpc_request(request);
         let request = Ticket {
             ticket: request.encode_to_vec().into(),
         };
 
         let mut request = tonic::Request::new(request);
-        Self::put_hints(request.metadata_mut(), hints)?;
+        let metadata = request.metadata_mut();
+        Self::put_hints(metadata, hints)?;
+        Self::put_flow_extensions(metadata, flow_extensions)?;
 
         let mut client = self.client.make_flight_client(false, false)?;
 
@@ -836,6 +872,36 @@ mod tests {
             ..Default::default()
         })
         .unwrap()
+    }
+
+    #[test]
+    fn test_put_flow_extensions_preserves_comma_bearing_values() {
+        let mut metadata = MetadataMap::new();
+        Database::put_flow_extensions(
+            &mut metadata,
+            &[
+                ("flow.return_region_seq", "true"),
+                ("flow.incremental_after_seqs", r#"{"1":10,"2":20}"#),
+            ],
+        )
+        .unwrap();
+
+        let value = metadata
+            .get(FLOW_EXTENSIONS_METADATA_KEY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let decoded: Vec<(String, String)> = serde_json::from_str(value).unwrap();
+        assert_eq!(
+            decoded,
+            vec![
+                ("flow.return_region_seq".to_string(), "true".to_string()),
+                (
+                    "flow.incremental_after_seqs".to_string(),
+                    r#"{"1":10,"2":20}"#.to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
