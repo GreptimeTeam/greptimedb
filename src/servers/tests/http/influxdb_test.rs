@@ -31,6 +31,7 @@ use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::InfluxdbLineProtocolHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 use tokio::sync::mpsc;
 
 struct DummyInstance {
@@ -58,7 +59,7 @@ impl SqlQueryHandler for DummyInstance {
     async fn do_exec_plan(
         &self,
         _plan: LogicalPlan,
-        _query: String,
+        _stmt: Option<Statement>,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
         unimplemented!()
