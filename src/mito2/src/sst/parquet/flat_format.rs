@@ -788,8 +788,9 @@ impl FlatConvertFormat {
 impl FlatReadFormat {
     /// Creates a helper with existing `metadata` and all columns.
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> FlatReadFormat {
-        let read_cols =
-            ReadColumns::from_deduped_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
+        let read_cols = ReadColumns::from_deduped_column_ids(
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+        );
         Self::new(Arc::clone(&metadata), &read_cols, None, "test", false).unwrap()
     }
 }

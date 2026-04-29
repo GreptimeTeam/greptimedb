@@ -474,10 +474,7 @@ impl PrefilterContextBuilder {
             return None;
         }
 
-        let total_count = read_format
-            .parquet_read_columns()
-            .root_indices_iter()
-            .count();
+        let total_count = read_format.parquet_read_columns().root_indices().len();
         let remaining_count = total_count.saturating_sub(prefilter_count);
         if pk_filters.is_none() && prefilter_count >= total_count {
             return None;

@@ -64,7 +64,7 @@ impl EncodedBulkPartIter {
         let data = encoded_part.data().clone();
         let series_count = encoded_part.metadata().num_series as usize;
 
-        // TODO(fys): Support applying nested paths when computing the projection mask.
+        // TODO(fys): Nested projection pushdown to the memtable layer is not supported yet.
         let root_indices = context
             .read_format()
             .parquet_read_columns()

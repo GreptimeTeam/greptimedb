@@ -433,11 +433,7 @@ impl CompactionProjectionMapper {
             .chain([metadata.time_index_column_pos()])
             .collect::<Vec<_>>();
 
-        let read_col_ids: Vec<_> = metadata
-            .column_metadatas
-            .iter()
-            .map(|col| col.column_id)
-            .collect();
+        let read_col_ids = metadata.column_metadatas.iter().map(|col| col.column_id);
         let mapper =
             FlatProjectionMapper::new_with_read_columns(metadata, projection, read_col_ids)?;
         let assembler = DfBatchAssembler::new(mapper.output_schema());

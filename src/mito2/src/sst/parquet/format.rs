@@ -694,8 +694,9 @@ impl StatValues {
 impl PrimaryKeyReadFormat {
     /// Creates a helper with existing `metadata` and all columns.
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> PrimaryKeyReadFormat {
-        let read_cols =
-            ReadColumns::from_deduped_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
+        let read_cols = ReadColumns::from_deduped_column_ids(
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+        );
         Self::new(Arc::clone(&metadata), &read_cols)
     }
 }
@@ -1070,8 +1071,9 @@ mod tests {
     #[test]
     fn test_convert_record_batch_with_override_sequence() {
         let metadata = build_test_region_metadata();
-        let read_cols =
-            ReadColumns::from_deduped_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
+        let read_cols = ReadColumns::from_deduped_column_ids(
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+        );
         let read_format = PrimaryKeyReadFormat::new(metadata, &read_cols);
 
         let columns: Vec<ArrayRef> = vec![

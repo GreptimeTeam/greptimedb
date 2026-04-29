@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(fys): remove this once the module is used
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, HashSet};
 use std::mem;
 

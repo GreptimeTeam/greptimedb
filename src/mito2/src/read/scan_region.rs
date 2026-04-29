@@ -405,7 +405,7 @@ impl ScanRegion {
         let read_cols = match &self.request.projection_input {
             Some(p) => {
                 // Read columns include the pushed-down projection and columns
-                // resolved from the pushed-down predicate.
+                // resolved from the predicate.
                 let metadata = &self.version.metadata;
                 let from_projection = read_columns_from_projection(p.clone(), metadata)?;
                 let from_predicate = read_columns_from_predicate(&predicate, metadata);
