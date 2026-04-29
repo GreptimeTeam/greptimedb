@@ -184,6 +184,10 @@ impl FlowQueryExtensions {
     }
 }
 
+/// Returns whether raw Flow query extensions request terminal region watermark collection.
+///
+/// This is only an intent/presence check for transport/scan plumbing; callers that need
+/// validated Flow options must still use [`FlowQueryExtensions::parse_flow_extensions`].
 pub fn should_collect_region_watermark_from_extensions(
     extensions: &HashMap<String, String>,
 ) -> bool {
