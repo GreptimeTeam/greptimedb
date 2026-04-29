@@ -131,7 +131,8 @@ impl ReadColumn {
     }
 
     pub fn estimated_size(&self) -> usize {
-        self.nested_paths.capacity() * mem::size_of::<NestedPath>()
+        mem::size_of::<ColumnId>()
+            + self.nested_paths.capacity() * mem::size_of::<NestedPath>()
             + self
                 .nested_paths
                 .iter()
