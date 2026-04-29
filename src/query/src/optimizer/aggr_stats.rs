@@ -105,6 +105,11 @@ impl<'a> RewriteTarget<'a> {
                 .iter()
                 .all(|filter| filter.is_none())
             && region_scan.append_mode()
+            && !region_scan
+                .scanner()
+                .lock()
+                .unwrap()
+                .has_predicate_without_region()
     }
 
     #[allow(unused)]
@@ -238,12 +243,17 @@ mod tests {
     use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use datafusion::parquet::file::properties::WriterProperties;
     use datafusion::physical_plan::aggregates::PhysicalGroupBy;
-    use datafusion::physical_plan::collect;
+    use datafusion::physical_plan::filter_pushdown::{
+        ChildFilterPushdownResult, ChildPushdownResult, FilterPushdownPhase, PushedDown,
+    };
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datafusion::physical_plan::{DisplayAs, DisplayFormatType, collect};
     use datafusion::scalar::ScalarValue;
     use datafusion_expr::utils::COUNT_STAR_EXPANSION;
     use datafusion_physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
-    use datafusion_physical_expr::expressions::{Column as PhysicalColumn, Literal};
+    use datafusion_physical_expr::expressions::{
+        Column as PhysicalColumn, DynamicFilterPhysicalExpr, Literal, lit,
+    };
     use datatypes::arrow::array::Float64Array;
     use datatypes::arrow::datatypes::DataType;
     use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
@@ -251,10 +261,12 @@ mod tests {
     use datatypes::prelude::VectorRef;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
+    use futures::StreamExt;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::region_engine::{
         FileStatsItem, PrepareRequest, QueryScanContext, RegionScanner, RowGroupStatsItem,
         ScannerProperties, SendableFileStatsStream, SinglePartitionScanner,
+        StatsAwareFallbackReason, StatsAwareFileDecision,
     };
     use store_api::storage::{RegionId, ScanRequest};
 
@@ -274,6 +286,7 @@ mod tests {
         properties: ScannerProperties,
         files: Vec<ScanTestFile>,
         scanned_file_ids: Arc<Mutex<Vec<String>>>,
+        has_predicate_without_region: bool,
     }
 
     impl RecordingStatsScanner {
@@ -292,20 +305,50 @@ mod tests {
                     .with_total_rows(total_rows),
                 files,
                 scanned_file_ids,
+                has_predicate_without_region: false,
             }
+        }
+
+        fn with_predicate_without_region(mut self, has_predicate_without_region: bool) -> Self {
+            self.has_predicate_without_region = has_predicate_without_region;
+            self
+        }
+
+        fn stats_decision(&self, file: &ScanTestFile) -> StatsAwareFileDecision {
+            let requirements = self.properties.stats_aware_skip_requirements();
+            let Some(candidate) = StatsCandidateFile::from_file_stats(
+                &file.stats,
+                self.metadata.partition_expr.as_deref(),
+                requirements,
+                &self.metadata.schema,
+            )
+            .unwrap() else {
+                return StatsAwareFileDecision::scan_fallback(
+                    file.id.clone(),
+                    StatsAwareFallbackReason::MissingOrUnusableRuntimeStats,
+                );
+            };
+
+            let values = requirements
+                .iter()
+                .map(|requirement| candidate.stat_value(requirement).unwrap().unwrap())
+                .collect();
+            StatsAwareFileDecision::stats_hit(file.id.clone(), values)
         }
 
         fn should_skip_file(&self, file: &ScanTestFile) -> bool {
             let requirements = self.properties.stats_aware_skip_requirements();
-            !requirements.is_empty()
-                && StatsCandidateFile::from_file_stats(
-                    &file.stats,
-                    self.metadata.partition_expr.as_deref(),
-                    requirements,
-                    &self.metadata.schema,
-                )
+            if requirements.is_empty() {
+                return false;
+            }
+
+            self.properties
+                .stats_aware_file_decision_state()
+                .get_or_compute(file.id.clone(), || {
+                    Ok::<_, std::convert::Infallible>(self.stats_decision(file))
+                })
                 .unwrap()
-                .is_some()
+                .is_stats_hit()
         }
     }
 
@@ -340,7 +383,7 @@ mod tests {
             let batches = self
                 .files
                 .iter()
-                .filter(|file| !self.should_skip_file(file))
+                .filter(|file| self.has_predicate_without_region || !self.should_skip_file(file))
                 .map(|file| {
                     self.scanned_file_ids.lock().unwrap().push(file.id.clone());
                     file.batch.clone()
@@ -362,14 +405,23 @@ mod tests {
         }
 
         fn has_predicate_without_region(&self) -> bool {
-            false
+            self.has_predicate_without_region
         }
 
         fn add_dyn_filter_to_predicate(
             &mut self,
             filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
         ) -> Vec<bool> {
-            vec![false; filter_exprs.len()]
+            let supported = filter_exprs
+                .into_iter()
+                .map(|expr| {
+                    (expr as Arc<dyn std::any::Any + Send + Sync + 'static>)
+                        .downcast::<DynamicFilterPhysicalExpr>()
+                        .is_ok()
+                })
+                .collect::<Vec<_>>();
+            self.has_predicate_without_region |= supported.iter().any(|supported| *supported);
+            supported
         }
 
         fn set_logical_region(&mut self, logical_region: bool) {
@@ -431,6 +483,13 @@ mod tests {
             .build()
             .unwrap(),
         )
+    }
+
+    fn build_dynamic_filter_expr() -> Arc<dyn datafusion::physical_plan::PhysicalExpr> {
+        Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(PhysicalColumn::new("v0", 0))],
+            lit(true),
+        ))
     }
 
     fn build_avg_expr(schema: arrow_schema::SchemaRef) -> Arc<AggregateFunctionExpr> {
@@ -574,6 +633,7 @@ mod tests {
         ScanTestFile {
             id: id.to_string(),
             stats: FileStatsItem {
+                file_id: id.to_string(),
                 num_rows: Some(values.len() as u64),
                 file_partition_expr: Some(partition_expr.to_string()),
                 row_groups: if with_row_groups {
@@ -590,6 +650,14 @@ mod tests {
         files: Vec<ScanTestFile>,
         scanned_file_ids: Arc<Mutex<Vec<String>>>,
     ) -> Arc<RegionScanExec> {
+        build_recording_region_scan_with_predicate(files, scanned_file_ids, false)
+    }
+
+    fn build_recording_region_scan_with_predicate(
+        files: Vec<ScanTestFile>,
+        scanned_file_ids: Arc<Mutex<Vec<String>>>,
+        has_predicate_without_region: bool,
+    ) -> Arc<RegionScanExec> {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new(
@@ -599,12 +667,10 @@ mod tests {
             ),
         ]));
         let metadata = build_region_metadata(Some("host = 'a'"));
-        let scanner = Box::new(RecordingStatsScanner::new(
-            schema,
-            metadata,
-            files,
-            scanned_file_ids,
-        ));
+        let scanner = Box::new(
+            RecordingStatsScanner::new(schema, metadata, files, scanned_file_ids)
+                .with_predicate_without_region(has_predicate_without_region),
+        );
         Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap())
     }
 
@@ -737,6 +803,21 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_ignores_region_scan_with_predicate_without_region() {
+        let region_scan = build_recording_region_scan_with_predicate(
+            Vec::new(),
+            Arc::new(Mutex::new(Vec::new())),
+            true,
+        );
+        let plan = build_final_over_partial_plan_with(region_scan, build_count_expr, None);
+        let optimized = AggrStatsPhysicalRule
+            .optimize(plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_final_over_partial_without_union(&optimized);
+    }
+
+    #[test]
     fn rewrite_maps_count_star_to_count_rows() {
         let optimized = AggrStatsPhysicalRule
             .optimize(
@@ -829,7 +910,7 @@ mod tests {
             .unwrap();
 
         let batches = collect(
-            optimized,
+            optimized.clone(),
             Arc::new(datafusion::execution::TaskContext::default()),
         )
         .await
@@ -844,12 +925,193 @@ mod tests {
 
         let scanned = scanned_file_ids.lock().unwrap().clone();
         assert_eq!(scanned, vec!["fallback-c".to_string()]);
+
+        let stats_scan = stats_scan_from_rewritten_plan(&optimized);
+        let display_state = stats_scan.decision_snapshot();
+        assert_eq!(display_state.files_total(), 3);
+        assert_eq!(
+            display_state.stats_hit_file_ids(),
+            &["eligible-a".to_string(), "eligible-b".to_string()]
+        );
+        assert_eq!(
+            display_state.fallback_file_ids(),
+            &["fallback-c".to_string()]
+        );
+
+        let display_text = VerboseStatsScanDisplay(stats_scan).to_string();
+        assert!(display_text.contains("files_total=3"));
+        assert!(display_text.contains("stats_hit_files=[\"eligible-a\", \"eligible-b\"]"));
+        assert!(display_text.contains("stats_fallback_files=[\"fallback-c\"]"));
+    }
+
+    #[tokio::test]
+    async fn late_dynamic_filter_pushdown_disables_stats_paths() {
+        let scanned_file_ids = Arc::new(Mutex::new(Vec::new()));
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let region_scan = build_recording_region_scan(
+            vec![
+                build_scan_test_file(
+                    schema.clone(),
+                    "eligible-a",
+                    "host = 'a'",
+                    vec![Some(1.0), None, Some(2.0)],
+                    true,
+                    0,
+                ),
+                build_scan_test_file(
+                    schema.clone(),
+                    "eligible-b",
+                    "host = 'a'",
+                    vec![Some(3.0), Some(4.0)],
+                    true,
+                    10,
+                ),
+                build_scan_test_file(
+                    schema,
+                    "fallback-c",
+                    "host = 'a'",
+                    vec![Some(5.0), None, Some(6.0)],
+                    false,
+                    20,
+                ),
+            ],
+            scanned_file_ids.clone(),
+        );
+
+        let plan = build_final_over_partial_plan_with(region_scan, build_count_expr, None);
+        let optimized = AggrStatsPhysicalRule
+            .optimize(plan, &ConfigOptions::default())
+            .unwrap();
+        let fallback_scan = fallback_scan_from_rewritten_plan(&optimized);
+        let filter = build_dynamic_filter_expr();
+
+        let pushdown = fallback_scan
+            .handle_child_pushdown_result(
+                FilterPushdownPhase::Post,
+                ChildPushdownResult {
+                    parent_filters: vec![ChildFilterPushdownResult {
+                        filter,
+                        child_results: vec![],
+                    }],
+                    self_filters: vec![],
+                },
+                &ConfigOptions::default(),
+            )
+            .unwrap();
+
+        assert!(matches!(pushdown.filters.as_slice(), [PushedDown::Yes]));
+        assert!(pushdown.updated_node.is_some());
+        assert!(
+            fallback_scan
+                .scanner()
+                .lock()
+                .unwrap()
+                .has_predicate_without_region()
+        );
+
+        let stats_scan = stats_scan_from_rewritten_plan(&optimized);
+        let stats_stream = stats_scan
+            .execute(0, Arc::new(datafusion::execution::TaskContext::default()))
+            .unwrap();
+        let stats_batches = stats_stream
+            .map(|batch| batch.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(stats_batches.is_empty());
+
+        let batches = collect(
+            optimized.clone(),
+            Arc::new(datafusion::execution::TaskContext::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(batches.len(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 6);
+
+        let scanned = scanned_file_ids.lock().unwrap().clone();
+        assert_eq!(
+            scanned,
+            vec![
+                "eligible-a".to_string(),
+                "eligible-b".to_string(),
+                "fallback-c".to_string()
+            ]
+        );
+
+        let display_state = stats_scan.decision_snapshot();
+        assert_eq!(display_state.files_total(), 0);
+        assert!(display_state.stats_hit_file_ids().is_empty());
+        assert!(display_state.fallback_file_ids().is_empty());
+    }
+
+    struct VerboseStatsScanDisplay<'a>(&'a StatsScanExec);
+
+    impl std::fmt::Display for VerboseStatsScanDisplay<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.0.fmt_as(DisplayFormatType::Verbose, f)
+        }
+    }
+
+    fn stats_scan_from_rewritten_plan(plan: &Arc<dyn ExecutionPlan>) -> &StatsScanExec {
+        let final_exec = plan.as_any().downcast_ref::<AggregateExec>().unwrap();
+        let coalesce = final_exec
+            .input()
+            .as_any()
+            .downcast_ref::<CoalescePartitionsExec>()
+            .unwrap();
+        let union = coalesce
+            .input()
+            .as_any()
+            .downcast_ref::<UnionExec>()
+            .unwrap();
+        union.children()[0]
+            .as_any()
+            .downcast_ref::<StatsScanExec>()
+            .unwrap()
+    }
+
+    fn fallback_scan_from_rewritten_plan(plan: &Arc<dyn ExecutionPlan>) -> &RegionScanExec {
+        let final_exec = plan.as_any().downcast_ref::<AggregateExec>().unwrap();
+        let coalesce = final_exec
+            .input()
+            .as_any()
+            .downcast_ref::<CoalescePartitionsExec>()
+            .unwrap();
+        let union = coalesce
+            .input()
+            .as_any()
+            .downcast_ref::<UnionExec>()
+            .unwrap();
+        let fallback_partial = union.children()[1]
+            .as_any()
+            .downcast_ref::<AggregateExec>()
+            .unwrap();
+        fallback_partial
+            .input()
+            .as_any()
+            .downcast_ref::<RegionScanExec>()
+            .unwrap()
     }
 
     fn assert_rewritten_stats_requirement(
         plan: &Arc<dyn ExecutionPlan>,
         expected: &[SupportStatAggr],
     ) {
+        let stats_scan = stats_scan_from_rewritten_plan(plan);
+        assert_eq!(stats_scan.requirements(), expected);
+
         let final_exec = plan.as_any().downcast_ref::<AggregateExec>().unwrap();
         let coalesce = final_exec
             .input()
@@ -862,11 +1124,6 @@ mod tests {
             .downcast_ref::<UnionExec>()
             .unwrap();
         let union_children = union.children();
-        let stats_scan = union_children[0]
-            .as_any()
-            .downcast_ref::<StatsScanExec>()
-            .unwrap();
-        assert_eq!(stats_scan.requirements(), expected);
 
         let fallback_partial = union_children[1]
             .as_any()

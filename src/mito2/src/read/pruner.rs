@@ -22,7 +22,9 @@ use std::time::Instant;
 use common_telemetry::debug;
 use smallvec::SmallVec;
 use snafu::ResultExt;
-use store_api::region_engine::{PartitionRange, ScannerProperties, SupportStatAggr};
+use store_api::region_engine::{
+    PartitionRange, ScannerProperties, StatsAwareFileDecisionState, SupportStatAggr,
+};
 use store_api::storage::FileId;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -41,15 +43,20 @@ const PREFETCH_COUNT: usize = 8;
 #[derive(Clone)]
 pub(crate) struct StatsAwareSkipConfig {
     requirements: Arc<[SupportStatAggr]>,
+    decision_state: StatsAwareFileDecisionState,
 }
 
 impl StatsAwareSkipConfig {
-    fn new(requirements: Vec<SupportStatAggr>) -> Option<Self> {
+    fn new(
+        requirements: Vec<SupportStatAggr>,
+        decision_state: StatsAwareFileDecisionState,
+    ) -> Option<Self> {
         if requirements.is_empty() {
             None
         } else {
             Some(Self {
                 requirements: requirements.into(),
+                decision_state,
             })
         }
     }
@@ -57,12 +64,19 @@ impl StatsAwareSkipConfig {
     pub(crate) fn requirements(&self) -> &[SupportStatAggr] {
         &self.requirements
     }
+
+    pub(crate) fn decision_state(&self) -> &StatsAwareFileDecisionState {
+        &self.decision_state
+    }
 }
 
 pub(crate) fn stats_aware_skip_config(
     properties: &ScannerProperties,
 ) -> Option<StatsAwareSkipConfig> {
-    StatsAwareSkipConfig::new(properties.stats_aware_skip_requirements().to_vec())
+    StatsAwareSkipConfig::new(
+        properties.stats_aware_skip_requirements().to_vec(),
+        properties.stats_aware_file_decision_state(),
+    )
 }
 
 /// Local pruner in a partition that supports prefetching files to prune.
@@ -469,6 +483,7 @@ impl Pruner {
                 pre_filter_mode,
                 reader_metrics,
                 stats_aware_skip.map(StatsAwareSkipConfig::requirements),
+                stats_aware_skip.map(StatsAwareSkipConfig::decision_state),
             )
             .await?;
 
@@ -553,6 +568,9 @@ impl Pruner {
                     stats_aware_skip
                         .as_ref()
                         .map(StatsAwareSkipConfig::requirements),
+                    stats_aware_skip
+                        .as_ref()
+                        .map(StatsAwareSkipConfig::decision_state),
                 )
                 .await;
 
@@ -560,6 +578,7 @@ impl Pruner {
             let mut entry = inner.file_entries[file_index].lock().unwrap();
             match result {
                 Ok(builder) => {
+                    let stats_aware_skipped = builder.is_stats_aware_skipped();
                     let arc_builder = Arc::new(builder);
                     if entry.builder.is_none() {
                         entry.builder = Some(arc_builder.clone());
@@ -594,6 +613,7 @@ impl Pruner {
                                 file_id,
                                 FileScanMetrics {
                                     build_part_cost: metrics.build_cost,
+                                    stats_aware_skip: stats_aware_skipped,
                                     ..Default::default()
                                 },
                             );
@@ -644,7 +664,9 @@ mod tests {
     #[test]
     fn keeps_cached_builder_when_stats_aware_skip_requirements_match() {
         let requirements = vec![SupportStatAggr::CountRows];
-        let skip_config = StatsAwareSkipConfig::new(requirements.clone()).unwrap();
+        let skip_config =
+            StatsAwareSkipConfig::new(requirements.clone(), StatsAwareFileDecisionState::default())
+                .unwrap();
         let mut entry = file_builder_entry_with_cached_builder(Some(requirements.into()));
         let cached_builder = entry.builder.as_ref().unwrap().clone();
 
@@ -667,7 +689,9 @@ mod tests {
         let new_requirements = vec![SupportStatAggr::CountNonNull {
             column_name: "value".to_string(),
         }];
-        let skip_config = StatsAwareSkipConfig::new(new_requirements).unwrap();
+        let skip_config =
+            StatsAwareSkipConfig::new(new_requirements, StatsAwareFileDecisionState::default())
+                .unwrap();
         let mut entry = file_builder_entry_with_cached_builder(Some(old_requirements.into()));
 
         PRUNER_ACTIVE_BUILDERS.inc();

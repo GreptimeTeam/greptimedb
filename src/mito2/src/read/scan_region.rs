@@ -42,7 +42,8 @@ use snafu::{OptionExt as _, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{
     FileStatsItem, PartitionRange, QueryScanContext, RegionScannerRef, RowGroupStatsItem,
-    SendableFileStatsStream, SupportStatAggr,
+    SendableFileStatsStream, StatsAwareFallbackReason, StatsAwareFileDecision,
+    StatsAwareFileDecisionState, SupportStatAggr,
 };
 use store_api::storage::{
     ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
@@ -1102,16 +1103,14 @@ impl ScanInput {
         }
     }
 
-    fn should_skip_file_by_stats(
+    fn classify_file_by_stats(
         &self,
-        file: &FileHandle,
-        parquet_meta: &ParquetMetaData,
+        file_stats: &FileStatsItem,
         requirements: &[SupportStatAggr],
-    ) -> Result<bool> {
-        let file_stats = build_file_stats_item(file, parquet_meta)?;
+    ) -> Result<StatsAwareFileDecision> {
         let region_partition_expr = self.region_metadata().partition_expr.clone();
         let candidate = StatsCandidateFile::from_file_stats(
-            &file_stats,
+            file_stats,
             region_partition_expr.as_deref(),
             requirements,
             &self.region_metadata().schema,
@@ -1122,7 +1121,53 @@ impl ScanInput {
         .context(ExternalSnafu {
             context: "failed to classify file stats for stats-aware skip mode",
         })?;
-        Ok(candidate.is_some())
+        let Some(candidate) = candidate else {
+            return Ok(StatsAwareFileDecision::scan_fallback(
+                file_stats.file_id.clone(),
+                StatsAwareFallbackReason::MissingOrUnusableRuntimeStats,
+            ));
+        };
+
+        let values = requirements
+            .iter()
+            .map(|requirement| {
+                candidate.stat_value(requirement).map_err(|error| {
+                    BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
+                })
+            })
+            .map(|value| {
+                value.and_then(|value| {
+                    value.ok_or_else(|| {
+                        BoxedError::new(PlainError::new(
+                            "failed to materialize stats-aware skip value".to_string(),
+                            StatusCode::Unexpected,
+                        ))
+                    })
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context(ExternalSnafu {
+                context: "failed to materialize stats-aware skip values",
+            })?;
+        Ok(StatsAwareFileDecision::stats_hit(
+            file_stats.file_id.clone(),
+            values,
+        ))
+    }
+
+    fn should_skip_file_by_stats(
+        &self,
+        file: &FileHandle,
+        parquet_meta: &ParquetMetaData,
+        requirements: &[SupportStatAggr],
+        decision_state: &StatsAwareFileDecisionState,
+    ) -> Result<bool> {
+        let file_stats = build_file_stats_item(file, parquet_meta)?;
+        let file_id = file_stats.file_id.clone();
+        let decision = decision_state.get_or_compute(file_id, || {
+            self.classify_file_by_stats(&file_stats, requirements)
+        })?;
+        Ok(decision.is_stats_hit())
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
@@ -1139,9 +1184,12 @@ impl ScanInput {
         pre_filter_mode: PreFilterMode,
         reader_metrics: &mut ReaderMetrics,
         stats_aware_skip_requirements: Option<&[SupportStatAggr]>,
+        stats_aware_file_decisions: Option<&StatsAwareFileDecisionState>,
     ) -> Result<FileRangeBuilder> {
-        if let Some(requirements) =
-            stats_aware_skip_requirements.filter(|requirements| !requirements.is_empty())
+        if self.predicate_group().predicate_without_region().is_none()
+            && let Some((requirements, decision_state)) = stats_aware_skip_requirements
+                .filter(|requirements| !requirements.is_empty())
+                .zip(stats_aware_file_decisions)
         {
             let sst_meta = self
                 .access_layer
@@ -1150,8 +1198,13 @@ impl ScanInput {
                 .expected_metadata(Some(self.region_metadata().clone()))
                 .read_sst_meta()
                 .await?;
-            if self.should_skip_file_by_stats(file, &sst_meta.parquet_metadata(), requirements)? {
-                return Ok(FileRangeBuilder::default());
+            if self.should_skip_file_by_stats(
+                file,
+                &sst_meta.parquet_metadata(),
+                requirements,
+                decision_state,
+            )? {
+                return Ok(FileRangeBuilder::stats_aware_skipped());
             }
         }
 
@@ -1535,6 +1588,7 @@ fn build_file_stats_item(
         })?;
 
     Ok(FileStatsItem {
+        file_id: file.file_id().to_string(),
         num_rows: Some(parquet_meta.file_metadata().num_rows() as u64),
         file_partition_expr,
         row_groups,
@@ -2300,6 +2354,7 @@ mod tests {
                 &[SupportStatAggr::MaxValue {
                     column_name: "host".to_string(),
                 }],
+                &StatsAwareFileDecisionState::default(),
             )
             .unwrap();
 
@@ -2330,6 +2385,7 @@ mod tests {
                 &[SupportStatAggr::MaxValue {
                     column_name: "host".to_string(),
                 }],
+                &StatsAwareFileDecisionState::default(),
             )
             .unwrap();
 

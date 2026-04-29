@@ -22,7 +22,6 @@ use async_stream::try_stream;
 use common_query::aggr_stats::StatsCandidateFile;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
@@ -33,14 +32,19 @@ use datafusion_physical_expr::EquivalenceProperties;
 use datatypes::arrow::array::{ArrayRef, StructArray};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::value::Value;
 use futures::StreamExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{QueryScanContext, RegionScannerRef, SendableFileStatsStream};
+use store_api::region_engine::{
+    FileStatsItem, QueryScanContext, RegionScannerRef, SendableFileStatsStream,
+    StatsAwareFallbackReason, StatsAwareFileDecision, StatsAwareFileDecisionSnapshot,
+    StatsAwareFileDecisionState,
+};
 
 use super::support_aggr::SupportStatAggr;
 
 fn build_state_row(
-    candidate: &StatsCandidateFile,
+    values: &[Value],
     schema: &SchemaRef,
     requirements: &[SupportStatAggr],
 ) -> Result<Vec<ScalarValue>> {
@@ -51,28 +55,24 @@ fn build_state_row(
             requirements.len()
         )));
     }
+    if values.len() != requirements.len() {
+        return Err(DataFusionError::Internal(format!(
+            "StatsScanExec value/requirement mismatch: {} values, {} requirements",
+            values.len(),
+            requirements.len()
+        )));
+    }
 
     let mut state_row = Vec::with_capacity(requirements.len());
-    for (field, requirement) in schema.fields().iter().zip(requirements) {
-        let state = build_state_scalar(candidate, field.as_ref(), requirement)?;
+    for (field, value) in schema.fields().iter().zip(values) {
+        let state = build_state_scalar(value, field.as_ref())?;
         state_row.push(state);
     }
 
     Ok(state_row)
 }
 
-fn build_state_scalar(
-    candidate: &StatsCandidateFile,
-    field: &Field,
-    requirement: &SupportStatAggr,
-) -> Result<ScalarValue> {
-    let Some(value) = candidate.stat_value(requirement)? else {
-        return Err(DataFusionError::Internal(format!(
-            "StatsScanExec built an ineligible stats candidate for requirement {:?}",
-            requirement
-        )));
-    };
-
+fn build_state_scalar(value: &Value, field: &Field) -> Result<ScalarValue> {
     let DataType::Struct(state_fields) = field.data_type() else {
         let output_type = ConcreteDataType::from_arrow_type(field.data_type());
         return value.try_to_scalar_value(&output_type).map_err(|error| {
@@ -116,17 +116,17 @@ fn build_state_scalar(
     ))))
 }
 
-fn build_batch_from_candidates(
+fn build_batch_from_stats_rows(
     schema: &SchemaRef,
     requirements: &[SupportStatAggr],
-    files: &[StatsCandidateFile],
+    stats_rows: &[Vec<Value>],
 ) -> Result<Option<RecordBatch>> {
     let mut columns = (0..requirements.len())
         .map(|_| Vec::<ScalarValue>::new())
         .collect::<Vec<_>>();
 
-    for file in files {
-        let row = build_state_row(file, schema, requirements)?;
+    for values in stats_rows {
+        let row = build_state_row(values, schema, requirements)?;
         for (index, scalar) in row.into_iter().enumerate() {
             columns[index].push(scalar);
         }
@@ -158,27 +158,61 @@ fn build_batch_from_candidates(
         })
 }
 
+fn classify_stats_file(
+    file_stats: &FileStatsItem,
+    region_metadata: &RegionMetadataRef,
+    requirements: &[SupportStatAggr],
+) -> Result<StatsAwareFileDecision> {
+    let Some(candidate) = StatsCandidateFile::from_file_stats(
+        file_stats,
+        region_metadata.partition_expr.as_deref(),
+        requirements,
+        &region_metadata.schema,
+    )?
+    else {
+        return Ok(StatsAwareFileDecision::scan_fallback(
+            file_stats.file_id.clone(),
+            StatsAwareFallbackReason::MissingOrUnusableRuntimeStats,
+        ));
+    };
+
+    let values = requirements
+        .iter()
+        .map(|requirement| {
+            candidate.stat_value(requirement)?.ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "StatsScanExec built an ineligible stats decision for requirement {:?}",
+                    requirement
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(StatsAwareFileDecision::stats_hit(
+        file_stats.file_id.clone(),
+        values,
+    ))
+}
+
 async fn build_batch_from_scan_stats(
     schema: &SchemaRef,
     requirements: &[SupportStatAggr],
     region_metadata: &RegionMetadataRef,
     mut scan_stats: SendableFileStatsStream,
+    decision_state: &StatsAwareFileDecisionState,
 ) -> Result<Option<RecordBatch>> {
-    let mut files = Vec::new();
+    let mut stats_rows = Vec::new();
     while let Some(file_stats) = scan_stats.next().await {
         let file_stats = file_stats.map_err(|error| DataFusionError::External(error.into()))?;
-        let Some(candidate) = StatsCandidateFile::from_file_stats(
-            &file_stats,
-            region_metadata.partition_expr.as_deref(),
-            requirements,
-            &region_metadata.schema,
-        )?
-        else {
-            continue;
-        };
-        files.push(candidate);
+        let file_id = file_stats.file_id.clone();
+        let decision = decision_state.get_or_compute(file_id, || {
+            classify_stats_file(&file_stats, region_metadata, requirements)
+        })?;
+        if let StatsAwareFileDecision::StatsHit { values, .. } = decision {
+            stats_rows.push(values);
+        }
     }
-    build_batch_from_candidates(schema, requirements, &files)
+    build_batch_from_stats_rows(schema, requirements, &stats_rows)
 }
 
 /// Physical execution plan for runtime stats-backed partial aggregates.
@@ -190,7 +224,6 @@ pub struct StatsScanExec {
     requirements: Vec<SupportStatAggr>,
     scanner: Arc<Mutex<RegionScannerRef>>,
     properties: Arc<PlanProperties>,
-    metrics: ExecutionPlanMetricsSet,
 }
 
 impl std::fmt::Debug for StatsScanExec {
@@ -218,20 +251,44 @@ impl StatsScanExec {
             schema,
             requirements,
             scanner,
-            metrics: ExecutionPlanMetricsSet::new(),
         }
     }
 
     pub fn requirements(&self) -> &[SupportStatAggr] {
         &self.requirements
     }
+
+    pub(crate) fn decision_snapshot(&self) -> StatsAwareFileDecisionSnapshot {
+        let scanner = self.scanner.lock().unwrap();
+        scanner
+            .properties()
+            .stats_aware_file_decision_state()
+            .snapshot()
+    }
 }
 
 impl DisplayAs for StatsScanExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default => {
                 write!(f, "StatsScanExec: requirements={}", self.requirements.len())
+            }
+            DisplayFormatType::Verbose => {
+                let snapshot = self.decision_snapshot();
+                write!(
+                    f,
+                    "StatsScanExec: requirements={}, files_total={}, stats_hit_files={:?}, stats_fallback_files={:?}",
+                    self.requirements.len(),
+                    snapshot.files_total(),
+                    snapshot.stats_hit_file_ids(),
+                    snapshot.fallback_file_ids()
+                )?;
+
+                write!(f, ", scanner=")?;
+                match self.scanner.try_lock() {
+                    Ok(scanner) => scanner.fmt_as(DisplayFormatType::Verbose, f),
+                    Err(_) => write!(f, "<locked>"),
+                }
             }
             DisplayFormatType::TreeRender => write!(f, "StatsScanExec"),
         }
@@ -271,7 +328,6 @@ impl ExecutionPlan for StatsScanExec {
             requirements: self.requirements.clone(),
             scanner: self.scanner.clone(),
             properties: self.properties.clone(),
-            metrics: self.metrics.clone(),
         }))
     }
 
@@ -289,13 +345,21 @@ impl ExecutionPlan for StatsScanExec {
 
         let schema = self.schema.clone();
         let requirements = self.requirements.clone();
-        let (region_metadata, scan_stats) = {
+        let (region_metadata, scan_stats, decision_state) = {
             let scanner = self.scanner.lock().unwrap();
+            if scanner.has_predicate_without_region() {
+                return Ok(Box::pin(RecordBatchStreamAdapter::new(
+                    self.schema.clone(),
+                    Box::pin(futures::stream::empty::<Result<RecordBatch>>()),
+                )));
+            }
+
             let region_metadata = scanner.metadata();
+            let decision_state = scanner.properties().stats_aware_file_decision_state();
             let scan_stats = scanner
                 .scan_stats(&QueryScanContext::default())
                 .map_err(|error| DataFusionError::External(error.into()))?;
-            (region_metadata, scan_stats)
+            (region_metadata, scan_stats, decision_state)
         };
         let stream = try_stream! {
             if let Some(batch) = build_batch_from_scan_stats(
@@ -303,6 +367,7 @@ impl ExecutionPlan for StatsScanExec {
                 &requirements,
                 &region_metadata,
                 scan_stats,
+                &decision_state,
             )
             .await? {
                 yield batch;
@@ -312,10 +377,6 @@ impl ExecutionPlan for StatsScanExec {
             self.schema.clone(),
             Box::pin(stream),
         )))
-    }
-
-    fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metrics.clone_inner())
     }
 }
 
@@ -331,6 +392,7 @@ mod tests {
     use datafusion::parquet::arrow::ArrowWriter;
     use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use datafusion::parquet::file::properties::WriterProperties;
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion_physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
     use datafusion_physical_expr::expressions::Column as PhysicalColumn;
     use datatypes::arrow::array::Int64Array;
@@ -351,6 +413,7 @@ mod tests {
         metadata: RegionMetadataRef,
         properties: ScannerProperties,
         files: Vec<FileStatsItem>,
+        predicate_without_region: bool,
     }
 
     impl store_api::region_engine::RegionScanner for StaticStatsScanner {
@@ -402,7 +465,7 @@ mod tests {
         }
 
         fn has_predicate_without_region(&self) -> bool {
-            false
+            self.predicate_without_region
         }
 
         fn add_dyn_filter_to_predicate(
@@ -424,6 +487,14 @@ mod tests {
             f: &mut std::fmt::Formatter<'_>,
         ) -> std::fmt::Result {
             write!(f, "StaticStatsScanner")
+        }
+    }
+
+    struct VerboseStatsScanDisplay<'a>(&'a StatsScanExec);
+
+    impl std::fmt::Display for VerboseStatsScanDisplay<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.0.fmt_as(DisplayFormatType::Verbose, f)
         }
     }
 
@@ -513,6 +584,11 @@ mod tests {
         batches.into_iter().next().unwrap()
     }
 
+    async fn collect_batches(exec: &StatsScanExec) -> Vec<RecordBatch> {
+        let stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
+        stream.map(|batch| batch.unwrap()).collect::<Vec<_>>().await
+    }
+
     #[tokio::test]
     async fn stats_scan_exec_matches_datafusion_count_state_field() {
         let aggr_expr = build_datafusion_aggr_expr(count_udaf(), "count(value)");
@@ -527,10 +603,12 @@ mod tests {
             metadata: region_metadata,
             properties: ScannerProperties::default(),
             files: vec![FileStatsItem {
+                file_id: "file-1".to_string(),
                 num_rows: Some(5),
                 file_partition_expr: Some("host = 'a'".to_string()),
                 row_groups: build_row_groups(&[vec![Some(1), None, Some(9), Some(3), None]]),
             }],
+            predicate_without_region: false,
         };
 
         let exec = StatsScanExec::new(
@@ -566,6 +644,7 @@ mod tests {
             metadata: region_metadata,
             properties: ScannerProperties::default(),
             files: vec![FileStatsItem {
+                file_id: "file-1".to_string(),
                 num_rows: Some(6),
                 file_partition_expr: Some("host = 'a'".to_string()),
                 row_groups: build_row_groups(&[
@@ -573,6 +652,7 @@ mod tests {
                     vec![Some(-3), Some(7), Some(2)],
                 ]),
             }],
+            predicate_without_region: false,
         };
 
         let exec = StatsScanExec::new(
@@ -608,6 +688,7 @@ mod tests {
             metadata: region_metadata,
             properties: ScannerProperties::default(),
             files: vec![FileStatsItem {
+                file_id: "file-1".to_string(),
                 num_rows: Some(6),
                 file_partition_expr: Some("host = 'a'".to_string()),
                 row_groups: build_row_groups(&[
@@ -615,6 +696,7 @@ mod tests {
                     vec![Some(-3), Some(11), Some(2)],
                 ]),
             }],
+            predicate_without_region: false,
         };
 
         let exec = StatsScanExec::new(
@@ -654,10 +736,12 @@ mod tests {
             metadata: region_metadata,
             properties: ScannerProperties::default(),
             files: vec![FileStatsItem {
+                file_id: "file-1".to_string(),
                 num_rows: Some(5),
                 file_partition_expr: Some("host = 'a'".to_string()),
                 row_groups: build_row_groups(&[vec![Some(1), None, Some(9), Some(3), None]]),
             }],
+            predicate_without_region: false,
         };
 
         let exec = StatsScanExec::new(
@@ -701,21 +785,25 @@ mod tests {
             properties: ScannerProperties::default(),
             files: vec![
                 FileStatsItem {
+                    file_id: "eligible".to_string(),
                     num_rows: Some(10),
                     file_partition_expr: Some("host = 'a'".to_string()),
                     row_groups: eligible_row_groups.clone(),
                 },
                 FileStatsItem {
+                    file_id: "missing-stats".to_string(),
                     num_rows: Some(5),
                     file_partition_expr: Some("host = 'a'".to_string()),
                     row_groups: vec![],
                 },
                 FileStatsItem {
+                    file_id: "partition-mismatch".to_string(),
                     num_rows: Some(10),
                     file_partition_expr: Some("host = 'b'".to_string()),
                     row_groups: eligible_row_groups,
                 },
             ],
+            predicate_without_region: false,
         };
 
         let exec = StatsScanExec::new(
@@ -744,6 +832,29 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(max_values.value(0), 9);
+
+        let display_state = exec.decision_snapshot();
+        assert_eq!(display_state.files_total(), 3);
+        assert_eq!(
+            display_state.stats_hit_file_ids(),
+            &["eligible".to_string()]
+        );
+        assert_eq!(
+            display_state.fallback_file_ids(),
+            &[
+                "missing-stats".to_string(),
+                "partition-mismatch".to_string()
+            ]
+        );
+
+        let display_text = VerboseStatsScanDisplay(&exec).to_string();
+        assert!(display_text.contains("files_total=3"));
+        assert!(display_text.contains("stats_hit_files=[\"eligible\"]"));
+        assert!(
+            display_text
+                .contains("stats_fallback_files=[\"missing-stats\", \"partition-mismatch\"]")
+        );
+        assert!(display_text.contains("scanner=StaticStatsScanner"));
     }
 
     #[tokio::test]
@@ -760,16 +871,19 @@ mod tests {
             properties: ScannerProperties::default(),
             files: vec![
                 FileStatsItem {
+                    file_id: "missing-stats".to_string(),
                     num_rows: Some(5),
                     file_partition_expr: Some("host = 'a'".to_string()),
                     row_groups: vec![],
                 },
                 FileStatsItem {
+                    file_id: "partition-mismatch".to_string(),
                     num_rows: Some(5),
                     file_partition_expr: Some("host = 'b'".to_string()),
                     row_groups: build_row_groups(&[vec![Some(1), Some(2), Some(3)]]),
                 },
             ],
+            predicate_without_region: false,
         };
 
         let exec = StatsScanExec::new(
@@ -800,16 +914,19 @@ mod tests {
             properties: ScannerProperties::default(),
             files: vec![
                 FileStatsItem {
+                    file_id: "file-1".to_string(),
                     num_rows: Some(7),
                     file_partition_expr: Some("host = 'a'".to_string()),
                     row_groups: vec![],
                 },
                 FileStatsItem {
+                    file_id: "file-2".to_string(),
                     num_rows: Some(3),
                     file_partition_expr: Some("host = 'a'".to_string()),
                     row_groups: vec![],
                 },
             ],
+            predicate_without_region: false,
         };
 
         let exec = StatsScanExec::new(
@@ -828,5 +945,39 @@ mod tests {
             .unwrap();
         assert_eq!(count_values.value(0), 7);
         assert_eq!(count_values.value(1), 3);
+    }
+
+    #[tokio::test]
+    async fn stats_scan_exec_emits_no_batches_with_non_region_predicate() {
+        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
+            "count[count]",
+            DataType::Int64,
+            false,
+        )]));
+        let region_metadata = build_region_metadata(Some("host = 'a'"));
+        let scanner = StaticStatsScanner {
+            schema: region_metadata.schema.clone(),
+            metadata: region_metadata,
+            properties: ScannerProperties::default(),
+            files: vec![FileStatsItem {
+                file_id: "file-1".to_string(),
+                num_rows: Some(5),
+                file_partition_expr: Some("host = 'a'".to_string()),
+                row_groups: build_row_groups(&[vec![Some(1), Some(2), Some(3), Some(4), Some(5)]]),
+            }],
+            predicate_without_region: true,
+        };
+
+        let exec = StatsScanExec::new(
+            schema,
+            vec![SupportStatAggr::CountNonNull {
+                column_name: "value".to_string(),
+            }],
+            Arc::new(Mutex::new(Box::new(scanner) as RegionScannerRef)),
+        );
+
+        let batches = collect_batches(&exec).await;
+
+        assert!(batches.is_empty());
     }
 }
