@@ -1095,81 +1095,81 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         for ddl in ddl_requests.drain(..) {
-            match self.maybe_schedule_soft_drop_flush(&ddl) {
-                Ok(true) => {
-                    // Keep the original DDL sender pending. The caller won't receive
-                    // the drop response until the flush finishes and replays this DDL.
-                    self.flush_scheduler.add_ddl_request_to_pending(ddl);
-                    continue;
-                }
-                Ok(false) => (),
-                Err(err) => {
-                    ddl.sender.send(Err(err));
-                    continue;
-                }
-            };
-
+            let region_id = ddl.region_id;
+            let sender = ddl.sender;
             let res = match ddl.request {
-                DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
+                DdlRequest::Create(req) => self.handle_create_request(region_id, req).await,
                 DdlRequest::Drop(req) => {
-                    self.handle_drop_request(ddl.region_id, req.partial_drop, req.soft_drop)
+                    match self.maybe_schedule_soft_drop_flush(region_id, &req) {
+                        Ok(true) => {
+                            // Keep the original DDL sender pending. The caller won't receive
+                            // the drop response until the flush finishes and replays this DDL.
+                            self.flush_scheduler
+                                .add_ddl_request_to_pending(SenderDdlRequest {
+                                    region_id,
+                                    request: DdlRequest::Drop(req),
+                                    sender,
+                                });
+                            continue;
+                        }
+                        Ok(false) => (),
+                        Err(err) => {
+                            sender.send(Err(err));
+                            continue;
+                        }
+                    }
+
+                    self.handle_drop_request(region_id, req.partial_drop, req.soft_drop)
                         .await
                 }
                 DdlRequest::Open((req, wal_entry_receiver)) => {
-                    self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
+                    self.handle_open_request(region_id, req, wal_entry_receiver, sender)
                         .await;
                     continue;
                 }
                 DdlRequest::Close(_) => {
-                    self.handle_close_request(ddl.region_id, ddl.sender).await;
+                    self.handle_close_request(region_id, sender).await;
                     continue;
                 }
                 DdlRequest::Alter(req) => {
-                    self.handle_alter_request(ddl.region_id, req, ddl.sender)
-                        .await;
+                    self.handle_alter_request(region_id, req, sender).await;
                     continue;
                 }
                 DdlRequest::Flush(req) => {
-                    self.handle_flush_request(ddl.region_id, req, None, ddl.sender);
+                    self.handle_flush_request(region_id, req, None, sender);
                     continue;
                 }
                 DdlRequest::Compact(req) => {
-                    self.handle_compaction_request(ddl.region_id, req, ddl.sender)
-                        .await;
+                    self.handle_compaction_request(region_id, req, sender).await;
                     continue;
                 }
                 DdlRequest::BuildIndex(req) => {
-                    self.handle_build_index_request(ddl.region_id, req, ddl.sender)
+                    self.handle_build_index_request(region_id, req, sender)
                         .await;
                     continue;
                 }
                 DdlRequest::Truncate(req) => {
-                    self.handle_truncate_request(ddl.region_id, req, ddl.sender)
-                        .await;
+                    self.handle_truncate_request(region_id, req, sender).await;
                     continue;
                 }
                 DdlRequest::Catchup((req, wal_entry_receiver)) => {
-                    self.handle_catchup_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
+                    self.handle_catchup_request(region_id, req, wal_entry_receiver, sender)
                         .await;
                     continue;
                 }
                 DdlRequest::EnterStaging(req) => {
-                    self.handle_enter_staging_request(
-                        ddl.region_id,
-                        req.partition_directive,
-                        ddl.sender,
-                    )
-                    .await;
+                    self.handle_enter_staging_request(region_id, req.partition_directive, sender)
+                        .await;
                     continue;
                 }
                 DdlRequest::ApplyStagingManifest(req) => {
-                    self.handle_apply_staging_manifest_request(ddl.region_id, req, ddl.sender)
+                    self.handle_apply_staging_manifest_request(region_id, req, sender)
                         .await;
                     continue;
                 }
             };
 
-            ddl.sender.send(res);
+            sender.send(res);
         }
     }
 
@@ -1181,15 +1181,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// the external drop request does not return success until the memtables are
     /// durable. We must not await the flush here because flush completion is
     /// delivered back through this same worker loop.
-    fn maybe_schedule_soft_drop_flush(&mut self, ddl: &SenderDdlRequest) -> Result<bool> {
-        let DdlRequest::Drop(req) = &ddl.request else {
-            return Ok(false);
-        };
+    fn maybe_schedule_soft_drop_flush(
+        &mut self,
+        region_id: RegionId,
+        req: &store_api::region_request::RegionDropRequest,
+    ) -> Result<bool> {
         if !req.soft_drop {
             return Ok(false);
         }
 
-        let Some(region) = self.regions.get_region(ddl.region_id) else {
+        let Some(region) = self.regions.get_region(region_id) else {
             return Ok(false);
         };
         if region
@@ -1204,7 +1205,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!(
             "Region {} has pending data, flushing before soft drop",
-            ddl.region_id
+            region_id
         );
         let task = self.new_flush_task(
             &region,
