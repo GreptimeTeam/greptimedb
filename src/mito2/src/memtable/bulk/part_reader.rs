@@ -380,7 +380,6 @@ fn apply_combined_filters(
     metrics: &mut MemScanMetricsData,
 ) -> error::Result<Option<RecordBatch>> {
     // Apply PK prefilter on raw batch before convert_batch to reduce conversion overhead.
-    let has_pk_prefilter = pk_filter.is_some();
     let record_batch = if let Some(pk_filter) = pk_filter {
         let rows_before = record_batch.num_rows();
         let prefilter_start = Instant::now();
@@ -413,7 +412,6 @@ fn apply_combined_filters(
         let predicate_mask = context.base.compute_filter_mask_flat(
             &record_batch,
             skip_fields,
-            has_pk_prefilter,
             &mut tag_decode_state,
         )?;
         // If predicate filters out the entire batch, return None early

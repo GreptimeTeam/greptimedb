@@ -172,7 +172,6 @@ impl FileRange {
                 self.row_group_idx,
                 self.row_selection.clone(),
                 fetch_metrics,
-                skip_fields,
             ))
             .await?;
 
@@ -199,7 +198,7 @@ impl FileRange {
                 FlatRowGroupReader::new(self.context.clone(), parquet_reader);
             // Flat PK prefilter makes the input stream predicate-dependent, so cached
             // selector results are not reusable across queries with different filters.
-            let cache_strategy = if self.context.reader_builder.has_flat_primary_key_prefilter() {
+            let cache_strategy = if self.context.reader_builder.has_predicate_prefilter() {
                 CacheStrategy::Disabled
             } else {
                 self.context.reader_builder.cache_strategy().clone()
@@ -297,16 +296,13 @@ impl FileRangeContext {
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
     /// If a partition expr filter is configured, it is also applied.
+    /// Physical filter exprs are not evaluated here; they are only applied during prefiltering.
     pub(crate) fn precise_filter_flat(
         &self,
         input: RecordBatch,
         skip_fields: bool,
     ) -> Result<Option<RecordBatch>> {
-        self.base.precise_filter_flat(
-            input,
-            skip_fields,
-            self.reader_builder.has_flat_primary_key_prefilter(),
-        )
+        self.base.precise_filter_flat(input, skip_fields)
     }
 
     pub(crate) fn pre_filter_mode(&self) -> PreFilterMode {
@@ -325,11 +321,8 @@ impl FileRangeContext {
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
         fetch_metrics: Option<&'a ParquetFetchMetrics>,
-        skip_fields: bool,
     ) -> RowGroupBuildContext<'a> {
         RowGroupBuildContext {
-            filters: &self.base.filters,
-            skip_fields,
             row_group_idx,
             row_selection,
             fetch_metrics,
@@ -344,7 +337,7 @@ impl FileRangeContext {
 }
 
 /// Mode to pre-filter columns in a range.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreFilterMode {
     /// Filters all columns.
     All,
@@ -415,15 +408,9 @@ impl RangeBase {
         &self,
         input: RecordBatch,
         skip_fields: bool,
-        skip_prefiltered_pk_filters: bool,
     ) -> Result<Option<RecordBatch>> {
         let mut tag_decode_state = TagDecodeState::new();
-        let mask = self.compute_filter_mask_flat(
-            &input,
-            skip_fields,
-            skip_prefiltered_pk_filters,
-            &mut tag_decode_state,
-        )?;
+        let mask = self.compute_filter_mask_flat(&input, skip_fields, &mut tag_decode_state)?;
 
         // If mask is None, the entire batch is filtered out
         let Some(mut mask) = mask else {
@@ -458,6 +445,7 @@ impl RangeBase {
 
     /// Computes the filter mask for the input RecordBatch based on pushed down predicates.
     /// If a partition expr filter is configured, it is applied later in `precise_filter_flat` but **NOT** in this function.
+    /// Physical filter exprs are excluded here and only apply during prefiltering.
     ///
     /// Returns `None` if the entire batch is filtered out, otherwise returns the boolean mask.
     ///
@@ -468,7 +456,6 @@ impl RangeBase {
         &self,
         input: &RecordBatch,
         skip_fields: bool,
-        skip_prefiltered_pk_filters: bool,
         tag_decode_state: &mut TagDecodeState,
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
@@ -487,12 +474,6 @@ impl RangeBase {
 
             // Skip field filters if skip_fields is true
             if skip_fields && filter_ctx.semantic_type() == SemanticType::Field {
-                continue;
-            }
-
-            // Flat parquet PK prefiltering already applied these tag predicates while refining
-            // row selection, so skip them here to avoid decoding/evaluating the same condition twice.
-            if skip_prefiltered_pk_filters && filter_ctx.usable_primary_key_filter() {
                 continue;
             }
 
@@ -703,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_filter_mask_flat_skips_prefiltered_pk_filters() {
+    fn test_compute_filter_mask_flat_applies_remaining_simple_filters() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let filters = vec![
             SimpleFilterContext::new_opt(&metadata, None, &col("tag_0").eq(lit("a"))).unwrap(),
@@ -712,16 +693,38 @@ mod tests {
         let base = new_test_range_base(filters);
         let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
 
-        let mask_without_skip = base
-            .compute_filter_mask_flat(&batch, false, false, &mut TagDecodeState::new())
+        let mask = base
+            .compute_filter_mask_flat(&batch, false, &mut TagDecodeState::new())
             .unwrap()
             .unwrap();
-        assert_eq!(mask_without_skip.count_set_bits(), 0);
+        assert_eq!(mask.count_set_bits(), 0);
+    }
 
-        let mask_with_skip = base
-            .compute_filter_mask_flat(&batch, false, true, &mut TagDecodeState::new())
+    #[test]
+    fn test_compute_filter_mask_flat_does_not_postfilter_physical_filters() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let physical_filter = crate::sst::parquet::reader::PhysicalFilterContext::new_opt(
+            &metadata,
+            None,
+            &read_format,
+            &col("field_0").in_list(vec![lit(1_u64), lit(2_u64)], false),
+        );
+        assert!(physical_filter.is_some());
+        let base = new_test_range_base(vec![]);
+        let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
+
+        let mask = base
+            .compute_filter_mask_flat(&batch, false, &mut TagDecodeState::new())
             .unwrap()
             .unwrap();
-        assert_eq!(mask_with_skip.count_set_bits(), 2);
+        assert_eq!(mask.count_set_bits(), 4);
     }
 }

@@ -27,8 +27,7 @@ use table::predicate::Predicate;
 use crate::error::Result;
 use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
 use crate::sst::parquet::flat_format::FlatReadFormat;
-use crate::sst::parquet::prefilter::CachedPrimaryKeyFilter;
-use crate::sst::parquet::reader::SimpleFilterContext;
+use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, build_bulk_filter_plan};
 use crate::sst::parquet::stats::RowGroupPruningStats;
 
 pub(crate) type BulkIterContextRef = Arc<BulkIterContext>;
@@ -66,17 +65,6 @@ impl BulkIterContext {
     ) -> Result<Self> {
         let codec = build_primary_key_codec(&region_metadata);
 
-        let simple_filters: Vec<SimpleFilterContext> = predicate
-            .as_ref()
-            .iter()
-            .flat_map(|predicate| {
-                predicate
-                    .exprs()
-                    .iter()
-                    .filter_map(|expr| SimpleFilterContext::new_opt(&region_metadata, None, expr))
-            })
-            .collect();
-
         let read_format = if let Some(column_ids) = projection {
             FlatReadFormat::new(
                 region_metadata.clone(),
@@ -103,12 +91,11 @@ impl BulkIterContext {
             .map(|pred| pred.dyn_filters().as_ref().clone())
             .unwrap_or_default();
 
-        // Pre-extract PK filters if applicable.
-        let pk_filters = Self::extract_pk_filters(&read_format, &simple_filters);
+        let filter_plan = build_bulk_filter_plan(&read_format, predicate.as_ref());
 
         Ok(Self {
             base: RangeBase {
-                filters: simple_filters,
+                filters: filter_plan.remaining_simple_filters,
                 dyn_filters,
                 read_format,
                 prune_schema: region_metadata.schema.clone(),
@@ -121,7 +108,7 @@ impl BulkIterContext {
                 partition_filter: None,
             },
             predicate,
-            pk_filters,
+            pk_filters: filter_plan.pk_filters,
         })
     }
 
@@ -151,30 +138,6 @@ impl BulkIterContext {
         } else {
             (0..file_meta.num_row_groups()).collect()
         }
-    }
-
-    /// Extracts PK filters if flat format with dictionary-encoded PKs is used.
-    fn extract_pk_filters(
-        read_format: &FlatReadFormat,
-        filters: &[SimpleFilterContext],
-    ) -> Option<Arc<Vec<SimpleFilterEvaluator>>> {
-        if read_format.batch_has_raw_pk_columns() {
-            return None;
-        }
-        let metadata = read_format.metadata();
-        if metadata.primary_key.is_empty() {
-            return None;
-        }
-
-        let pk_filters: Vec<_> = filters
-            .iter()
-            .filter_map(|f| f.primary_key_prefilter())
-            .collect();
-        if pk_filters.is_empty() {
-            return None;
-        }
-
-        Some(Arc::new(pk_filters))
     }
 
     /// Builds a fresh PK filter for a new iterator. Returns `None` if PK
