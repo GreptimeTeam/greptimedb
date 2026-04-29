@@ -357,7 +357,7 @@ fn json_struct_get(array: &ArrayRef, path: &str, with_type: Option<&DataType>) -
         };
         let Some(sub_json) = json.column_by_name(segment) else {
             return Ok(new_null_array(
-                with_type.unwrap_or(&DataType::Null),
+                with_type.unwrap_or(&DataType::Utf8View),
                 array.len(),
             ));
         };
@@ -522,10 +522,7 @@ impl Function for JsonGetWithType {
             }
             DataType::Struct(_) => json_struct_get(&arg0, path, with_type.as_ref())?,
             _ => {
-                return Err(DataFusionError::Execution(format!(
-                    "JSON_GET not supported argument type {}",
-                    arg0.data_type(),
-                )));
+                return exec_err!("JSON_GET not supported argument type {}", arg0.data_type());
             }
         };
 
