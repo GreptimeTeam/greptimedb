@@ -433,6 +433,49 @@ async fn test_drop_recreated_table_fails_when_previous_tombstone_exists() {
 }
 
 #[tokio::test]
+async fn test_hard_drop_recreated_table_ignores_previous_orphan_tombstone() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let original_table_id = 1024;
+    let recreated_table_id = 1025;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, original_table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let drop_task = new_drop_table_task(table_name, original_table_id, false);
+    let mut drop_procedure = DropTableProcedure::new(drop_task, ddl_context.clone());
+    execute_procedure_until(&mut drop_procedure, |p| {
+        p.data.state == DropTableState::DeleteTombstone
+    })
+    .await;
+
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task(table_name, recreated_table_id).table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, recreated_table_id, false),
+        ddl_context,
+    );
+
+    procedure.on_prepare().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_on_rollback() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());

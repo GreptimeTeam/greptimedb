@@ -108,10 +108,11 @@ impl DropTableExecutor {
             }
         );
 
-        if let Some(dropped_table) = ctx
-            .table_metadata_manager
-            .get_dropped_table(&self.table)
-            .await?
+        if ctx.soft_drop_enabled
+            && let Some(dropped_table) = ctx
+                .table_metadata_manager
+                .get_dropped_table(&self.table)
+                .await?
             && dropped_table.table_id != self.table_id
         {
             return error::TableNameTombstoneConflictSnafu {
