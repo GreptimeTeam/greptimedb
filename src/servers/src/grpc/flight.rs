@@ -28,7 +28,9 @@ use async_trait::async_trait;
 use bytes::{self, Bytes};
 use common_error::ext::ErrorExt;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
-use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
+use common_grpc::flight::{
+    FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightEncoder, FlightMessage,
+};
 use common_memory_manager::MemoryGuard;
 use common_query::{Output, OutputData};
 use common_recordbatch::DfRecordBatch;
@@ -39,7 +41,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use futures::{Stream, future, ready};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
-use query::metrics::terminal_recordbatch_metrics_from_plan;
+use query::metrics::terminal_recordbatch_metrics_from_plan_if_requested;
 use query::options::FlowQueryExtensions;
 use session::context::{Channel, QueryContextRef};
 use snafu::{IntoError, ResultExt, ensure};
@@ -57,8 +59,6 @@ use crate::grpc::{FlightCompression, TonicResult, context_auth};
 use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::request_memory_metrics::RequestMemoryMetrics;
 use crate::{error, hint_headers};
-
-const FLOW_EXTENSIONS_METADATA_KEY: &str = "x-greptime-flow-extensions";
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
 
@@ -204,8 +204,11 @@ impl FlightCraft for GreptimeRequestHandler {
         // Validate flow hint syntax at the transport boundary before dispatching the request.
         // This does not authorize or execute anything; `handle_request()` below still performs
         // the normal frontend handling and auth checks before query execution.
-        FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
+        let flow_extensions = FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
             .map_err(|e| Status::invalid_argument(e.output_msg()))?;
+        let should_emit_terminal_metrics = flow_extensions
+            .as_ref()
+            .is_some_and(|extensions| extensions.should_collect_region_watermark());
 
         // The Grpc protocol pass query by Flight. It needs to be wrapped under a span, in order to record stream
         let span = info_span!(
@@ -221,6 +224,7 @@ impl FlightCraft for GreptimeRequestHandler {
                 TracingContext::from_current_span(),
                 flight_compression,
                 query_ctx,
+                should_emit_terminal_metrics,
             );
             Ok(Response::new(stream))
         }
@@ -552,6 +556,7 @@ fn to_flight_data_stream(
     tracing_context: TracingContext,
     flight_compression: FlightCompression,
     query_ctx: QueryContextRef,
+    should_emit_terminal_metrics: bool,
 ) -> TonicStream<FlightData> {
     match output.data {
         OutputData::Stream(stream) => {
@@ -573,15 +578,11 @@ fn to_flight_data_stream(
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {
-            let should_emit_terminal_metrics =
-                FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
-                    .expect("flow extensions must be validated before Flight serialization")
-                    .is_some_and(|extensions| extensions.should_collect_region_watermark());
-            let terminal_metrics = should_emit_terminal_metrics
-                .then_some(output.meta.plan)
-                .flatten()
-                .and_then(terminal_recordbatch_metrics_from_plan)
-                .and_then(|metrics| serde_json::to_string(&metrics).ok());
+            let terminal_metrics = terminal_recordbatch_metrics_from_plan_if_requested(
+                output.meta.plan,
+                should_emit_terminal_metrics,
+            )
+            .and_then(|metrics| serde_json::to_string(&metrics).ok());
             let affected_rows = FlightEncoder::default().encode(FlightMessage::AffectedRows {
                 rows,
                 metrics: terminal_metrics,

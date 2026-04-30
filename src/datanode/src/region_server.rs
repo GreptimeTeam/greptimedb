@@ -774,7 +774,7 @@ struct RegionWatermarkStream {
     stream: SendableRecordBatchStream,
     region_id: u64,
     snapshot_seq: u64,
-    finished: AtomicBool,
+    finished: bool,
 }
 
 impl RegionWatermarkStream {
@@ -783,28 +783,25 @@ impl RegionWatermarkStream {
             stream,
             region_id: region_id.as_u64(),
             snapshot_seq,
-            finished: AtomicBool::new(false),
+            finished: false,
         }
     }
 
     fn merged_metrics(&self, mut metrics: RecordBatchMetrics) -> RecordBatchMetrics {
-        let entry = if let Some(entry) = metrics
+        if metrics
             .region_watermarks
-            .iter_mut()
-            .find(|entry| entry.region_id == self.region_id)
+            .iter()
+            .any(|entry| entry.region_id == self.region_id)
         {
-            entry
-        } else {
-            metrics
-                .region_watermarks
-                .push(common_recordbatch::adapter::RegionWatermarkEntry {
-                    region_id: self.region_id,
-                    watermark: None,
-                });
-            metrics.region_watermarks.last_mut().unwrap()
-        };
+            return metrics;
+        }
 
-        entry.watermark = Some(self.snapshot_seq);
+        metrics
+            .region_watermarks
+            .push(common_recordbatch::adapter::RegionWatermarkEntry {
+                region_id: self.region_id,
+                watermark: Some(self.snapshot_seq),
+            });
         metrics
     }
 }
@@ -824,7 +821,7 @@ impl RecordBatchStream for RegionWatermarkStream {
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
         let base = self.stream.metrics();
-        if !self.finished.load(Ordering::Relaxed) {
+        if !self.finished {
             return base;
         }
 
@@ -838,7 +835,7 @@ impl Stream for RegionWatermarkStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(None) => {
-                self.finished.store(true, Ordering::Relaxed);
+                self.finished = true;
                 Poll::Ready(None)
             }
             other => other,
@@ -1771,7 +1768,7 @@ mod tests {
     use api::v1::SemanticType;
     use common_error::ext::ErrorExt;
     use common_recordbatch::RecordBatches;
-    use common_recordbatch::adapter::RegionWatermarkEntry;
+    use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -1814,6 +1811,39 @@ mod tests {
             vec![RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
                 watermark: Some(99),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_region_watermark_stream_preserves_unproved_watermark() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let values: VectorRef = Arc::new(Int32Vector::from_slice([1]));
+        let batch = RecordBatch::new(schema.clone(), vec![values]).unwrap();
+        let stream = RecordBatches::try_new(schema, vec![batch])
+            .unwrap()
+            .as_stream();
+
+        let region_id = RegionId::new(42, 7);
+        let wrapped = RegionWatermarkStream::new(stream, region_id, 99);
+        let metrics = RecordBatchMetrics {
+            region_watermarks: vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                watermark: None,
+            }],
+            ..Default::default()
+        };
+
+        let merged = wrapped.merged_metrics(metrics);
+        assert_eq!(
+            merged.region_watermarks,
+            vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                watermark: None,
             }]
         );
     }

@@ -26,8 +26,11 @@ use futures::Stream;
 use futures_util::ready;
 use lazy_static::lazy_static;
 use prometheus::*;
+use session::context::QueryContextRef;
 
 use crate::dist_plan::MergeScanExec;
+use crate::error::Result;
+use crate::options::FlowQueryExtensions;
 
 /// Intermediate merge state for one participating region while collecting
 /// terminal correctness watermarks across merge-scan sub-stages.
@@ -201,6 +204,27 @@ impl Stream for RegionWatermarkMetricsStream {
     }
 }
 
+/// Returns whether terminal region watermark metrics should be collected for the query context.
+pub fn should_collect_region_watermark_from_query_ctx(query_ctx: &QueryContextRef) -> Result<bool> {
+    Ok(
+        FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())?
+            .is_some_and(|extensions| extensions.should_collect_region_watermark()),
+    )
+}
+
+/// Attaches terminal region watermark metrics to `stream` when collection is requested.
+pub fn maybe_attach_region_watermark_metrics(
+    stream: SendableRecordBatchStream,
+    plan: Arc<dyn ExecutionPlan>,
+    should_collect_region_watermark: bool,
+) -> SendableRecordBatchStream {
+    if should_collect_region_watermark {
+        Box::pin(RegionWatermarkMetricsStream::new(stream, plan))
+    } else {
+        stream
+    }
+}
+
 pub fn terminal_recordbatch_metrics_from_plan(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Option<RecordBatchMetrics> {
@@ -212,6 +236,18 @@ pub fn terminal_recordbatch_metrics_from_plan(
             region_watermarks,
             ..Default::default()
         })
+    }
+}
+
+/// Collects terminal record-batch metrics from `plan` only when requested.
+pub fn terminal_recordbatch_metrics_from_plan_if_requested(
+    plan: Option<Arc<dyn ExecutionPlan>>,
+    should_collect_region_watermark: bool,
+) -> Option<RecordBatchMetrics> {
+    if should_collect_region_watermark {
+        plan.and_then(terminal_recordbatch_metrics_from_plan)
+    } else {
+        None
     }
 }
 
@@ -240,6 +276,10 @@ fn merge_region_watermark_entries(
     merged: &mut BTreeMap<u64, MergeState>,
     entries: impl IntoIterator<Item = RegionWatermarkEntry>,
 ) {
+    // Merge by correctness rather than by maximum/minimum sequence. Any
+    // explicit unproved entry (`None`) vetoes a proved watermark, and
+    // conflicting proofs degrade the region back to unproved so Flow cannot
+    // advance checkpoints from ambiguous terminal metrics.
     for entry in entries {
         merged
             .entry(entry.region_id)
@@ -281,6 +321,9 @@ fn merge_merge_scan_region_watermarks(
     regions: impl IntoIterator<Item = u64>,
     sub_stage_metrics: impl IntoIterator<Item = RecordBatchMetrics>,
 ) {
+    // Regions listed by MergeScanExec participated even when no sub-stage can
+    // prove a watermark. Keep them as explicit `None` entries so callers can
+    // distinguish unproved participation from non-participation.
     for region_id in regions {
         merged.entry(region_id).or_insert(MergeState::Participated);
     }

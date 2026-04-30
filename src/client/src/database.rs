@@ -36,7 +36,7 @@ use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
-use common_grpc::flight::{FlightDecoder, FlightMessage};
+use common_grpc::flight::{FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::ExternalSnafu;
@@ -61,12 +61,21 @@ type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
 type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>>>>;
 
-const FLOW_EXTENSIONS_METADATA_KEY: &str = "x-greptime-flow-extensions";
-
+/// Terminal metrics associated with a query output.
+///
+/// For streaming outputs, metrics are only final after the stream is fully
+/// drained and [`Self::is_ready`] returns `true`. Region watermark helpers keep
+/// the RFC distinction between proved regions, unproved participating regions,
+/// and non-participating regions.
 #[derive(Debug, Clone, Default)]
 pub struct OutputMetrics {
-    metrics: Arc<RwLock<Option<RecordBatchMetrics>>>,
-    ready: Arc<AtomicBool>,
+    inner: Arc<OutputMetricsInner>,
+}
+
+#[derive(Debug, Default)]
+struct OutputMetricsInner {
+    metrics: RwLock<Option<RecordBatchMetrics>>,
+    ready: AtomicBool,
 }
 
 impl OutputMetrics {
@@ -74,20 +83,29 @@ impl OutputMetrics {
         Self::default()
     }
 
+    /// Replaces the current terminal metrics snapshot.
     pub fn update(&self, metrics: Option<RecordBatchMetrics>) {
-        *self.metrics.write().expect("metrics lock poisoned") = metrics;
+        *self.inner.metrics.write().unwrap() = metrics;
     }
 
+    /// Marks the terminal metrics as final for this output.
     pub fn mark_ready(&self) {
-        self.ready.store(true, Ordering::Release);
+        let _ = self
+            .inner
+            .ready
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
     }
 
+    /// Returns whether terminal metrics are final.
+    ///
+    /// Streaming outputs become ready only after the stream reaches EOF.
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.inner.ready.load(Ordering::Acquire)
     }
 
+    /// Returns the latest terminal metrics snapshot, if any.
     pub fn get(&self) -> Option<RecordBatchMetrics> {
-        self.metrics.read().expect("metrics lock poisoned").clone()
+        self.inner.metrics.read().unwrap().clone()
     }
 
     /// Returns proved per-region watermarks.
@@ -118,6 +136,11 @@ impl OutputMetrics {
     }
 }
 
+/// Query output together with a handle for its terminal metrics.
+///
+/// The contained [`OutputMetrics`] lets callers read stream terminal metrics
+/// after consuming `output`. For non-stream outputs, metrics are ready
+/// immediately.
 #[derive(Debug)]
 pub struct OutputWithMetrics {
     pub output: Output,
@@ -125,6 +148,10 @@ pub struct OutputWithMetrics {
 }
 
 impl OutputWithMetrics {
+    /// Wraps an output with a terminal metrics handle.
+    ///
+    /// Stream outputs update the handle as the stream is consumed. Non-stream
+    /// outputs are marked ready immediately.
     pub fn from_output(output: Output) -> Self {
         let terminal_metrics = OutputMetrics::new();
         let output = attach_terminal_metrics(output, &terminal_metrics);
@@ -134,14 +161,17 @@ impl OutputWithMetrics {
         }
     }
 
+    /// Returns proved per-region watermarks from the terminal metrics.
     pub fn region_watermark_map(&self) -> Option<std::collections::HashMap<u64, u64>> {
         self.metrics.region_watermark_map()
     }
 
+    /// Returns all regions participating in terminal metric collection.
     pub fn participating_regions(&self) -> Option<std::collections::BTreeSet<u64>> {
         self.metrics.participating_regions()
     }
 
+    /// Drops the terminal metrics handle and returns the original output.
     pub fn into_output(self) -> Output {
         self.output
     }
@@ -320,7 +350,6 @@ where
                                     yield Err(BoxedError::new(e)).context(ExternalSnafu);
                                 }
                             };
-                            break;
                         }
                         FlightMessage::AffectedRows { .. } | FlightMessage::Schema(_) => {
                             yield IllegalFlightMessagesSnafu {reason: format!("A Schema message must be succeeded exclusively by a set of RecordBatch messages, flight_message: {:?}", flight_message)}
@@ -513,9 +542,6 @@ impl Database {
     }
 
     fn put_hints(metadata: &mut MetadataMap, hints: &[(&str, &str)]) -> Result<()> {
-        // Keep this helper for simple ASCII hint values only. The wire format is the
-        // existing comma-separated `x-greptime-hints` metadata value and does not
-        // escape commas inside individual values.
         let Some(value) = hints
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
@@ -646,6 +672,10 @@ impl Database {
             .map(OutputWithMetrics::into_output)
     }
 
+    /// Executes a SQL query and returns the output with terminal metrics.
+    ///
+    /// For stream outputs, callers must consume the stream before reading final
+    /// terminal metrics from [`OutputWithMetrics::metrics`].
     pub async fn sql_with_terminal_metrics<S>(
         &self,
         sql: S,
@@ -654,36 +684,33 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        self.query_with_terminal_metrics(
+        self.query_with_terminal_metrics_and_flow_extensions(
             QueryRequest {
                 query: Some(Query::Sql(sql.as_ref().to_string())),
             },
             hints,
+            &[],
         )
         .await
     }
 
     /// Executes a logical plan directly without SQL parsing.
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
-        self.query_with_terminal_metrics(
+        self.query_with_terminal_metrics_and_flow_extensions(
             QueryRequest {
                 query: Some(Query::LogicalPlan(logical_plan)),
             },
+            &[],
             &[],
         )
         .await
         .map(OutputWithMetrics::into_output)
     }
 
-    pub async fn query_with_terminal_metrics(
-        &self,
-        request: QueryRequest,
-        hints: &[(&str, &str)],
-    ) -> Result<OutputWithMetrics> {
-        self.query_with_terminal_metrics_and_flow_extensions(request, hints, &[])
-            .await
-    }
-
+    /// Executes a query and carries flow extensions through Flight metadata.
+    ///
+    /// This is the lower-level terminal-metrics API for Flow callers that need
+    /// to pass JSON-bearing flow extensions without going through hint metadata.
     pub async fn query_with_terminal_metrics_and_flow_extensions(
         &self,
         request: QueryRequest,
@@ -864,10 +891,14 @@ mod tests {
     }
 
     fn terminal_metrics_json() -> String {
+        terminal_metrics_json_with_seq(42)
+    }
+
+    fn terminal_metrics_json_with_seq(seq: u64) -> String {
         serde_json::to_string(&RecordBatchMetrics {
             region_watermarks: vec![common_recordbatch::adapter::RegionWatermarkEntry {
                 region_id: 7,
-                watermark: Some(42),
+                watermark: Some(seq),
             }],
             ..Default::default()
         })
@@ -1069,6 +1100,55 @@ mod tests {
         assert!(record_batch_stream.next().await.is_none());
         assert!(terminal_metrics.is_ready());
         assert!(terminal_metrics.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_record_batch_stream_continues_after_partial_metrics() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let first_batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1])) as VectorRef],
+        )
+        .unwrap();
+        let second_batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([2])) as VectorRef],
+        )
+        .unwrap();
+        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![
+            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+            Ok(FlightMessage::RecordBatch(
+                first_batch.into_df_record_batch(),
+            )),
+            Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(1))),
+            Ok(FlightMessage::RecordBatch(
+                second_batch.into_df_record_batch(),
+            )),
+            Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(2))),
+        ]
+            as Vec<Result<FlightMessage>>))
+        .await
+        .unwrap();
+        let terminal_metrics = output.metrics.clone();
+        let OutputData::Stream(mut record_batch_stream) = output.output.data else {
+            panic!("expected stream output");
+        };
+
+        let first_batch = record_batch_stream.next().await.unwrap().unwrap();
+        assert_eq!(first_batch.num_rows(), 1);
+        let second_batch = record_batch_stream.next().await.unwrap().unwrap();
+        assert_eq!(second_batch.num_rows(), 1);
+        assert!(record_batch_stream.next().await.is_none());
+
+        assert!(terminal_metrics.is_ready());
+        assert_eq!(
+            terminal_metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([(7, 2)]))
+        );
     }
 
     #[test]

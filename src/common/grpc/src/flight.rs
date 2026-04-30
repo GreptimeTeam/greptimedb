@@ -37,6 +37,9 @@ use vec1::{Vec1, vec1};
 use crate::error;
 use crate::error::{DecodeFlightDataSnafu, InvalidFlightDataSnafu, Result};
 
+/// Flight metadata key used to carry flow query extensions as JSON pairs.
+pub const FLOW_EXTENSIONS_METADATA_KEY: &str = "x-greptime-flow-extensions";
+
 #[derive(Debug, Clone)]
 pub enum FlightMessage {
     Schema(SchemaRef),

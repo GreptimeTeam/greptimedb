@@ -60,8 +60,10 @@ use crate::error::{
     TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
-use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED, RegionWatermarkMetricsStream};
-use crate::options::FlowQueryExtensions;
+use crate::metrics::{
+    OnDone, QUERY_STAGE_ELAPSED, maybe_attach_region_watermark_metrics,
+    should_collect_region_watermark_from_query_ctx,
+};
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -547,10 +549,10 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        let explain_verbose = ctx.query_ctx().explain_verbose();
+        let query_ctx = ctx.query_ctx();
+        let explain_verbose = query_ctx.explain_verbose();
         let should_collect_region_watermark =
-            FlowQueryExtensions::parse_flow_extensions(&ctx.query_ctx().extensions())?
-                .is_some_and(|extensions| extensions.should_collect_region_watermark());
+            should_collect_region_watermark_from_query_ctx(&query_ctx)?;
         let output_partitions = plan.properties().output_partitioning().partition_count();
         if explain_verbose {
             common_telemetry::info!("Executing query plan, output_partitions: {output_partitions}");
@@ -586,14 +588,11 @@ impl QueryExecutor for DatafusionQueryEngine {
                         );
                     }
                 });
-                if should_collect_region_watermark {
-                    Ok(Box::pin(RegionWatermarkMetricsStream::new(
-                        Box::pin(stream),
-                        plan.clone(),
-                    )))
-                } else {
-                    Ok(Box::pin(stream))
-                }
+                Ok(maybe_attach_region_watermark_metrics(
+                    Box::pin(stream),
+                    plan.clone(),
+                    should_collect_region_watermark,
+                ))
             }
             _ => {
                 // merge into a single partition
@@ -612,7 +611,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
-                stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
+                stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
                     let exec_cost = exec_timer.stop_and_record();
                     if explain_verbose {
@@ -622,14 +621,11 @@ impl QueryExecutor for DatafusionQueryEngine {
                         );
                     }
                 });
-                if should_collect_region_watermark {
-                    Ok(Box::pin(RegionWatermarkMetricsStream::new(
-                        Box::pin(stream),
-                        plan.clone(),
-                    )))
-                } else {
-                    Ok(Box::pin(stream))
-                }
+                Ok(maybe_attach_region_watermark_metrics(
+                    Box::pin(stream),
+                    plan.clone(),
+                    should_collect_region_watermark,
+                ))
             }
         }
     }
