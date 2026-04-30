@@ -30,21 +30,13 @@ use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, O
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
-fn map_region_flush_reason(reason: RegionFlushReason) -> FlushReason {
-    match reason {
-        RegionFlushReason::RegionMigration => FlushReason::RegionMigration,
-        RegionFlushReason::Repartition => FlushReason::Repartition,
-        RegionFlushReason::RemoteWalPrune => FlushReason::RemoteWalPrune,
-    }
-}
-
 fn resolve_flush_reason(
     explicit_reason: Option<FlushReason>,
     request_reason: Option<RegionFlushReason>,
     is_downgrading: bool,
 ) -> FlushReason {
     explicit_reason
-        .or_else(|| request_reason.map(map_region_flush_reason))
+        .or_else(|| request_reason.map(FlushReason::from))
         .unwrap_or({
             if is_downgrading {
                 FlushReason::Downgrading

@@ -104,9 +104,7 @@ pub(crate) async fn flush_region(
 ) -> Result<()> {
     let mut flush_regions =
         FlushRegions::sync_batch(region_ids.to_vec(), FlushErrorStrategy::TryAll);
-    if let Some(reason) = reason {
-        flush_regions = flush_regions.with_reason(reason);
-    }
+    flush_regions.reason = reason;
     let flush_instruction = Instruction::FlushRegions(flush_regions);
 
     let tracing_ctx = TracingContext::from_current_span();
