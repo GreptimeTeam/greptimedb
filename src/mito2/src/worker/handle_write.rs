@@ -85,9 +85,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .start_timer();
             let mut wal_writer = self.wal.writer();
             for region_ctx in region_ctxs.values_mut() {
-                if matches!(region_ctx.version().options.wal_options, WalOptions::Noop)
-                    || region_ctx.version().options.skip_wal
-                {
+                if region_ctx.version().options.wal_skipped() {
                     // Skip wal write for noop region.
                     continue;
                 }
@@ -98,9 +96,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             match wal_writer.write_to_wal().await.map_err(Arc::new) {
                 Ok(response) => {
                     for (region_id, region_ctx) in region_ctxs.iter_mut() {
-                        if matches!(region_ctx.version().options.wal_options, WalOptions::Noop)
-                            || region_ctx.version().options.skip_wal
-                        {
+                        if region_ctx.version().options.wal_skipped() {
                             continue;
                         }
 

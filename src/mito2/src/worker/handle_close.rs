@@ -39,8 +39,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // If the region is using Noop WAL and has data in memtable,
         // we should flush it before closing to ensure durability.
-        if (region.provider == Provider::Noop
-            || region.version_control.current().version.options.skip_wal)
+        if region
+            .version_control
+            .current()
+            .version
+            .options
+            .wal_skipped()
             && !region
                 .version_control
                 .current()

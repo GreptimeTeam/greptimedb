@@ -125,6 +125,11 @@ impl RegionOptions {
                 memtable.primary_key_encoding()
             })
     }
+
+    /// Returns true if the WAL should be skipped for this region.
+    pub fn wal_skipped(&self) -> bool {
+        matches!(self.wal_options, WalOptions::Noop) || self.skip_wal
+    }
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
