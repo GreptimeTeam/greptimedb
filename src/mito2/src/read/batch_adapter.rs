@@ -212,12 +212,12 @@ fn compute_output_arrow_schema(
         if !read_column_id_set.contains(&column_metadata.column_id) {
             continue;
         }
-        let mut field = Field::new(
+        let field = Field::new(
             &column_metadata.column_schema.name,
             column_metadata.column_schema.data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
         );
-        field = with_field_id(field, column_metadata.column_id);
+        let field = with_field_id(field, column_metadata.column_id);
 
         if column_metadata.semantic_type == SemanticType::Tag {
             fields.push(tag_maybe_to_dictionary_field(

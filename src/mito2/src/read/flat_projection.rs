@@ -396,12 +396,12 @@ pub(crate) fn compute_input_arrow_schema(
     let mut new_fields = Vec::with_capacity(batch_schema.len() + 3);
     for (column_id, _) in batch_schema {
         let column_metadata = metadata.column_by_id(*column_id).unwrap();
-        let mut field = Field::new(
+        let field = Field::new(
             &column_metadata.column_schema.name,
             column_metadata.column_schema.data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
         );
-        field = with_field_id(field, *column_id);
+        let field = with_field_id(field, *column_id);
         if column_metadata.semantic_type == SemanticType::Tag {
             new_fields.push(tag_maybe_to_dictionary_field(
                 &column_metadata.column_schema.data_type,
