@@ -337,8 +337,7 @@ impl RegionFlushTrigger {
 
         // Sends flush instructions to datanodes.
         if !regions_to_flush.is_empty() {
-            self.send_remote_wal_prune_flush_instructions(&regions_to_flush)
-                .await?;
+            self.send_flush_instructions(&regions_to_flush).await?;
             debug!(
                 "Sent {} flush instructions to datanodes for topic: '{}', regions: {:?}",
                 regions_to_flush.len(),
@@ -354,10 +353,7 @@ impl RegionFlushTrigger {
         Ok(())
     }
 
-    async fn send_remote_wal_prune_flush_instructions(
-        &self,
-        regions_to_flush: &[RegionId],
-    ) -> Result<()> {
+    async fn send_flush_instructions(&self, regions_to_flush: &[RegionId]) -> Result<()> {
         let leader_to_region_ids =
             group_regions_by_leader(&self.table_metadata_manager, regions_to_flush).await?;
         let flush_instructions = leader_to_region_ids
@@ -740,7 +736,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_remote_wal_prune_flush_instructions_payload_includes_reason() {
+    async fn test_send_flush_instructions_payload_includes_remote_wal_prune_reason() {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         let leader_region_registry = Arc::new(LeaderRegionRegistry::new());
@@ -776,10 +772,7 @@ mod tests {
         .await;
 
         let region_id = RegionId::new(0, 0);
-        trigger
-            .send_remote_wal_prune_flush_instructions(&[region_id])
-            .await
-            .unwrap();
+        trigger.send_flush_instructions(&[region_id]).await.unwrap();
 
         let response = rx.recv().await.unwrap().unwrap();
         let msg = response.mailbox_message.unwrap();
