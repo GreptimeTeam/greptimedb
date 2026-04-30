@@ -29,8 +29,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, SKIP_WAL_KEY,
-    SST_FORMAT_KEY,
+    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, SST_FORMAT_KEY,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -1404,6 +1403,7 @@ mod tests {
 
     use super::*;
     use crate::Error;
+    use crate::requests::SKIP_WAL_KEY;
 
     /// Create a test schema with 3 columns: `[col1 int32, ts timestampmills, col2 int32]`.
     fn new_test_schema() -> Schema {
