@@ -130,7 +130,7 @@ impl SeqScan {
     ///
     /// # Panics
     /// Panics if the compaction flag is not set.
-    pub async fn build_flat_reader_for_compaction(&self) -> Result<BoxedRecordBatchStream> {
+    pub(crate) async fn build_flat_reader_for_compaction(&self) -> Result<BoxedRecordBatchStream> {
         assert!(self.stream_ctx.input.compaction);
 
         let metrics_set = ExecutionPlanMetricsSet::new();

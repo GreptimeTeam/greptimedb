@@ -42,6 +42,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::OpType;
+use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use common_time::Timestamp;
 use datafusion_common::arrow::array::UInt8Array;
@@ -1119,6 +1120,25 @@ impl FlatSource {
             FlatSource::Iter(iter) => iter.next().transpose(),
             FlatSource::Stream(stream) => stream.try_next().await,
         }
+    }
+}
+
+pub struct RecordBatchSource {
+    schema: SchemaRef,
+    inner: FlatSource,
+}
+
+impl RecordBatchSource {
+    pub fn new(schema: SchemaRef, inner: FlatSource) -> Self {
+        Self { schema, inner }
+    }
+
+    pub(crate) fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        self.inner.next_batch().await
     }
 }
 

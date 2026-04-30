@@ -17,15 +17,20 @@
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use arrow_schema::extension::ExtensionType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu, NewDfRecordBatchSnafu};
+use common_recordbatch::error::{
+    ArrowComputeSnafu, DataTypesSnafu, ExternalSnafu, NewDfRecordBatchSnafu,
+};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
+use datatypes::extension::json::JsonExtensionType;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
+use datatypes::vectors::json::array::JsonArray;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
@@ -43,6 +48,7 @@ use crate::sst::{
 ///
 /// This mapper support duplicate and unsorted projection indices.
 /// The output schema is determined by the projection indices.
+#[derive(Clone)]
 pub struct FlatProjectionMapper {
     /// Metadata of the region.
     metadata: RegionMetadataRef,
@@ -226,10 +232,8 @@ impl FlatProjectionMapper {
             self.input_arrow_schema.clone()
         } else {
             // For compaction, we need to build a different schema from encoding.
-            to_flat_sst_arrow_schema(
-                &self.metadata,
-                &FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding),
-            )
+            let options = FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding);
+            to_flat_sst_arrow_schema(&self.metadata, &options)
         }
     }
 
@@ -238,6 +242,10 @@ impl FlatProjectionMapper {
     /// less columns than [FlatProjectionMapper::column_ids()].
     pub(crate) fn output_schema(&self) -> SchemaRef {
         self.output_schema.clone()
+    }
+
+    pub(crate) fn with_output_schema(&mut self, output_schema: SchemaRef) {
+        self.output_schema = output_schema;
     }
 
     /// Converts a flat format [RecordBatch] to a normal [RecordBatch].
@@ -284,6 +292,13 @@ impl FlatProjectionMapper {
                         .context(ArrowComputeSnafu)?;
                     array = casted;
                 }
+            }
+
+            let field = self.output_schema.arrow_schema().field(output_idx);
+            if field.extension_type_name() == Some(JsonExtensionType::NAME) {
+                array = JsonArray::from(&array)
+                    .try_align(field.data_type())
+                    .context(DataTypesSnafu)?;
             }
             arrays.push(array);
         }

@@ -355,7 +355,7 @@ pub fn merge_record_batches(schema: SchemaRef, batches: &[RecordBatch]) -> Resul
     Ok(RecordBatch::from_df_record_batch(schema, record_batch))
 }
 
-fn maybe_align_json_array_with_schema(
+pub fn maybe_align_json_array_with_schema(
     schema: &ArrowSchemaRef,
     arrays: Vec<ArrayRef>,
 ) -> Result<Vec<ArrayRef>> {

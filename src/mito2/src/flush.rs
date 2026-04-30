@@ -46,9 +46,9 @@ use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
-use crate::read::FlatSource;
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
+use crate::read::{FlatSource, RecordBatchSource};
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
@@ -550,14 +550,16 @@ impl RegionFlushTask {
         write_opts: &WriteOptions,
         mem_ranges: MemtableRanges,
     ) -> Result<FlushFlatMemResult> {
-        let batch_schema = to_flat_sst_arrow_schema(
-            &version.metadata,
-            &FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding),
-        );
+        let memtable_schema = mem_ranges
+            .schema()
+            .unwrap_or_else(|| version.metadata.schema.arrow_schema().clone());
+
+        let options = FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding);
+        let batch_schema = to_flat_sst_arrow_schema(&version.metadata, &options);
         let field_column_start =
             flat_format::field_column_start(&version.metadata, batch_schema.fields().len());
         let flat_sources = memtable_flat_sources(
-            batch_schema,
+            batch_schema.clone(),
             mem_ranges,
             &version.options,
             field_column_start,
@@ -565,6 +567,7 @@ impl RegionFlushTask {
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
         for (source, max_sequence) in flat_sources.sources {
+            let source = RecordBatchSource::new(memtable_schema.clone(), source);
             let write_request = self.new_write_request(version, max_sequence, source);
             let access_layer = self.access_layer.clone();
             let write_opts = write_opts.clone();
@@ -642,7 +645,7 @@ impl RegionFlushTask {
         &self,
         version: &VersionRef,
         max_sequence: u64,
-        source: FlatSource,
+        source: RecordBatchSource,
     ) -> SstWriteRequest {
         let flat_format = version
             .options

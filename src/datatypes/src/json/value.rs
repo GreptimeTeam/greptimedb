@@ -161,12 +161,18 @@ impl JsonVariant {
                 };
                 JsonNativeType::Array(Box::new(item_type))
             }
-            JsonVariant::Object(object) => JsonNativeType::Object(
-                object
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.native_type()))
-                    .collect(),
-            ),
+            JsonVariant::Object(object) => {
+                if object.is_empty() {
+                    JsonNativeType::Null
+                } else {
+                    JsonNativeType::Object(
+                        object
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.native_type()))
+                            .collect(),
+                    )
+                }
+            }
             JsonVariant::Variant(_) => JsonNativeType::Variant,
         }
     }
@@ -639,12 +645,18 @@ impl JsonVariantRef<'_> {
                     };
                     JsonNativeType::Array(Box::new(item_type))
                 }
-                JsonVariantRef::Object(object) => JsonNativeType::Object(
-                    object
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), native_type(v)))
-                        .collect(),
-                ),
+                JsonVariantRef::Object(object) => {
+                    if object.is_empty() {
+                        JsonNativeType::Null
+                    } else {
+                        JsonNativeType::Object(
+                            object
+                                .iter()
+                                .map(|(k, v)| (k.to_string(), native_type(v)))
+                                .collect(),
+                        )
+                    }
+                }
                 JsonVariantRef::Variant(_) => JsonNativeType::Variant,
             }
         }

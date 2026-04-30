@@ -513,7 +513,7 @@ mod tests {
     use crate::cache::test_util::{assert_parquet_metadata_equal, new_fs_store};
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::error::InvalidBatchSnafu;
-    use crate::read::FlatSource;
+    use crate::read::{FlatSource, RecordBatchSource};
     use crate::region::options::IndexOptions;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::test_util::TestEnv;
@@ -728,9 +728,11 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata());
 
         // Creates a source that can return an error to abort the writer.
+        let record_batch = new_record_batch_by_range(&["a", "d"], 0, 60);
+        let schema = record_batch.schema();
         let source = FlatSource::Iter(Box::new(
             [
-                Ok(new_record_batch_by_range(&["a", "d"], 0, 60)),
+                Ok(record_batch),
                 InvalidBatchSnafu {
                     reason: "Abort the writer",
                 }
@@ -738,6 +740,7 @@ mod tests {
             ]
             .into_iter(),
         ));
+        let source = RecordBatchSource::new(schema, source);
 
         // Write to local cache and upload sst to mock remote store
         let write_request = SstWriteRequest {

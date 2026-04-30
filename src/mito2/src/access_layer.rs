@@ -36,7 +36,7 @@ use crate::error::{
     CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
-use crate::read::FlatSource;
+use crate::read::RecordBatchSource;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::IndexerBuilderImpl;
@@ -525,7 +525,7 @@ pub enum OperationType {
 pub struct SstWriteRequest {
     pub op_type: OperationType,
     pub metadata: RegionMetadataRef,
-    pub source: FlatSource,
+    pub source: RecordBatchSource,
     pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub storage: Option<String>,

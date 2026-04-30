@@ -43,7 +43,6 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::read::FlatSource;
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
@@ -362,8 +361,7 @@ impl SstMerger for DefaultSstMerger {
             time_range: output.output_time_range,
             merge_mode,
         };
-        let reader = builder.build_flat_sst_reader().await?;
-        let source = FlatSource::Stream(reader);
+        let source = builder.build_flat_sst_reader().await?;
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = compaction_region.region_metadata.clone();
         let sst_infos = compaction_region

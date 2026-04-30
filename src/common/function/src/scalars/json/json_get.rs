@@ -439,12 +439,12 @@ fn json_struct_get(array: &ArrayRef, path: &str, with_type: Option<&DataType>) -
 /// use the third argument's type to determine the return type.
 #[derive(Debug, Display)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
-pub(super) struct JsonGetWithType {
+pub struct JsonGetWithType {
     signature: Signature,
 }
 
 impl JsonGetWithType {
-    pub(crate) const NAME: &'static str = "json_get";
+    pub const NAME: &'static str = "json_get";
 }
 
 impl Default for JsonGetWithType {

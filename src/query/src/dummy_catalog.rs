@@ -15,6 +15,7 @@
 //! Dummy catalog for region server.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +31,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::data_type::ConcreteDataType;
 use futures::stream::BoxStream;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
@@ -280,6 +282,10 @@ impl DummyTableProvider {
 
     pub fn get_vector_search_hint(&self) -> Option<VectorSearchRequest> {
         self.scan_request.lock().unwrap().vector_search.clone()
+    }
+
+    pub fn with_json2_type_hint(&self, json2_column_types: &HashMap<String, ConcreteDataType>) {
+        self.scan_request.lock().unwrap().json2_column_types = json2_column_types.clone();
     }
 
     pub fn with_sequence(&self, sequence: u64) {

@@ -59,10 +59,10 @@ use crate::error::{
     RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
-use crate::read::BoxedRecordBatchStream;
 use crate::read::flat_projection::FlatProjectionMapper;
-use crate::read::scan_region::{PredicateGroup, ScanInput};
+use crate::read::scan_region::{PredicateGroup, ScanInput, concretize_json2_types};
 use crate::read::seq_scan::SeqScan;
+use crate::read::{FlatSource, RecordBatchSource};
 use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
@@ -993,12 +993,14 @@ struct CompactionSstReaderBuilder<'a> {
 
 impl CompactionSstReaderBuilder<'_> {
     /// Builds [BoxedRecordBatchStream] that reads all SST files and yields batches in flat format for compaction.
-    async fn build_flat_sst_reader(self) -> Result<BoxedRecordBatchStream> {
+    async fn build_flat_sst_reader(self) -> Result<RecordBatchSource> {
         let scan_input = self.build_scan_input()?.with_compaction(true);
-
-        SeqScan::new(scan_input)
+        let scan_input = concretize_json2_types(scan_input).await?;
+        let schema = scan_input.mapper.output_schema().arrow_schema().clone();
+        let reader = SeqScan::new(scan_input)
             .build_flat_reader_for_compaction()
-            .await
+            .await?;
+        Ok(RecordBatchSource::new(schema, FlatSource::Stream(reader)))
     }
 
     fn build_scan_input(self) -> Result<ScanInput> {

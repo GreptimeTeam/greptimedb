@@ -433,7 +433,7 @@ impl UnorderedPart {
             return Ok(Some(self.parts[0].batch.clone()));
         }
 
-        // Get the schema from the first part
+        // Get the schema from the first part and normalize JSON2 columns across all parts.
         let schema = self.parts[0].batch.schema();
         let concatenated = if schema.has_json_extension_field() {
             let (schema, batches) = align_parts(&self.parts)?;
@@ -1608,6 +1608,11 @@ impl MultiBulkPart {
         self.series_count
     }
 
+    /// Returns the schema of batches in this part.
+    pub(crate) fn record_batch_schema(&self) -> Option<SchemaRef> {
+        self.batches.first().map(|batch| batch.schema())
+    }
+
     /// Returns the number of record batches in this part.
     pub fn num_batches(&self) -> usize {
         self.batches.len()
@@ -2115,6 +2120,7 @@ mod tests {
             &FlatSchemaOptions {
                 raw_pk_columns: false,
                 string_pk_use_dict: true,
+                ..Default::default()
             },
         );
 
@@ -2552,6 +2558,7 @@ mod tests {
             &FlatSchemaOptions {
                 raw_pk_columns: false,
                 string_pk_use_dict: true,
+                ..Default::default()
             },
         );
 

@@ -36,7 +36,7 @@ use store_api::metric_engine_consts::{
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{FileId, RegionId};
 
-use crate::read::{Batch, FlatSource};
+use crate::read::{Batch, FlatSource, RecordBatchSource};
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use crate::test_util::{new_batch_builder, new_noop_file_purger};
@@ -306,8 +306,11 @@ pub fn new_record_batch_with_custom_sequence(
 }
 
 /// Creates a FlatSource from flat format RecordBatches.
-pub fn new_flat_source_from_record_batches(batches: Vec<RecordBatch>) -> FlatSource {
-    FlatSource::Iter(Box::new(batches.into_iter().map(Ok)))
+pub(crate) fn new_flat_source_from_record_batches(batches: Vec<RecordBatch>) -> RecordBatchSource {
+    RecordBatchSource::new(
+        batches[0].schema(),
+        FlatSource::Iter(Box::new(batches.into_iter().map(Ok))),
+    )
 }
 
 /// Creates a new region metadata for testing SSTs with binary datatype.

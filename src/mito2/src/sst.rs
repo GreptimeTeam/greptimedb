@@ -91,6 +91,7 @@ pub struct FlatSchemaOptions {
     /// when storing primary key columns.
     /// Only takes effect when `raw_pk_columns` is true.
     pub string_pk_use_dict: bool,
+    pub override_schema: Option<SchemaRef>,
 }
 
 impl Default for FlatSchemaOptions {
@@ -98,6 +99,7 @@ impl Default for FlatSchemaOptions {
         Self {
             raw_pk_columns: true,
             string_pk_use_dict: true,
+            override_schema: None,
         }
     }
 }
@@ -111,6 +113,7 @@ impl FlatSchemaOptions {
             Self {
                 raw_pk_columns: false,
                 string_pk_use_dict: false,
+                override_schema: None,
             }
         }
     }
