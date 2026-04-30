@@ -71,10 +71,8 @@ struct SparsePrimaryKeyCodecInner {
 
 /// Sparse values representation.
 ///
-/// A list of `(ColumnId, Value)` pairs. Lookups are linear scans, which is
-/// faster than a `HashMap` at the small fan-outs typical of sparse primary
-/// keys. Append-only: callers must not insert a column id that is already
-/// present, otherwise the duplicate will shadow the later value on lookup.
+/// callers must not insert a column id that is already present,
+/// otherwise the duplicate will shadow the later value on lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SparseValues {
     values: Vec<(ColumnId, Value)>,
@@ -148,18 +146,9 @@ const TAGS_START_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SI
 /// a small pre-reserved `Vec` beats a `HashMap` lookup in that regime (no
 /// hash, better cache behavior). Primary keys with more than this many tags
 /// spill the remainder into a `HashMap`.
-///
-/// Benchmarked via `bench_inline_threshold`: at 32 entries the worst-case
-/// linear scan (~6.6 ns) is still on par with a `HashMap` lookup (~7.2 ns).
 const SPARSE_OFFSETS_INLINE_CAP: usize = 32;
 
 /// A lazily populated cache of tag column offsets inside a sparse primary key.
-///
-/// Keeps a cursor into the pk so repeated `has_column` lookups for the same
-/// pk only advance the decoder as far as they must. Storage is a hybrid of a
-/// pre-reserved `Vec` (fast path for small pks) and an overflow `HashMap` for
-/// pks with more than [`SPARSE_OFFSETS_INLINE_CAP`] tags. Reuse across pks by
-/// calling [`SparseOffsetsCache::clear`].
 #[derive(Debug, Clone)]
 pub struct SparseOffsetsCache {
     /// Small-vec fast path, pre-reserved to [`SPARSE_OFFSETS_INLINE_CAP`] so
@@ -393,14 +382,6 @@ impl SparsePrimaryKeyCodec {
 
     /// Returns the offset of the given column id in the given primary key.
     ///
-    /// Decoding is lazy: on each call we only advance the cache's cursor as
-    /// far as needed to answer the query. A column that has already been
-    /// seen returns immediately; a column we haven't reached yet causes the
-    /// parser to resume from `cache.cursor` and stop as soon as the column
-    /// is located. Once the cursor walks off the end (or hits an unknown
-    /// column id) the cache is marked finished, so subsequent misses are
-    /// O(1).
-    ///
     /// The pk must start with the table_id + tsid prefix written by
     /// `encode_internal`.
     pub fn has_column(
@@ -409,6 +390,13 @@ impl SparsePrimaryKeyCodec {
         cache: &mut SparseOffsetsCache,
         column_id: ColumnId,
     ) -> Option<usize> {
+        // Decoding is lazy: on each call we only advance the cache's cursor as
+        // far as needed to answer the query. A column that has already been
+        // seen returns immediately; a column we haven't reached yet causes the
+        // parser to resume from `cache.cursor` and stop as soon as the column
+        // is located. Once the cursor walks off the end (or hits an unknown
+        // column id) the cache is marked finished, so subsequent misses are
+        // O(1).
         // table_id and tsid are at fixed offsets.
         match column_id {
             RESERVED_COLUMN_ID_TABLE_ID => return Some(TABLE_ID_VALUE_OFFSET),
