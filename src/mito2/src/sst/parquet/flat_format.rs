@@ -57,7 +57,7 @@ use crate::sst::parquet::format::{
 };
 use crate::sst::{
     FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
-    to_flat_sst_arrow_schema,
+    to_flat_sst_arrow_schema, with_field_id,
 };
 
 /// Helper for writing the SST format.
@@ -769,12 +769,12 @@ impl FlatConvertFormat {
         // Builds new schema
         let mut new_fields =
             Vec::with_capacity(batch.schema().fields().len() + self.projected_primary_keys.len());
-        for (_, _, column_index) in &self.projected_primary_keys {
+        for (column_id, _, column_index) in &self.projected_primary_keys {
             let column_metadata = &self.metadata.column_metadatas[*column_index];
             let old_field = &self.metadata.schema.arrow_schema().fields()[*column_index];
             let field =
                 tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, old_field);
-            new_fields.push(field);
+            new_fields.push(Arc::new(with_field_id((*field).clone(), *column_id)));
         }
         new_fields.extend(batch.schema().fields().iter().cloned());
 

@@ -59,6 +59,17 @@ pub enum FormatType {
     Flat,
 }
 
+/// Iceberg-compatible column field ID key stored in Parquet column metadata.
+pub const PARQUET_FIELD_ID_KEY: &str = "PARQUET:field_id";
+
+/// Adds `PARQUET:field_id` metadata to an Arrow field.
+pub fn with_field_id(mut field: Field, column_id: u32) -> Field {
+    field
+        .metadata_mut()
+        .insert(PARQUET_FIELD_ID_KEY.to_string(), column_id.to_string());
+    field
+}
+
 /// Gets the arrow schema to store in parquet.
 pub fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
     let fields = Fields::from_iter(
@@ -70,13 +81,19 @@ pub fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
             .zip(&metadata.column_metadatas)
             .filter_map(|(field, column_meta)| {
                 if column_meta.semantic_type == SemanticType::Field {
-                    Some(field.clone())
+                    Some(Arc::new(with_field_id(
+                        (**field).clone(),
+                        column_meta.column_id,
+                    )))
                 } else {
                     // We have fixed positions for tags (primary key) and time index.
                     None
                 }
             })
-            .chain([metadata.time_index_field()])
+            .chain([Arc::new(with_field_id(
+                (*metadata.time_index_field()).clone(),
+                metadata.time_index_column().column_id,
+            ))])
             .chain(internal_fields()),
     );
 
@@ -135,13 +152,14 @@ pub fn to_flat_sst_arrow_schema(
     if options.raw_pk_columns {
         for pk_id in &metadata.primary_key {
             let pk_index = metadata.column_index_by_id(*pk_id).unwrap();
+            let column_id = metadata.column_metadatas[pk_index].column_id;
             if options.string_pk_use_dict {
                 let old_field = &schema.fields[pk_index];
                 let new_field = tag_maybe_to_dictionary_field(
                     &metadata.column_metadatas[pk_index].column_schema.data_type,
                     old_field,
                 );
-                fields.push(new_field);
+                fields.push(Arc::new(with_field_id((*new_field).clone(), column_id)));
             }
         }
     }
@@ -151,12 +169,18 @@ pub fn to_flat_sst_arrow_schema(
         .zip(&metadata.column_metadatas)
         .filter_map(|(field, column_meta)| {
             if column_meta.semantic_type == SemanticType::Field {
-                Some(field.clone())
+                Some(Arc::new(with_field_id(
+                    (**field).clone(),
+                    column_meta.column_id,
+                )))
             } else {
                 None
             }
         })
-        .chain([metadata.time_index_field()])
+        .chain([Arc::new(with_field_id(
+            (*metadata.time_index_field()).clone(),
+            metadata.time_index_column().column_id,
+        ))])
         .chain(internal_fields());
     for field in remaining_fields {
         fields.push(field);
@@ -179,12 +203,21 @@ pub fn flat_sst_arrow_schema_column_num(
 
 /// Helper function to create a dictionary field from a field.
 fn to_dictionary_field(field: &Field) -> Field {
-    Field::new_dictionary(
+    let mut new_field = Field::new_dictionary(
         field.name(),
         datatypes::arrow::datatypes::DataType::UInt32,
         field.data_type().clone(),
         field.is_nullable(),
-    )
+    );
+
+    // retain field_id metadata
+    if let Some(field_id) = field.metadata().get(PARQUET_FIELD_ID_KEY) {
+        new_field
+            .metadata_mut()
+            .insert(PARQUET_FIELD_ID_KEY.to_string(), field_id.clone());
+    }
+
+    new_field
 }
 
 /// Helper function to create a dictionary field from a field if it is a string column.

@@ -45,7 +45,7 @@ use crate::error::{
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray};
-use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
+use crate::sst::{internal_fields, tag_maybe_to_dictionary_field, with_field_id};
 
 /// Returns true if `left` and `right` have same columns and primary key encoding.
 pub(crate) fn has_same_columns_and_pk_encoding(
@@ -143,12 +143,19 @@ impl FlatCompatBatch {
             let column_field = &expect_metadata.schema.arrow_schema().fields()[column_index];
             // For tag columns, we need to create a dictionary field.
             if expect_column.semantic_type == SemanticType::Tag {
-                fields.push(tag_maybe_to_dictionary_field(
+                let field = tag_maybe_to_dictionary_field(
                     &expect_column.column_schema.data_type,
                     column_field,
-                ));
+                );
+                fields.push(Arc::new(with_field_id(
+                    (*field).clone(),
+                    expect_column.column_id,
+                )));
             } else {
-                fields.push(column_field.clone());
+                fields.push(Arc::new(with_field_id(
+                    (**column_field).clone(),
+                    expect_column.column_id,
+                )));
             };
 
             if let Some((index, actual_data_type)) = actual_schema_index.get(column_id) {
