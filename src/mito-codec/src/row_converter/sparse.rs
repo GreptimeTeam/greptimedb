@@ -71,8 +71,8 @@ struct SparsePrimaryKeyCodecInner {
 
 /// Sparse values representation.
 ///
-/// callers must not insert a column id that is already present,
-/// otherwise the duplicate will shadow the later value on lookup.
+/// Callers must not insert a column id that is already present; otherwise
+/// the existing entry will shadow the newly inserted value on lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SparseValues {
     values: Vec<(ColumnId, Value)>,
@@ -384,6 +384,11 @@ impl SparsePrimaryKeyCodec {
     ///
     /// The pk must start with the table_id + tsid prefix written by
     /// `encode_internal`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pk` is not a well-formed sparse primary key produced by
+    /// this codec (e.g. truncated or otherwise malformed bytes).
     pub fn has_column(
         &self,
         pk: &[u8],
