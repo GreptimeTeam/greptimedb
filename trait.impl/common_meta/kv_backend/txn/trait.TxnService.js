@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["catalog",[["impl TxnService for <a class=\"struct\" href=\"catalog/kvbackend/struct.CachedKvBackend.html\" title=\"struct catalog::kvbackend::CachedKvBackend\">CachedKvBackend</a>",0],["impl TxnService for <a class=\"struct\" href=\"catalog/kvbackend/struct.MetaKvBackend.html\" title=\"struct catalog::kvbackend::MetaKvBackend\">MetaKvBackend</a>",0]]],["common_meta",[]],["log_store",[["impl TxnService for <a class=\"struct\" href=\"log_store/raft_engine/struct.RaftEngineBackend.html\" title=\"struct log_store::raft_engine::RaftEngineBackend\">RaftEngineBackend</a>",0]]],["meta_client",[["impl TxnService for <a class=\"struct\" href=\"meta_client/client/cluster/struct.Client.html\" title=\"struct meta_client::client::cluster::Client\">Client</a>",0],["impl TxnService for <a class=\"struct\" href=\"meta_client/client/struct.ClusterKvBackend.html\" title=\"struct meta_client::client::ClusterKvBackend\">ClusterKvBackend</a>",0]]],["meta_srv",[["impl TxnService for <a class=\"struct\" href=\"meta_srv/cluster/struct.MetaPeerClient.html\" title=\"struct meta_srv::cluster::MetaPeerClient\">MetaPeerClient</a>",0],["impl TxnService for <a class=\"struct\" href=\"meta_srv/service/store/cached_kv/struct.LeaderCachedKvBackend.html\" title=\"struct meta_srv::service::store::cached_kv::LeaderCachedKvBackend\">LeaderCachedKvBackend</a>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[355,19,204,363,408]}

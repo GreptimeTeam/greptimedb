@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fill_missing_cols"],"struct":["MissingColFiller","ParquetErrorAdapter"],"type":["ProjectedRecordBatchStream"]};

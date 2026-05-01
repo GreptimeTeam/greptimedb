@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DDL_DIR","SCHEMAS_FILE","SCHEMA_DIR"],"struct":["SchemaDefinition","SchemaSnapshot"]};

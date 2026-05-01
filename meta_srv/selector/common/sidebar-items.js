@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["choose_items","filter_out_excluded_peers"]};

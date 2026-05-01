@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["canonicalize_schema_filter","chunk_has_schema_files","collect_chunk_data_prefixes","ddl_statement_for_schema","format_data_import_plan","is_schema_scoped_statement","parse_ddl_statements","starts_with_keyword","validate_chunk_schema_files","validate_chunk_statuses","validate_data_snapshot"],"struct":["Import","ImportV2Command"]};

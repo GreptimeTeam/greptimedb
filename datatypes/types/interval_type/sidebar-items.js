@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IntervalType"],"macro":["impl_data_type_for_interval"],"struct":["IntervalDayTimeType","IntervalMonthDayNanoType","IntervalYearMonthType"]};

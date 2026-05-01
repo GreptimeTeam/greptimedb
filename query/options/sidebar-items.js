@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FLOW_INCREMENTAL_AFTER_SEQS","FLOW_INCREMENTAL_MODE","FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY","FLOW_RETURN_REGION_SEQ","FLOW_SINK_TABLE_ID"],"enum":["FlowIncrementalMode"],"fn":["invalid_query_context_extension","parse_bool","parse_incremental_after_seqs"],"struct":["FlowQueryExtensions","QueryOptions"]};

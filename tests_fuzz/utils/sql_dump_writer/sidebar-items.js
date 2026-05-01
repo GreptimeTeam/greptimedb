@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["format_comment","format_sql_entry","normalize_sql","sanitize_file_name"],"struct":["SqlDumpSession"]};

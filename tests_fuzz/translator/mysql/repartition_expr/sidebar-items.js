@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["format_partition_expr_sql","format_wait_clause"],"struct":["RepartitionExprTranslator"]};

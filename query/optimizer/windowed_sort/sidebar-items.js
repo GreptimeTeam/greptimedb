@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fetch_partition_range","is_supported_time_index_wrapper","is_time_index_column","is_time_index_expr","passthrough_child","remove_repartition","schema_preserving_child"],"struct":["ScannerInfo","WindowedSortPhysicalRule"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GREPTIME_PARTITION_ID","INIT_CAPACITY","PARTITION_EXPRESSION","PARTITION_NAME","TABLE_CATALOG","TABLE_NAME","TABLE_SCHEMA"],"struct":["InformationSchemaPartitions","InformationSchemaPartitionsBuilder"]};

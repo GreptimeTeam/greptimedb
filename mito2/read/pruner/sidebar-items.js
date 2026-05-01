@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PREFETCH_COUNT"],"struct":["FileBuilderEntry","PartitionPruner","PruneRequest","Pruner","PrunerInner"]};
