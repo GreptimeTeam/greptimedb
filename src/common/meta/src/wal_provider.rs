@@ -74,11 +74,8 @@ impl WalProvider {
     }
 
     /// Allocates a batch of wal options where each wal options goes to a region.
-    /// If skip_wal is true, the wal options will be set to Noop regardless of the provider type.
-    pub fn alloc_batch(&self, num_regions: usize, skip_wal: bool) -> Result<Vec<WalOptions>> {
-        if skip_wal {
-            return Ok(vec![WalOptions::Noop; num_regions]);
-        }
+    /// skip_wal does not affect provider allocation.
+    pub fn alloc_batch(&self, num_regions: usize, _skip_wal: bool) -> Result<Vec<WalOptions>> {
         match self {
             WalProvider::RaftEngine => Ok(vec![WalOptions::RaftEngine; num_regions]),
             WalProvider::Kafka(topic_manager) => {
@@ -269,7 +266,7 @@ mod tests {
         let got = provider.allocate(&regions, true).await.unwrap();
         assert_eq!(got.len(), num_regions as usize);
         for wal_options in got.values() {
-            assert_eq!(wal_options, &"{\"wal.provider\":\"noop\"}");
+            assert_eq!(wal_options, &"{\"wal.provider\":\"raft_engine\"}");
         }
     }
 }

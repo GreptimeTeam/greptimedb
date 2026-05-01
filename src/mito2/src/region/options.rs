@@ -89,6 +89,8 @@ pub struct RegionOptions {
     pub merge_mode: Option<MergeMode>,
     /// SST format type.
     pub sst_format: Option<FormatType>,
+    // Skip WAL options
+    pub skip_wal: bool,
 }
 
 impl RegionOptions {
@@ -122,6 +124,11 @@ impl RegionOptions {
             .map_or(PrimaryKeyEncoding::default(), |memtable| {
                 memtable.primary_key_encoding()
             })
+    }
+
+    /// Returns true if the WAL should be skipped for this region.
+    pub fn wal_skipped(&self) -> bool {
+        matches!(self.wal_options, WalOptions::Noop) || self.skip_wal
     }
 }
 
@@ -170,6 +177,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             memtable,
             merge_mode: options.merge_mode,
             sst_format: options.sst_format,
+            skip_wal: options.skip_wal,
         };
         opts.validate()?;
 
@@ -277,6 +285,8 @@ struct RegionOptionsWithoutEnum {
     merge_mode: Option<MergeMode>,
     #[serde_as(as = "NoneAsEmptyString")]
     sst_format: Option<FormatType>,
+    #[serde_as(as = "DisplayFromStr")]
+    skip_wal: bool,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -288,6 +298,7 @@ impl Default for RegionOptionsWithoutEnum {
             append_mode: options.append_mode,
             merge_mode: options.merge_mode,
             sst_format: options.sst_format,
+            skip_wal: options.skip_wal,
         }
     }
 }
@@ -648,6 +659,7 @@ mod tests {
             ("memtable.partition_tree.data_freeze_threshold", "2048"),
             ("memtable.partition_tree.fork_dictionary_bytes", "128M"),
             ("merge_mode", "last_non_null"),
+            ("skip_wal", "true"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
@@ -677,6 +689,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            skip_wal: true,
         };
         assert_eq!(expect, options);
     }
@@ -712,6 +725,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            skip_wal: false,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
@@ -777,6 +791,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            skip_wal: false,
         };
         assert_eq!(options, got);
     }

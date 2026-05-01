@@ -214,6 +214,10 @@ ALTER TABLE ato SET 'compaction.twcs.trigger_file_num'='';
 
 Affected Rows: 0
 
+ALTER TABLE ato SET 'skip_wal'='true';
+
+Affected Rows: 0
+
 SHOW CREATE TABLE ato;
 
 +-------+-----------------------------------------------------+
@@ -231,6 +235,32 @@ SHOW CREATE TABLE ato;
 |       |   'compaction.twcs.max_output_file_size' = '500MB', |
 |       |   'compaction.type' = 'twcs',                       |
 |       |   ttl = '1s'                                        |
+|       |   skip_wal = 'true'                                 |
+|       | )                                                   |
++-------+-----------------------------------------------------+
+
+ALTER TABLE ato SET 'skip_wal'='false';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE ato;
+
++-------+-----------------------------------------------------+
+| Table | Create Table                                        |
++-------+-----------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                  |
+|       |   "i" INT NULL,                                     |
+|       |   "j" TIMESTAMP(3) NOT NULL,                        |
+|       |   TIME INDEX ("j"),                                 |
+|       |   PRIMARY KEY ("i")                                 |
+|       | )                                                   |
+|       |                                                     |
+|       | ENGINE=mito                                         |
+|       | WITH(                                               |
+|       |   'compaction.twcs.max_output_file_size' = '500MB', |
+|       |   'compaction.type' = 'twcs',                       |
+|       |   ttl = '1s'                                        |
+|       |   skip_wal = 'false'                                |
 |       | )                                                   |
 +-------+-----------------------------------------------------+
 
@@ -252,6 +282,7 @@ SHOW CREATE TABLE ato;
 |       |   'compaction.twcs.max_output_file_size' = '500MB', |
 |       |   'compaction.type' = 'twcs',                       |
 |       |   ttl = '1s'                                        |
+|       |   skip_wal = 'false'                                |
 |       | )                                                   |
 +-------+-----------------------------------------------------+
 
@@ -309,4 +340,3 @@ SHOW CREATE TABLE phy;
 DROP TABLE phy;
 
 Affected Rows: 0
-
