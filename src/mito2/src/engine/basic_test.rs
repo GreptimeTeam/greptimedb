@@ -932,9 +932,7 @@ async fn test_list_ssts_with_format(
         engine
             .handle_request(
                 *region_id,
-                RegionRequest::Flush(RegionFlushRequest {
-                    row_group_size: None,
-                }),
+                RegionRequest::Flush(RegionFlushRequest::default()),
             )
             .await
             .unwrap();
@@ -1124,9 +1122,7 @@ async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expe
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();

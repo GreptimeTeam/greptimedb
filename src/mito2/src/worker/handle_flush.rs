@@ -19,7 +19,7 @@ use std::sync::atomic::Ordering;
 
 use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
-use store_api::region_request::RegionFlushRequest;
+use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
 use crate::config::{IndexBuildMode, MitoConfig};
@@ -29,6 +29,22 @@ use crate::region::MitoRegionRef;
 use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
+
+fn resolve_flush_reason(
+    explicit_reason: Option<FlushReason>,
+    request_reason: Option<RegionFlushReason>,
+    is_downgrading: bool,
+) -> FlushReason {
+    explicit_reason
+        .or_else(|| request_reason.map(FlushReason::from))
+        .unwrap_or({
+            if is_downgrading {
+                FlushReason::Downgrading
+            } else {
+                FlushReason::Manual
+            }
+        })
+}
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job failed.
@@ -176,13 +192,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.
         self.update_topic_latest_entry_id(&region);
 
-        let reason = reason.unwrap_or_else(|| {
-            if region.is_downgrading() {
-                FlushReason::Downgrading
-            } else {
-                FlushReason::Manual
-            }
-        });
+        let reason = resolve_flush_reason(reason, request.reason, region.is_downgrading());
         let mut task =
             self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
         task.push_sender(sender);
@@ -347,5 +357,45 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_flush_reason_prefers_explicit_reason() {
+        let reason = resolve_flush_reason(
+            Some(FlushReason::Closing),
+            Some(RegionFlushReason::RemoteWalPrune),
+            true,
+        );
+        assert_eq!(reason, FlushReason::Closing);
+    }
+
+    #[test]
+    fn test_resolve_flush_reason_uses_request_reason() {
+        assert_eq!(
+            resolve_flush_reason(None, Some(RegionFlushReason::RegionMigration), true),
+            FlushReason::RegionMigration
+        );
+        assert_eq!(
+            resolve_flush_reason(None, Some(RegionFlushReason::Repartition), false),
+            FlushReason::Repartition
+        );
+        assert_eq!(
+            resolve_flush_reason(None, Some(RegionFlushReason::RemoteWalPrune), false),
+            FlushReason::RemoteWalPrune
+        );
+    }
+
+    #[test]
+    fn test_resolve_flush_reason_fallback_unchanged() {
+        assert_eq!(
+            resolve_flush_reason(None, None, true),
+            FlushReason::Downgrading
+        );
+        assert_eq!(resolve_flush_reason(None, None, false), FlushReason::Manual);
     }
 }

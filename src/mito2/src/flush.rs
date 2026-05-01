@@ -26,6 +26,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
+use store_api::region_request::RegionFlushReason;
 use store_api::storage::{RegionId, SequenceNumber};
 use strum::IntoStaticStr;
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -221,12 +222,28 @@ pub enum FlushReason {
     EnterStaging,
     /// Flush when region is closing.
     Closing,
+    /// Flush triggered before region migration.
+    RegionMigration,
+    /// Flush triggered by repartition procedure.
+    Repartition,
+    /// Flush triggered by remote WAL pruning.
+    RemoteWalPrune,
 }
 
 impl FlushReason {
     /// Get flush reason as static str.
     fn as_str(&self) -> &'static str {
         self.into()
+    }
+}
+
+impl From<RegionFlushReason> for FlushReason {
+    fn from(reason: RegionFlushReason) -> Self {
+        match reason {
+            RegionFlushReason::RegionMigration => FlushReason::RegionMigration,
+            RegionFlushReason::Repartition => FlushReason::Repartition,
+            RegionFlushReason::RemoteWalPrune => FlushReason::RemoteWalPrune,
+        }
     }
 }
 

@@ -27,6 +27,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::SyncRegionFromRequest;
+use store_api::region_request::RegionFlushReason;
 use store_api::storage::RegionId;
 
 use crate::error::{self, Error, Result};
@@ -85,6 +86,7 @@ impl SyncRegion {
             &prepare_result.central_region_datanode,
             operation_timeout,
             ErrorStrategy::Retry,
+            Some(RegionFlushReason::Repartition),
         )
         .await
     }
