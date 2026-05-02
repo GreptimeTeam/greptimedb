@@ -1154,7 +1154,10 @@ impl TableMetadataManager {
         table_route_value: &TableRouteValue,
     ) -> Result<HashMap<RegionNumber, WalOptions>> {
         let mut region_wal_options = HashMap::new();
-        let datanode_table_keys = region_distribution(table_route_value.region_routes()?)
+        let Some(region_routes) = table_route_value.region_routes().ok() else {
+            return Ok(region_wal_options);
+        };
+        let datanode_table_keys = region_distribution(region_routes)
             .into_keys()
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
             .collect::<Vec<_>>();
