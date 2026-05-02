@@ -230,11 +230,50 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
                 merge_scan.sub_stage_metrics(),
             );
         }
-
         stack.extend(plan.children().into_iter().cloned());
     }
 
     finalize_region_watermarks(merged)
+}
+
+fn merge_region_watermark_entries(
+    merged: &mut BTreeMap<u64, MergeState>,
+    entries: impl IntoIterator<Item = RegionWatermarkEntry>,
+) {
+    for entry in entries {
+        merged
+            .entry(entry.region_id)
+            .and_modify(|existing| match entry.watermark {
+                None => match existing {
+                    MergeState::Participated | MergeState::Proved(_) => {
+                        *existing = MergeState::Unproved;
+                    }
+                    MergeState::Unproved | MergeState::Conflict { .. } => {}
+                },
+                Some(seq) => match existing {
+                    MergeState::Participated => {
+                        *existing = MergeState::Proved(seq);
+                    }
+                    MergeState::Unproved => {}
+                    MergeState::Proved(existing_seq) if *existing_seq == seq => {}
+                    MergeState::Proved(existing_seq) => {
+                        let old_seq = *existing_seq;
+                        *existing = MergeState::Conflict {
+                            watermarks: vec![old_seq, seq],
+                        };
+                    }
+                    MergeState::Conflict { watermarks } => {
+                        if !watermarks.contains(&seq) {
+                            watermarks.push(seq);
+                        }
+                    }
+                },
+            })
+            .or_insert(match entry.watermark {
+                Some(seq) => MergeState::Proved(seq),
+                None => MergeState::Unproved,
+            });
+    }
 }
 
 fn merge_merge_scan_region_watermarks(
@@ -247,40 +286,7 @@ fn merge_merge_scan_region_watermarks(
     }
 
     for metrics in sub_stage_metrics {
-        for entry in metrics.region_watermarks {
-            merged
-                .entry(entry.region_id)
-                .and_modify(|existing| match entry.watermark {
-                    None => match existing {
-                        MergeState::Participated | MergeState::Proved(_) => {
-                            *existing = MergeState::Unproved;
-                        }
-                        MergeState::Unproved | MergeState::Conflict { .. } => {}
-                    },
-                    Some(seq) => match existing {
-                        MergeState::Participated => {
-                            *existing = MergeState::Proved(seq);
-                        }
-                        MergeState::Unproved => {}
-                        MergeState::Proved(existing_seq) if *existing_seq == seq => {}
-                        MergeState::Proved(existing_seq) => {
-                            let old_seq = *existing_seq;
-                            *existing = MergeState::Conflict {
-                                watermarks: vec![old_seq, seq],
-                            };
-                        }
-                        MergeState::Conflict { watermarks } => {
-                            if !watermarks.contains(&seq) {
-                                watermarks.push(seq);
-                            }
-                        }
-                    },
-                })
-                .or_insert(match entry.watermark {
-                    Some(seq) => MergeState::Proved(seq),
-                    None => MergeState::Unproved,
-                });
-        }
+        merge_region_watermark_entries(merged, metrics.region_watermarks);
     }
 }
 
