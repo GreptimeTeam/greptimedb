@@ -188,7 +188,7 @@ impl Procedure for UndropTableProcedure {
     }
 }
 
-async fn open_regions(
+pub(crate) async fn open_regions(
     context: &DdlContext,
     table_id: TableId,
     table_name: &TableName,
