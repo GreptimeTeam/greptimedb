@@ -1468,11 +1468,12 @@ mod tests {
         assert_eq!(normal_batches.len(), override_batches.len());
         for (normal, override_batch) in normal_batches.into_iter().zip(override_batches.iter()) {
             let expected_batch = {
-                let mut columns = normal.columns().to_vec();
+                let num_rows = normal.num_rows();
+                let (schema, mut columns, _) = normal.into_parts();
                 let num_cols = columns.len();
                 columns[num_cols - 2] =
-                    Arc::new(UInt64Array::from_value(custom_sequence, normal.num_rows()));
-                RecordBatch::try_new(normal.schema(), columns).unwrap()
+                    Arc::new(UInt64Array::from_value(custom_sequence, num_rows));
+                RecordBatch::try_new(schema, columns).unwrap()
             };
 
             // Override batch should match expected batch

@@ -445,10 +445,11 @@ impl FlatRewritePrimaryKey {
         let new_pk_dict_array =
             PrimaryKeyArray::new(old_pk_dict_array.keys().clone(), new_pk_values_array);
 
-        let mut columns = batch.columns().to_vec();
-        columns[primary_key_column_index(batch.num_columns())] = Arc::new(new_pk_dict_array);
+        let (schema, mut columns, _) = batch.into_parts();
+        let primary_key_idx = primary_key_column_index(columns.len());
+        columns[primary_key_idx] = Arc::new(new_pk_dict_array);
 
-        RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
+        RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)
     }
 }
 
@@ -579,10 +580,11 @@ impl FlatCompatPrimaryKey {
             PrimaryKeyArray::new(old_pk_dict_array.keys().clone(), new_pk_values_array);
 
         // Overrides the primary key column.
-        let mut columns = batch.columns().to_vec();
-        columns[primary_key_column_index(batch.num_columns())] = Arc::new(new_pk_dict_array);
+        let (schema, mut columns, _) = batch.into_parts();
+        let primary_key_idx = primary_key_column_index(columns.len());
+        columns[primary_key_idx] = Arc::new(new_pk_dict_array);
 
-        RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
+        RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)
     }
 }
 
