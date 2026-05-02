@@ -351,7 +351,7 @@ impl ParquetReaderBuilder {
             .as_ref()
             .and_then(|meta| meta.partition_expr.as_ref())
             .map(|expr| expr.as_str());
-        let (_, is_same_region_partition) = Self::is_same_region_partition(
+        let (region_partition_expr, is_same_region_partition) = Self::is_same_region_partition(
             region_partition_expr_str,
             self.file_handle.meta_ref().partition_expr.as_ref(),
         )?;
@@ -483,7 +483,12 @@ impl ParquetReaderBuilder {
             prefilter_builder: filter_plan.prefilter_builder,
         };
 
-        let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
+        let partition_filter = self.build_partition_filter(
+            &read_format,
+            &prune_schema,
+            region_partition_expr.as_ref(),
+            is_same_region_partition,
+        )?;
 
         let context = FileRangeContext::new(
             reader_builder,
@@ -525,18 +530,9 @@ impl ParquetReaderBuilder {
         &self,
         read_format: &FlatReadFormat,
         prune_schema: &Arc<datatypes::schema::Schema>,
+        region_partition_expr: Option<&PartitionExpr>,
+        is_same_region_partition: bool,
     ) -> Result<Option<PartitionFilterContext>> {
-        let region_partition_expr_str = self
-            .expected_metadata
-            .as_ref()
-            .and_then(|meta| meta.partition_expr.as_ref());
-        let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
-
-        let (region_partition_expr, is_same_region_partition) = Self::is_same_region_partition(
-            region_partition_expr_str.map(|s| s.as_str()),
-            file_partition_expr_ref,
-        )?;
-
         if is_same_region_partition {
             return Ok(None);
         }
