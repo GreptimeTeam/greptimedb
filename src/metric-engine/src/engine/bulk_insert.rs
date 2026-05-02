@@ -190,13 +190,13 @@ impl MetricEngineInner {
 
             for (index, field) in batch.schema().fields().iter().enumerate() {
                 let name = field.name();
-                let column_id =
-                    *physical_columns
-                        .get(name)
-                        .with_context(|| error::ColumnNotFoundSnafu {
-                            name: name.clone(),
-                            region_id: logical_region_id,
-                        })?;
+                let column_id = physical_columns
+                    .get(name)
+                    .map(|info| info.column_id)
+                    .with_context(|| error::ColumnNotFoundSnafu {
+                        name: name.clone(),
+                        region_id: logical_region_id,
+                    })?;
                 if tag_names.contains(name.as_str()) {
                     tag_columns.push(TagColumnInfo {
                         name: name.clone(),

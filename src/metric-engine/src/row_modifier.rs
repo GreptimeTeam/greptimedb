@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
@@ -264,7 +265,10 @@ struct IterIndex {
 }
 
 impl IterIndex {
-    fn new(row_schema: &[ColumnSchema], name_to_column_id: &HashMap<String, ColumnId>) -> Self {
+    fn new<K>(row_schema: &[ColumnSchema], name_to_column_id: &HashMap<K, ColumnId>) -> Self
+    where
+        K: Eq + Hash + Borrow<str>,
+    {
         let mut reserved_indices = SmallVec::<[ValueIndex; 2]>::new();
         // Uses BTreeMap to keep the primary key column name order (lexicographical)
         let mut primary_key_indices = BTreeMap::new();
@@ -290,7 +294,9 @@ impl IterIndex {
                         primary_key_indices.insert(
                             col.column_name.as_str(),
                             ValueIndex {
-                                column_id: *name_to_column_id.get(&col.column_name).unwrap(),
+                                column_id: *name_to_column_id
+                                    .get(col.column_name.as_str())
+                                    .unwrap(),
                                 index: idx,
                             },
                         );
@@ -298,13 +304,13 @@ impl IterIndex {
                 },
                 SemanticType::Field => {
                     field_indices.push(ValueIndex {
-                        column_id: *name_to_column_id.get(&col.column_name).unwrap(),
+                        column_id: *name_to_column_id.get(col.column_name.as_str()).unwrap(),
                         index: idx,
                     });
                 }
                 SemanticType::Timestamp => {
                     ts_index = Some(ValueIndex {
-                        column_id: *name_to_column_id.get(&col.column_name).unwrap(),
+                        column_id: *name_to_column_id.get(col.column_name.as_str()).unwrap(),
                         index: idx,
                     });
                 }
@@ -338,7 +344,10 @@ pub struct RowsIter {
 }
 
 impl RowsIter {
-    pub fn new(rows: Rows, name_to_column_id: &HashMap<String, ColumnId>) -> Self {
+    pub fn new<K>(rows: Rows, name_to_column_id: &HashMap<K, ColumnId>) -> Self
+    where
+        K: Eq + Hash + Borrow<str>,
+    {
         let index: IterIndex = IterIndex::new(&rows.schema, name_to_column_id);
         Self { rows, index }
     }

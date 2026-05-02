@@ -145,7 +145,7 @@ impl MetricEngineInner {
         let physical_columns = create_data_region_request
             .column_metadatas
             .iter()
-            .map(|metadata| (metadata.column_schema.name.clone(), metadata.column_id))
+            .map(|metadata| (metadata.column_schema.name.clone(), metadata.into()))
             .collect::<HashMap<_, _>>();
         let time_index_unit = create_data_region_request
             .column_metadatas
@@ -321,7 +321,7 @@ impl MetricEngineInner {
         let new_add_columns = new_column_names.iter().map(|name| {
             // Safety: previous steps ensure the physical region exist
             let column_metadata = *physical_schema_map.get(name).unwrap();
-            (name.to_string(), column_metadata.column_id)
+            (name.to_string(), column_metadata.into())
         });
 
         extension_return_value.insert(

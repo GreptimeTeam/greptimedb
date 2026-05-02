@@ -18,14 +18,15 @@ use api::v1::SemanticType;
 use snafu::ensure;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::RegionCreateRequest;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::RegionId;
 
+use crate::engine::state::PhysicalColumnInfo;
 use crate::error::{AddingFieldColumnSnafu, Result};
 
 /// Extract new columns from the create requests.
 pub fn extract_new_columns<'a>(
     requests: &'a [(RegionId, RegionCreateRequest)],
-    physical_columns: &HashMap<String, ColumnId>,
+    physical_columns: &HashMap<String, PhysicalColumnInfo>,
     new_column_names: &mut HashSet<&'a str>,
     new_columns: &mut Vec<ColumnMetadata>,
 ) -> Result<()> {
@@ -123,7 +124,14 @@ mod tests {
         ];
 
         let mut physical_columns = HashMap::new();
-        physical_columns.insert("existing_column".to_string(), 0);
+        physical_columns.insert(
+            "existing_column".to_string(),
+            PhysicalColumnInfo {
+                column_id: 0,
+                data_type: ConcreteDataType::string_datatype(),
+                semantic_type: SemanticType::Tag,
+            },
+        );
         let mut new_column_names = HashSet::new();
         let mut new_columns = Vec::new();
 

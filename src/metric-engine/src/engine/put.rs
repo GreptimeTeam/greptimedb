@@ -24,7 +24,7 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_request::{
     AffectedRows, RegionDeleteRequest, RegionPutRequest, RegionRequest,
 };
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::{ColumnId, RegionId, TableId};
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
@@ -248,20 +248,27 @@ impl MetricEngineInner {
         // Batch-modify all rows (add __table_id and __tsid columns)
         let final_rows = {
             let state = self.state.read().unwrap();
-            let name_to_id = state
+            let physical_columns = state
                 .physical_region_states()
                 .get(&data_region_id)
                 .with_context(|| PhysicalRegionNotFoundSnafu {
                     region_id: data_region_id,
                 })?
                 .physical_columns();
+            // Borrow the physical column names rather than cloning them: the
+            // state guard is held for the whole block and the map doesn't
+            // outlive this scope.
+            let name_to_id: HashMap<&str, ColumnId> = physical_columns
+                .iter()
+                .map(|(name, info)| (name.as_str(), info.column_id))
+                .collect();
 
             let iter = RowsIter::new(
                 Rows {
                     schema: merged_schema,
                     rows: merged_rows,
                 },
-                name_to_id,
+                &name_to_id,
             );
 
             self.row_modifier.modify_rows(
@@ -484,7 +491,10 @@ impl MetricEngineInner {
     ///
     /// Includes:
     /// - Check if the logical region exists
-    /// - Check if the columns exist
+    /// - Check if every column in the request exists in the physical region
+    /// - Check each column's datatype and semantic type match the physical region's schema
+    /// - Check that all required physical columns (time index and tag columns) are present;
+    ///   field columns are optional.
     async fn verify_rows(
         &self,
         logical_region_id: RegionId,
@@ -502,20 +512,75 @@ impl MetricEngineInner {
             .fail();
         }
 
-        // Check if a physical column exists
-        let physical_columns = state
+        // Type + semantic check on every column in the request schema.
+        let physical_state = state
             .physical_region_states()
             .get(&data_region_id)
             .context(PhysicalRegionNotFoundSnafu {
                 region_id: data_region_id,
-            })?
-            .physical_columns();
+            })?;
+        let physical_columns = physical_state.physical_columns();
         for col in &rows.schema {
-            ensure!(
-                physical_columns.contains_key(&col.column_name),
-                ColumnNotFoundSnafu {
-                    name: col.column_name.clone(),
+            let info = physical_columns
+                .get(&col.column_name)
+                .context(ColumnNotFoundSnafu {
+                    name: &col.column_name,
                     region_id: logical_region_id,
+                })?;
+
+            ensure!(
+                api::helper::is_column_type_value_eq(
+                    col.datatype,
+                    col.datatype_extension.clone(),
+                    &info.data_type
+                ),
+                InvalidRequestSnafu {
+                    region_id: logical_region_id,
+                    reason: format!(
+                        "column {} expect type {:?}, given: {}({})",
+                        col.column_name,
+                        info.data_type,
+                        api::v1::ColumnDataType::try_from(col.datatype)
+                            .map(|v| v.as_str_name())
+                            .unwrap_or("Unknown"),
+                        col.datatype,
+                    ),
+                }
+            );
+
+            ensure!(
+                api::helper::is_semantic_type_eq(col.semantic_type, info.semantic_type),
+                InvalidRequestSnafu {
+                    region_id: logical_region_id,
+                    reason: format!(
+                        "column {} expect semantic type {:?}, given: {}({})",
+                        col.column_name,
+                        info.semantic_type,
+                        api::v1::SemanticType::try_from(col.semantic_type)
+                            .map(|v| v.as_str_name())
+                            .unwrap_or("Unknown"),
+                        col.semantic_type,
+                    ),
+                }
+            );
+        }
+
+        // Completeness check: the physical region's time index column MUST be
+        // present in the request. Without it, mito would previously panic at
+        // `ValueBuilder::push` when building the timestamp column
+        // (see issue #7990). Tag columns are per-logical-region (the physical
+        // region aggregates tags from many logical regions), so we can't
+        // require a specific tag without per-logical-region metadata here;
+        // missing tags are handled by mito's default-fill. Field columns are
+        // always optional.
+        let ts_name = physical_state.time_index_column_name();
+        if !ts_name.is_empty() {
+            let present = rows.schema.iter().any(|col| col.column_name == ts_name);
+            ensure!(
+                present,
+                InvalidRequestSnafu {
+                    region_id: logical_region_id,
+                    reason: format!("missing required time index column {ts_name}"),
                 }
             );
         }
@@ -536,14 +601,20 @@ impl MetricEngineInner {
         let input = std::mem::take(rows);
         let iter = {
             let state = self.state.read().unwrap();
-            let name_to_id = state
+            let physical_columns = state
                 .physical_region_states()
                 .get(&physical_region_id)
                 .with_context(|| PhysicalRegionNotFoundSnafu {
                     region_id: physical_region_id,
                 })?
                 .physical_columns();
-            RowsIter::new(input, name_to_id)
+            // Borrow the physical column names rather than cloning them; the
+            // map is scoped to this block and the state guard holds.
+            let name_to_id: HashMap<&str, ColumnId> = physical_columns
+                .iter()
+                .map(|(name, info)| (name.as_str(), info.column_id))
+                .collect();
+            RowsIter::new(input, &name_to_id)
         };
         let output =
             self.row_modifier
@@ -1257,5 +1328,196 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.affected_rows, 3);
+    }
+
+    /// Regression test for issue #7990: the metric engine must reject a row
+    /// whose timestamp column carries a non-timestamp datatype, rather than
+    /// letting it panic inside mito's `ValueBuilder::push`.
+    #[tokio::test]
+    async fn test_verify_rows_rejects_wrong_type() {
+        use api::v1::value::ValueData;
+        use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, SemanticType};
+        use common_query::prelude::{greptime_timestamp, greptime_value};
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+
+        // Timestamp column is declared as String — the very payload that
+        // caused #7990. It should surface a typed error rather than panic.
+        let schema = vec![
+            PbColumnSchema {
+                column_name: greptime_timestamp().to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Timestamp as _,
+                datatype_extension: None,
+                options: None,
+            },
+            PbColumnSchema {
+                column_name: greptime_value().to_string(),
+                datatype: ColumnDataType::Float64 as i32,
+                semantic_type: SemanticType::Field as _,
+                datatype_extension: None,
+                options: None,
+            },
+            PbColumnSchema {
+                column_name: "job".to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as _,
+                datatype_extension: None,
+                options: None,
+            },
+        ];
+        let rows = vec![Row {
+            values: vec![
+                Value {
+                    value_data: Some(ValueData::StringValue("not-a-timestamp".to_string())),
+                },
+                Value {
+                    value_data: Some(ValueData::F64Value(1.0)),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue("tag_0".to_string())),
+                },
+            ],
+        }];
+
+        let err = env
+            .metric()
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows { schema, rows },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    /// The completeness check must reject requests that omit the time index
+    /// column, since mito cannot default-fill a `TimeIndex` column and would
+    /// previously panic on the empty builder.
+    #[tokio::test]
+    async fn test_verify_rows_rejects_missing_time_index() {
+        use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, SemanticType};
+        use common_query::prelude::greptime_value;
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+
+        // Payload only carries the field and a tag — no timestamp column.
+        let schema = vec![
+            PbColumnSchema {
+                column_name: greptime_value().to_string(),
+                datatype: ColumnDataType::Float64 as i32,
+                semantic_type: SemanticType::Field as _,
+                datatype_extension: None,
+                options: None,
+            },
+            PbColumnSchema {
+                column_name: "job".to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as _,
+                datatype_extension: None,
+                options: None,
+            },
+        ];
+        let rows = vec![Row {
+            values: vec![
+                Value {
+                    value_data: Some(api::v1::value::ValueData::F64Value(1.0)),
+                },
+                Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue("tag_0".to_string())),
+                },
+            ],
+        }];
+
+        let err = env
+            .metric()
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows { schema, rows },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    /// Completeness check must not reject a request just because the field
+    /// column is missing: fields are optional from the metric engine's
+    /// perspective. In the default test region `greptime_value` is declared
+    /// non-nullable, so the request still fails, but the error comes from
+    /// mito (about a null in a non-null column) — proving our check let the
+    /// request through rather than blocking it pre-flight.
+    #[tokio::test]
+    async fn test_verify_rows_accepts_missing_field() {
+        use api::v1::value::ValueData;
+        use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, SemanticType};
+        use common_query::prelude::greptime_timestamp;
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+
+        // Schema has timestamp + tag but no field column.
+        let schema = vec![
+            PbColumnSchema {
+                column_name: greptime_timestamp().to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as _,
+                datatype_extension: None,
+                options: None,
+            },
+            PbColumnSchema {
+                column_name: "job".to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as _,
+                datatype_extension: None,
+                options: None,
+            },
+        ];
+        let rows = vec![Row {
+            values: vec![
+                Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(0)),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue("tag_0".to_string())),
+                },
+            ],
+        }];
+
+        let err = env
+            .metric()
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows { schema, rows },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        // The failure must NOT be our completeness check (InvalidArguments on
+        // "missing required ... column"). It should come from mito, after
+        // verify_rows allowed the request through.
+        let message = err.to_string();
+        assert!(
+            !message.contains("missing required"),
+            "completeness check must not block requests missing only a field column: {message}"
+        );
     }
 }

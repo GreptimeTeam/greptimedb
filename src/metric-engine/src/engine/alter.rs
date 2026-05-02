@@ -189,7 +189,7 @@ impl MetricEngineInner {
         let new_add_columns = new_column_names.iter().map(|name| {
             // Safety: previous steps ensure the physical region exist
             let column_metadata = *physical_schema_map.get(name).unwrap();
-            (name.to_string(), column_metadata.column_id)
+            (name.to_string(), column_metadata.into())
         });
 
         // Writes logical regions metadata to metadata region
