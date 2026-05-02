@@ -716,13 +716,14 @@ async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
     execute_procedure_until_done(&mut procedure).await;
 
     let mut requests = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..3 {
         let (peer, request) = rx.try_recv().unwrap();
         requests.push((peer.id, request.body.unwrap()));
     }
     requests.sort_unstable_by_key(|(peer_id, _)| *peer_id);
-    assert_matches!(requests[0].1, region_request::Body::Drop(_));
-    assert_matches!(requests[1].1, region_request::Body::Close(_));
+    assert_matches!(requests[0].1, region_request::Body::Open(_));
+    assert_matches!(requests[1].1, region_request::Body::Drop(_));
+    assert_matches!(requests[2].1, region_request::Body::Close(_));
     assert!(
         ddl_context
             .table_metadata_manager
@@ -793,6 +794,12 @@ async fn test_purge_dropped_table_by_name_selects_tombstone_when_live_table_exis
         .unwrap()
         .unwrap();
     assert_eq!(live_table.table_id(), live_table_id);
+
+    let (_, request) = rx.try_recv().unwrap();
+    let Some(region_request::Body::Open(req)) = request.body else {
+        unreachable!();
+    };
+    assert_eq!(req.region_id, RegionId::new(dropped_table_id, 1).as_u64());
 
     let (_, request) = rx.try_recv().unwrap();
     let Some(region_request::Body::Drop(req)) = request.body else {

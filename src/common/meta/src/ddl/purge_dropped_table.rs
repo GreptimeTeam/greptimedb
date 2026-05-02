@@ -24,10 +24,12 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::{RegionNumber, TableId};
 use strum::AsRefStr;
+use table::metadata::TableInfo;
 use table::table_name::TableName;
 
 use crate::ddl::DdlContext;
 use crate::ddl::drop_table::executor::DropTableExecutor;
+use crate::ddl::undrop_table::open_regions;
 use crate::ddl::utils::map_to_procedure_error;
 use crate::error::Result;
 use crate::key::table_route::TableRouteValue;
@@ -73,8 +75,25 @@ impl PurgeDroppedTableProcedure {
         };
         self.data.table_id = Some(dropped_table.table_id);
         self.data.table_name = Some(dropped_table.table_name);
+        self.data.table_info = Some(dropped_table.table_info_value.table_info);
         self.data.table_route_value = Some(dropped_table.table_route_value);
         self.data.region_wal_options = dropped_table.region_wal_options;
+        self.data.state = PurgeDroppedTableState::OpenRegions;
+        Ok(Status::executing(true))
+    }
+
+    async fn on_open_regions(&mut self) -> Result<Status> {
+        if let Some(region_routes) = self.data.physical_region_routes() {
+            open_regions(
+                &self.context,
+                self.data.table_id(),
+                self.data.table_name(),
+                self.data.table_info(),
+                region_routes,
+                &self.data.region_wal_options,
+            )
+            .await?;
+        }
         self.data.state = PurgeDroppedTableState::DropRegions;
         Ok(Status::executing(true))
     }
@@ -127,6 +146,7 @@ impl Procedure for PurgeDroppedTableProcedure {
     async fn execute(&mut self, _: &ProcedureContext) -> ProcedureResult<Status> {
         match self.data.state {
             PurgeDroppedTableState::Prepare => self.on_prepare().await,
+            PurgeDroppedTableState::OpenRegions => self.on_open_regions().await,
             PurgeDroppedTableState::DropRegions => self.on_drop_regions().await,
             PurgeDroppedTableState::DeleteTombstone => self.on_delete_tombstone().await,
         }
@@ -157,6 +177,7 @@ pub struct PurgeDroppedTableData {
     task: PurgeDroppedTableTask,
     table_id: Option<TableId>,
     table_name: Option<TableName>,
+    table_info: Option<TableInfo>,
     table_route_value: Option<TableRouteValue>,
     #[serde(default)]
     region_wal_options: HashMap<RegionNumber, WalOptions>,
@@ -169,6 +190,7 @@ impl PurgeDroppedTableData {
             task,
             table_id: None,
             table_name: None,
+            table_info: None,
             table_route_value: None,
             region_wal_options: HashMap::new(),
         }
@@ -180,6 +202,10 @@ impl PurgeDroppedTableData {
 
     fn table_name(&self) -> &TableName {
         self.table_name.as_ref().unwrap()
+    }
+
+    fn table_info(&self) -> &TableInfo {
+        self.table_info.as_ref().unwrap()
     }
 
     fn table_route_value(&self) -> &TableRouteValue {
@@ -197,6 +223,7 @@ impl PurgeDroppedTableData {
 #[derive(Debug, Serialize, Deserialize, AsRefStr, PartialEq)]
 enum PurgeDroppedTableState {
     Prepare,
+    OpenRegions,
     DropRegions,
     DeleteTombstone,
 }
