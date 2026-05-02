@@ -17,6 +17,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
@@ -28,7 +29,10 @@ use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
+use datatypes::value::Value;
+use futures::Stream;
 use futures::future::join_all;
+use parquet::file::metadata::RowGroupMetaData;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
@@ -313,6 +317,138 @@ pub struct ScannerProperties {
 
     /// Whether the scanner is scanning a logical region.
     logical_region: bool,
+
+    /// Optimizer-approved aggregate-stats requirements used by stats-aware skip.
+    stats_aware_skip_requirements: Vec<SupportStatAggr>,
+    /// Shared file decision state for runtime aggregate-stats scans.
+    stats_aware_file_decisions: StatsAwareFileDecisionState,
+}
+
+/// Aggregate-stats requirement forwarded to scanner prepare / scan paths.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SupportStatAggr {
+    CountRows,
+    CountNonNull { column_name: String },
+    MinValue { column_name: String },
+    MaxValue { column_name: String },
+}
+
+/// Reason why a file remains on the row-scan fallback path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatsAwareFallbackReason {
+    /// Runtime stats are missing or cannot satisfy all optimizer-approved requirements.
+    MissingOrUnusableRuntimeStats,
+}
+
+/// Shared per-file runtime aggregate-stats decision.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatsAwareFileDecision {
+    /// Runtime stats fully satisfy the requirement set.
+    StatsHit { file_id: String, values: Vec<Value> },
+    /// The file must stay on the normal row-scan path.
+    ScanFallback {
+        file_id: String,
+        reason: StatsAwareFallbackReason,
+    },
+}
+
+/// Display-friendly summary derived from shared stats-aware file decisions.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StatsAwareFileDecisionSnapshot {
+    files_total: usize,
+    stats_hit_file_ids: Vec<String>,
+    fallback_file_ids: Vec<String>,
+}
+
+impl StatsAwareFileDecisionSnapshot {
+    pub fn files_total(&self) -> usize {
+        self.files_total
+    }
+
+    pub fn stats_hit_file_ids(&self) -> &[String] {
+        &self.stats_hit_file_ids
+    }
+
+    pub fn fallback_file_ids(&self) -> &[String] {
+        &self.fallback_file_ids
+    }
+}
+
+impl StatsAwareFileDecision {
+    pub fn stats_hit(file_id: String, values: Vec<Value>) -> Self {
+        Self::StatsHit { file_id, values }
+    }
+
+    pub fn scan_fallback(file_id: String, reason: StatsAwareFallbackReason) -> Self {
+        Self::ScanFallback { file_id, reason }
+    }
+
+    pub fn file_id(&self) -> &str {
+        match self {
+            Self::StatsHit { file_id, .. } | Self::ScanFallback { file_id, .. } => file_id,
+        }
+    }
+
+    pub fn is_stats_hit(&self) -> bool {
+        matches!(self, Self::StatsHit { .. })
+    }
+}
+
+/// Shared lazy cache for runtime aggregate-stats file classification.
+#[derive(Debug, Default, Clone)]
+pub struct StatsAwareFileDecisionState {
+    decisions: Arc<Mutex<HashMap<String, StatsAwareFileDecision>>>,
+}
+
+impl StatsAwareFileDecisionState {
+    /// Returns an existing decision, or computes one outside the mutex and stores it per file.
+    ///
+    /// Concurrent callers for the same file may run `compute` more than once; after computation,
+    /// this method stores or reuses the first inserted decision so callers observe one cached
+    /// decision per file.
+    pub fn get_or_compute<E>(
+        &self,
+        file_id: String,
+        compute: impl FnOnce() -> Result<StatsAwareFileDecision, E>,
+    ) -> Result<StatsAwareFileDecision, E> {
+        {
+            let decisions = self.decisions.lock().unwrap();
+            if let Some(decision) = decisions.get(&file_id).cloned() {
+                return Ok(decision);
+            }
+        }
+
+        let decision = compute()?;
+        let mut decisions = self.decisions.lock().unwrap();
+        let decision = decisions.entry(file_id).or_insert(decision).clone();
+        Ok(decision)
+    }
+
+    /// Returns a display-friendly snapshot of cached file decisions.
+    pub fn snapshot(&self) -> StatsAwareFileDecisionSnapshot {
+        let decisions = self.decisions.lock().unwrap();
+        let mut stats_hit_file_ids = Vec::new();
+        let mut fallback_file_ids = Vec::new();
+
+        for decision in decisions.values() {
+            match decision {
+                StatsAwareFileDecision::StatsHit { file_id, .. } => {
+                    stats_hit_file_ids.push(file_id.clone());
+                }
+                StatsAwareFileDecision::ScanFallback { file_id, .. } => {
+                    fallback_file_ids.push(file_id.clone());
+                }
+            }
+        }
+
+        stats_hit_file_ids.sort();
+        fallback_file_ids.sort();
+        StatsAwareFileDecisionSnapshot {
+            files_total: stats_hit_file_ids.len() + fallback_file_ids.len(),
+            stats_hit_file_ids,
+            fallback_file_ids,
+        }
+    }
 }
 
 impl ScannerProperties {
@@ -337,6 +473,8 @@ impl ScannerProperties {
             distinguish_partition_range: false,
             target_partitions: 0,
             logical_region: false,
+            stats_aware_skip_requirements: Vec::new(),
+            stats_aware_file_decisions: StatsAwareFileDecisionState::default(),
         }
     }
 
@@ -351,6 +489,10 @@ impl ScannerProperties {
         if let Some(target_partitions) = request.target_partitions {
             self.target_partitions = target_partitions;
         }
+        if let Some(stats_aware_skip_requirements) = request.stats_aware_skip_requirements {
+            self.stats_aware_skip_requirements = stats_aware_skip_requirements;
+            self.stats_aware_file_decisions = StatsAwareFileDecisionState::default();
+        }
     }
 
     /// Returns the number of actual partitions.
@@ -364,6 +506,16 @@ impl ScannerProperties {
 
     pub fn total_rows(&self) -> usize {
         self.total_rows
+    }
+
+    /// Returns aggregate-stats requirements attached to stats-aware skip.
+    pub fn stats_aware_skip_requirements(&self) -> &[SupportStatAggr] {
+        &self.stats_aware_skip_requirements
+    }
+
+    /// Returns shared stats-aware file decisions for this scanner.
+    pub fn stats_aware_file_decision_state(&self) -> StatsAwareFileDecisionState {
+        self.stats_aware_file_decisions.clone()
     }
 
     /// Returns whether the scanner is scanning a logical region.
@@ -395,6 +547,8 @@ pub struct PrepareRequest {
     pub distinguish_partition_range: Option<bool>,
     /// The expected number of target partitions.
     pub target_partitions: Option<usize>,
+    /// Optimizer-approved aggregate-stats requirements for stats-aware skip.
+    pub stats_aware_skip_requirements: Option<Vec<SupportStatAggr>>,
 }
 
 impl PrepareRequest {
@@ -415,6 +569,15 @@ impl PrepareRequest {
         self.target_partitions = Some(target_partitions);
         self
     }
+
+    /// Sets optimizer-approved aggregate-stats requirements for stats-aware skip.
+    pub fn with_stats_aware_skip_requirements(
+        mut self,
+        stats_aware_skip_requirements: Vec<SupportStatAggr>,
+    ) -> Self {
+        self.stats_aware_skip_requirements = Some(stats_aware_skip_requirements);
+        self
+    }
 }
 
 /// Necessary context of the query for the scanner.
@@ -423,6 +586,29 @@ pub struct QueryScanContext {
     /// Whether the query is EXPLAIN ANALYZE VERBOSE.
     pub explain_verbose: bool,
 }
+
+/// File-level stats returned by [`RegionScanner::scan_stats`].
+#[derive(Debug, Clone)]
+pub struct FileStatsItem {
+    /// Region-engine specific file identifier for observability.
+    pub file_id: String,
+    /// Exact row count from parquet metadata.
+    pub num_rows: Option<u64>,
+    /// Greptime file metadata, not parquet-native metadata.
+    pub file_partition_expr: Option<String>,
+    /// Nested parquet row-group metadata for future finer-grained use.
+    pub row_groups: Vec<RowGroupStatsItem>,
+}
+
+/// Row-group stats nested inside one [`FileStatsItem`].
+#[derive(Debug, Clone)]
+pub struct RowGroupStatsItem {
+    pub row_group_index: usize,
+    pub metadata: Arc<RowGroupMetaData>,
+}
+
+pub type SendableFileStatsStream =
+    Pin<Box<dyn Stream<Item = Result<FileStatsItem, BoxedError>> + Send>>;
 
 /// A scanner that provides a way to scan the region concurrently.
 ///
@@ -455,6 +641,11 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    /// Returns file-level stats for the current scan context.
+    ///
+    /// This method is read-only and does not scan row data.
+    fn scan_stats(&self, ctx: &QueryScanContext) -> Result<SendableFileStatsStream, BoxedError>;
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
     fn has_predicate_without_region(&self) -> bool;
@@ -1016,6 +1207,10 @@ impl RegionScanner for SinglePartitionScanner {
         Ok(result.unwrap())
     }
 
+    fn scan_stats(&self, _ctx: &QueryScanContext) -> Result<SendableFileStatsStream, BoxedError> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
     fn has_predicate_without_region(&self) -> bool {
         false
     }
@@ -1043,5 +1238,68 @@ impl RegionScanner for SinglePartitionScanner {
 impl DisplayAs for SinglePartitionScanner {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use super::*;
+
+    fn fallback_decision(file_id: &str) -> StatsAwareFileDecision {
+        StatsAwareFileDecision::scan_fallback(
+            file_id.to_string(),
+            StatsAwareFallbackReason::MissingOrUnusableRuntimeStats,
+        )
+    }
+
+    #[test]
+    fn stats_aware_file_decision_compute_runs_outside_lock() {
+        let state = StatsAwareFileDecisionState::default();
+
+        let decision = state
+            .get_or_compute("file-1".to_string(), || {
+                assert_eq!(state.snapshot().files_total(), 0);
+                Ok::<_, Infallible>(fallback_decision("file-1"))
+            })
+            .unwrap();
+
+        assert_eq!(decision, fallback_decision("file-1"));
+    }
+
+    #[test]
+    fn scanner_properties_prepare_clears_stats_aware_file_decisions() {
+        let mut properties = ScannerProperties::default();
+        let decision_state = properties.stats_aware_file_decision_state();
+        decision_state
+            .get_or_compute("file-1".to_string(), || {
+                Ok::<_, Infallible>(fallback_decision("file-1"))
+            })
+            .unwrap();
+        assert_eq!(
+            properties
+                .stats_aware_file_decision_state()
+                .snapshot()
+                .files_total(),
+            1
+        );
+
+        properties.prepare(
+            PrepareRequest::default().with_stats_aware_skip_requirements(vec![
+                SupportStatAggr::CountNonNull {
+                    column_name: "value".to_string(),
+                },
+            ]),
+        );
+
+        assert_eq!(properties.stats_aware_skip_requirements().len(), 1);
+        assert_eq!(
+            properties
+                .stats_aware_file_decision_state()
+                .snapshot()
+                .files_total(),
+            0
+        );
     }
 }

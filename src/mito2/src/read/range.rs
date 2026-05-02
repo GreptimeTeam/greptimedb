@@ -393,6 +393,8 @@ pub struct FileRangeBuilder {
     context: Option<FileRangeContextRef>,
     /// Row group selection for the file to read.
     selection: RowGroupSelection,
+    /// True if this file was intentionally skipped by aggregate-stats runtime classification.
+    stats_aware_skipped: bool,
 }
 
 impl FileRangeBuilder {
@@ -401,7 +403,22 @@ impl FileRangeBuilder {
         Self {
             context: Some(context),
             selection,
+            stats_aware_skipped: false,
         }
+    }
+
+    /// Builds an empty builder for a file covered by aggregate stats.
+    pub(crate) fn stats_aware_skipped() -> Self {
+        Self {
+            context: None,
+            selection: RowGroupSelection::default(),
+            stats_aware_skipped: true,
+        }
+    }
+
+    /// Returns true if this file was skipped because stats already cover it.
+    pub(crate) fn is_stats_aware_skipped(&self) -> bool {
+        self.stats_aware_skipped
     }
 
     /// Builds file ranges to read.

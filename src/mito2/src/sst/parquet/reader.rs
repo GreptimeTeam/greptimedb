@@ -261,6 +261,21 @@ impl ParquetReaderBuilder {
         self
     }
 
+    pub(crate) async fn read_sst_meta(&self) -> Result<Arc<CachedSstMeta>> {
+        let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
+        let file_size = self.file_handle.meta_ref().file_size;
+        let mut cache_metrics = MetadataCacheMetrics::default();
+        let (sst_meta, _) = self
+            .read_parquet_metadata(
+                &file_path,
+                file_size,
+                &mut cache_metrics,
+                self.page_index_policy,
+            )
+            .await?;
+        Ok(sst_meta)
+    }
+
     /// Sets the compaction flag.
     #[must_use]
     pub fn compaction(mut self, compaction: bool) -> Self {

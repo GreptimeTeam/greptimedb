@@ -642,6 +642,7 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_engine::{
         PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+        SendableFileStatsStream,
     };
     use store_api::storage::{RegionId, ScanRequest};
     use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
@@ -708,6 +709,13 @@ mod tests {
             _partition: usize,
         ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
             Ok(Box::pin(EmptyRecordBatchStream::new(self.schema.clone())))
+        }
+
+        fn scan_stats(
+            &self,
+            _ctx: &QueryScanContext,
+        ) -> std::result::Result<SendableFileStatsStream, BoxedError> {
+            Ok(Box::pin(futures::stream::empty()))
         }
 
         fn has_predicate_without_region(&self) -> bool {

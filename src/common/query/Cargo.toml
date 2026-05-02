@@ -22,6 +22,7 @@ common-time.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 once_cell.workspace = true
 serde.workspace = true

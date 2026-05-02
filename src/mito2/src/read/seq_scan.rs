@@ -31,6 +31,7 @@ use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    SendableFileStatsStream,
 };
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
@@ -39,12 +40,12 @@ use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu};
 use crate::read::flat_dedup::{FlatDedupReader, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::FlatLastRowReader;
-use crate::read::pruner::{PartitionPruner, Pruner};
+use crate::read::pruner::{PartitionPruner, Pruner, stats_aware_skip_config};
 use crate::read::range::RangeMeta;
 use crate::read::range_cache::{
     build_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
 };
-use crate::read::scan_region::{ScanInput, StreamContext};
+use crate::read::scan_region::{ScanInput, StreamContext, scan_input_stats};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, compute_parallel_channel_size,
     scan_flat_file_ranges, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
@@ -157,7 +158,7 @@ impl SeqScan {
         pruner: Arc<Pruner>,
     ) -> Result<BoxedRecordBatchStream> {
         pruner.add_partition_ranges(partition_ranges);
-        let partition_pruner = Arc::new(PartitionPruner::new(pruner, partition_ranges));
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner, partition_ranges, None));
 
         let mut sources = Vec::new();
         for part_range in partition_ranges {
@@ -384,12 +385,17 @@ impl SeqScan {
         let compaction = self.stream_ctx.input.compaction;
         let file_scan_semaphore = if compaction { None } else { semaphore.clone() };
         let pruner = self.pruner.clone();
+        let stats_aware_skip = stats_aware_skip_config(&self.properties);
         // Initializes ref counts for the pruner.
         // If we call scan_batch_in_partition() multiple times but don't read all batches from the stream,
         // then the ref count won't be decremented.
         // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
         pruner.add_partition_ranges(&partition_ranges);
-        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &partition_ranges));
+        let partition_pruner = Arc::new(PartitionPruner::new(
+            pruner,
+            &partition_ranges,
+            stats_aware_skip,
+        ));
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -543,6 +549,10 @@ impl RegionScanner for SeqScan {
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scan_partition_impl(ctx, metrics_set, partition)
             .map_err(BoxedError::new)
+    }
+
+    fn scan_stats(&self, ctx: &QueryScanContext) -> Result<SendableFileStatsStream, BoxedError> {
+        Ok(scan_input_stats(&self.stream_ctx.input, ctx))
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {

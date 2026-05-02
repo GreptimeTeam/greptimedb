@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod aggr_stats;
 pub mod constant_term;
 pub mod count_nest_aggr;
 pub mod count_wildcard;

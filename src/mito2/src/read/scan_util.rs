@@ -66,6 +66,8 @@ pub struct FileScanMetrics {
     pub build_reader_cost: Duration,
     /// Time spent scanning this file (accumulated across all ranges).
     pub scan_cost: Duration,
+    /// Whether this file was skipped because aggregate stats already cover it.
+    pub stats_aware_skip: bool,
 }
 
 impl fmt::Debug for FileScanMetrics {
@@ -88,6 +90,9 @@ impl fmt::Debug for FileScanMetrics {
         if !self.scan_cost.is_zero() {
             write!(f, ", \"scan_cost\":\"{:?}\"", self.scan_cost)?;
         }
+        if self.stats_aware_skip {
+            write!(f, ", \"stats_aware_skip\":true")?;
+        }
 
         write!(f, "}}")
     }
@@ -101,6 +106,7 @@ impl FileScanMetrics {
         self.build_part_cost += other.build_part_cost;
         self.build_reader_cost += other.build_reader_cost;
         self.scan_cost += other.scan_cost;
+        self.stats_aware_skip |= other.stats_aware_skip;
     }
 }
 
@@ -631,6 +637,22 @@ impl fmt::Debug for ScanMetricsSet {
         )
     }
 }
+
+impl ScanMetricsSet {
+    fn stats_aware_skipped_file_ids(&self) -> Vec<String> {
+        let Some(per_file_metrics) = &self.per_file_metrics else {
+            return Vec::new();
+        };
+
+        let mut file_ids = per_file_metrics
+            .iter()
+            .filter(|(_, metrics)| metrics.stats_aware_skip)
+            .map(|(file_id, _)| file_id.to_string())
+            .collect::<Vec<_>>();
+        file_ids.sort();
+        file_ids
+    }
+}
 impl ScanMetricsSet {
     /// Attaches the `prepare_scan_cost` to the metrics set.
     fn with_prepare_scan_cost(mut self, cost: Duration) -> Self {
@@ -985,6 +1007,22 @@ impl PartitionMetricsList {
     /// Format verbose metrics for each partition for explain.
     pub(crate) fn format_verbose_metrics(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let list = self.0.lock().unwrap();
+        let mut stats_aware_skipped_files = list
+            .iter()
+            .filter_map(|p| p.as_ref())
+            .flat_map(|p| p.stats_aware_skipped_file_ids())
+            .collect::<Vec<_>>();
+        stats_aware_skipped_files.sort();
+        stats_aware_skipped_files.dedup();
+
+        if !stats_aware_skipped_files.is_empty() {
+            write!(
+                f,
+                ", \"stats_aware_skipped_files\": {:?}",
+                stats_aware_skipped_files
+            )?;
+        }
+
         write!(f, ", \"metrics_per_partition\": ")?;
         f.debug_list()
             .entries(list.iter().filter_map(|p| p.as_ref()))
@@ -1121,6 +1159,14 @@ impl PartitionMetrics {
     /// Returns whether verbose explain is enabled.
     pub(crate) fn explain_verbose(&self) -> bool {
         self.0.explain_verbose
+    }
+
+    fn stats_aware_skipped_file_ids(&self) -> Vec<String> {
+        self.0
+            .metrics
+            .lock()
+            .unwrap()
+            .stats_aware_skipped_file_ids()
     }
 
     /// Returns a MergeMetricsReport trait object for reporting merge metrics.
@@ -1698,12 +1744,13 @@ pub(crate) fn split_record_batch(record_batch: RecordBatch, batches: &mut VecDeq
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Instant;
 
     use common_time::Timestamp;
     use smallvec::{SmallVec, smallvec};
-    use store_api::storage::RegionId;
+    use store_api::storage::{FileId, RegionId};
 
     use super::*;
     use crate::cache::CacheStrategy;
@@ -1909,6 +1956,37 @@ mod tests {
     fn test_compute_parallel_channel_size_clamps_to_max_for_small_batches() {
         assert_eq!(64, compute_parallel_channel_size(0));
         assert_eq!(64, compute_parallel_channel_size(1));
+    }
+
+    #[test]
+    fn test_scan_metrics_set_reports_stats_aware_skipped_files() {
+        let skipped_file = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+        let scanned_file = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+        let mut per_file_metrics = HashMap::new();
+        per_file_metrics.insert(
+            skipped_file,
+            FileScanMetrics {
+                stats_aware_skip: true,
+                ..Default::default()
+            },
+        );
+        per_file_metrics.insert(
+            scanned_file,
+            FileScanMetrics {
+                num_ranges: 1,
+                ..Default::default()
+            },
+        );
+
+        let metrics = ScanMetricsSet {
+            per_file_metrics: Some(per_file_metrics),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            vec![skipped_file.to_string()],
+            metrics.stats_aware_skipped_file_ids()
+        );
     }
 
     #[test]
