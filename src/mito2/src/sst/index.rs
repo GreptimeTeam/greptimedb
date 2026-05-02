@@ -32,6 +32,7 @@ use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
+use index::target::IndexTarget;
 use mito_codec::index::IndexValuesCodec;
 use mito_codec::row_converter::CompositeValues;
 use object_store::ObjectStore;
@@ -383,9 +384,34 @@ impl IndexerBuilderImpl {
         let indexed_column_ids = self.metadata.inverted_indexed_column_ids(
             self.index_options.inverted_index.ignore_column_ids.iter(),
         );
-        if indexed_column_ids.is_empty() {
+        let ignored = self
+            .index_options
+            .inverted_index
+            .ignore_column_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let subfield_targets = self
+            .index_options
+            .inverted_index
+            .sub_fields
+            .iter()
+            .filter(|sub| !ignored.contains(&sub.column_id))
+            .map(|sub| IndexTarget::SubField {
+                column_id: sub.column_id,
+                path: sub.path.clone(),
+                value_type: sub.value_type,
+            })
+            .collect::<Vec<_>>();
+        let mut indexed_targets = indexed_column_ids
+            .iter()
+            .copied()
+            .map(IndexTarget::ColumnId)
+            .collect::<Vec<_>>();
+        indexed_targets.extend(subfield_targets.iter().cloned());
+        if indexed_targets.is_empty() {
             debug!(
-                "No columns to be indexed, skip creating inverted index, region_id: {}, file_id: {}",
+                "No targets to be indexed, skip creating inverted index, region_id: {}, file_id: {}",
                 self.metadata.region_id, file_id,
             );
             return None;
@@ -414,14 +440,25 @@ impl IndexerBuilderImpl {
             segment_row_count = row_group_size;
         }
 
-        let indexer = InvertedIndexer::new(
-            file_id,
-            &self.metadata,
-            self.intermediate_manager.clone(),
-            self.inverted_index_config.mem_threshold_on_create(),
-            segment_row_count,
-            indexed_column_ids,
-        );
+        let indexer = if subfield_targets.is_empty() {
+            InvertedIndexer::new(
+                file_id,
+                &self.metadata,
+                self.intermediate_manager.clone(),
+                self.inverted_index_config.mem_threshold_on_create(),
+                segment_row_count,
+                indexed_column_ids,
+            )
+        } else {
+            InvertedIndexer::new_with_targets(
+                file_id,
+                &self.metadata,
+                self.intermediate_manager.clone(),
+                self.inverted_index_config.mem_threshold_on_create(),
+                segment_row_count,
+                indexed_targets,
+            )
+        };
 
         Some(indexer)
     }
