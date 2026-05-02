@@ -44,12 +44,14 @@ pub mod drop_flow;
 pub mod drop_table;
 pub mod drop_view;
 pub mod flow_meta;
+pub mod purge_dropped_table;
 pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod truncate_table;
+pub mod undrop_table;
 pub mod utils;
 
 /// Metadata allocated to a table.
