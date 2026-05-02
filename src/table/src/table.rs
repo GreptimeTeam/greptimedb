@@ -36,6 +36,7 @@ use crate::metadata::{FilterPushDownType, TableInfoRef, TableType};
 pub mod adapter;
 mod metrics;
 pub mod numbers;
+mod projection_pushdown;
 pub mod scan;
 
 lazy_static! {
