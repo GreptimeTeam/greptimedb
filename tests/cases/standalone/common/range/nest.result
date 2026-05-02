@@ -45,6 +45,82 @@ SELECT ts, b, min(c) RANGE '5s' FROM (SELECT ts, host AS b, val AS c FROM host W
 | 1970-01-01T00:00:20 | host1 | 2               |
 +---------------------+-------+-----------------+
 
+CREATE TABLE host_union_0 (
+  ts timestamp(3) time index,
+  host STRING PRIMARY KEY,
+  val BIGINT,
+  ts2 timestamp(3),
+);
+
+Affected Rows: 0
+
+CREATE TABLE host_union_1 (
+  ts timestamp(3) time index,
+  host STRING PRIMARY KEY,
+  val BIGINT,
+  ts2 timestamp(3),
+);
+
+Affected Rows: 0
+
+INSERT INTO TABLE host_union_0 VALUES
+    (0,     'host1', 3, 0),
+    (5000,  'host1', 2, 5000),
+    (10000, 'host1', 1, 10000);
+
+Affected Rows: 3
+
+INSERT INTO TABLE host_union_1 VALUES
+    (0,     'host1', 6, 0),
+    (5000,  'host1', 5, 5000),
+    (10000, 'host1', 4, 10000);
+
+Affected Rows: 3
+
+SELECT ts, host, min(val ORDER BY ts ASC) RANGE '5s'
+FROM (
+  SELECT ts, host, val, ts2 FROM host_union_0
+  UNION ALL
+  SELECT ts, host, val, ts2 FROM host_union_1
+)
+WHERE ts >= '1970-01-01 00:00:00'
+ALIGN '5s' BY (host)
+ORDER BY host, ts;
+
++---------------------+-------+------------------------------------------------+
+| ts                  | host  | min(val) ORDER BY [ts ASC NULLS LAST] RANGE 5s |
++---------------------+-------+------------------------------------------------+
+| 1970-01-01T00:00:00 | host1 | 3                                              |
+| 1970-01-01T00:00:05 | host1 | 2                                              |
+| 1970-01-01T00:00:10 | host1 | 1                                              |
++---------------------+-------+------------------------------------------------+
+
+SELECT tmp.ts, tmp.host, min(tmp.val ORDER BY tmp.ts ASC) RANGE '5s'
+FROM (
+  SELECT ts, host, val, ts2 FROM host_union_0
+  UNION ALL
+  SELECT ts, host, val, ts2 FROM host_union_1
+) AS tmp
+WHERE tmp.ts >= '1970-01-01 00:00:00'
+ALIGN '5s' BY (tmp.host)
+ORDER BY tmp.host, tmp.ts;
+
++---------------------+-------+--------------------------------------------------------+
+| ts                  | host  | min(tmp.val) ORDER BY [tmp.ts ASC NULLS LAST] RANGE 5s |
++---------------------+-------+--------------------------------------------------------+
+| 1970-01-01T00:00:00 | host1 | 3                                                      |
+| 1970-01-01T00:00:05 | host1 | 2                                                      |
+| 1970-01-01T00:00:10 | host1 | 1                                                      |
++---------------------+-------+--------------------------------------------------------+
+
+DROP TABLE host_union_0;
+
+Affected Rows: 0
+
+DROP TABLE host_union_1;
+
+Affected Rows: 0
+
 -- Test EXPLAIN and ANALYZE
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
