@@ -71,36 +71,56 @@ struct SparsePrimaryKeyCodecInner {
 
 /// Sparse values representation.
 ///
-/// A map of [`ColumnId`] to [`Value`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Callers must not insert a column id that is already present; otherwise
+/// the existing entry will shadow the newly inserted value on lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SparseValues {
-    values: HashMap<ColumnId, Value>,
+    values: Vec<(ColumnId, Value)>,
 }
 
 impl SparseValues {
-    /// Creates a new [`SparseValues`] instance.
-    pub fn new(values: HashMap<ColumnId, Value>) -> Self {
-        Self { values }
+    /// Creates an empty [`SparseValues`].
+    pub fn new() -> Self {
+        Self { values: Vec::new() }
+    }
+
+    /// Creates an empty [`SparseValues`] with space reserved for `cap` entries.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(cap),
+        }
     }
 
     /// Returns the value of the given column, or [`Value::Null`] if the column is not present.
     pub fn get_or_null(&self, column_id: ColumnId) -> &Value {
-        self.values.get(&column_id).unwrap_or(&Value::Null)
+        for (id, value) in &self.values {
+            if *id == column_id {
+                return value;
+            }
+        }
+        &Value::Null
     }
 
     /// Returns the value of the given column, or [`None`] if the column is not present.
     pub fn get(&self, column_id: &ColumnId) -> Option<&Value> {
-        self.values.get(column_id)
+        for (id, value) in &self.values {
+            if id == column_id {
+                return Some(value);
+            }
+        }
+        None
     }
 
-    /// Inserts a new value into the [`SparseValues`].
+    /// Appends a new `(column_id, value)` pair.
+    ///
+    /// Append-only: the caller must ensure `column_id` is not already present.
     pub fn insert(&mut self, column_id: ColumnId, value: Value) {
-        self.values.insert(column_id, value);
+        self.values.push((column_id, value));
     }
 
     /// Returns an iterator over all stored column id/value pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&ColumnId, &Value)> {
-        self.values.iter()
+        self.values.iter().map(|(id, value)| (id, value))
     }
 }
 
@@ -110,6 +130,92 @@ pub const RESERVED_COLUMN_ID_TSID: ColumnId = ReservedColumnId::tsid();
 pub const RESERVED_COLUMN_ID_TABLE_ID: ColumnId = ReservedColumnId::table_id();
 /// The size of the column id in the encoded sparse row.
 pub const COLUMN_ID_ENCODE_SIZE: usize = 4;
+
+// Fixed byte offsets for reserved columns in the sparse encoding.
+// Layout: [table_id_col_id: 4B][marker: 1B][table_id: 4B][tsid_col_id: 4B][marker: 1B][tsid: 8B]
+/// Byte offset to the table_id value (after its 4-byte column id).
+const TABLE_ID_VALUE_OFFSET: usize = COLUMN_ID_ENCODE_SIZE;
+/// Byte offset to the tsid value (after 9-byte table_id entry + 4-byte tsid column id).
+const TSID_VALUE_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SIZE;
+/// Byte offset where tag columns start (after 9-byte table_id + 13-byte tsid entries).
+const TAGS_START_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SIZE + 9;
+
+/// Inline capacity for the small-vec fast path of [`SparseOffsetsCache`].
+///
+/// Most sparse primary keys carry only a handful of tags; a linear scan over
+/// a small pre-reserved `Vec` beats a `HashMap` lookup in that regime (no
+/// hash, better cache behavior). Primary keys with more than this many tags
+/// spill the remainder into a `HashMap`.
+const SPARSE_OFFSETS_INLINE_CAP: usize = 32;
+
+/// A lazily populated cache of tag column offsets inside a sparse primary key.
+#[derive(Debug, Clone)]
+pub struct SparseOffsetsCache {
+    /// Small-vec fast path, pre-reserved to [`SPARSE_OFFSETS_INLINE_CAP`] so
+    /// the common case never reallocates.
+    inline: Vec<(ColumnId, usize)>,
+    /// Overflow for columns beyond the inline capacity. Lazily allocated.
+    overflow: HashMap<ColumnId, usize>,
+    /// Next byte position in the pk to resume parsing from.
+    cursor: usize,
+    /// True once the decoder has walked past the last tag column (or stopped
+    /// on an unknown column id); no further offsets can be discovered.
+    finished: bool,
+}
+
+impl Default for SparseOffsetsCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SparseOffsetsCache {
+    pub fn new() -> Self {
+        Self {
+            inline: Vec::new(),
+            overflow: HashMap::new(),
+            cursor: TAGS_START_OFFSET,
+            finished: false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.inline.clear();
+        self.overflow.clear();
+        self.cursor = TAGS_START_OFFSET;
+        self.finished = false;
+    }
+
+    /// Returns the cached offset for `column_id`, if any.
+    fn get(&self, column_id: ColumnId) -> Option<usize> {
+        for entry in &self.inline {
+            if entry.0 == column_id {
+                return Some(entry.1);
+            }
+        }
+        if self.overflow.is_empty() {
+            return None;
+        }
+        self.overflow.get(&column_id).copied()
+    }
+
+    /// Records a new `(column_id, offset)` entry.
+    fn insert(&mut self, column_id: ColumnId, offset: usize) {
+        if self.inline.len() < SPARSE_OFFSETS_INLINE_CAP {
+            if self.inline.capacity() == 0 {
+                self.inline.reserve_exact(SPARSE_OFFSETS_INLINE_CAP);
+            }
+            self.inline.push((column_id, offset));
+        } else {
+            self.overflow.insert(column_id, offset);
+        }
+    }
+
+    #[cfg(test)]
+    fn contains(&self, column_id: ColumnId) -> bool {
+        self.get(column_id).is_some()
+    }
+}
 
 impl SparsePrimaryKeyCodec {
     /// Creates a new [`SparsePrimaryKeyCodec`] instance.
@@ -247,7 +353,7 @@ impl SparsePrimaryKeyCodec {
     /// Decodes the given bytes into a [`SparseValues`].
     fn decode_sparse(&self, bytes: &[u8]) -> Result<SparseValues> {
         let mut deserializer = Deserializer::new(bytes);
-        let mut values = SparseValues::new(HashMap::new());
+        let mut values = SparseValues::with_capacity(16);
 
         let column_id = u32::deserialize(&mut deserializer).context(DeserializeFieldSnafu)?;
         let value = self.inner.table_id_field.deserialize(&mut deserializer)?;
@@ -275,31 +381,65 @@ impl SparsePrimaryKeyCodec {
     }
 
     /// Returns the offset of the given column id in the given primary key.
+    ///
+    /// The pk must start with the table_id + tsid prefix written by
+    /// `encode_internal`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pk` is not a well-formed sparse primary key produced by
+    /// this codec (e.g. truncated or otherwise malformed bytes).
     pub fn has_column(
         &self,
         pk: &[u8],
-        offsets_map: &mut HashMap<u32, usize>,
+        cache: &mut SparseOffsetsCache,
         column_id: ColumnId,
     ) -> Option<usize> {
-        if offsets_map.is_empty() {
-            let mut deserializer = Deserializer::new(pk);
-            let mut offset = 0;
-            while deserializer.has_remaining() {
-                let column_id = u32::deserialize(&mut deserializer).unwrap();
-                offset += 4;
-                offsets_map.insert(column_id, offset);
-                let Some(field) = self.get_field(column_id) else {
-                    break;
-                };
-
-                let skip = field.skip_deserialize(pk, &mut deserializer).unwrap();
-                offset += skip;
-            }
-
-            offsets_map.get(&column_id).copied()
-        } else {
-            offsets_map.get(&column_id).copied()
+        // Decoding is lazy: on each call we only advance the cache's cursor as
+        // far as needed to answer the query. A column that has already been
+        // seen returns immediately; a column we haven't reached yet causes the
+        // parser to resume from `cache.cursor` and stop as soon as the column
+        // is located. Once the cursor walks off the end (or hits an unknown
+        // column id) the cache is marked finished, so subsequent misses are
+        // O(1).
+        // table_id and tsid are at fixed offsets.
+        match column_id {
+            RESERVED_COLUMN_ID_TABLE_ID => return Some(TABLE_ID_VALUE_OFFSET),
+            RESERVED_COLUMN_ID_TSID => return Some(TSID_VALUE_OFFSET),
+            _ => {}
         }
+
+        if let Some(offset) = cache.get(column_id) {
+            return Some(offset);
+        }
+        if cache.finished {
+            return None;
+        }
+
+        let mut deserializer = Deserializer::new(pk);
+        deserializer.advance(cache.cursor);
+        let mut offset = cache.cursor;
+        while deserializer.has_remaining() {
+            let col = u32::deserialize(&mut deserializer).unwrap();
+            offset += COLUMN_ID_ENCODE_SIZE;
+            let value_offset = offset;
+            cache.insert(col, value_offset);
+            let Some(field) = self.get_field(col) else {
+                cache.finished = true;
+                cache.cursor = offset;
+                return None;
+            };
+
+            let skip = field.skip_deserialize(pk, &mut deserializer).unwrap();
+            offset += skip;
+            cache.cursor = offset;
+            if col == column_id {
+                return Some(value_offset);
+            }
+        }
+
+        cache.finished = true;
+        None
     }
 
     /// Decode value at `offset` in `pk`.
@@ -317,10 +457,10 @@ impl SparsePrimaryKeyCodec {
     pub fn encoded_value_for_column<'a>(
         &self,
         pk: &'a [u8],
-        offsets_map: &mut HashMap<u32, usize>,
+        cache: &mut SparseOffsetsCache,
         column_id: ColumnId,
     ) -> Result<Option<&'a [u8]>> {
-        let Some(offset) = self.has_column(pk, offsets_map, column_id) else {
+        let Some(offset) = self.has_column(pk, cache, column_id) else {
             return Ok(None);
         };
 
@@ -537,9 +677,8 @@ mod tests {
 
     #[test]
     fn test_sparse_value_new_and_get_or_null() {
-        let mut values = HashMap::new();
-        values.insert(1, Value::Int32(42));
-        let sparse_value = SparseValues::new(values);
+        let mut sparse_value = SparseValues::new();
+        sparse_value.insert(1, Value::Int32(42));
 
         assert_eq!(sparse_value.get_or_null(1), &Value::Int32(42));
         assert_eq!(sparse_value.get_or_null(2), &Value::Null);
@@ -547,7 +686,7 @@ mod tests {
 
     #[test]
     fn test_sparse_value_insert() {
-        let mut sparse_value = SparseValues::new(HashMap::new());
+        let mut sparse_value = SparseValues::new();
         sparse_value.insert(1, Value::Int32(42));
 
         assert_eq!(sparse_value.get_or_null(1), &Value::Int32(42));
@@ -681,7 +820,7 @@ mod tests {
         codec.encode_to_vec(row.into_iter(), &mut buffer).unwrap();
         assert!(!buffer.is_empty());
 
-        let mut offsets_map = HashMap::new();
+        let mut offsets_map = SparseOffsetsCache::new();
         for column_id in [
             RESERVED_COLUMN_ID_TABLE_ID,
             RESERVED_COLUMN_ID_TSID,
@@ -700,6 +839,36 @@ mod tests {
     }
 
     #[test]
+    fn test_has_column_lazy_resume() {
+        let region_metadata = test_region_metadata();
+        let codec = SparsePrimaryKeyCodec::new(&region_metadata);
+        let mut buffer = Vec::new();
+        codec
+            .encode_to_vec(test_row().into_iter(), &mut buffer)
+            .unwrap();
+
+        let mut cache = SparseOffsetsCache::new();
+        // Look up an early column: only a prefix of tags is decoded.
+        assert!(codec.has_column(&buffer, &mut cache, 1).is_some());
+        assert!(!cache.finished);
+        assert!(cache.contains(1));
+        assert!(!cache.contains(5));
+
+        // A later column resumes from the cursor.
+        assert!(codec.has_column(&buffer, &mut cache, 5).is_some());
+        assert!(cache.contains(5));
+
+        // An earlier column that was already cached still resolves.
+        assert!(codec.has_column(&buffer, &mut cache, 2).is_some());
+
+        // A non-existent column walks off the end and marks the cache finished.
+        assert!(codec.has_column(&buffer, &mut cache, 999).is_none());
+        assert!(cache.finished);
+        // Further misses are O(1).
+        assert!(codec.has_column(&buffer, &mut cache, 998).is_none());
+    }
+
+    #[test]
     fn test_decode_value_at() {
         let region_metadata = test_region_metadata();
         let codec = SparsePrimaryKeyCodec::new(&region_metadata);
@@ -709,7 +878,7 @@ mod tests {
         assert!(!buffer.is_empty());
 
         let row = test_row();
-        let mut offsets_map = HashMap::new();
+        let mut offsets_map = SparseOffsetsCache::new();
         for column_id in [
             RESERVED_COLUMN_ID_TABLE_ID,
             RESERVED_COLUMN_ID_TSID,
@@ -744,7 +913,7 @@ mod tests {
             .unwrap();
         assert!(!buffer.is_empty());
 
-        let mut offsets_map = HashMap::new();
+        let mut offsets_map = SparseOffsetsCache::new();
         for column_id in [
             RESERVED_COLUMN_ID_TABLE_ID,
             RESERVED_COLUMN_ID_TSID,
