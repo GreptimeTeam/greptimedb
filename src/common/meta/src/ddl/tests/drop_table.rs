@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::region::{RegionRequest, region_request};
+use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -27,9 +28,8 @@ use common_procedure_test::{
 use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 
-use crate::ddl::TableMetadata;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::{DropTableProcedure, DropTableState};
@@ -41,6 +41,7 @@ use crate::ddl::test_util::{
     put_datanode_address, test_create_logical_table_task, test_create_physical_table_task,
 };
 use crate::ddl::undrop_table::UndropTableProcedure;
+use crate::ddl::{DetectingRegion, RegionFailureDetectorController, TableMetadata};
 use crate::error::Error;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -320,6 +321,45 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
 }
 
 #[tokio::test]
+async fn test_soft_drop_deregisters_failure_detectors() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.region_failure_detector_controller = detector_controller.clone();
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![Peer::empty(2)],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context,
+    );
+    execute_procedure_until_done(&mut procedure).await;
+
+    assert_eq!(
+        detector_controller.deregistered().await,
+        vec![(1, RegionId::new(table_id, 1))]
+    );
+}
+
+#[tokio::test]
 async fn test_hard_drop_keeps_delete_tombstone_flow() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
@@ -569,6 +609,49 @@ async fn test_undrop_table_restores_metadata_and_reopens_regions() {
 }
 
 #[tokio::test]
+async fn test_undrop_table_registers_failure_detectors() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.region_failure_detector_controller = detector_controller.clone();
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut drop_procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut drop_procedure).await;
+    detector_controller.clear().await;
+
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task(table_name, table_id), ddl_context);
+    execute_procedure_until_done(&mut procedure).await;
+
+    assert_eq!(
+        detector_controller.registered().await,
+        vec![(1, RegionId::new(table_id, 1))]
+    );
+}
+
+#[tokio::test]
 async fn test_undrop_logical_table_skips_datanode_open() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx);
@@ -788,6 +871,55 @@ async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
 }
 
 #[tokio::test]
+async fn test_purge_dropped_table_deregisters_failure_detectors() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.region_failure_detector_controller = detector_controller.clone();
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    let table_route_value = TableRouteValue::physical(vec![RegionRoute {
+        region: Region::new_test(RegionId::new(table_id, 1)),
+        leader_peer: Some(Peer::empty(1)),
+        follower_peers: vec![],
+        leader_state: None,
+        leader_down_since: None,
+        write_route_policy: None,
+    }]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            table_route_value.clone(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata(
+            table_id,
+            &task.table_name(),
+            &table_route_value,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = PurgeDroppedTableProcedure::new(
+        new_purge_dropped_table_task(table_name, Some(table_id)),
+        ddl_context,
+    );
+    execute_procedure_until_done(&mut procedure).await;
+
+    assert_eq!(
+        detector_controller.deregistered().await,
+        vec![(1, RegionId::new(table_id, 1))]
+    );
+}
+
+#[tokio::test]
 async fn test_purge_dropped_table_by_name_selects_tombstone_when_live_table_exists() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx);
@@ -974,6 +1106,38 @@ async fn create_metric_logical_table_tombstone(
         .await
         .unwrap();
     logical_table_id
+}
+
+#[derive(Default)]
+struct RecordingRegionFailureDetectorController {
+    registered: Mutex<Vec<DetectingRegion>>,
+    deregistered: Mutex<Vec<DetectingRegion>>,
+}
+
+impl RecordingRegionFailureDetectorController {
+    async fn registered(&self) -> Vec<DetectingRegion> {
+        self.registered.lock().await.clone()
+    }
+
+    async fn deregistered(&self) -> Vec<DetectingRegion> {
+        self.deregistered.lock().await.clone()
+    }
+
+    async fn clear(&self) {
+        self.registered.lock().await.clear();
+        self.deregistered.lock().await.clear();
+    }
+}
+
+#[async_trait]
+impl RegionFailureDetectorController for RecordingRegionFailureDetectorController {
+    async fn register_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        self.registered.lock().await.extend(detecting_regions);
+    }
+
+    async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        self.deregistered.lock().await.extend(detecting_regions);
+    }
 }
 
 #[tokio::test]

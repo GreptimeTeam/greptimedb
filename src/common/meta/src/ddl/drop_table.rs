@@ -36,7 +36,7 @@ use table::table_reference::TableReference;
 
 use self::executor::DropTableExecutor;
 use crate::ddl::DdlContext;
-use crate::ddl::utils::map_to_procedure_error;
+use crate::ddl::utils::{convert_region_routes_to_detecting_regions, map_to_procedure_error};
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
@@ -181,6 +181,11 @@ impl DropTableProcedure {
                     &self.data.physical_region_routes,
                 )
                 .await?;
+            self.context
+                .deregister_failure_detectors(convert_region_routes_to_detecting_regions(
+                    &self.data.physical_region_routes,
+                ))
+                .await;
             self.dropping_regions.clear();
             return Ok(Status::done());
         }
