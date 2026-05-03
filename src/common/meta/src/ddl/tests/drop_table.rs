@@ -635,6 +635,59 @@ async fn test_undrop_logical_table_skips_datanode_open() {
 }
 
 #[tokio::test]
+async fn test_soft_drop_metric_logical_table_fails() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let physical_table_id = create_physical_table(&ddl_context, "phy").await;
+    let logical_table_id =
+        create_logical_table(ddl_context.clone(), physical_table_id, "foo").await;
+
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", logical_table_id, false),
+        ddl_context,
+    );
+    let err = procedure.on_prepare().await.unwrap_err();
+
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+}
+
+#[tokio::test]
+async fn test_undrop_metric_logical_table_fails() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let physical_table_id = create_physical_table(&ddl_context, "phy").await;
+    let logical_table_id =
+        create_metric_logical_table_tombstone(&ddl_context, physical_table_id, "foo").await;
+
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task("foo", logical_table_id), ddl_context);
+    let err = procedure.on_prepare().await.unwrap_err();
+
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+}
+
+#[tokio::test]
+async fn test_purge_metric_logical_table_fails() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let physical_table_id = create_physical_table(&ddl_context, "phy").await;
+    let logical_table_id =
+        create_metric_logical_table_tombstone(&ddl_context, physical_table_id, "foo").await;
+
+    let mut procedure = PurgeDroppedTableProcedure::new(
+        new_purge_dropped_table_task("foo", Some(logical_table_id)),
+        ddl_context,
+    );
+    let err = procedure
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+}
+
+#[tokio::test]
 async fn test_undrop_table_fails_when_live_name_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let mut ddl_context = new_ddl_context(node_manager);
@@ -899,6 +952,28 @@ fn new_purge_dropped_table_task(
         table: table_name.to_string(),
         table_id,
     }
+}
+
+async fn create_metric_logical_table_tombstone(
+    ddl_context: &crate::ddl::DdlContext,
+    physical_table_id: TableId,
+    table_name: &str,
+) -> TableId {
+    let logical_table_id =
+        create_logical_table(ddl_context.clone(), physical_table_id, table_name).await;
+    let mut task = test_create_logical_table_task(table_name);
+    task.set_table_id(logical_table_id);
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata(
+            logical_table_id,
+            &task.table_name(),
+            &TableRouteValue::logical(physical_table_id),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+    logical_table_id
 }
 
 #[tokio::test]

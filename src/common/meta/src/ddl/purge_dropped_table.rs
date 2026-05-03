@@ -21,7 +21,7 @@ use common_procedure::{
 };
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use store_api::storage::{RegionNumber, TableId};
 use strum::AsRefStr;
 use table::metadata::TableInfo;
@@ -30,8 +30,8 @@ use table::table_name::TableName;
 use crate::ddl::DdlContext;
 use crate::ddl::drop_table::executor::DropTableExecutor;
 use crate::ddl::undrop_table::open_regions;
-use crate::ddl::utils::map_to_procedure_error;
-use crate::error::Result;
+use crate::ddl::utils::{is_metric_engine_logical_table, map_to_procedure_error};
+use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::rpc::ddl::PurgeDroppedTableTask;
@@ -73,6 +73,15 @@ impl PurgeDroppedTableProcedure {
         let Some(dropped_table) = dropped_table else {
             return Ok(Status::done());
         };
+        ensure!(
+            !is_metric_engine_logical_table(
+                &dropped_table.table_info_value.table_info,
+                &dropped_table.table_route_value
+            ),
+            error::UnsupportedSnafu {
+                operation: "purging metric logical tables".to_string()
+            }
+        );
         self.data.table_id = Some(dropped_table.table_id);
         self.data.table_name = Some(dropped_table.table_name);
         self.data.table_info = Some(dropped_table.table_info_value.table_info);

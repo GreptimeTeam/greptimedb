@@ -33,7 +33,10 @@ use table::metadata::TableId;
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
-use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error, region_storage_path};
+use crate::ddl::utils::{
+    add_peer_context_if_needed, is_metric_engine_logical_table, map_to_procedure_error,
+    region_storage_path,
+};
 use crate::ddl::{CreateRequestBuilder, DdlContext, build_template_from_raw_table_info};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
@@ -92,6 +95,15 @@ impl UndropTableProcedure {
         self.data.table_name = Some(dropped_table.table_name.clone());
         self.data.table_route_value = Some(dropped_table.table_route_value.clone());
         self.data.region_wal_options = dropped_table.region_wal_options;
+        ensure!(
+            !is_metric_engine_logical_table(
+                &dropped_table.table_info_value.table_info,
+                self.data.table_route_value()
+            ),
+            error::UnsupportedSnafu {
+                operation: "undropping metric logical tables".to_string()
+            }
+        );
         self.data.table_info = Some(dropped_table.table_info_value.table_info);
         self.data.state = UndropTableState::RestoreMetadata;
         Ok(Status::executing(true))
