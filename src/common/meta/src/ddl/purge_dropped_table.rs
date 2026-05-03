@@ -30,7 +30,10 @@ use table::table_name::TableName;
 use crate::ddl::DdlContext;
 use crate::ddl::drop_table::executor::DropTableExecutor;
 use crate::ddl::undrop_table::open_regions;
-use crate::ddl::utils::{is_metric_engine_logical_table, map_to_procedure_error};
+use crate::ddl::utils::{
+    convert_region_routes_to_detecting_regions, is_metric_engine_logical_table,
+    map_to_procedure_error,
+};
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
@@ -119,6 +122,11 @@ impl PurgeDroppedTableProcedure {
                     false,
                 )
                 .await?;
+            self.context
+                .deregister_failure_detectors(convert_region_routes_to_detecting_regions(
+                    region_routes,
+                ))
+                .await;
         }
         self.data.state = PurgeDroppedTableState::DeleteTombstone;
         Ok(Status::executing(true))

@@ -133,7 +133,10 @@ impl DdlContext {
     ///
     /// Once the regions were dropped, subsequent heartbeats no longer include these regions.
     /// Therefore, we should remove the failure detectors for these dropped regions.
-    async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+    pub(crate) async fn deregister_failure_detectors(
+        &self,
+        detecting_regions: Vec<DetectingRegion>,
+    ) {
         self.region_failure_detector_controller
             .deregister_failure_detectors(detecting_regions)
             .await;

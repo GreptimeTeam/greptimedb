@@ -34,8 +34,8 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::ddl::utils::{
-    add_peer_context_if_needed, is_metric_engine_logical_table, map_to_procedure_error,
-    region_storage_path,
+    add_peer_context_if_needed, convert_region_routes_to_detecting_regions,
+    is_metric_engine_logical_table, map_to_procedure_error, region_storage_path,
 };
 use crate::ddl::{CreateRequestBuilder, DdlContext, build_template_from_raw_table_info};
 use crate::error::{self, Result};
@@ -258,6 +258,9 @@ pub(crate) async fn open_regions(
         .await
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
+    context
+        .register_failure_detectors(convert_region_routes_to_detecting_regions(region_routes))
+        .await;
     Ok(())
 }
 
