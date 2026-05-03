@@ -23,7 +23,7 @@ use catalog::information_extension::DistributedInformationExtension;
 use catalog::information_schema::InformationExtensionRef;
 use catalog::kvbackend::{
     CachedKvBackendBuilder, CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder,
-    MetaKvBackend,
+    new_read_only_meta_kv_backend,
 };
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
@@ -393,13 +393,14 @@ impl StartCommand {
             .await
             .context(error::StartFrontendSnafu)?;
 
+        let readonly_meta_backend = new_read_only_meta_kv_backend(meta_client.clone());
+
         // TODO(discord9): add helper function to ease the creation of cache registry&such
-        let cached_meta_backend =
-            CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone())))
-                .cache_max_capacity(cache_max_capacity)
-                .cache_ttl(cache_ttl)
-                .cache_tti(cache_tti)
-                .build();
+        let cached_meta_backend = CachedKvBackendBuilder::new(readonly_meta_backend.clone())
+            .cache_max_capacity(cache_max_capacity)
+            .cache_ttl(cache_ttl)
+            .cache_tti(cache_tti)
+            .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
 
         // Builds cache registry
@@ -409,7 +410,7 @@ impl StartCommand {
                 .build(),
         );
         let fundamental_cache_registry =
-            build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
+            build_fundamental_cache_registry(readonly_meta_backend.clone());
         let layered_cache_registry = Arc::new(
             with_default_composite_cache_registry(
                 layered_cache_builder.add_cache_registry(fundamental_cache_registry),

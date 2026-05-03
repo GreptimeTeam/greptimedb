@@ -91,6 +91,7 @@ pub struct MetaClientBuilder {
     role: Role,
     enable_heartbeat: bool,
     enable_store: bool,
+    enable_direct_store_writes: bool,
     enable_procedure: bool,
     enable_access_cluster_info: bool,
     region_follower: Option<RegionFollowerClientRef>,
@@ -143,9 +144,26 @@ impl MetaClientBuilder {
         }
     }
 
+    /// Enables the Store client in read-only mode.
+    ///
+    /// Store write methods fail fast by default. Metadata writes from production
+    /// frontend/datanode/flownode clients should go through metasrv procedures.
     pub fn enable_store(self) -> Self {
         Self {
             enable_store: true,
+            ..self
+        }
+    }
+
+    /// Enables direct Store write RPCs for tests, examples, or controlled admin tooling.
+    ///
+    /// This is not a leader-aware production write client: writable Store requests
+    /// are sent to a randomly selected metasrv peer and may receive `NotLeader`.
+    /// Production metadata writes should use metasrv-owned write paths instead.
+    pub fn enable_direct_store_writes_for_admin(self) -> Self {
+        Self {
+            enable_store: true,
+            enable_direct_store_writes: true,
             ..self
         }
     }
@@ -216,9 +234,13 @@ impl MetaClientBuilder {
         let config = self
             .enable_heartbeat
             .then(|| ConfigClient::new(self.id, self.role, mgr.clone()));
-        let store = self
-            .enable_store
-            .then(|| StoreClient::new(self.id, self.role, mgr.clone()));
+        let store = self.enable_store.then(|| {
+            if self.enable_direct_store_writes {
+                StoreClient::new_writable(self.id, self.role, mgr.clone())
+            } else {
+                StoreClient::new(self.id, self.role, mgr.clone())
+            }
+        });
         let procedure = self.enable_procedure.then(|| {
             let mgr = self.ddl_channel_manager.unwrap_or(mgr.clone());
             ProcedureClient::new(
@@ -983,6 +1005,19 @@ mod tests {
         meta_client.start(urls).await.unwrap();
         let res = meta_client.put(PutRequest::default()).await;
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_store_writes_are_read_only_by_default() {
+        let meta_client = MetaClientBuilder::new(0, Role::Datanode)
+            .enable_store()
+            .build();
+
+        let res = meta_client.put(PutRequest::default()).await;
+        assert!(matches!(
+            res.err(),
+            Some(error::Error::ReadOnlyKvBackend { .. })
+        ));
     }
 
     #[tokio::test]

@@ -38,6 +38,7 @@ async fn run() {
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config, None);
     let mut meta_client = MetaClientBuilder::datanode_default_options(id)
+        .enable_direct_store_writes_for_admin()
         .channel_manager(channel_manager)
         .build();
     meta_client.start(&["127.0.0.1:3002"]).await.unwrap();

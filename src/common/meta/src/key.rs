@@ -1660,6 +1660,7 @@ mod tests {
     };
     use crate::kv_backend::KvBackend;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::kv_backend::read_only::ReadOnlyKvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{LeaderState, Region, RegionRoute, region_distribution};
     use crate::rpc::store::{PutRequest, RangeRequest};
@@ -1946,6 +1947,46 @@ mod tests {
             "new-a2"
         );
         assert_eq!(region_routes[0].follower_peers[0].addr, "new-a3");
+    }
+
+    #[tokio::test]
+    async fn test_get_full_table_info_with_read_only_kv_backend() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let writable_manager = TableMetadataManager::new(mem_kv.clone());
+
+        let region_routes = vec![new_test_region_route()];
+        let table_info = new_test_table_info();
+        let table_id = table_info.ident.table_id;
+
+        create_physical_table_metadata(
+            &writable_manager,
+            table_info.clone(),
+            region_routes.clone(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let read_only_kv = Arc::new(ReadOnlyKvBackend::new(mem_kv));
+        let read_only_manager = TableMetadataManager::new(read_only_kv);
+
+        let (remote_table_info, remote_table_route) = read_only_manager
+            .get_full_table_info(table_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            remote_table_info.unwrap().into_inner().table_info,
+            table_info
+        );
+        assert_eq!(
+            remote_table_route
+                .unwrap()
+                .into_inner()
+                .region_routes()
+                .unwrap(),
+            &region_routes
+        );
     }
 
     #[tokio::test]

@@ -98,7 +98,10 @@ impl State {
 
 pub fn become_leader(enable_leader_cache: bool) -> impl FnOnce(&State) -> State {
     move |prev| match prev {
-        State::Leader(leader) => State::Leader(LeaderState { ..leader.clone() }),
+        State::Leader(leader) => State::Leader(LeaderState {
+            enable_leader_cache,
+            ..leader.clone()
+        }),
         State::Follower(follower) => State::Leader(LeaderState {
             server_addr: follower.server_addr.clone(),
             enable_leader_cache,
@@ -141,6 +144,16 @@ mod tests {
             state,
             State::Leader(LeaderState {
                 enable_leader_cache: false,
+                ..
+            })
+        );
+
+        state.next_state(become_leader(true));
+
+        assert_matches!(
+            state,
+            State::Leader(LeaderState {
+                enable_leader_cache: true,
                 ..
             })
         );

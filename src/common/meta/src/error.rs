@@ -155,6 +155,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Trying to write to a read-only kv backend: {}", name))]
+    ReadOnlyKvBackend {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to get procedure state receiver, procedure id: {procedure_id}"))]
     ProcedureStateReceiver {
         procedure_id: ProcedureId,
@@ -1146,7 +1153,7 @@ impl ErrorExt for Error {
             | ColumnIdMismatch { .. }
             | TimestampMismatch { .. } => StatusCode::Unexpected,
 
-            Unsupported { .. } => StatusCode::Unsupported,
+            Unsupported { .. } | ReadOnlyKvBackend { .. } => StatusCode::Unsupported,
             WriteObject { .. } | ReadObject { .. } => StatusCode::StorageUnavailable,
 
             SerdeJson { .. }

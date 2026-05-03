@@ -63,6 +63,7 @@ pub async fn mock_client_by(server_addr: String, channel_manager: ChannelManager
     let id = 2000u64;
     let mut meta_client = MetaClientBuilder::datanode_default_options(id)
         .enable_access_cluster_info()
+        .enable_direct_store_writes_for_admin()
         .channel_manager(channel_manager)
         .build();
     meta_client.start(&[&server_addr]).await.unwrap();
