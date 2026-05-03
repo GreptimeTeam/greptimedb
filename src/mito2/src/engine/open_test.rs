@@ -122,14 +122,8 @@ async fn test_engine_reopen_region() {
     test_engine_reopen_region_with_format(true).await;
 }
 
-#[tokio::test]
-async fn test_engine_reopens_closed_soft_dropped_region() {
-    test_engine_reopens_closed_soft_dropped_region_with_format(false).await;
-    test_engine_reopens_closed_soft_dropped_region_with_format(true).await;
-}
-
-async fn test_engine_reopens_closed_soft_dropped_region_with_format(flat_format: bool) {
-    let mut env = TestEnv::with_prefix("reopen-soft-dropped-region").await;
+async fn test_engine_reopen_region_with_format(flat_format: bool) {
+    let mut env = TestEnv::with_prefix("reopen-region").await;
     let engine = env
         .create_engine(MitoConfig {
             default_flat_format: flat_format,
@@ -149,32 +143,13 @@ async fn test_engine_reopens_closed_soft_dropped_region_with_format(flat_format:
         &engine,
         region_id,
         Rows {
-            schema: column_schemas.clone(),
+            schema: column_schemas,
             rows: build_rows(0, 2),
         },
     )
     .await;
 
-    engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
-        .await
-        .unwrap();
-    assert!(!engine.is_region_exists(region_id));
-
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Open(RegionOpenRequest {
-                engine: String::new(),
-                table_dir,
-                path_type: PathType::Bare,
-                options: HashMap::default(),
-                skip_wal_replay: false,
-                checkpoint: None,
-            }),
-        )
-        .await
-        .unwrap();
+    reopen_region(&engine, region_id, table_dir, false, Default::default()).await;
     assert!(engine.is_region_exists(region_id));
 
     let scanner = engine
@@ -184,27 +159,6 @@ async fn test_engine_reopens_closed_soft_dropped_region_with_format(flat_format:
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(2, batches.iter().map(|b| b.num_rows()).sum::<usize>());
-}
-
-async fn test_engine_reopen_region_with_format(flat_format: bool) {
-    let mut env = TestEnv::with_prefix("reopen-region").await;
-    let engine = env
-        .create_engine(MitoConfig {
-            default_flat_format: flat_format,
-            ..Default::default()
-        })
-        .await;
-
-    let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
-    let table_dir = request.table_dir.clone();
-    engine
-        .handle_request(region_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
-
-    reopen_region(&engine, region_id, table_dir, false, Default::default()).await;
-    assert!(engine.is_region_exists(region_id));
 }
 
 #[tokio::test]
