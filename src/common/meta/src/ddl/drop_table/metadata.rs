@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use common_catalog::format_full_table_name;
-use snafu::OptionExt;
+use snafu::{OptionExt, ensure};
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 
 use crate::ddl::drop_table::DropTableProcedure;
-use crate::ddl::utils::extract_region_wal_options;
+use crate::ddl::utils::{extract_region_wal_options, is_metric_engine_logical_table};
 use crate::error::{self, Result};
+use crate::key::table_route::TableRouteValue;
 
 impl DropTableProcedure {
     /// Fetches the table info and physical table route.
@@ -31,18 +32,34 @@ impl DropTableProcedure {
             .get_physical_table_route(task.table_id)
             .await?;
 
-        if physical_table_id == self.data.table_id() {
-            let table_info_value = self
-                .context
-                .table_metadata_manager
-                .table_info_manager()
-                .get(task.table_id)
-                .await?
-                .with_context(|| error::TableInfoNotFoundSnafu {
-                    table: format_full_table_name(&task.catalog, &task.schema, &task.table),
-                })?
-                .into_inner();
+        let table_info_value = self
+            .context
+            .table_metadata_manager
+            .table_info_manager()
+            .get(task.table_id)
+            .await?
+            .with_context(|| error::TableInfoNotFoundSnafu {
+                table: format_full_table_name(&task.catalog, &task.schema, &task.table),
+            })?
+            .into_inner();
+        let table_route_value = TableRouteValue::new(
+            self.data.table_id(),
+            physical_table_id,
+            physical_table_route_value.region_routes.clone(),
+        );
+        // TODO(hl): support soft-dropping logical tables.
+        ensure!(
+            !(self.context.soft_drop_enabled
+                && is_metric_engine_logical_table(
+                    &table_info_value.table_info,
+                    &table_route_value
+                )),
+            error::UnsupportedSnafu {
+                operation: "soft-dropping metric logical tables".to_string()
+            }
+        );
 
+        if physical_table_id == self.data.table_id() {
             let engine = table_info_value.table_info.meta.engine;
             // rollback only if dropping the metric physical table fails
             self.data.allow_rollback = engine.as_str() == METRIC_ENGINE_NAME;
