@@ -34,6 +34,7 @@ use crate::read::{Batch, BatchReader, BoxedBatchReader, BoxedRecordBatchStream};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 use crate::sst::parquet::format::{PrimaryKeyArray, primary_key_offsets};
+use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::parquet::reader::FlatRowGroupReader;
 
 /// Reader to keep the last row for each time series.
@@ -134,7 +135,7 @@ impl FlatRowGroupLastRowCachedReader {
         file_id: FileId,
         row_group_idx: usize,
         cache_strategy: CacheStrategy,
-        projection: &[usize],
+        read_cols: &ParquetReadColumns,
         reader: FlatRowGroupReader,
     ) -> Self {
         let key = SelectorResultKey {
@@ -145,14 +146,14 @@ impl FlatRowGroupLastRowCachedReader {
 
         if let Some(value) = cache_strategy.get_selector_result(&key) {
             let is_flat = matches!(&value.result, SelectorResult::Flat(_));
-            let schema_matches = value.projection == projection;
+            let schema_matches = value.read_cols == *read_cols;
             if is_flat && schema_matches {
                 Self::new_hit(value)
             } else {
-                Self::new_miss(key, projection, reader, cache_strategy)
+                Self::new_miss(key, read_cols, reader, cache_strategy)
             }
         } else {
-            Self::new_miss(key, projection, reader, cache_strategy)
+            Self::new_miss(key, read_cols, reader, cache_strategy)
         }
     }
 
@@ -171,14 +172,14 @@ impl FlatRowGroupLastRowCachedReader {
 
     fn new_miss(
         key: SelectorResultKey,
-        projection: &[usize],
+        read_cols: &ParquetReadColumns,
         reader: FlatRowGroupReader,
         cache_strategy: CacheStrategy,
     ) -> Self {
         selector_result_cache_miss();
         Self::Miss(FlatRowGroupLastRowReader::new(
             key,
-            projection.to_vec(),
+            read_cols.clone(),
             reader,
             cache_strategy,
         ))
@@ -257,7 +258,7 @@ pub(crate) struct FlatRowGroupLastRowReader {
     selector: FlatLastTimestampSelector,
     yielded_batches: Vec<RecordBatch>,
     cache_strategy: CacheStrategy,
-    projection: Vec<usize>,
+    read_cols: ParquetReadColumns,
     /// Accumulates small selector-output batches before concatenating.
     pending: BatchBuffer,
 }
@@ -265,7 +266,7 @@ pub(crate) struct FlatRowGroupLastRowReader {
 impl FlatRowGroupLastRowReader {
     fn new(
         key: SelectorResultKey,
-        projection: Vec<usize>,
+        read_cols: ParquetReadColumns,
         reader: FlatRowGroupReader,
         cache_strategy: CacheStrategy,
     ) -> Self {
@@ -275,7 +276,7 @@ impl FlatRowGroupLastRowReader {
             selector: FlatLastTimestampSelector::default(),
             yielded_batches: vec![],
             cache_strategy,
-            projection,
+            read_cols,
             pending: BatchBuffer::new(),
         }
     }
@@ -323,7 +324,7 @@ impl FlatRowGroupLastRowReader {
         let batches = std::mem::take(&mut self.yielded_batches);
         let value = Arc::new(SelectorResultValue::new_flat(
             batches,
-            self.projection.clone(),
+            self.read_cols.clone(),
         ));
         self.cache_strategy.put_selector_result(self.key, value);
     }

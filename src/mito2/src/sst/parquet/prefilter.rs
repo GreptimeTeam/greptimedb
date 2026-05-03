@@ -474,7 +474,7 @@ impl PrefilterContextBuilder {
             return None;
         }
 
-        let total_count = read_format.projection_indices().len();
+        let total_count = read_format.parquet_read_columns().root_indices().len();
         let remaining_count = total_count.saturating_sub(prefilter_count);
         if pk_filters.is_none() && prefilter_count >= total_count {
             return None;
@@ -1106,14 +1106,8 @@ mod tests {
 
         let field_0 = metadata.column_by_name("field_0").unwrap().column_id;
         let ts = metadata.time_index_column().column_id;
-        let projected_read_format = FlatReadFormat::new(
-            metadata.clone(),
-            [field_0, ts].into_iter(),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
+        let projected_read_format =
+            FlatReadFormat::new(metadata.clone(), [field_0, ts], None, "test", true).unwrap();
         let projected_parquet_schema = parquet_schema(&projected_read_format);
         let pk_prefilter_plan = build_reader_filter_plan(
             Some(&Predicate::new(vec![col("tag_0").eq(lit("a"))])),

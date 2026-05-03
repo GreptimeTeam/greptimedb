@@ -711,14 +711,9 @@ mod tests {
         ));
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format = FlatReadFormat::new(
-            actual_metadata.clone(),
-            [0, 1, 2, 3].into_iter(),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3], None, "test", false)
+                .unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -799,21 +794,14 @@ mod tests {
             &[1],
         ));
 
-        // Output projection: tag_1, field_2. Read also includes field_3.
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &expected_metadata,
             vec![1, 2],
             vec![1, 2, 3],
         )
         .unwrap();
-        let read_format = FlatReadFormat::new(
-            actual_metadata.clone(),
-            [1, 2, 3].into_iter(),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), [1, 2, 3], None, "test", false).unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -897,14 +885,9 @@ mod tests {
         let expected_metadata = Arc::new(expected_metadata);
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format = FlatReadFormat::new(
-            actual_metadata.clone(),
-            [0, 1, 2, 3].into_iter(),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3], None, "test", false)
+                .unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -991,14 +974,8 @@ mod tests {
         let expected_metadata = Arc::new(expected_metadata);
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format = FlatReadFormat::new(
-            actual_metadata.clone(),
-            [0, 2, 3].into_iter(),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), [0, 2, 3], None, "test", true).unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =

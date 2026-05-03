@@ -25,6 +25,7 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
 use crate::error::Result;
+use crate::read::read_columns::ReadColumns;
 use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
 use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, build_bulk_filter_plan};
@@ -65,26 +66,22 @@ impl BulkIterContext {
     ) -> Result<Self> {
         let codec = build_primary_key_codec(&region_metadata);
 
-        let read_format = if let Some(column_ids) = projection {
-            FlatReadFormat::new(
-                region_metadata.clone(),
-                column_ids.iter().copied(),
-                None,
-                "memtable",
-                skip_auto_convert,
-            )?
+        let read_cols: ReadColumns = if let Some(col_ids) = projection {
+            col_ids.iter().copied().into()
         } else {
-            FlatReadFormat::new(
-                region_metadata.clone(),
-                region_metadata
-                    .column_metadatas
-                    .iter()
-                    .map(|col| col.column_id),
-                None,
-                "memtable",
-                skip_auto_convert,
-            )?
+            region_metadata
+                .column_metadatas
+                .iter()
+                .map(|col| col.column_id)
+                .into()
         };
+        let read_format = FlatReadFormat::new(
+            region_metadata.clone(),
+            read_cols,
+            None,
+            "memtable",
+            skip_auto_convert,
+        )?;
 
         let dyn_filters = predicate
             .as_ref()
