@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use api::v1::region::{
     CloseRequest as PbCloseRegionRequest, DropRequest as PbDropRegionRequest, RegionRequest,
@@ -82,6 +82,8 @@ impl DropTableExecutor {
     /// Checks whether table exists.
     /// - Early returns if table not exists and `drop_if_exists` is `true`.
     /// - Throws an error if table not exists and `drop_if_exists` is `false`.
+    /// - Rejects dropping a recreated live table while an older tombstone still owns the same
+    ///   fully qualified name.
     pub async fn on_prepare(&self, ctx: &DdlContext) -> Result<Control<()>> {
         let table_ref = self.table.table_ref();
 
@@ -105,6 +107,21 @@ impl DropTableExecutor {
                 table_name: table_ref.to_string()
             }
         );
+
+        if ctx.soft_drop_enabled
+            && let Some(dropped_table) = ctx
+                .table_metadata_manager
+                .get_dropped_table(&self.table)
+                .await?
+            && dropped_table.table_id != self.table_id
+        {
+            return error::TableNameTombstoneConflictSnafu {
+                table_name: table_ref.to_string(),
+                existing_table_id: dropped_table.table_id,
+                dropping_table_id: self.table_id,
+            }
+            .fail();
+        }
 
         Ok(Control::Continue(()))
     }
@@ -211,7 +228,17 @@ impl DropTableExecutor {
         Ok(())
     }
 
-    /// Drops region on datanode.
+    /// Drops regions on datanodes.
+    ///
+    /// Arguments:
+    /// - `node_manager`: resolves datanode clients from peers in `region_routes`.
+    /// - `leader_region_registry`: tracks in-flight leader region operations.
+    /// - `region_routes`: table region placement; leaders receive drop requests and followers
+    ///   receive close requests.
+    /// - `fast_path`: forwards to datanode drop requests to skip extra cleanup when safe.
+    /// - `force`: forwards to datanode drop requests to allow forced region removal.
+    /// - `partial_drop`: forwards to datanode drop requests for partial table/region drops.
+    #[allow(clippy::too_many_arguments)]
     pub async fn on_drop_regions(
         &self,
         node_manager: &NodeManagerRef,
@@ -313,6 +340,64 @@ impl DropTableExecutor {
         }
 
         // Deletes the leader region from registry.
+        let region_ids = operating_leader_regions(region_routes);
+        leader_region_registry.batch_delete(region_ids.into_iter().map(|(region_id, _)| region_id));
+
+        Ok(())
+    }
+
+    /// Closes all table regions on datanodes without deleting region files or metadata tombstones.
+    pub async fn on_close_regions(
+        &self,
+        node_manager: &NodeManagerRef,
+        leader_region_registry: &LeaderRegionRegistryRef,
+        region_routes: &[RegionRoute],
+    ) -> Result<()> {
+        let table_id = self.table_id;
+        let mut seen_peer_ids = HashSet::new();
+        let peers = find_leaders(region_routes)
+            .into_iter()
+            .chain(find_followers(region_routes))
+            .filter(|peer| seen_peer_ids.insert(peer.id));
+        let mut close_region_tasks = Vec::new();
+
+        for datanode in peers {
+            let requester = node_manager.datanode(&datanode).await;
+            let region_ids = find_leader_regions(region_routes, &datanode)
+                .into_iter()
+                .chain(find_follower_regions(region_routes, &datanode))
+                .map(|region_number| RegionId::new(table_id, region_number));
+
+            for region_id in region_ids {
+                debug!("Closing region {region_id} on Datanode {datanode:?}");
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader {
+                        tracing_context: TracingContext::from_current_span().to_w3c(),
+                        ..Default::default()
+                    }),
+                    body: Some(region_request::Body::Close(PbCloseRegionRequest {
+                        region_id: region_id.as_u64(),
+                    })),
+                };
+
+                let datanode = datanode.clone();
+                let requester = requester.clone();
+                close_region_tasks.push(async move {
+                    if let Err(err) = requester.handle(request).await
+                        && err.status_code() != StatusCode::RegionNotFound
+                    {
+                        return Err(add_peer_context_if_needed(datanode)(err));
+                    }
+                    Ok(())
+                });
+            }
+        }
+
+        join_all(close_region_tasks)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
         let region_ids = operating_leader_regions(region_routes);
         leader_region_registry.batch_delete(region_ids.into_iter().map(|(region_id, _)| region_id));
 

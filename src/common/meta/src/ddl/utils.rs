@@ -39,7 +39,7 @@ use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
 use store_api::storage::{RegionId, RegionNumber};
-use table::metadata::TableId;
+use table::metadata::{TableId, TableInfo};
 use table::table_reference::TableReference;
 
 use crate::ddl::{DdlContext, DetectingRegion};
@@ -66,6 +66,14 @@ pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error
         }
         err
     }
+}
+
+pub(crate) fn is_metric_engine_logical_table(
+    table_info: &TableInfo,
+    table_route_value: &TableRouteValue,
+) -> bool {
+    table_info.meta.engine == METRIC_ENGINE
+        && matches!(table_route_value, TableRouteValue::Logical(_))
 }
 
 /// Maps the error to the corresponding procedure error.
