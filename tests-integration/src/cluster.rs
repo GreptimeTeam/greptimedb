@@ -26,7 +26,9 @@ use cache::{
     with_default_composite_cache_registry,
 };
 use catalog::information_extension::DistributedInformationExtension;
-use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
+use catalog::kvbackend::{
+    CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, new_read_only_meta_kv_backend,
+};
 use catalog::process_manager::ProcessManager;
 use client::Client;
 use client::client_manager::NodeClients;
@@ -285,6 +287,9 @@ impl GreptimeDbClusterBuilder {
             ..Default::default()
         };
 
+        test_util::prepare_another_catalog_and_schema_with_kv_backend(self.kv_backend.clone())
+            .await;
+
         let metasrv = meta_srv::mocks::mock(
             opt,
             self.kv_backend.clone(),
@@ -306,8 +311,6 @@ impl GreptimeDbClusterBuilder {
         let mut frontend = self
             .build_frontend(metasrv.clone(), datanode_clients, start_frontend_servers)
             .await;
-
-        test_util::prepare_another_catalog_and_schema(&frontend.instance).await;
 
         frontend.start().await.unwrap();
 
@@ -422,9 +425,7 @@ impl GreptimeDbClusterBuilder {
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
-        let meta_backend = Arc::new(MetaKvBackend {
-            client: meta_client.clone(),
-        });
+        let meta_backend = new_read_only_meta_kv_backend(meta_client.clone());
 
         let layered_cache_registry = Arc::new(
             LayeredCacheRegistryBuilder::default()
@@ -456,9 +457,9 @@ impl GreptimeDbClusterBuilder {
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
-        let cached_meta_backend = Arc::new(
-            CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone()))).build(),
-        );
+        let readonly_meta_backend = new_read_only_meta_kv_backend(meta_client.clone());
+        let cached_meta_backend =
+            Arc::new(CachedKvBackendBuilder::new(readonly_meta_backend.clone()).build());
 
         let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
             CacheRegistryBuilder::default()
@@ -466,7 +467,7 @@ impl GreptimeDbClusterBuilder {
                 .build(),
         );
         let fundamental_cache_registry =
-            build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
+            build_fundamental_cache_registry(readonly_meta_backend.clone());
         let cache_registry = Arc::new(
             with_default_composite_cache_registry(
                 layered_cache_builder.add_cache_registry(fundamental_cache_registry),

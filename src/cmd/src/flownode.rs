@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
-use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
+use catalog::kvbackend::{
+    CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, new_read_only_meta_kv_backend,
+};
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -46,8 +48,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
-    MissingConfigSnafu, OtherSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
+    BuildCacheRegistrySnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu, MissingConfigSnafu,
+    OtherSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
@@ -300,13 +302,14 @@ impl StartCommand {
         let cache_ttl = meta_config.metadata_cache_ttl;
         let cache_tti = meta_config.metadata_cache_tti;
 
+        let readonly_meta_backend = new_read_only_meta_kv_backend(meta_client.clone());
+
         // TODO(discord9): add helper function to ease the creation of cache registry&such
-        let cached_meta_backend =
-            CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone())))
-                .cache_max_capacity(cache_max_capacity)
-                .cache_ttl(cache_ttl)
-                .cache_tti(cache_tti)
-                .build();
+        let cached_meta_backend = CachedKvBackendBuilder::new(readonly_meta_backend.clone())
+            .cache_max_capacity(cache_max_capacity)
+            .cache_ttl(cache_ttl)
+            .cache_tti(cache_tti)
+            .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
 
         // Builds cache registry
@@ -316,7 +319,7 @@ impl StartCommand {
                 .build(),
         );
         let fundamental_cache_registry =
-            build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
+            build_fundamental_cache_registry(readonly_meta_backend.clone());
         let layered_cache_registry = Arc::new(
             with_default_composite_cache_registry(
                 layered_cache_builder.add_cache_registry(fundamental_cache_registry),
@@ -346,10 +349,6 @@ impl StartCommand {
 
         let table_metadata_manager =
             Arc::new(TableMetadataManager::new(cached_meta_backend.clone()));
-        table_metadata_manager
-            .init()
-            .await
-            .context(InitMetadataSnafu)?;
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),

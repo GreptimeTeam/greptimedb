@@ -803,6 +803,14 @@ impl Metasrv {
         &self.kv_backend
     }
 
+    pub(crate) fn leader_cached_kv_backend(&self) -> &Arc<LeaderCachedKvBackend> {
+        &self.leader_cached_kv_backend
+    }
+
+    pub(crate) fn is_leader_cache_ready(&self) -> bool {
+        self.state.read().unwrap().enable_leader_cache()
+    }
+
     pub fn meta_peer_client(&self) -> &MetaPeerClientRef {
         &self.meta_peer_client
     }

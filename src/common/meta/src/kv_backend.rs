@@ -33,6 +33,7 @@ pub mod etcd;
 pub mod memory;
 #[cfg(any(feature = "mysql_kvbackend", feature = "pg_kvbackend"))]
 pub mod rds;
+pub mod read_only;
 pub mod test;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;

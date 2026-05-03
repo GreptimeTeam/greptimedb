@@ -144,8 +144,9 @@ impl ErrorExt for Error {
             | Error::CreateHeartbeatStream { .. }
             | Error::CreateChannel { .. }
             | Error::RetryTimesExceeded { .. }
-            | Error::ReadOnlyKvBackend { .. }
             | Error::ConvertMetaConfig { .. } => StatusCode::Internal,
+
+            Error::ReadOnlyKvBackend { .. } => StatusCode::Unsupported,
 
             Error::MetaServer { code, .. } => *code,
 
