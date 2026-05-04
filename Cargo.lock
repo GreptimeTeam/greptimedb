@@ -11071,6 +11071,7 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-expr-common",
  "datafusion-functions",
  "datafusion-optimizer",
  "datafusion-physical-expr",
