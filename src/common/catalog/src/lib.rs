@@ -74,9 +74,9 @@ pub fn parse_catalog_and_schema_from_db_string(db: &str) -> (String, String) {
 pub fn parse_optional_catalog_and_schema_from_db_string(db: &str) -> (Option<String>, String) {
     let parts = db.splitn(2, '-').collect::<Vec<&str>>();
     if parts.len() == 2 {
-        (Some(parts[0].to_lowercase()), parts[1].to_lowercase())
+        (Some(parts[0].to_string()), parts[1].to_string())
     } else {
-        (None, db.to_lowercase())
+        (None, db.to_string())
     }
 }
 
@@ -118,7 +118,7 @@ mod tests {
         );
 
         assert_eq!(
-            (Some("catalog".to_string()), "schema".to_string()),
+            (Some("CATALOG".to_string()), "SCHEMA".to_string()),
             parse_optional_catalog_and_schema_from_db_string("CATALOG-SCHEMA")
         );
 
