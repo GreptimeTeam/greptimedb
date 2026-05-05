@@ -67,6 +67,8 @@ pub struct StandaloneOptions {
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
+    /// Environment variable keys to read and report in heartbeat messages.
+    pub heartbeat_env_vars: Vec<String>,
 }
 
 impl Default for StandaloneOptions {
@@ -102,13 +104,14 @@ impl Default for StandaloneOptions {
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
+            heartbeat_env_vars: vec![],
         }
     }
 }
 
 impl Configurable for StandaloneOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["wal.broker_endpoints"])
+        Some(&["heartbeat_env_vars", "wal.broker_endpoints"])
     }
 }
 
@@ -141,6 +144,7 @@ impl StandaloneOptions {
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
             slow_query: cloned_opts.slow_query,
+            heartbeat_env_vars: cloned_opts.heartbeat_env_vars.clone(),
             ..Default::default()
         }
     }
@@ -157,6 +161,7 @@ impl StandaloneOptions {
             init_regions_in_background: cloned_opts.init_regions_in_background,
             init_regions_parallelism: cloned_opts.init_regions_parallelism,
             query: cloned_opts.query,
+            heartbeat_env_vars: cloned_opts.heartbeat_env_vars,
             ..Default::default()
         }
     }

@@ -16,6 +16,7 @@ use api::v1::meta::{HeartbeatRequest, NodeInfo as PbNodeInfo, Role};
 use common_meta::cluster::{
     DatanodeStatus, FlownodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus,
 };
+use common_meta::datanode::EnvVars;
 use common_meta::heartbeat::utils::get_flownode_workloads;
 use common_meta::peer::Peer;
 use common_meta::rpc::store::PutRequest;
@@ -46,6 +47,11 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             return Ok(HandleControl::Continue);
         };
 
+        let env_vars = EnvVars::from_extensions(&req.extensions)
+            .unwrap_or_default()
+            .map(|e| e.vars)
+            .unwrap_or_default();
+
         let value = NodeInfo {
             peer,
             last_activity_ts: common_time::util::current_time_millis(),
@@ -58,6 +64,7 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             cpu_usage_millicores: info.cpu_usage_millicores,
             memory_usage_bytes: info.memory_usage_bytes,
             hostname: info.hostname,
+            env_vars,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -85,6 +92,11 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
         };
         let flownode_workloads = get_flownode_workloads(req.node_workloads.as_ref());
 
+        let env_vars = EnvVars::from_extensions(&req.extensions)
+            .unwrap_or_default()
+            .map(|e| e.vars)
+            .unwrap_or_default();
+
         let value = NodeInfo {
             peer,
             last_activity_ts: common_time::util::current_time_millis(),
@@ -99,6 +111,7 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
             cpu_usage_millicores: info.cpu_usage_millicores,
             memory_usage_bytes: info.memory_usage_bytes,
             hostname: info.hostname,
+            env_vars,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -137,6 +150,11 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             .count();
         let follower_regions = stat.region_stats.len() - leader_regions;
 
+        let env_vars = EnvVars::from_extensions(&req.extensions)
+            .unwrap_or_default()
+            .map(|e| e.vars)
+            .unwrap_or_default();
+
         let value = NodeInfo {
             peer,
             last_activity_ts: stat.timestamp_millis,
@@ -155,6 +173,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             cpu_usage_millicores: info.cpu_usage_millicores,
             memory_usage_bytes: info.memory_usage_bytes,
             hostname: info.hostname,
+            env_vars,
         };
 
         put_into_memory_store(ctx, key, value).await?;

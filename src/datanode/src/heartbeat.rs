@@ -21,7 +21,7 @@ use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
 use common_base::Plugins;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::datanode::REGION_STATISTIC_KEY;
+use common_meta::datanode::{EnvVars, REGION_STATISTIC_KEY};
 use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -66,6 +66,7 @@ pub struct HeartbeatTask {
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     region_alive_keeper: Arc<RegionAliveKeeper>,
     resource_stat: ResourceStatRef,
+    env_vars: EnvVars,
 }
 
 impl Drop for HeartbeatTask {
@@ -114,6 +115,7 @@ impl HeartbeatTask {
             resp_handler_executor,
             region_alive_keeper,
             resource_stat,
+            env_vars: EnvVars::from_config(&opts.heartbeat_env_vars),
         })
     }
 
@@ -258,6 +260,7 @@ impl HeartbeatTask {
             .mito_engine()
             .context(RegionEngineNotFoundSnafu { name: "mito" })?
             .gc_limiter();
+        let env_vars = self.env_vars.clone();
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -303,6 +306,7 @@ impl HeartbeatTask {
                                     let mut extensions = heartbeat_request.extensions.clone();
                                     let gc_stat = gc_limiter.gc_stat();
                                     gc_stat.into_extensions(&mut extensions);
+                                    env_vars.into_extensions(&mut extensions);
 
                                     let req = HeartbeatRequest {
                                         mailbox_message: Some(message),
@@ -331,6 +335,7 @@ impl HeartbeatTask {
                         let mut extensions = heartbeat_request.extensions.clone();
                         let gc_stat = gc_limiter.gc_stat();
                         gc_stat.into_extensions(&mut extensions);
+                        env_vars.into_extensions(&mut extensions);
 
                         let mut req = HeartbeatRequest {
                             region_stats,

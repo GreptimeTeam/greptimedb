@@ -460,6 +460,7 @@ impl ClusterInfo for MetaClient {
                             cpu_usage_millicores: node_info.cpu_usage_millicores,
                             memory_usage_bytes: node_info.memory_usage_bytes,
                             hostname: node_info.hostname,
+                            env_vars: Default::default(),
                         }
                     } else {
                         // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
@@ -475,6 +476,7 @@ impl ClusterInfo for MetaClient {
                             cpu_usage_millicores: 0,
                             memory_usage_bytes: 0,
                             hostname: "".to_string(),
+                            env_vars: Default::default(),
                         }
                     }
                 })
@@ -492,6 +494,7 @@ impl ClusterInfo for MetaClient {
                             cpu_usage_millicores: node_info.cpu_usage_millicores,
                             memory_usage_bytes: node_info.memory_usage_bytes,
                             hostname: node_info.hostname,
+                            env_vars: Default::default(),
                         }
                     } else {
                         // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
@@ -507,6 +510,7 @@ impl ClusterInfo for MetaClient {
                             cpu_usage_millicores: 0,
                             memory_usage_bytes: 0,
                             hostname: "".to_string(),
+                            env_vars: Default::default(),
                         }
                     }
                 }))

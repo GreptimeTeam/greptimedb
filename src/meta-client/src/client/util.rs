@@ -169,6 +169,7 @@ mod tests {
             cpu_usage_millicores: 0,
             memory_usage_bytes: 0,
             hostname: String::new(),
+            env_vars: Default::default(),
         }
     }
 
