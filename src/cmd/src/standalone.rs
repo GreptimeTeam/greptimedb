@@ -396,8 +396,10 @@ impl StartCommand {
             .context(error::CreateDirSnafu { dir: data_home })?;
 
         let metadata_dir = metadata_store_dir(data_home);
-        let kv_backend = standalone::build_metadata_kvbackend(metadata_dir, opts.metadata_store)
-            .context(error::BuildMetadataKvbackendSnafu)?;
+        let kv_backend = creator
+            .metadata_kv_backend_creator
+            .create(metadata_dir, &opts)
+            .await?;
         let procedure_manager =
             standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);
 
@@ -666,6 +668,26 @@ impl NodeManagerCreator for DefaultNodeManagerCreator {
     }
 }
 
+/// Customizes how standalone opens its metadata KV backend.
+///
+/// The default implementation preserves the built-in raft-engine path. Other
+/// callers can provide a custom implementation without changing standalone
+/// configuration types.
+#[async_trait]
+pub trait MetadataKvBackendCreator: Send + Sync {
+    async fn create(&self, metadata_dir: String, opts: &StandaloneOptions) -> Result<KvBackendRef>;
+}
+
+pub struct DefaultMetadataKvBackendCreator;
+
+#[async_trait]
+impl MetadataKvBackendCreator for DefaultMetadataKvBackendCreator {
+    async fn create(&self, metadata_dir: String, opts: &StandaloneOptions) -> Result<KvBackendRef> {
+        standalone::build_metadata_kvbackend(metadata_dir, opts.metadata_store)
+            .context(error::BuildMetadataKvbackendSnafu)
+    }
+}
+
 pub trait TableIdAllocatorCreator {
     fn create(&self, kv_backend: &KvBackendRef) -> Arc<Sequence>;
 }
@@ -711,6 +733,9 @@ impl ProcedureExecutorCreator for DefaultProcedureExecutorCreator {
 /// `InstanceCreator` is used for grouping various component creators for building the
 /// Standalone instance, suitable for customizing how the instance can be built.
 pub struct InstanceCreator {
+    /// Hook for replacing metadata KV construction while reusing the rest of the
+    /// standalone build flow.
+    metadata_kv_backend_creator: Box<dyn MetadataKvBackendCreator>,
     node_manager_creator: Box<dyn NodeManagerCreator>,
     table_id_allocator_creator: Box<dyn TableIdAllocatorCreator>,
     procedure_executor_creator: Box<dyn ProcedureExecutorCreator>,
@@ -723,16 +748,26 @@ impl InstanceCreator {
         procedure_executor_creator: Box<dyn ProcedureExecutorCreator>,
     ) -> Self {
         Self {
+            metadata_kv_backend_creator: Box::new(DefaultMetadataKvBackendCreator),
             node_manager_creator,
             table_id_allocator_creator,
             procedure_executor_creator,
         }
+    }
+
+    pub fn with_metadata_kv_backend_creator(
+        mut self,
+        metadata_kv_backend_creator: Box<dyn MetadataKvBackendCreator>,
+    ) -> Self {
+        self.metadata_kv_backend_creator = metadata_kv_backend_creator;
+        self
     }
 }
 
 impl Default for InstanceCreator {
     fn default() -> Self {
         Self {
+            metadata_kv_backend_creator: Box::new(DefaultMetadataKvBackendCreator),
             node_manager_creator: Box::new(DefaultNodeManagerCreator),
             table_id_allocator_creator: Box::new(DefaultTableIdAllocatorCreator),
             procedure_executor_creator: Box::new(DefaultProcedureExecutorCreator),
