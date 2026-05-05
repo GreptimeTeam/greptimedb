@@ -260,7 +260,8 @@ impl HeartbeatTask {
             .mito_engine()
             .context(RegionEngineNotFoundSnafu { name: "mito" })?
             .gc_limiter();
-        let env_vars = self.env_vars.clone();
+        let mut env_var_extensions = std::collections::HashMap::new();
+        self.env_vars.into_extensions(&mut env_var_extensions);
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -303,10 +304,9 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
-                                    let mut extensions = heartbeat_request.extensions.clone();
+                                    let mut extensions = env_var_extensions.clone();
                                     let gc_stat = gc_limiter.gc_stat();
                                     gc_stat.into_extensions(&mut extensions);
-                                    env_vars.into_extensions(&mut extensions);
 
                                     let req = HeartbeatRequest {
                                         mailbox_message: Some(message),
@@ -332,10 +332,9 @@ impl HeartbeatTask {
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
 
-                        let mut extensions = heartbeat_request.extensions.clone();
+                        let mut extensions = env_var_extensions.clone();
                         let gc_stat = gc_limiter.gc_stat();
                         gc_stat.into_extensions(&mut extensions);
-                        env_vars.into_extensions(&mut extensions);
 
                         let mut req = HeartbeatRequest {
                             region_stats,

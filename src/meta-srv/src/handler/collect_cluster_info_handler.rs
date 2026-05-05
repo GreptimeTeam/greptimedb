@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::meta::{HeartbeatRequest, NodeInfo as PbNodeInfo, Role};
 use common_meta::cluster::{
     DatanodeStatus, FlownodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus,
@@ -43,14 +45,9 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer, info)) = extract_base_info(req) else {
+        let Some((key, peer, info, env_vars)) = extract_base_info(req) else {
             return Ok(HandleControl::Continue);
         };
-
-        let env_vars = EnvVars::from_extensions(&req.extensions)
-            .unwrap_or_default()
-            .map(|e| e.vars)
-            .unwrap_or_default();
 
         let value = NodeInfo {
             peer,
@@ -87,15 +84,10 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer, info)) = extract_base_info(req) else {
+        let Some((key, peer, info, env_vars)) = extract_base_info(req) else {
             return Ok(HandleControl::Continue);
         };
         let flownode_workloads = get_flownode_workloads(req.node_workloads.as_ref());
-
-        let env_vars = EnvVars::from_extensions(&req.extensions)
-            .unwrap_or_default()
-            .map(|e| e.vars)
-            .unwrap_or_default();
 
         let value = NodeInfo {
             peer,
@@ -135,7 +127,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer, info)) = extract_base_info(req) else {
+        let Some((key, peer, info, env_vars)) = extract_base_info(req) else {
             return Ok(HandleControl::Continue);
         };
 
@@ -149,11 +141,6 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             .filter(|s| matches!(s.role, RegionRole::Leader | RegionRole::StagingLeader))
             .count();
         let follower_regions = stat.region_stats.len() - leader_regions;
-
-        let env_vars = EnvVars::from_extensions(&req.extensions)
-            .unwrap_or_default()
-            .map(|e| e.vars)
-            .unwrap_or_default();
 
         let value = NodeInfo {
             peer,
@@ -182,7 +169,9 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
     }
 }
 
-fn extract_base_info(request: &HeartbeatRequest) -> Option<(NodeInfoKey, Peer, PbNodeInfo)> {
+fn extract_base_info(
+    request: &HeartbeatRequest,
+) -> Option<(NodeInfoKey, Peer, PbNodeInfo, HashMap<String, String>)> {
     let HeartbeatRequest { peer, info, .. } = request;
     let key = NodeInfoKey::new(request)?;
     let Some(peer) = &peer else {
@@ -192,7 +181,12 @@ fn extract_base_info(request: &HeartbeatRequest) -> Option<(NodeInfoKey, Peer, P
         return None;
     };
 
-    Some((key, peer.clone(), info.clone()))
+    let env_vars = EnvVars::from_extensions(&request.extensions)
+        .unwrap_or_default()
+        .map(|e| e.vars)
+        .unwrap_or_default();
+
+    Some((key, peer.clone(), info.clone(), env_vars))
 }
 
 async fn put_into_memory_store(ctx: &mut Context, key: NodeInfoKey, value: NodeInfo) -> Result<()> {
