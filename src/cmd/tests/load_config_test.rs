@@ -313,6 +313,32 @@ fn test_load_standalone_example_config() {
 }
 
 #[test]
+fn test_load_standalone_user_provider_from_config() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    let user_provider = "static_user_provider:file:/tmp/greptimedb-users";
+    std::fs::write(
+        config.path(),
+        format!("user_provider = \"{user_provider}\"\n"),
+    )
+    .unwrap();
+
+    let options =
+        GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+
+    assert_eq!(
+        options.component.user_provider.as_deref(),
+        Some(user_provider)
+    );
+
+    let frontend_options = options.component.frontend_options();
+    assert_eq!(
+        frontend_options.user_provider.as_deref(),
+        Some(user_provider)
+    );
+}
+
+#[test]
 fn test_load_heartbeat_env_vars_from_env() {
     let env_prefix = "HEARTBEAT_ENV_VARS_UT";
     let env_key = [env_prefix, "HEARTBEAT_ENV_VARS"].join(ENV_VAR_SEP);
