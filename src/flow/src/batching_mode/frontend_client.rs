@@ -196,6 +196,9 @@ impl DatabaseWithPeer {
 }
 
 impl FrontendClient {
+    // TODO: support more fine-grained load balancing strategies for frontend
+    // selection, such as AZ (availability zone) awareness, to prefer frontends
+    // in the same zone as the flownode and reduce cross-AZ latency.
     /// scan for available frontend from metadata
     pub(crate) async fn scan_for_frontend(&self) -> Result<Vec<Peer>, Error> {
         let Self::Distributed { meta_client, .. } = self else {
@@ -314,12 +317,7 @@ impl FrontendClient {
                         database_client
                             .handler
                             .lock()
-                            .map_err(|e| {
-                                UnexpectedSnafu {
-                                    reason: format!("Failed to lock database client: {e}"),
-                                }
-                                .build()
-                            })?
+                            .unwrap()
                             .as_ref()
                             .context(UnexpectedSnafu {
                                 reason: "Standalone's frontend instance is not set",
@@ -392,12 +390,7 @@ impl FrontendClient {
                         database_client
                             .handler
                             .lock()
-                            .map_err(|e| {
-                                UnexpectedSnafu {
-                                    reason: format!("Failed to lock database client: {e}"),
-                                }
-                                .build()
-                            })?
+                            .unwrap()
                             .as_ref()
                             .context(UnexpectedSnafu {
                                 reason: "Standalone's frontend instance is not set",

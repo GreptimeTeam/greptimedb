@@ -352,10 +352,15 @@ where
                             };
                         }
                         FlightMessage::AffectedRows { .. } | FlightMessage::Schema(_) => {
-                            yield IllegalFlightMessagesSnafu {reason: format!("A Schema message must be succeeded exclusively by a set of RecordBatch messages, flight_message: {:?}", flight_message)}
-                                    .fail()
-                                    .map_err(BoxedError::new)
-                                    .context(ExternalSnafu);
+                            yield IllegalFlightMessagesSnafu {
+                                reason: format!(
+                                    "A Schema message must be succeeded exclusively by a set of RecordBatch messages, flight_message: {:?}",
+                                    flight_message
+                                )
+                            }
+                            .fail()
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu);
                             break;
                         }
                     }

@@ -272,14 +272,29 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
     finalize_region_watermarks(merged)
 }
 
+/// Merge a batch of per-region watermark entries into the global merged state.
+///
+/// # Merge strategy: correctness over maximum
+///
+/// Flow checkpoint advancement requires provable watermarks so that incremental
+/// queries never miss rows. This merge uses correctness-first semantics:
+///
+/// | Current state  | New entry       | Result            | Rationale |
+/// |---------------|-----------------|-------------------|-----------|
+/// | Participated  | Proved(seq)     | Proved(seq)       | First proof for the region |
+/// | Participated  | Unproved         | Unproved          | One branch cannot prove → region is unsafe |
+/// | Proved(old)   | Proved(same)    | Proved(old)       | Convergent proof, keep |
+/// | Proved(old)   | Proved(diff)    | Conflict([old,diff]) | Ambiguous → degrade to unproved |
+/// | Unproved      | _anything_      | Unproved          | Already unsafe, stays unsafe |
+/// | Conflict{..}  | Proved(seq)     | Conflict[...seq]  | Record for diagnostics |
+///
+/// Using `max(old, new)` would be incorrect because it could advance a
+/// checkpoint past rows that a competing MergeScan sub-stage has not yet
+/// scanned, causing Flow to skip data.
 fn merge_region_watermark_entries(
     merged: &mut BTreeMap<u64, MergeState>,
     entries: impl IntoIterator<Item = RegionWatermarkEntry>,
 ) {
-    // Merge by correctness rather than by maximum/minimum sequence. Any
-    // explicit unproved entry (`None`) vetoes a proved watermark, and
-    // conflicting proofs degrade the region back to unproved so Flow cannot
-    // advance checkpoints from ambiguous terminal metrics.
     for entry in entries {
         merged
             .entry(entry.region_id)
