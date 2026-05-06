@@ -153,6 +153,7 @@ macro_rules! http_tests {
 
                 test_influxdb_write,
                 test_influxdb_write_with_hints,
+                test_influxdb_write_with_append_mode_hint,
                 test_http_memory_limit,
             );
         )*
@@ -3770,6 +3771,42 @@ pub async fn test_influxdb_write_with_hints(storage_type: StorageType) {
     assert!(
         resp.contains("skip_wal = 'true'"),
         "expected skip_wal = 'true' in SHOW CREATE TABLE output, got: {resp}"
+    );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_influxdb_write_with_append_mode_hint(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(
+        storage_type,
+        "test_influxdb_write_with_append_mode_hint",
+    )
+    .await;
+
+    let client = TestClient::new(app).await;
+
+    let result = client
+        .post("/v1/influxdb/write?db=public")
+        .header("x-greptime-hint-append_mode", "true")
+        .body("append_mode_table,host=host1 cpu=1.2 1664370459457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+
+    let res = client
+        .get("/v1/sql?sql=show create table append_mode_table")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+    assert!(
+        resp.contains("append_mode = 'true'"),
+        "expected append_mode = 'true' in SHOW CREATE TABLE output, got: {resp}"
+    );
+    assert!(
+        resp.contains("merge_mode = 'last_row'"),
+        "expected merge_mode = 'last_row' in SHOW CREATE TABLE output, got: {resp}"
     );
 
     guard.remove_all().await;
