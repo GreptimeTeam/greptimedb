@@ -11093,6 +11093,7 @@ dependencies = [
  "datafusion-physical-expr",
  "datafusion-sql",
  "datatypes",
+ "either",
  "fastrand",
  "futures",
  "futures-util",

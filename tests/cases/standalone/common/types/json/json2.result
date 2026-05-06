@@ -62,6 +62,36 @@ values (9, '{"a": {"x": true}, "c": "s9", "d": [{"e": {"g": -0.9}}]}'),
 
 Affected Rows: 2
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+explain select j.a.b from json2_table;
+
++---------------+---------------------------------------------------+
+| plan_type     | plan                                              |
++---------------+---------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[   |
+|               | Projection: json_get(json2_table.j, Utf8("a.b"))  |
+|               |   TableScan: json2_table                          |
+|               | ]]                                                |
+| physical_plan | CooperativeExec                                   |
+|               |   MergeScanExec: REDACTED
+|               |                                                   |
++---------------+---------------------------------------------------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+explain select j.a.x::bool from json2_table;
+
++---------------+------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                               |
++---------------+------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                    |
+|               | Projection: json_get(json2_table.j, Utf8("a.x"), Boolean(NULL)) AS arrow_cast(json_get(json2_table.j,Utf8("a.x")),Utf8("Boolean")) |
+|               |   TableScan: json2_table                                                                                                           |
+|               | ]]                                                                                                                                 |
+| physical_plan | CooperativeExec                                                                                                                    |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                    |
++---------------+------------------------------------------------------------------------------------------------------------------------------------+
+
 drop table json2_table;
 
 Affected Rows: 0
