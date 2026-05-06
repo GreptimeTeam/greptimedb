@@ -38,7 +38,7 @@ use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CommentObjectType as PbCommentObjectType, CommentOnExpr,
     CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropDatabaseExpr,
     DropFlowExpr, DropTableExpr, DropViewExpr, EvalInterval, ExpireAfter, Option as PbOption,
-    PurgeDroppedTableExpr, QueryContext as PbQueryContext, TruncateTableExpr, UndropTableExpr,
+    QueryContext as PbQueryContext, TruncateTableExpr,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose;
@@ -254,7 +254,7 @@ impl TryFrom<Task> for DdlTask {
                 Ok(DdlTask::UndropTable(undrop_table.try_into()?))
             }
             Task::PurgeDroppedTableTask(purge_dropped_table) => {
-                Ok(DdlTask::PurgeDroppedTable(purge_dropped_table.try_into()?))
+                Ok(DdlTask::PurgeDroppedTable(purge_dropped_table.into()))
             }
             Task::AlterTableTask(alter_table) => Ok(DdlTask::AlterTable(alter_table.try_into()?)),
             Task::TruncateTableTask(truncate_table) => {
@@ -685,15 +685,11 @@ impl TryFrom<PbUndropTableTask> for UndropTableTask {
     type Error = error::Error;
 
     fn try_from(pb: PbUndropTableTask) -> Result<Self> {
-        let undrop_table = pb.undrop_table.context(error::InvalidProtoMsgSnafu {
-            err_msg: "expected undrop table",
-        })?;
-
         Ok(Self {
-            catalog: undrop_table.catalog_name,
-            schema: undrop_table.schema_name,
-            table: undrop_table.table_name,
-            table_id: undrop_table
+            catalog: pb.catalog_name,
+            schema: pb.schema_name,
+            table: pb.table_name,
+            table_id: pb
                 .table_id
                 .context(error::InvalidProtoMsgSnafu {
                     err_msg: "expected table_id",
@@ -706,44 +702,32 @@ impl TryFrom<PbUndropTableTask> for UndropTableTask {
 impl From<UndropTableTask> for PbUndropTableTask {
     fn from(task: UndropTableTask) -> Self {
         Self {
-            undrop_table: Some(UndropTableExpr {
-                catalog_name: task.catalog,
-                schema_name: task.schema,
-                table_name: task.table,
-                table_id: Some(api::v1::TableId { id: task.table_id }),
-            }),
+            catalog_name: task.catalog,
+            schema_name: task.schema,
+            table_name: task.table,
+            table_id: Some(api::v1::TableId { id: task.table_id }),
         }
     }
 }
 
-impl TryFrom<PbPurgeDroppedTableTask> for PurgeDroppedTableTask {
-    type Error = error::Error;
-
-    fn try_from(pb: PbPurgeDroppedTableTask) -> Result<Self> {
-        let purge_dropped_table = pb
-            .purge_dropped_table
-            .context(error::InvalidProtoMsgSnafu {
-                err_msg: "expected purge dropped table",
-            })?;
-
-        Ok(Self {
-            catalog: purge_dropped_table.catalog_name,
-            schema: purge_dropped_table.schema_name,
-            table: purge_dropped_table.table_name,
-            table_id: purge_dropped_table.table_id.map(|table_id| table_id.id),
-        })
+impl From<PbPurgeDroppedTableTask> for PurgeDroppedTableTask {
+    fn from(pb: PbPurgeDroppedTableTask) -> Self {
+        Self {
+            catalog: pb.catalog_name,
+            schema: pb.schema_name,
+            table: pb.table_name,
+            table_id: pb.table_id.map(|table_id| table_id.id),
+        }
     }
 }
 
 impl From<PurgeDroppedTableTask> for PbPurgeDroppedTableTask {
     fn from(task: PurgeDroppedTableTask) -> Self {
         Self {
-            purge_dropped_table: Some(PurgeDroppedTableExpr {
-                catalog_name: task.catalog,
-                schema_name: task.schema,
-                table_name: task.table,
-                table_id: task.table_id.map(|id| api::v1::TableId { id }),
-            }),
+            catalog_name: task.catalog,
+            schema_name: task.schema,
+            table_name: task.table,
+            table_id: task.table_id.map(|id| api::v1::TableId { id }),
         }
     }
 }
@@ -1861,15 +1845,6 @@ mod tests {
         let de = DdlTask::try_from(pb_task).unwrap();
 
         assert!(matches!(de, DdlTask::PurgeDroppedTable(task) if task == expected));
-    }
-
-    #[test]
-    fn test_purge_dropped_table_task_requires_expr() {
-        let result = DdlTask::try_from(Task::PurgeDroppedTableTask(
-            PbPurgeDroppedTableTask::default(),
-        ));
-
-        assert!(result.is_err());
     }
 
     #[test]
