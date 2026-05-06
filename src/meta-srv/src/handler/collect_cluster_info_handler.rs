@@ -22,6 +22,7 @@ use common_meta::datanode::EnvVars;
 use common_meta::heartbeat::utils::get_flownode_workloads;
 use common_meta::peer::Peer;
 use common_meta::rpc::store::PutRequest;
+use common_telemetry::warn;
 use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
 
@@ -182,6 +183,11 @@ fn extract_base_info(
     };
 
     let env_vars = EnvVars::from_extensions(&request.extensions)
+        .inspect_err(|e| {
+            warn!(e;
+                "Failed to deserialize __env_vars from heartbeat extensions, peer: {}", peer
+            );
+        })
         .unwrap_or_default()
         .map(|e| e.vars)
         .unwrap_or_default();
