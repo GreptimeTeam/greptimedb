@@ -1090,20 +1090,15 @@ pub fn fill_table_options_for_create(
             table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
         }
         AutoCreateTableType::LastNonNull => {
-            let append_mode_enabled = ctx
+            if ctx
                 .extension(APPEND_MODE_KEY)
-                .is_some_and(|value| value.eq_ignore_ascii_case("true"));
-            if append_mode_enabled {
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+            {
                 table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+                table_options.insert(MERGE_MODE_KEY.to_string(), "last_row".to_string());
+            } else {
+                table_options.insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
             }
-            table_options.insert(
-                MERGE_MODE_KEY.to_string(),
-                if append_mode_enabled {
-                    "last_row".to_string()
-                } else {
-                    "last_non_null".to_string()
-                },
-            );
         }
         AutoCreateTableType::Trace => {
             table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
