@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use api::v1::region::{
     OpenRequest as PbOpenRegionRequest, RegionRequest, RegionRequestHeader, region_request,
@@ -44,7 +44,9 @@ use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::rpc::ddl::UndropTableTask;
-use crate::rpc::router::{RegionRoute, find_leader_regions, find_leaders};
+use crate::rpc::router::{
+    RegionRoute, find_follower_regions, find_followers, find_leader_regions, find_leaders,
+};
 
 pub struct UndropTableProcedure {
     context: DdlContext,
@@ -219,11 +221,18 @@ pub(crate) async fn open_regions(
                 .context(error::SerdeJsonSnafu)
         })
         .collect::<Result<HashMap<_, _>>>()?;
-    let leaders = find_leaders(region_routes);
-    let mut tasks = Vec::with_capacity(leaders.len());
-    for datanode in leaders {
+    let mut seen_peer_ids = HashSet::new();
+    let peers = find_leaders(region_routes)
+        .into_iter()
+        .chain(find_followers(region_routes))
+        .filter(|peer| seen_peer_ids.insert(peer.id));
+    let mut tasks = Vec::new();
+    for datanode in peers {
         let requester = context.node_manager.datanode(&datanode).await;
-        for region_number in find_leader_regions(region_routes, &datanode) {
+        let region_numbers = find_leader_regions(region_routes, &datanode)
+            .into_iter()
+            .chain(find_follower_regions(region_routes, &datanode));
+        for region_number in region_numbers {
             let region_id = RegionId::new(table_id, region_number);
             let create_request = builder.build_one(
                 region_id,
