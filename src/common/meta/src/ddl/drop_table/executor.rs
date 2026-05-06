@@ -272,6 +272,7 @@ impl DropTableExecutor {
                         fast_path,
                         force,
                         partial_drop,
+                        soft_drop: false,
                     })),
                 };
                 let datanode = datanode.clone();
