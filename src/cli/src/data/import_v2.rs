@@ -35,6 +35,7 @@
 //! ```
 
 mod command;
+pub(crate) mod coordinator;
 pub mod error;
 pub mod executor;
 pub(crate) mod state;
