@@ -793,6 +793,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
+    use common_options::plugin_options::StandaloneFlag;
     use common_test_util::temp_dir::create_named_temp_file;
     use common_wal::config::DatanodeWalConfig;
     use frontend::frontend::FrontendOptions;
@@ -810,6 +811,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
+        plugins.insert(StandaloneFlag);
         plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
             .await
             .unwrap();

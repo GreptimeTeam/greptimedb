@@ -622,6 +622,7 @@ mod tests {
                 disable_dashboard: false,
                 ..Default::default()
             },
+            meta_client: Some(MetaClientOptions::default()),
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
