@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::SemanticType;
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{debug, info};
 use datatypes::schema::{SkippingIndexOptions, SkippingIndexType};
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
@@ -27,8 +27,8 @@ use store_api::storage::{ConcreteDataType, RegionId};
 
 use crate::engine::IndexOptions;
 use crate::error::{
-    ColumnTypeMismatchSnafu, ForbiddenPhysicalAlterSnafu, MitoReadOperationSnafu,
-    MitoWriteOperationSnafu, Result, SetSkippingIndexOptionSnafu,
+    AddingFieldColumnSnafu, ColumnTypeMismatchSnafu, ForbiddenPhysicalAlterSnafu,
+    MitoReadOperationSnafu, MitoWriteOperationSnafu, Result, SetSkippingIndexOptionSnafu,
 };
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_DDL_DURATION, PHYSICAL_COLUMN_COUNT};
 use crate::utils;
@@ -132,10 +132,10 @@ impl DataRegion {
                         .fail();
                     }
                 } else {
-                    warn!(
-                        "Column {} in region {region_id} is not a tag",
-                        c.column_schema.name
-                    );
+                    return AddingFieldColumnSnafu {
+                        name: &c.column_schema.name,
+                    }
+                    .fail();
                 };
 
                 c.column_id = new_column_id_start + delta as u32;

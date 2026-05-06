@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
+use common_telemetry::warn;
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
 use snafu::OptionExt;
@@ -191,11 +192,12 @@ impl MetricEngineState {
                 SemanticType::Timestamp,
                 "unexpected time index column {col} added to an existing physical region"
             );
-            debug_assert_ne!(
-                info.semantic_type,
-                SemanticType::Field,
-                "unexpected field column {col} added to an existing physical region"
-            );
+            if info.semantic_type == SemanticType::Field {
+                warn!(
+                    "Unexpected field column {col} added to physical region {physical_region_id}; cached field column remains {}",
+                    state.field_column_name
+                );
+            }
             state.physical_columns.insert(col, info);
         }
     }
