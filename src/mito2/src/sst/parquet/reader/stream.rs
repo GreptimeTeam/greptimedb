@@ -332,7 +332,10 @@ mod tests {
             Err(err) => err,
         };
 
-        assert!(err.to_string().contains("projected root matches len 2"));
+        assert!(
+            err.to_string()
+                .contains("projected root presence len 2 does not match output schema columns 1")
+        );
     }
 
     #[tokio::test]
