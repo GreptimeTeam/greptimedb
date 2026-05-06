@@ -1293,6 +1293,7 @@ mod tests {
     use crate::read::range_cache::{
         RangeScanCacheKey, RangeScanCacheValue, ScanRequestFingerprintBuilder,
     };
+    use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::row_selection::RowGroupSelection;
 
     #[tokio::test]
@@ -1466,7 +1467,7 @@ mod tests {
             region_id: RegionId::new(1, 1),
             row_groups: vec![(FileId::random(), 0)],
             scan: ScanRequestFingerprintBuilder {
-                read_columns: vec![].into(),
+                read_columns: ReadColumns::from_deduped_column_ids(std::iter::empty()),
                 read_column_types: vec![],
                 filters: vec!["tag_0 = 1".to_string()],
                 time_filters: vec![],

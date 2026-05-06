@@ -21,6 +21,7 @@ use datatypes::arrow::array::{ArrayRef, new_null_array};
 use datatypes::arrow::datatypes::{DataType, FieldRef, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
+use futures::stream::BoxStream;
 use parquet::arrow::async_reader::ParquetRecordBatchStream;
 use snafu::{IntoError, ResultExt, ensure};
 
@@ -29,66 +30,77 @@ use crate::error::{
 };
 use crate::sst::parquet::async_reader::SstAsyncFileReader;
 
-/// Wraps a parquet record batch stream and fills missing projected root columns.
+/// Aligns projected batches to the expected output schema for nested projections.
 ///
+/// Background
+/// ----------
 /// Nested projection may ask parquet to read leaves under a root column. If none
 /// of the requested leaves exists in the current parquet file, parquet decoding
-/// omits the whole root from the physical `RecordBatch`. The logical projection
-/// still contains that root, so this wrapper restores the output shape by
-/// inserting a root-level null array.
-pub struct MissingColFiller<S> {
-    /// Inner stream that yields record batches from parquet reader.
+/// omits the whole root from the physical [`RecordBatch`].
+///
+/// In addition, after nested-path filtering, returned struct arrays may contain
+/// only a subset of fields. The current output schema is not pruned by nested
+/// paths, so physical struct fields can be a subset of the expected struct
+/// fields, and their nested schema can differ from the expected output schema.
+///
+/// To keep projected batches schema-consistent before entering upper readers:
+/// - Root-column presence alignment restores missing projected root columns by
+///   inserting root-level null arrays.
+/// - Nested struct alignment aligns struct arrays to the expected nested field
+///   layout.
+pub struct NestedSchemaAligner<S> {
     inner: S,
     /// Output schema expected by the upper reader.
     output_schema: SchemaRef,
-    /// Whether each projected root exists in the physical batch returned by parquet.
-    projected_root_matches: Vec<bool>,
+    /// Whether each projected root exists in the physical batch returned by
+    /// parquet.
+    projected_root_presence: Vec<bool>,
     /// Number of columns expected from the physical batch returned by parquet.
     expected_input_col_num: usize,
-    /// Whether all projected roots are present and the stream can pass batches through.
-    all_matched: bool,
+    /// Whether all projected roots are present and the stream can pass batches
+    /// through.
+    all_roots_present: bool,
 }
 
-pub(crate) type ProjectedRecordBatchStream =
-    NestedSchemaAligner<MissingColFiller<ParquetErrorAdapter>>;
+pub(crate) type ProjectedRecordBatchStream = BoxStream<'static, Result<RecordBatch>>;
 
-impl<S> MissingColFiller<S>
+impl<S> NestedSchemaAligner<S>
 where
     S: Stream<Item = Result<RecordBatch>>,
 {
     pub fn new(
         inner: S,
-        projected_root_matches: Vec<bool>,
+        projected_root_presence: Vec<bool>,
         output_schema: SchemaRef,
-    ) -> Result<MissingColFiller<S>> {
+    ) -> Result<NestedSchemaAligner<S>> {
         ensure!(
-            projected_root_matches.len() == output_schema.fields().len(),
+            projected_root_presence.len() == output_schema.fields().len(),
             UnexpectedSnafu {
                 reason: format!(
-                    "MissingColFiller projected root matches len {} does not match output schema columns {}",
-                    projected_root_matches.len(),
+                    "NestedSchemaAligner projected root presence len {} does not match output schema columns {}",
+                    projected_root_presence.len(),
                     output_schema.fields().len()
                 ),
             }
         );
 
-        let expected_input_col_num = projected_root_matches
+        let expected_input_col_num = projected_root_presence
             .iter()
             .filter(|matched| **matched)
             .count();
-        let all_matched = projected_root_matches.iter().all(|&m| m);
+        let all_roots_present = projected_root_presence.iter().all(|&m| m);
 
-        Ok(MissingColFiller {
+        Ok(NestedSchemaAligner {
             inner,
             output_schema,
-            projected_root_matches,
+            projected_root_presence,
             expected_input_col_num,
-            all_matched,
+            all_roots_present,
         })
     }
 }
 
-impl<S> Stream for MissingColFiller<S>
+impl<S> Stream for NestedSchemaAligner<S>
 where
     S: Stream<Item = Result<RecordBatch>> + Unpin,
 {
@@ -99,18 +111,22 @@ where
 
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(rb))) => {
-                let output_schema = &this.output_schema;
-                let rb = if this.all_matched {
+                let rb = if this.all_roots_present {
                     rb
                 } else {
                     fill_missing_cols(
                         rb,
-                        output_schema,
-                        &this.projected_root_matches,
+                        &this.output_schema,
+                        &this.projected_root_presence,
                         this.expected_input_col_num,
                     )?
                 };
-                Poll::Ready(Some(Ok(rb)))
+
+                if rb.schema() == this.output_schema {
+                    Poll::Ready(Some(Ok(rb)))
+                } else {
+                    Poll::Ready(Some(align_batch_to_schema(rb, &this.output_schema)))
+                }
             }
             Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
             Poll::Ready(None) => Poll::Ready(None),
@@ -129,7 +145,7 @@ fn fill_missing_cols(
         rb.columns().len() == expected_input_col_num,
         UnexpectedSnafu {
             reason: format!(
-                "MissingColFiller expected {} input columns but got {}",
+                "NestedSchemaAligner expected {} input columns but got {}",
                 expected_input_col_num,
                 rb.columns().len()
             ),
@@ -149,49 +165,6 @@ fn fill_missing_cols(
     }
 
     RecordBatch::try_new(output_schema.clone(), cols).context(NewRecordBatchSnafu)
-}
-
-/// Aligns struct arrays in projected batches to the expected output schema.
-///
-/// After nested-path filtering, returned struct arrays may contain only a
-/// subset of fields, so their schema can differ from the expected output
-/// schema. This stream aligns those struct arrays to keep projected batches
-/// schema-consistent before entering upper readers.
-pub struct NestedSchemaAligner<S> {
-    inner: S,
-    output_schema: SchemaRef,
-}
-
-impl<S> NestedSchemaAligner<S>
-where
-    S: Stream<Item = Result<RecordBatch>>,
-{
-    pub fn new(inner: S, output_schema: SchemaRef) -> Self {
-        Self {
-            inner,
-            output_schema,
-        }
-    }
-}
-
-impl<S> Stream for NestedSchemaAligner<S>
-where
-    S: Stream<Item = Result<RecordBatch>> + Unpin,
-{
-    type Item = Result<RecordBatch>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(rb))) => {
-                Poll::Ready(Some(align_batch_to_schema(rb, &this.output_schema)))
-            }
-            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    }
 }
 
 fn align_batch_to_schema(rb: RecordBatch, output_schema: &SchemaRef) -> Result<RecordBatch> {
@@ -270,7 +243,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_filler_with_all_projected_roots_match() {
+    async fn test_aligner_with_all_projected_roots_match() {
         let output_schema = schema([
             Field::new("a", DataType::Int64, true),
             Field::new("b", DataType::Utf8, true),
@@ -282,16 +255,16 @@ mod tests {
         .unwrap();
         let stream = stream::iter([Ok(input.clone())]);
 
-        let mut filler =
-            MissingColFiller::new(stream, vec![true, true], output_schema.clone()).unwrap();
-        let output = filler.next().await.unwrap().unwrap();
+        let mut aligner =
+            NestedSchemaAligner::new(stream, vec![true, true], output_schema.clone()).unwrap();
+        let output = aligner.next().await.unwrap().unwrap();
 
         assert_eq!(input, output);
-        assert!(filler.next().await.is_none());
+        assert!(aligner.next().await.is_none());
     }
 
     #[tokio::test]
-    async fn test_filler_with_fills_null_root_columns() {
+    async fn test_aligner_with_fills_null_root_columns() {
         let input_schema = schema([Field::new("a", DataType::Int64, true)]);
         let output_schema = schema([
             Field::new("a", DataType::Int64, true),
@@ -301,9 +274,10 @@ mod tests {
         let input = RecordBatch::try_new(input_schema, vec![int_array([10, 20])]).unwrap();
         let stream = stream::iter([Ok(input)]);
 
-        let mut filler =
-            MissingColFiller::new(stream, vec![true, false, false], output_schema.clone()).unwrap();
-        let output = filler.next().await.unwrap().unwrap();
+        let mut aligner =
+            NestedSchemaAligner::new(stream, vec![true, false, false], output_schema.clone())
+                .unwrap();
+        let output = aligner.next().await.unwrap().unwrap();
 
         assert_eq!(output_schema, output.schema());
         assert_eq!(3, output.num_columns());
@@ -325,7 +299,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_filler_with_fills_missing_struct_root_column() {
+    async fn test_aligner_with_fills_missing_struct_root_column() {
         let input_schema = schema([Field::new("a", DataType::Int64, true)]);
         let struct_type = DataType::Struct(Fields::from(vec![
             Field::new("x", DataType::Int64, true),
@@ -338,9 +312,9 @@ mod tests {
         let input = RecordBatch::try_new(input_schema, vec![int_array([10, 20])]).unwrap();
         let stream = stream::iter([Ok(input)]);
 
-        let mut filler =
-            MissingColFiller::new(stream, vec![true, false], output_schema.clone()).unwrap();
-        let output = filler.next().await.unwrap().unwrap();
+        let mut aligner =
+            NestedSchemaAligner::new(stream, vec![true, false], output_schema.clone()).unwrap();
+        let output = aligner.next().await.unwrap().unwrap();
 
         assert_eq!(output_schema, output.schema());
         assert_eq!(2, output.num_columns());
@@ -349,12 +323,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_filler_with_reject_projection_len_mismatch() {
+    async fn test_aligner_reject_projection_len_mismatch() {
         let output_schema = schema([Field::new("a", DataType::Int64, true)]);
         let stream = stream::iter([]);
 
-        let err = match MissingColFiller::new(stream, vec![true, false], output_schema) {
-            Ok(_) => panic!("MissingColFiller should reject projection length mismatch"),
+        let err = match NestedSchemaAligner::new(stream, vec![true, false], output_schema) {
+            Ok(_) => panic!("NestedSchemaAligner should reject projection length mismatch"),
             Err(err) => err,
         };
 
@@ -362,7 +336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_filler_reject_with_input_column_mismatch() {
+    async fn test_aligner_reject_with_input_column_mismatch() {
         let input_schema = schema([Field::new("a", DataType::Int64, true)]);
         let output_schema = schema([
             Field::new("a", DataType::Int64, true),
@@ -372,9 +346,9 @@ mod tests {
         let input = RecordBatch::try_new(input_schema, vec![int_array([1, 2])]).unwrap();
         let stream = stream::iter([Ok(input)]);
 
-        let mut filler =
-            MissingColFiller::new(stream, vec![true, true, false], output_schema).unwrap();
-        let err = filler.next().await.unwrap().unwrap_err();
+        let mut aligner =
+            NestedSchemaAligner::new(stream, vec![true, true, false], output_schema).unwrap();
+        let err = aligner.next().await.unwrap().unwrap_err();
 
         assert!(
             err.to_string()
@@ -406,7 +380,8 @@ mod tests {
         .unwrap();
 
         let mut aligner =
-            NestedSchemaAligner::new(stream::iter([Ok(input)]), output_schema.clone());
+            NestedSchemaAligner::new(stream::iter([Ok(input)]), vec![true], output_schema.clone())
+                .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
 
         assert_eq!(output_schema, output.schema());

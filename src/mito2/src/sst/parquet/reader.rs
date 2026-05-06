@@ -469,6 +469,7 @@ impl ParquetReaderBuilder {
             output_schema,
             object_store: self.object_store.clone(),
             projection: projection_plan,
+            has_nested_projection: parquet_read_cols.has_nested(),
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder: filter_plan.prefilter_builder,
         };
@@ -1617,6 +1618,8 @@ pub(crate) struct RowGroupReaderBuilder {
     object_store: ObjectStore,
     /// Projection mask.
     projection: ProjectionMaskPlan,
+    /// Whether projected read columns include nested paths.
+    has_nested_projection: bool,
     /// Cache.
     cache_strategy: CacheStrategy,
     /// Pre-built prefilter state. `None` if prefiltering is not applicable.
@@ -1720,12 +1723,16 @@ impl RowGroupReaderBuilder {
         stream: ParquetRecordBatchStream<SstAsyncFileReader>,
     ) -> Result<ProjectedRecordBatchStream> {
         let stream = ParquetErrorAdapter::new(stream, self.file_path.clone());
-        let stream = stream::MissingColFiller::new(
+        if !self.has_nested_projection {
+            return Ok(stream.boxed());
+        }
+
+        Ok(NestedSchemaAligner::new(
             stream,
             self.projection.projected_root_presence.clone(),
             self.output_schema.clone(),
-        )?;
-        Ok(NestedSchemaAligner::new(stream, self.output_schema.clone()))
+        )?
+        .boxed())
     }
 
     /// Builds a [ParquetRecordBatchStream] with a custom projection mask.
@@ -2213,10 +2220,12 @@ mod tests {
         let region_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             region_metadata.clone(),
-            region_metadata
-                .column_metadatas
-                .iter()
-                .map(|column| column.column_id),
+            ReadColumns::from_deduped_column_ids(
+                region_metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_id),
+            ),
             None,
             &file_path,
             false,
@@ -2319,7 +2328,9 @@ mod tests {
         let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
             None,
             "test",
             true,
@@ -2341,7 +2352,9 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
             None,
             "test",
             true,

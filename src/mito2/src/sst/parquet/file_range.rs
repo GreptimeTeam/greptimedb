@@ -655,6 +655,7 @@ mod tests {
     use datafusion_expr::{col, lit};
 
     use super::*;
+    use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::test_util::sst_util::{new_record_batch_with_custom_sequence, sst_region_metadata};
 
@@ -663,7 +664,9 @@ mod tests {
 
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
             None,
             "test",
             true,
@@ -706,7 +709,9 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
             None,
             "test",
             true,

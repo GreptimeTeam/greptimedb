@@ -164,7 +164,7 @@ impl FlatReadFormat {
     /// If `skip_auto_convert` is true, skips auto conversion of format when the encoding is sparse encoding.
     pub fn new(
         metadata: RegionMetadataRef,
-        read_cols: impl Into<ReadColumns>,
+        read_cols: ReadColumns,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
@@ -416,10 +416,9 @@ impl ParquetPrimaryKeyToFlat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
     fn new(
         metadata: RegionMetadataRef,
-        read_cols: impl Into<ReadColumns>,
+        read_cols: ReadColumns,
         skip_auto_convert: bool,
     ) -> ParquetPrimaryKeyToFlat {
-        let read_cols = read_cols.into();
         assert!(if skip_auto_convert {
             metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
         } else {
@@ -484,8 +483,7 @@ struct ParquetFlat {
 
 impl ParquetFlat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    fn new(metadata: RegionMetadataRef, read_cols: impl Into<ReadColumns>) -> ParquetFlat {
-        let read_cols = read_cols.into();
+    fn new(metadata: RegionMetadataRef, read_cols: ReadColumns) -> ParquetFlat {
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(&metadata);
         let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
@@ -792,7 +790,9 @@ impl FlatReadFormat {
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> FlatReadFormat {
         Self::new(
             Arc::clone(&metadata),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
             None,
             "test",
             false,
@@ -813,6 +813,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::{FlatReadFormat, field_column_start};
+    use crate::read::read_columns::ReadColumns;
     use crate::sst::{
         FlatSchemaOptions, flat_sst_arrow_schema_column_num, to_flat_sst_arrow_schema,
     };
@@ -893,8 +894,14 @@ mod tests {
     #[test]
     fn test_output_arrow_schema_uses_projection() {
         let metadata = Arc::new(build_metadata(1, 2, PrimaryKeyEncoding::Dense));
-        let read_format =
-            FlatReadFormat::new(metadata.clone(), [0_u32, 2_u32], None, "test", false).unwrap();
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids([0_u32, 2_u32]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
 
         let output_schema = read_format.output_arrow_schema().unwrap();
         let projection = read_format.parquet_read_columns().root_indices();

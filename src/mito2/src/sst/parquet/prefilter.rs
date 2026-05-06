@@ -734,6 +734,7 @@ mod tests {
     use store_api::codec::PrimaryKeyEncoding;
 
     use super::*;
+    use crate::read::read_columns::ReadColumns;
     use crate::sst::internal_fields;
     use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
     use crate::test_util::sst_util::{
@@ -981,7 +982,9 @@ mod tests {
             Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
             None,
             "test",
             false,
@@ -1017,7 +1020,9 @@ mod tests {
         ));
         let legacy_read_format = FlatReadFormat::new(
             metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
             None,
             "memtable",
             false,
@@ -1044,7 +1049,9 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let raw_pk_read_format = FlatReadFormat::new(
             metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
             None,
             "memtable",
             true,
@@ -1078,7 +1085,9 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let full_read_format = FlatReadFormat::new(
             metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
             None,
             "test",
             true,
@@ -1106,8 +1115,14 @@ mod tests {
 
         let field_0 = metadata.column_by_name("field_0").unwrap().column_id;
         let ts = metadata.time_index_column().column_id;
-        let projected_read_format =
-            FlatReadFormat::new(metadata.clone(), [field_0, ts], None, "test", true).unwrap();
+        let projected_read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids([field_0, ts]),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
         let projected_parquet_schema = parquet_schema(&projected_read_format);
         let pk_prefilter_plan = build_reader_filter_plan(
             Some(&Predicate::new(vec![col("tag_0").eq(lit("a"))])),
@@ -1155,7 +1170,9 @@ mod tests {
             Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
             None,
             "test",
             false,

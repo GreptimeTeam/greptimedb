@@ -78,16 +78,16 @@ impl FlatProjectionMapper {
     ) -> Result<Self> {
         let projection: Vec<_> = projection.into_iter().collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
-        Self::new_with_read_columns(metadata, projection, read_column_ids)
+        let read_cols = ReadColumns::from_deduped_column_ids(read_column_ids);
+        Self::new_with_read_columns(metadata, projection, read_cols)
     }
 
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
         projection: Vec<usize>,
-        read_cols: impl Into<ReadColumns>,
+        read_cols: ReadColumns,
     ) -> Result<Self> {
-        let read_cols = read_cols.into();
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
 
@@ -433,8 +433,8 @@ impl CompactionProjectionMapper {
             .collect::<Vec<_>>();
 
         let read_col_ids = metadata.column_metadatas.iter().map(|col| col.column_id);
-        let mapper =
-            FlatProjectionMapper::new_with_read_columns(metadata, projection, read_col_ids)?;
+        let read_cols = ReadColumns::from_deduped_column_ids(read_col_ids);
+        let mapper = FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols)?;
         let assembler = DfBatchAssembler::new(mapper.output_schema());
 
         Ok(Self { mapper, assembler })

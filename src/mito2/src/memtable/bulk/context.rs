@@ -66,14 +66,15 @@ impl BulkIterContext {
     ) -> Result<Self> {
         let codec = build_primary_key_codec(&region_metadata);
 
-        let read_cols: ReadColumns = if let Some(col_ids) = projection {
-            col_ids.iter().copied().into()
+        let read_cols = if let Some(col_ids) = projection {
+            ReadColumns::from_deduped_column_ids(col_ids.iter().copied())
         } else {
-            region_metadata
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .into()
+            ReadColumns::from_deduped_column_ids(
+                region_metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id),
+            )
         };
         let read_format = FlatReadFormat::new(
             region_metadata.clone(),
