@@ -573,12 +573,21 @@ async fn test_undrop_table_restores_metadata_and_reopens_regions() {
             .is_none()
     );
 
-    let (peer, request) = rx.try_recv().unwrap();
-    assert_eq!(peer.id, 1);
-    let Some(region_request::Body::Open(req)) = request.body else {
-        unreachable!();
-    };
-    assert_eq!(req.region_id, RegionId::new(table_id, 1).as_u64());
+    let mut opened_regions = HashSet::new();
+    for _ in 0..2 {
+        let (peer, request) = rx.try_recv().unwrap();
+        let Some(region_request::Body::Open(req)) = request.body else {
+            unreachable!();
+        };
+        opened_regions.insert((peer.id, req.region_id));
+    }
+    assert_eq!(
+        opened_regions,
+        HashSet::from([
+            (1, RegionId::new(table_id, 1).as_u64()),
+            (2, RegionId::new(table_id, 1).as_u64()),
+        ])
+    );
     assert!(rx.try_recv().is_err());
 
     assert_eq!(
@@ -791,14 +800,16 @@ async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
     execute_procedure_until_done(&mut procedure).await;
 
     let mut requests = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let (peer, request) = rx.try_recv().unwrap();
         requests.push((peer.id, request.body.unwrap()));
     }
     requests.sort_unstable_by_key(|(peer_id, _)| *peer_id);
     assert_matches!(requests[0].1, region_request::Body::Open(_));
     assert_matches!(requests[1].1, region_request::Body::Drop(_));
-    assert_matches!(requests[2].1, region_request::Body::Close(_));
+    assert_matches!(requests[2].1, region_request::Body::Open(_));
+    assert_matches!(requests[3].1, region_request::Body::Close(_));
+    assert!(rx.try_recv().is_err());
     assert!(
         ddl_context
             .table_metadata_manager
