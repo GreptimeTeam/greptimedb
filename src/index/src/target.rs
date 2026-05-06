@@ -22,16 +22,23 @@ use serde::{Deserialize, Serialize};
 use snafu::{Snafu, ensure};
 use store_api::storage::ColumnId;
 
-/// Describes an index target. Column ids are the only supported variant for now.
+/// Describes an index target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IndexTarget {
     ColumnId(ColumnId),
+    ColumnNestedPath {
+        column_id: ColumnId,
+        path: Vec<String>,
+    },
 }
 
 impl Display for IndexTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             IndexTarget::ColumnId(id) => write!(f, "{}", id),
+            IndexTarget::ColumnNestedPath { column_id, path } => {
+                write!(f, "{}:{}", column_id, path.join("."))
+            }
         }
     }
 }
@@ -39,11 +46,55 @@ impl Display for IndexTarget {
 impl IndexTarget {
     /// Parse a target key string back into an index target description.
     pub fn decode(key: &str) -> Result<Self, TargetKeyError> {
-        validate_column_key(key)?;
-        let id = key
+        ensure!(!key.is_empty(), EmptySnafu);
+
+        let (col_id, nested_path) = match key.split_once(':') {
+            Some((col_id, path)) => (col_id, Some(path)),
+            None => (key, None),
+        };
+
+        validate_column_key(col_id)?;
+
+        let col_id = col_id
             .parse::<ColumnId>()
-            .map_err(|_| InvalidColumnIdSnafu { value: key }.build())?;
-        Ok(IndexTarget::ColumnId(id))
+            .map_err(|_| InvalidColumnIdSnafu { value: col_id }.build())?;
+
+        let Some(nested_path) = nested_path else {
+            return Ok(IndexTarget::ColumnId(col_id));
+        };
+
+        let nested_path_str = nested_path.trim();
+        ensure!(!nested_path_str.is_empty(), InvalidPathSnafu { key });
+        // FIXME(fys): do we need to handle special characters in here and encode method?
+        let nested_path = nested_path_str
+            .split('.')
+            .map(str::trim)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        ensure!(
+            nested_path
+                .iter()
+                .all(|seg| !seg.is_empty() && !seg.contains(':')),
+            InvalidPathSnafu { key }
+        );
+        Ok(IndexTarget::ColumnNestedPath {
+            column_id: col_id,
+            path: nested_path,
+        })
+    }
+
+    pub fn column_id(&self) -> ColumnId {
+        match self {
+            IndexTarget::ColumnId(id) => *id,
+            IndexTarget::ColumnNestedPath { column_id, .. } => *column_id,
+        }
+    }
+
+    pub fn path(&self) -> Option<&[String]> {
+        match self {
+            IndexTarget::ColumnId(_) => None,
+            IndexTarget::ColumnNestedPath { path, .. } => Some(path),
+        }
     }
 }
 
@@ -59,6 +110,9 @@ pub enum TargetKeyError {
 
     #[snafu(display("failed to parse column id from '{value}'"))]
     InvalidColumnId { value: String },
+
+    #[snafu(display("invalid target path in key '{key}'"))]
+    InvalidPath { key: String },
 }
 
 impl ErrorExt for TargetKeyError {
@@ -103,5 +157,17 @@ mod tests {
     fn decode_rejects_invalid_digits() {
         let err = IndexTarget::decode("1a2").unwrap_err();
         assert!(matches!(err, TargetKeyError::InvalidCharacters { .. }));
+    }
+
+    #[test]
+    fn encode_decode_column_path() {
+        let target = IndexTarget::ColumnNestedPath {
+            column_id: 42,
+            path: vec!["a".to_string(), "b".to_string()],
+        };
+        let key = format!("{}", target);
+        assert_eq!(key, "42:a.b");
+        let decoded = IndexTarget::decode(&key).unwrap();
+        assert_eq!(decoded, target);
     }
 }
