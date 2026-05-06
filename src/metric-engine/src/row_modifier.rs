@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
@@ -30,6 +29,7 @@ use store_api::metric_engine_consts::{
 use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 use store_api::storage::{ColumnId, TableId};
 
+use crate::engine::PhysicalColumnInfo;
 use crate::error::{EncodePrimaryKeySnafu, Result, TableIdCountMismatchSnafu};
 
 /// A row modifier modifies [`Rows`].
@@ -265,10 +265,10 @@ struct IterIndex {
 }
 
 impl IterIndex {
-    fn new<K>(row_schema: &[ColumnSchema], name_to_column_id: &HashMap<K, ColumnId>) -> Self
-    where
-        K: Eq + Hash + Borrow<str>,
-    {
+    fn new(
+        row_schema: &[ColumnSchema],
+        physical_columns: &HashMap<String, PhysicalColumnInfo>,
+    ) -> Self {
         let mut reserved_indices = SmallVec::<[ValueIndex; 2]>::new();
         // Uses BTreeMap to keep the primary key column name order (lexicographical)
         let mut primary_key_indices = BTreeMap::new();
@@ -294,9 +294,10 @@ impl IterIndex {
                         primary_key_indices.insert(
                             col.column_name.as_str(),
                             ValueIndex {
-                                column_id: *name_to_column_id
-                                    .get(col.column_name.as_str())
-                                    .unwrap(),
+                                column_id: physical_columns
+                                    .get(&col.column_name)
+                                    .unwrap()
+                                    .column_id,
                                 index: idx,
                             },
                         );
@@ -304,13 +305,13 @@ impl IterIndex {
                 },
                 SemanticType::Field => {
                     field_indices.push(ValueIndex {
-                        column_id: *name_to_column_id.get(col.column_name.as_str()).unwrap(),
+                        column_id: physical_columns.get(&col.column_name).unwrap().column_id,
                         index: idx,
                     });
                 }
                 SemanticType::Timestamp => {
                     ts_index = Some(ValueIndex {
-                        column_id: *name_to_column_id.get(col.column_name.as_str()).unwrap(),
+                        column_id: physical_columns.get(&col.column_name).unwrap().column_id,
                         index: idx,
                     });
                 }
@@ -344,11 +345,8 @@ pub struct RowsIter {
 }
 
 impl RowsIter {
-    pub fn new<K>(rows: Rows, name_to_column_id: &HashMap<K, ColumnId>) -> Self
-    where
-        K: Eq + Hash + Borrow<str>,
-    {
-        let index: IterIndex = IterIndex::new(&rows.schema, name_to_column_id);
+    pub fn new(rows: Rows, physical_columns: &HashMap<String, PhysicalColumnInfo>) -> Self {
+        let index: IterIndex = IterIndex::new(&rows.schema, physical_columns);
         Self { rows, index }
     }
 
@@ -464,8 +462,19 @@ mod tests {
         }
     }
 
-    fn test_name_to_column_id() -> HashMap<String, ColumnId> {
-        HashMap::from([("namespace".to_string(), 1), ("host".to_string(), 2)])
+    fn make_info(column_id: ColumnId) -> PhysicalColumnInfo {
+        PhysicalColumnInfo {
+            column_id,
+            data_type: datatypes::prelude::ConcreteDataType::string_datatype(),
+            semantic_type: SemanticType::Tag,
+        }
+    }
+
+    fn test_name_to_column_id() -> HashMap<String, PhysicalColumnInfo> {
+        HashMap::from([
+            ("namespace".to_string(), make_info(1)),
+            ("host".to_string(), make_info(2)),
+        ])
     }
 
     #[test]
@@ -666,11 +675,11 @@ mod tests {
     }
 
     /// Helper function to create a name_to_column_id map
-    fn create_name_to_column_id(labels: &[&str]) -> HashMap<String, ColumnId> {
+    fn create_name_to_column_id(labels: &[&str]) -> HashMap<String, PhysicalColumnInfo> {
         labels
             .iter()
             .enumerate()
-            .map(|(idx, name)| (name.to_string(), idx as ColumnId + 1))
+            .map(|(idx, name)| (name.to_string(), make_info(idx as ColumnId + 1)))
             .collect()
     }
 
@@ -701,7 +710,7 @@ mod tests {
     fn extract_tsid(
         schema: Vec<ColumnSchema>,
         row: Row,
-        name_to_column_id: &HashMap<String, ColumnId>,
+        name_to_column_id: &HashMap<String, PhysicalColumnInfo>,
         table_id: TableId,
     ) -> u64 {
         let rows = Rows {

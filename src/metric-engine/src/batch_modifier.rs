@@ -204,6 +204,7 @@ mod tests {
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
     use super::*;
+    use crate::engine::PhysicalColumnInfo;
     use crate::row_modifier::{RowModifier, RowsIter, TableIdInput};
 
     fn build_sparse_test_batch() -> RecordBatch {
@@ -364,11 +365,16 @@ mod tests {
         let modified =
             modify_batch_sparse(batch, table_id, &tag_columns, &non_tag_indices).unwrap();
 
-        let name_to_column_id: HashMap<String, ColumnId> = [
-            ("greptime_timestamp".to_string(), 0),
-            ("greptime_value".to_string(), 1),
-            ("namespace".to_string(), 2),
-            ("host".to_string(), 3),
+        let make_info = |column_id: ColumnId| PhysicalColumnInfo {
+            column_id,
+            data_type: datatypes::prelude::ConcreteDataType::string_datatype(),
+            semantic_type: SemanticType::Tag,
+        };
+        let name_to_column_id: HashMap<String, PhysicalColumnInfo> = [
+            ("greptime_timestamp".to_string(), make_info(0)),
+            ("greptime_value".to_string(), make_info(1)),
+            ("namespace".to_string(), make_info(2)),
+            ("host".to_string(), make_info(3)),
         ]
         .into_iter()
         .collect();
