@@ -67,7 +67,7 @@ pub fn set_data_region_options(
         SEG_ROW_COUNT_FOR_DATA_REGION.to_string(),
     );
     // Set memtable options for the data region.
-    options.insert("memtable.type".to_string(), "partition_tree".to_string());
+    options.insert("memtable.type".to_string(), "bulk".to_string());
     if sparse_primary_key_encoding_if_absent
         && !options.contains_key(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING)
     {
@@ -213,11 +213,24 @@ mod tests {
         let mut options = HashMap::new();
         set_data_region_options(&mut options, false);
 
+        assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
         assert_eq!(
             options.get(COMPACTION_TYPE),
             Some(&COMPACTION_TYPE_TWCS.to_string())
         );
         assert_eq!(options.get(TWCS_TIME_WINDOW), Some(&"1d".to_string()));
+    }
+
+    #[test]
+    fn test_set_data_region_options_sparse_primary_key_encoding() {
+        let mut options = HashMap::new();
+        set_data_region_options(&mut options, true);
+
+        assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
+        assert_eq!(
+            options.get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING),
+            Some(&"sparse".to_string())
+        );
     }
 
     #[test]

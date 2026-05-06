@@ -22,6 +22,8 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use either::Either;
+use store_api::codec::PrimaryKeyEncoding;
+use store_api::metric_engine_consts::MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING;
 use store_api::region_engine::{RegionEngine, RegionRole, SettableRegionRoleState};
 use store_api::region_request::{
     PathType, RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
@@ -141,6 +143,77 @@ async fn test_engine_reopen_region_with_format(flat_format: bool) {
 
     reopen_region(&engine, region_id, table_dir, false, Default::default()).await;
     assert!(engine.is_region_exists(region_id));
+}
+
+#[tokio::test]
+async fn test_reopen_time_series_sparse_memtable_with_bulk() {
+    let mut env = TestEnv::with_prefix("reopen-time-series-sparse-with-bulk").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: false,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "time_series")
+        .insert_option(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, "sparse")
+        .build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    assert_eq!(
+        PrimaryKeyEncoding::Sparse,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .metadata()
+            .primary_key_encoding
+    );
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+    flush_region(&engine, region_id, None).await;
+
+    reopen_region(
+        &engine,
+        region_id,
+        table_dir,
+        true,
+        HashMap::from([("memtable.type".to_string(), "bulk".to_string())]),
+    )
+    .await;
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(3, 6),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
++-------+---------+---------------------+";
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
 #[tokio::test]

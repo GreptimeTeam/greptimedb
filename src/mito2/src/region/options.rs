@@ -29,11 +29,13 @@ use serde_json::Value;
 use serde_with::{DisplayFromStr, NoneAsEmptyString, serde_as, with_prefix};
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metric_engine_consts::MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING;
 use store_api::mito_engine_options::COMPACTION_OVERRIDE;
 use store_api::storage::ColumnId;
 use strum::EnumString;
 
 use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
+use crate::memtable::bulk::BulkMemtableConfig;
 use crate::memtable::partition_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
 use crate::sst::FormatType;
 
@@ -91,6 +93,9 @@ pub struct RegionOptions {
     pub merge_mode: Option<MergeMode>,
     /// SST format type.
     pub sst_format: Option<FormatType>,
+    /// Internal primary key encoding override used by metric-engine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_key_encoding: Option<PrimaryKeyEncoding>,
 }
 
 impl RegionOptions {
@@ -120,11 +125,13 @@ impl RegionOptions {
 
     /// Returns the `primary_key_encoding` if it is set, otherwise returns the default [`PrimaryKeyEncoding`].
     pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
-        self.memtable
+        self.primary_key_encoding.unwrap_or_else(|| {
+            self.memtable
             .as_ref()
             .map_or(PrimaryKeyEncoding::default(), |memtable| {
                 memtable.primary_key_encoding()
             })
+        })
     }
 }
 
@@ -166,6 +173,17 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
             .unwrap_or(false);
         let compaction_override = has_compaction_type || compaction_override_flag;
+        let primary_key_encoding = options_map
+            .get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING)
+            .map(|v| match v.to_lowercase().as_str() {
+                "dense" => Ok(PrimaryKeyEncoding::Dense),
+                "sparse" => Ok(PrimaryKeyEncoding::Sparse),
+                _ => Err(InvalidRegionOptionsSnafu {
+                    reason: format!("Invalid primary key encoding: {v}"),
+                }
+                .build()),
+            })
+            .transpose()?;
 
         let opts = RegionOptions {
             ttl: options.ttl,
@@ -178,6 +196,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             memtable,
             merge_mode: options.merge_mode,
             sst_format: options.sst_format,
+            primary_key_encoding,
         };
         opts.validate()?;
 
@@ -341,10 +360,13 @@ impl Default for InvertedIndexOptions {
 #[serde(tag = "memtable.type", rename_all = "snake_case")]
 pub enum MemtableOptions {
     TimeSeries,
+    #[serde(with = "prefix_bulk")]
+    Bulk(BulkMemtableConfig),
     #[serde(with = "prefix_partition_tree")]
     PartitionTree(PartitionTreeOptions),
 }
 
+with_prefix!(prefix_bulk "memtable.bulk.");
 with_prefix!(prefix_partition_tree "memtable.partition_tree.");
 
 impl MemtableOptions {
@@ -636,6 +658,14 @@ mod tests {
         };
         assert_eq!(expect, options);
 
+        let map = make_map(&[("memtable.type", "bulk")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig::default())),
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+
         let map = make_map(&[("memtable.type", "partition_tree")]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
@@ -743,6 +773,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            primary_key_encoding: None,
         };
         assert_eq!(expect, options);
     }
@@ -778,6 +809,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            primary_key_encoding: None,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
@@ -843,6 +875,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            primary_key_encoding: None,
         };
         assert_eq!(options, got);
     }

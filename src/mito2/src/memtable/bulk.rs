@@ -37,6 +37,7 @@ use common_time::Timestamp;
 use datatypes::arrow::datatypes::SchemaRef;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceRange};
 use tokio::sync::Semaphore;
@@ -98,7 +99,8 @@ static ENCODE_BYTES_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
 });
 
 /// Configuration for bulk memtable.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct BulkMemtableConfig {
     /// Threshold for triggering merge of parts.
     pub merge_threshold: usize,
@@ -1347,6 +1349,12 @@ impl BulkMemtableBuilder {
             append_mode,
             merge_mode,
         }
+    }
+
+    /// Sets the bulk memtable config.
+    pub fn with_config(mut self, config: BulkMemtableConfig) -> Self {
+        self.config = config;
+        self
     }
 
     /// Sets the compact dispatcher.
