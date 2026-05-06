@@ -20,6 +20,7 @@ use api::v1::SemanticType;
 use common_telemetry::warn;
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnDefaultConstraint;
 use snafu::OptionExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
@@ -38,6 +39,8 @@ use crate::utils::to_data_region_id;
 pub struct PhysicalColumnInfo {
     pub column_id: ColumnId,
     pub data_type: ConcreteDataType,
+    pub is_nullable: bool,
+    pub default_constraint: Option<ColumnDefaultConstraint>,
     pub semantic_type: SemanticType,
 }
 
@@ -46,6 +49,8 @@ impl From<&ColumnMetadata> for PhysicalColumnInfo {
         Self {
             column_id: metadata.column_id,
             data_type: metadata.column_schema.data_type.clone(),
+            is_nullable: metadata.column_schema.is_nullable(),
+            default_constraint: metadata.column_schema.default_constraint().cloned(),
             semantic_type: metadata.semantic_type,
         }
     }
@@ -53,9 +58,13 @@ impl From<&ColumnMetadata> for PhysicalColumnInfo {
 
 impl From<ColumnMetadata> for PhysicalColumnInfo {
     fn from(metadata: ColumnMetadata) -> Self {
+        let is_nullable = metadata.column_schema.is_nullable();
+        let default_constraint = metadata.column_schema.default_constraint().cloned();
         Self {
             column_id: metadata.column_id,
             data_type: metadata.column_schema.data_type,
+            is_nullable,
+            default_constraint,
             semantic_type: metadata.semantic_type,
         }
     }

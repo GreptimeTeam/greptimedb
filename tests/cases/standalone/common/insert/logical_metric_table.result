@@ -77,6 +77,39 @@ DROP TABLE phy;
 
 Affected Rows: 0
 
+CREATE TABLE phy_default (ts timestamp time index, val double default 42) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE t_default (ts timestamp time index, val double default 42, host string primary key) engine = metric with ("on_physical_table" = "phy_default");
+
+Affected Rows: 0
+
+INSERT INTO t_default (host, ts) VALUES ('host1', 0), ('host2', 1);
+
+Affected Rows: 2
+
+SELECT host, ts, val FROM t_default ORDER BY host;
+
++-------+-------------------------+------+
+| host  | ts                      | val  |
++-------+-------------------------+------+
+| host1 | 1970-01-01T00:00:00     | 42.0 |
+| host2 | 1970-01-01T00:00:00.001 | 42.0 |
++-------+-------------------------+------+
+
+INSERT INTO t_default (host, val) VALUES ('host3', 3);
+
+Error: 1004(InvalidArguments), Invalid request for region 4415226380288(1028, 0), reason: missing required time index column ts
+
+DROP TABLE t_default;
+
+Affected Rows: 0
+
+DROP TABLE phy_default;
+
+Affected Rows: 0
+
 CREATE TABLE phy (
     ts timestamp time index,
     val double

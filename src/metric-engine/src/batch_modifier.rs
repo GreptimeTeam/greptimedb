@@ -368,6 +368,8 @@ mod tests {
         let make_info = |column_id: ColumnId| PhysicalColumnInfo {
             column_id,
             data_type: datatypes::prelude::ConcreteDataType::string_datatype(),
+            is_nullable: false,
+            default_constraint: None,
             semantic_type: SemanticType::Tag,
         };
         let name_to_column_id: HashMap<String, PhysicalColumnInfo> = [

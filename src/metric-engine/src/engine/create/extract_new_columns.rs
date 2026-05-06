@@ -129,6 +129,8 @@ mod tests {
             PhysicalColumnInfo {
                 column_id: 0,
                 data_type: ConcreteDataType::string_datatype(),
+                is_nullable: false,
+                default_constraint: None,
                 semantic_type: SemanticType::Tag,
             },
         );

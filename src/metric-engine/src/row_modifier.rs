@@ -466,6 +466,8 @@ mod tests {
         PhysicalColumnInfo {
             column_id,
             data_type: datatypes::prelude::ConcreteDataType::string_datatype(),
+            is_nullable: false,
+            default_constraint: None,
             semantic_type: SemanticType::Tag,
         }
     }

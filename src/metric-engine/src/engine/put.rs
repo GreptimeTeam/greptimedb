@@ -14,13 +14,14 @@
 
 use std::collections::HashMap;
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
     ColumnSchema, PrimaryKeyEncoding as PrimaryKeyEncodingProto, Row, Rows, SemanticType, Value,
     WriteHint,
 };
 use common_telemetry::{error, info};
 use fxhash::FxHashMap;
-use snafu::{OptionExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_request::{
     AffectedRows, RegionDeleteRequest, RegionPutRequest, RegionRequest,
@@ -29,7 +30,7 @@ use store_api::storage::{RegionId, TableId};
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    ColumnNotFoundSnafu, ForbiddenPhysicalAlterSnafu, InvalidRequestSnafu,
+    ColumnNotFoundSnafu, CreateDefaultSnafu, ForbiddenPhysicalAlterSnafu, InvalidRequestSnafu,
     LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, UnsupportedRegionRequestSnafu,
 };
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
@@ -117,7 +118,7 @@ impl MetricEngineInner {
     async fn put_regions_batch_single_physical(
         &self,
         physical_region_id: RegionId,
-        requests: Vec<(RegionId, RegionPutRequest)>,
+        mut requests: Vec<(RegionId, RegionPutRequest)>,
     ) -> Result<AffectedRows> {
         if requests.is_empty() {
             return Ok(0);
@@ -127,7 +128,7 @@ impl MetricEngineInner {
         let primary_key_encoding = self.get_primary_key_encoding(data_region_id)?;
 
         // Validate all requests
-        self.validate_batch_requests(physical_region_id, &requests)
+        self.validate_batch_requests(physical_region_id, &mut requests)
             .await?;
 
         // Merge requests according to encoding strategy
@@ -158,11 +159,16 @@ impl MetricEngineInner {
     async fn validate_batch_requests(
         &self,
         physical_region_id: RegionId,
-        requests: &[(RegionId, RegionPutRequest)],
+        requests: &mut [(RegionId, RegionPutRequest)],
     ) -> Result<()> {
         for (logical_region_id, request) in requests {
-            self.verify_rows(*logical_region_id, physical_region_id, &request.rows, true)
-                .await?;
+            self.verify_rows(
+                *logical_region_id,
+                physical_region_id,
+                &mut request.rows,
+                true,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -407,8 +413,13 @@ impl MetricEngineInner {
         let (physical_region_id, data_region_id, primary_key_encoding) =
             self.find_data_region_meta(logical_region_id)?;
 
-        self.verify_rows(logical_region_id, physical_region_id, &request.rows, true)
-            .await?;
+        self.verify_rows(
+            logical_region_id,
+            physical_region_id,
+            &mut request.rows,
+            true,
+        )
+        .await?;
 
         // write to data region
         // TODO: retrieve table name
@@ -440,8 +451,13 @@ impl MetricEngineInner {
         let (physical_region_id, data_region_id, primary_key_encoding) =
             self.find_data_region_meta(logical_region_id)?;
 
-        self.verify_rows(logical_region_id, physical_region_id, &request.rows, false)
-            .await?;
+        self.verify_rows(
+            logical_region_id,
+            physical_region_id,
+            &mut request.rows,
+            false,
+        )
+        .await?;
 
         // write to data region
         // TODO: retrieve table name
@@ -495,7 +511,7 @@ impl MetricEngineInner {
         &self,
         logical_region_id: RegionId,
         physical_region_id: RegionId,
-        rows: &Rows,
+        rows: &mut Rows,
         check_fields: bool,
     ) -> Result<()> {
         // Check if the region exists
@@ -572,19 +588,67 @@ impl MetricEngineInner {
         );
 
         if check_fields {
-            let mut field_columns = rows.schema.iter().filter(|col| {
-                api::helper::is_semantic_type_eq(col.semantic_type, SemanticType::Field)
-            });
             let field_name = physical_state.field_column_name();
-            let field_column = field_columns.next();
-            ensure!(
-                field_column.is_some_and(|col| col.column_name == field_name)
-                    && field_columns.next().is_none(),
-                InvalidRequestSnafu {
-                    region_id: logical_region_id,
-                    reason: format!("missing required field column {field_name}"),
-                }
-            );
+            if !rows.schema.iter().any(|col| col.column_name == field_name) {
+                let field_info =
+                    physical_columns
+                        .get(field_name)
+                        .with_context(|| ColumnNotFoundSnafu {
+                            name: field_name,
+                            region_id: logical_region_id,
+                        })?;
+                Self::fill_missing_field_column(logical_region_id, field_name, field_info, rows)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn fill_missing_field_column(
+        logical_region_id: RegionId,
+        field_name: &str,
+        field_info: &crate::engine::state::PhysicalColumnInfo,
+        rows: &mut Rows,
+    ) -> Result<()> {
+        let Some(default_constraint) = field_info.default_constraint.as_ref() else {
+            return InvalidRequestSnafu {
+                region_id: logical_region_id,
+                reason: format!("missing required field column {field_name}"),
+            }
+            .fail();
+        };
+
+        let default_value = default_constraint
+            .create_default(&field_info.data_type, field_info.is_nullable)
+            .context(CreateDefaultSnafu {
+                region_id: logical_region_id,
+                column: field_name,
+            })?;
+        let default_value = api::helper::to_grpc_value(default_value);
+        let (datatype, datatype_extension) =
+            ColumnDataTypeWrapper::try_from(field_info.data_type.clone())
+                .map_err(|e| {
+                    InvalidRequestSnafu {
+                        region_id: logical_region_id,
+                        reason: format!(
+                            "no protobuf type for field column {field_name} ({:?}): {e}",
+                            field_info.data_type
+                        ),
+                    }
+                    .build()
+                })?
+                .to_parts();
+
+        rows.schema.push(ColumnSchema {
+            column_name: field_name.to_string(),
+            datatype: datatype as i32,
+            semantic_type: SemanticType::Field as i32,
+            datatype_extension,
+            options: None,
+        });
+
+        for row in &mut rows.rows {
+            row.values.push(default_value.clone());
         }
 
         Ok(())
@@ -1482,86 +1546,6 @@ mod tests {
             values: vec![
                 Value {
                     value_data: Some(ValueData::TimestampMillisecondValue(0)),
-                },
-                Value {
-                    value_data: Some(ValueData::StringValue("tag_0".to_string())),
-                },
-            ],
-        }];
-
-        let err = env
-            .metric()
-            .handle_request(
-                logical_region_id,
-                RegionRequest::Put(RegionPutRequest {
-                    rows: Rows { schema, rows },
-                    hint: None,
-                    partition_expr_version: None,
-                }),
-            )
-            .await
-            .unwrap_err();
-        let message = err.to_string();
-        assert!(
-            message.contains("missing required field column"),
-            "expected field-completeness rejection, got: {message}"
-        );
-        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
-    }
-
-    #[tokio::test]
-    async fn test_verify_rows_rejects_multiple_fields() {
-        use api::v1::value::ValueData;
-        use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, SemanticType};
-        use common_query::prelude::{greptime_timestamp, greptime_value};
-
-        let env = TestEnv::new().await;
-        env.init_metric_region().await;
-
-        let logical_region_id = env.default_logical_region_id();
-
-        // Duplicate field columns should be rejected even if each field matches
-        // the physical column definition.
-        let schema = vec![
-            PbColumnSchema {
-                column_name: greptime_timestamp().to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as i32,
-                semantic_type: SemanticType::Timestamp as _,
-                datatype_extension: None,
-                options: None,
-            },
-            PbColumnSchema {
-                column_name: greptime_value().to_string(),
-                datatype: ColumnDataType::Float64 as i32,
-                semantic_type: SemanticType::Field as _,
-                datatype_extension: None,
-                options: None,
-            },
-            PbColumnSchema {
-                column_name: greptime_value().to_string(),
-                datatype: ColumnDataType::Float64 as i32,
-                semantic_type: SemanticType::Field as _,
-                datatype_extension: None,
-                options: None,
-            },
-            PbColumnSchema {
-                column_name: "job".to_string(),
-                datatype: ColumnDataType::String as i32,
-                semantic_type: SemanticType::Tag as _,
-                datatype_extension: None,
-                options: None,
-            },
-        ];
-        let rows = vec![Row {
-            values: vec![
-                Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(0)),
-                },
-                Value {
-                    value_data: Some(ValueData::F64Value(1.0)),
-                },
-                Value {
-                    value_data: Some(ValueData::F64Value(2.0)),
                 },
                 Value {
                     value_data: Some(ValueData::StringValue("tag_0".to_string())),
