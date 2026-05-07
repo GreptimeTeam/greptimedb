@@ -96,9 +96,10 @@ impl RegionOptions {
     pub fn validate(&self) -> Result<()> {
         if self.append_mode {
             ensure!(
-                self.merge_mode.is_none(),
+                self.merge_mode
+                    .is_none_or(|mode| mode == MergeMode::LastRow),
                 InvalidRegionOptionsSnafu {
-                    reason: "merge_mode is not allowed when append_mode is enabled",
+                    reason: "only last_row merge_mode is allowed when append_mode is enabled",
                 }
             );
         }
@@ -618,6 +619,18 @@ mod tests {
         assert_eq!(MergeMode::LastNonNull, options.merge_mode());
 
         let map = make_map(&[("merge_mode", "unknown")]);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_append_mode_allows_last_row_merge_mode() {
+        let map = make_map(&[("append_mode", "true"), ("merge_mode", "last_row")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert!(options.append_mode);
+        assert_eq!(MergeMode::LastRow, options.merge_mode());
+
+        let map = make_map(&[("append_mode", "true"), ("merge_mode", "last_non_null")]);
         let err = RegionOptions::try_from(&map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
