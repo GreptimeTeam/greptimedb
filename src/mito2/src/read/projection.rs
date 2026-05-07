@@ -108,6 +108,7 @@ mod tests {
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::read_columns::ReadColumns;
 
     fn print_record_batch(record_batch: RecordBatch) -> String {
         pretty::pretty_format_batches(&[record_batch.into_df_record_batch()])
@@ -221,7 +222,10 @@ mod tests {
         );
         let cache = CacheStrategy::Disabled;
         let mapper = FlatProjectionMapper::all(&metadata).unwrap();
-        assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
+        assert_eq!(
+            &[0, 1, 2, 3, 4],
+            mapper.read_columns().column_ids().as_slice()
+        );
         assert_eq!(
             [
                 (1, ConcreteDataType::int64_datatype()),
@@ -255,8 +259,8 @@ mod tests {
                 .build(),
         );
         let cache = CacheStrategy::Disabled;
-        let mapper = FlatProjectionMapper::new(&metadata, [4, 1].into_iter()).unwrap();
-        assert_eq!([4, 1], mapper.column_ids());
+        let mapper = FlatProjectionMapper::new(&metadata, [4, 1]).unwrap();
+        assert_eq!(&[4, 1], mapper.read_columns().column_ids().as_slice());
         assert_eq!(
             [
                 (1, ConcreteDataType::int64_datatype()),
@@ -288,10 +292,13 @@ mod tests {
                 .build(),
         );
         let cache = CacheStrategy::Disabled;
-        let mapper =
-            FlatProjectionMapper::new_with_read_columns(&metadata, vec![4, 1], vec![4, 1, 3])
-                .unwrap();
-        assert_eq!([4, 1, 3], mapper.column_ids());
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &metadata,
+            vec![4, 1],
+            ReadColumns::from_deduped_column_ids([4, 1, 3]),
+        )
+        .unwrap();
+        assert_eq!(&[4, 1, 3], mapper.read_columns().column_ids().as_slice());
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(3, 3), (4, 4)], 3);
         let record_batch = mapper.convert(&batch, &cache).unwrap();
@@ -315,8 +322,8 @@ mod tests {
                 .build(),
         );
         let cache = CacheStrategy::Disabled;
-        let mapper = FlatProjectionMapper::new(&metadata, [].into_iter()).unwrap();
-        assert_eq!([0], mapper.column_ids());
+        let mapper = FlatProjectionMapper::new(&metadata, []).unwrap();
+        assert_eq!(&[0], mapper.read_columns().column_ids().as_slice());
         assert!(mapper.output_schema().is_empty());
         assert_eq!(
             [(0, ConcreteDataType::timestamp_millisecond_datatype())],

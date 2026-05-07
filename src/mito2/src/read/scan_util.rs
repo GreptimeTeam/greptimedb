@@ -1368,7 +1368,7 @@ mod split_tests {
     async fn new_stream_context_with_files(files: Vec<FileHandle>) -> StreamContext {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         let input = ScanInput::new(env.access_layer.clone(), mapper).with_files(files);
 
         StreamContext {
@@ -1745,7 +1745,7 @@ mod tests {
     ) -> Arc<StreamContext> {
         let env = SchedulerEnv::new().await;
         let metadata = metadata_for_test();
-        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         let input = ScanInput::new(env.access_layer.clone(), mapper)
             .with_cache(CacheStrategy::Disabled)
             .with_memtables(memtables)
