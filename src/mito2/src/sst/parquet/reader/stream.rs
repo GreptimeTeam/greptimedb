@@ -125,10 +125,6 @@ where
                     )?
                 };
 
-                if !this.all_roots_present {
-                    return Poll::Ready(Some(Ok(rb)));
-                }
-
                 let is_schema_matched = *this
                     .is_schema_matched
                     .get_or_insert_with(|| rb.schema() == this.output_schema);
