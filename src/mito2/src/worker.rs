@@ -1021,33 +1021,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         general_requests: &mut Vec<WorkerRequest>,
         bulk_requests: &mut Vec<SenderBulkRequest>,
     ) {
+        // Convert bulk insert requests into `bulk_requests` before background notifications run.
+        // This lets an edit-completion notification drain same-batch bulk writes for its region
+        // before it starts the next queued edit.
+        let mut pending_general_requests = Vec::with_capacity(general_requests.len());
         for worker_req in general_requests.drain(..) {
             match worker_req {
-                WorkerRequest::Write(_) | WorkerRequest::Ddl(_) => {
-                    // These requests are categorized into write_requests and ddl_requests.
-                    continue;
-                }
-                WorkerRequest::Background { region_id, notify } => {
-                    // For background notify, we handle it directly.
-                    self.handle_background_notify(region_id, notify).await;
-                }
-                WorkerRequest::SetRegionRoleStateGracefully {
-                    region_id,
-                    region_role_state,
-                    sender,
-                } => {
-                    self.set_role_state_gracefully(region_id, region_role_state, sender)
-                        .await;
-                }
-                WorkerRequest::EditRegion(request) => {
-                    self.handle_region_edit(request);
-                }
-                WorkerRequest::Stop => {
-                    debug_assert!(!self.running.load(Ordering::Relaxed));
-                }
-                WorkerRequest::SyncRegion(req) => {
-                    self.handle_region_sync(req).await;
-                }
                 WorkerRequest::BulkInserts {
                     metadata,
                     request,
@@ -1071,6 +1050,53 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         );
                     }
                 }
+                worker_req => pending_general_requests.push(worker_req),
+            }
+        }
+        *general_requests = pending_general_requests;
+
+        for worker_req in general_requests.drain(..) {
+            match worker_req {
+                WorkerRequest::Write(_) | WorkerRequest::Ddl(_) => {
+                    // These requests are categorized into write_requests and ddl_requests.
+                    continue;
+                }
+                WorkerRequest::Background { region_id, notify } => {
+                    if matches!(
+                        &notify,
+                        BackgroundNotify::RegionEdit(edit_result)
+                            if edit_result.update_region_state
+                    ) {
+                        // The current batch's write buffers may contain writes that arrived while
+                        // this edit was in flight. Classify them before restoring edit progress.
+                        self.handle_buffered_region_write_requests(
+                            &region_id,
+                            write_requests,
+                            bulk_requests,
+                        )
+                        .await;
+                    }
+                    // For background notify, we handle it directly.
+                    self.handle_background_notify(region_id, notify).await;
+                }
+                WorkerRequest::SetRegionRoleStateGracefully {
+                    region_id,
+                    region_role_state,
+                    sender,
+                } => {
+                    self.set_role_state_gracefully(region_id, region_role_state, sender)
+                        .await;
+                }
+                WorkerRequest::EditRegion(request) => {
+                    self.handle_region_edit(request);
+                }
+                WorkerRequest::Stop => {
+                    debug_assert!(!self.running.load(Ordering::Relaxed));
+                }
+                WorkerRequest::SyncRegion(req) => {
+                    self.handle_region_sync(req).await;
+                }
+                WorkerRequest::BulkInserts { .. } => unreachable!("bulk inserts are buffered"),
                 WorkerRequest::RemapManifests(req) => {
                     self.handle_remap_manifests_request(req);
                 }

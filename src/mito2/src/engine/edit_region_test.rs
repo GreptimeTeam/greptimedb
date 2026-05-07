@@ -15,10 +15,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use api::v1::Rows;
 use common_time::util::current_time_millis;
 use object_store::ObjectStore;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{RegionPutRequest, RegionRequest};
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::{Barrier, oneshot};
 
@@ -27,9 +28,9 @@ use crate::engine::MitoEngine;
 use crate::engine::flush_test::MockTimeProvider;
 use crate::engine::listener::EventListener;
 use crate::manifest::action::RegionEdit;
-use crate::region::MitoRegionRef;
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::sst::file::FileMeta;
-use crate::test_util::{CreateRequestBuilder, TestEnv};
+use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
 
 #[tokio::test]
 async fn test_edit_region_schedule_compaction() {
@@ -208,6 +209,113 @@ async fn test_edit_region_fill_cache_with_format(flat_format: bool) {
         .unwrap()
         .unwrap();
     assert_eq!(file_id, actual);
+}
+
+#[tokio::test]
+async fn test_write_during_region_editing_is_queued() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let create_request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&create_request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create_request))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+
+    let manifest_guard = region.manifest_ctx.manifest_manager.write().await;
+    let edit = RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            level: 0,
+            ..Default::default()
+        }],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+    };
+
+    let edit_engine = engine.clone();
+    let edit_task = tokio::spawn(async move { edit_engine.edit_region(region_id, edit).await });
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let write_engine = engine.clone();
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 1),
+    };
+    let mut write_task = Box::pin(tokio::spawn(async move {
+        write_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows,
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+    }));
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut write_task)
+            .await
+            .is_err(),
+        "write should wait while region edit is in progress"
+    );
+
+    let second_file_id = FileId::random();
+    let second_edit = RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id: region.region_id,
+            file_id: second_file_id,
+            level: 0,
+            ..Default::default()
+        }],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+    };
+    let second_edit_engine = engine.clone();
+    let mut second_edit_task =
+        Box::pin(async move { second_edit_engine.edit_region(region_id, second_edit).await });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut second_edit_task)
+            .await
+            .is_err(),
+        "queued region edit should wait for the in-flight edit"
+    );
+
+    drop(manifest_guard);
+    edit_task.await.unwrap().unwrap();
+    let output = write_task.await.unwrap().unwrap();
+    assert_eq!(1, output.affected_rows);
+    second_edit_task.await.unwrap();
+
+    let second_file_sequence = region.version().ssts.levels()[0]
+        .files
+        .iter()
+        .find(|(file_id, _)| **file_id == second_file_id)
+        .and_then(|(_, file)| file.meta_ref().sequence)
+        .map(|sequence| sequence.get());
+    assert_eq!(Some(3), second_file_sequence);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

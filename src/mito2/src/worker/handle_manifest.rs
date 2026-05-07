@@ -49,9 +49,12 @@ use crate::worker::{RegionWorkerLoop, WorkerListener};
 
 pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
 
-/// A queue for temporary store region edit requests, if the region is in the "Editing" state.
-/// When the current region edit request is completed, the next (if there exists) request in the
-/// queue will be processed.
+/// A queue for region edit requests received while the region is already `Editing`.
+///
+/// Normal writes and bulk inserts that arrive during `Editing` use the stalled-write queue instead.
+/// When an edit completes, those writes are handled before the next queued edit starts, preserving
+/// sequence ordering between direct SST edits and WAL/memtable writes unless global reject
+/// backpressure rejects them first.
 /// Everything is done in the region worker loop.
 pub(crate) struct RegionEditQueue {
     region_id: RegionId,
@@ -134,7 +137,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .await;
         }
         // Handles the stalled requests.
-        self.handle_region_stalled_requests(&change_result.region_id)
+        self.handle_region_stalled_requests(&change_result.region_id, true)
             .await;
     }
 
@@ -213,7 +216,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles region edit request.
     pub(crate) fn handle_region_edit(&mut self, request: RegionEditRequest) {
         let region_id = request.region_id;
@@ -337,6 +340,13 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         let _ = edit_result.sender.send(edit_result.result);
+
+        if edit_result.update_region_state {
+            // Writes stalled specifically by this edit are handled before the next queued edit.
+            // Otherwise the next edit could reserve a committed sequence before those writes.
+            self.handle_region_stalled_requests(&edit_result.region_id, false)
+                .await;
+        }
 
         if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id)
             && let Some(request) = edit_queue.dequeue()
