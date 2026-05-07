@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use crate::error::{ReadOnlyKvBackendSnafu, Result};
-use crate::kv_backend::txn::{Txn, TxnOp, TxnRequest, TxnResponse};
+use crate::kv_backend::txn::{Txn, TxnOp, TxnResponse};
 use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -55,12 +55,8 @@ impl ReadOnlyKvBackend {
     }
 
     fn validate_read_only_txn(&self, txn: &Txn) -> Result<()> {
-        let TxnRequest {
-            success, failure, ..
-        } = txn.clone().into();
-
-        self.validate_read_only_ops(&success)?;
-        self.validate_read_only_ops(&failure)
+        self.validate_read_only_ops(&txn.req.success)?;
+        self.validate_read_only_ops(&txn.req.failure)
     }
 }
 
