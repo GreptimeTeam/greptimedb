@@ -323,7 +323,7 @@ mod tests {
 
             fn pre_execute(
                 &self,
-                _statement: &Statement,
+                _statement: Option<&Statement>,
                 _plan: Option<&LogicalPlan>,
                 _query_ctx: QueryContextRef,
             ) -> Result<()> {
@@ -333,6 +333,7 @@ mod tests {
 
             fn post_execute(
                 &self,
+                _statement: Option<&Statement>,
                 mut output: Output,
                 _query_ctx: QueryContextRef,
             ) -> Result<Output> {
@@ -396,7 +397,7 @@ mod tests {
 
             fn pre_execute(
                 &self,
-                _statement: &Statement,
+                _statement: Option<&Statement>,
                 _plan: Option<&LogicalPlan>,
                 _query_ctx: QueryContextRef,
             ) -> Result<()> {
@@ -404,7 +405,12 @@ mod tests {
                 Ok(())
             }
 
-            fn post_execute(&self, output: Output, _query_ctx: QueryContextRef) -> Result<Output> {
+            fn post_execute(
+                &self,
+                _statement: Option<&Statement>,
+                output: Output,
+                _query_ctx: QueryContextRef,
+            ) -> Result<Output> {
                 self.post_execute_called.store(true, Ordering::Relaxed);
                 Ok(output)
             }
