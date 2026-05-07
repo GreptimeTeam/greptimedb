@@ -73,8 +73,8 @@ use crate::region::{
     RegionMapRef,
 };
 use crate::request::{
-    BackgroundNotify, DdlRequest, SenderBulkRequest, SenderDdlRequest, SenderWriteRequest,
-    WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BulkInsertRequest, DdlRequest, SenderBulkRequest, SenderDdlRequest,
+    SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::RegionFileId;
@@ -919,6 +919,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             write_req_buffer.clear();
             ddl_req_buffer.clear();
             general_req_buffer.clear();
+            let mut bulk_insert_req_num = 0;
 
             let max_wait_time = self.time_provider.wait_duration(CHECK_REGION_INTERVAL);
             let sleep = tokio::time::sleep(max_wait_time);
@@ -935,6 +936,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                             match request_with_time.request {
                                 WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
                                 WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
+                                WorkerRequest::BulkInserts(bulk_insert) => {
+                                    bulk_insert_req_num += 1;
+                                    self.buffer_bulk_insert_request(bulk_insert, &mut bulk_req_buffer)
+                                        .await;
+                                }
                                 req => general_req_buffer.push(req),
                             }
                         },
@@ -983,6 +989,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         match request_with_time.request {
                             WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
                             WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
+                            WorkerRequest::BulkInserts(bulk_insert) => {
+                                bulk_insert_req_num += 1;
+                                self.buffer_bulk_insert_request(bulk_insert, &mut bulk_req_buffer)
+                                    .await
+                            }
                             req => general_req_buffer.push(req),
                         }
                     }
@@ -992,7 +1003,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
 
             self.listener.on_recv_requests(
-                write_req_buffer.len() + ddl_req_buffer.len() + general_req_buffer.len(),
+                write_req_buffer.len()
+                    + ddl_req_buffer.len()
+                    + general_req_buffer.len()
+                    + bulk_insert_req_num,
             );
 
             self.handle_requests(
@@ -1011,9 +1025,34 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         info!("Exit region worker thread {}", self.id);
     }
 
+    async fn buffer_bulk_insert_request(
+        &mut self,
+        bulk_insert: BulkInsertRequest,
+        bulk_requests: &mut Vec<SenderBulkRequest>,
+    ) {
+        let BulkInsertRequest {
+            metadata,
+            request,
+            sender,
+        } = bulk_insert;
+
+        if let Some(region_metadata) = metadata {
+            self.handle_bulk_insert_batch(region_metadata, request, bulk_requests, sender)
+                .await;
+        } else {
+            error!("Cannot find region metadata for {}", request.region_id);
+            sender.send(
+                error::RegionNotFoundSnafu {
+                    region_id: request.region_id,
+                }
+                .fail(),
+            );
+        }
+    }
+
     /// Dispatches and processes requests.
     ///
-    /// `buffer` should be empty.
+    /// `general_requests` should not contain categorized write, ddl, or bulk insert requests.
     async fn handle_requests(
         &mut self,
         write_requests: &mut Vec<SenderWriteRequest>,
@@ -1021,46 +1060,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         general_requests: &mut Vec<WorkerRequest>,
         bulk_requests: &mut Vec<SenderBulkRequest>,
     ) {
-        // Convert bulk insert requests into `bulk_requests` before background notifications run.
-        // This lets an edit-completion notification drain same-batch bulk writes for its region
-        // before it starts the next queued edit.
-        let mut pending_general_requests = Vec::with_capacity(general_requests.len());
-        for worker_req in general_requests.drain(..) {
-            match worker_req {
-                WorkerRequest::BulkInserts {
-                    metadata,
-                    request,
-                    sender,
-                } => {
-                    if let Some(region_metadata) = metadata {
-                        self.handle_bulk_insert_batch(
-                            region_metadata,
-                            request,
-                            bulk_requests,
-                            sender,
-                        )
-                        .await;
-                    } else {
-                        error!("Cannot find region metadata for {}", request.region_id);
-                        sender.send(
-                            error::RegionNotFoundSnafu {
-                                region_id: request.region_id,
-                            }
-                            .fail(),
-                        );
-                    }
-                }
-                worker_req => pending_general_requests.push(worker_req),
-            }
-        }
-        *general_requests = pending_general_requests;
-
         for worker_req in general_requests.drain(..) {
             match worker_req {
                 WorkerRequest::Write(_) | WorkerRequest::Ddl(_) => {
-                    // These requests are categorized into write_requests and ddl_requests.
+                    // These requests are categorized before dispatching general requests.
                     continue;
                 }
+                WorkerRequest::BulkInserts(_) => unreachable!("bulk inserts are buffered"),
                 WorkerRequest::Background { region_id, notify } => {
                     if matches!(
                         &notify,
@@ -1096,7 +1102,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::SyncRegion(req) => {
                     self.handle_region_sync(req).await;
                 }
-                WorkerRequest::BulkInserts { .. } => unreachable!("bulk inserts are buffered"),
                 WorkerRequest::RemapManifests(req) => {
                     self.handle_remap_manifests_request(req);
                 }

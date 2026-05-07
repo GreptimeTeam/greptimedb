@@ -15,11 +15,15 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use api::v1::Rows;
+use api::v1::{ArrowIpc, Rows};
+use common_recordbatch::DfRecordBatch;
+use common_test_util::flight::encode_to_flight_data;
 use common_time::util::current_time_millis;
+use datatypes::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
+use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use object_store::ObjectStore;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionPutRequest, RegionRequest};
+use store_api::region_request::{RegionBulkInsertsRequest, RegionPutRequest, RegionRequest};
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::{Barrier, oneshot};
 
@@ -226,20 +230,7 @@ async fn test_write_during_region_editing_is_queued() {
     let region = engine.get_region(region_id).unwrap();
 
     let manifest_guard = region.manifest_ctx.manifest_manager.write().await;
-    let edit = RegionEdit {
-        files_to_add: vec![FileMeta {
-            region_id: region.region_id,
-            file_id: FileId::random(),
-            level: 0,
-            ..Default::default()
-        }],
-        files_to_remove: vec![],
-        timestamp_ms: None,
-        compaction_time_window: None,
-        flushed_entry_id: None,
-        flushed_sequence: None,
-        committed_sequence: None,
-    };
+    let edit = test_region_edit(region.region_id, FileId::random());
 
     let edit_engine = engine.clone();
     let edit_task = tokio::spawn(async move { edit_engine.edit_region(region_id, edit).await });
@@ -278,20 +269,7 @@ async fn test_write_during_region_editing_is_queued() {
     );
 
     let second_file_id = FileId::random();
-    let second_edit = RegionEdit {
-        files_to_add: vec![FileMeta {
-            region_id: region.region_id,
-            file_id: second_file_id,
-            level: 0,
-            ..Default::default()
-        }],
-        files_to_remove: vec![],
-        timestamp_ms: None,
-        compaction_time_window: None,
-        flushed_entry_id: None,
-        flushed_sequence: None,
-        committed_sequence: None,
-    };
+    let second_edit = test_region_edit(region.region_id, second_file_id);
     let second_edit_engine = engine.clone();
     let mut second_edit_task =
         Box::pin(async move { second_edit_engine.edit_region(region_id, second_edit).await });
@@ -316,6 +294,136 @@ async fn test_write_during_region_editing_is_queued() {
         .and_then(|(_, file)| file.meta_ref().sequence)
         .map(|sequence| sequence.get());
     assert_eq!(Some(3), second_file_sequence);
+}
+
+#[tokio::test]
+async fn test_bulk_insert_during_region_editing_is_queued() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+
+    let manifest_guard = region.manifest_ctx.manifest_manager.write().await;
+    let edit = test_region_edit(region.region_id, FileId::random());
+
+    let edit_engine = engine.clone();
+    let edit_task = tokio::spawn(async move { edit_engine.edit_region(region_id, edit).await });
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let bulk_engine = engine.clone();
+    let bulk_task = tokio::spawn(async move {
+        bulk_engine
+            .handle_request(
+                region_id,
+                RegionRequest::BulkInserts(build_bulk_insert_request(region_id, 0, 1)),
+            )
+            .await
+    });
+
+    let mut bulk_task = Box::pin(bulk_task);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut bulk_task)
+            .await
+            .is_err(),
+        "bulk insert should wait while region edit is in progress"
+    );
+
+    let second_file_id = FileId::random();
+    let second_edit = test_region_edit(region.region_id, second_file_id);
+    let second_edit_engine = engine.clone();
+    let mut second_edit_task =
+        Box::pin(async move { second_edit_engine.edit_region(region_id, second_edit).await });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut second_edit_task)
+            .await
+            .is_err(),
+        "queued region edit should wait for the in-flight edit"
+    );
+
+    drop(manifest_guard);
+    edit_task.await.unwrap().unwrap();
+    let output = bulk_task.await.unwrap().unwrap();
+    assert_eq!(1, output.affected_rows);
+    second_edit_task.await.unwrap();
+
+    let second_file_sequence = region.version().ssts.levels()[0]
+        .files
+        .iter()
+        .find(|(file_id, _)| **file_id == second_file_id)
+        .and_then(|(_, file)| file.meta_ref().sequence)
+        .map(|sequence| sequence.get());
+    assert_eq!(Some(3), second_file_sequence);
+}
+
+fn test_region_edit(region_id: RegionId, file_id: FileId) -> RegionEdit {
+    RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id,
+            file_id,
+            level: 0,
+            ..Default::default()
+        }],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+    }
+}
+
+fn build_bulk_insert_request(
+    region_id: RegionId,
+    start: usize,
+    end: usize,
+) -> RegionBulkInsertsRequest {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tag_0", DataType::Utf8, true),
+        Field::new("field_0", DataType::Float64, true),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]));
+    let tag = Arc::new(StringArray::from_iter_values(
+        (start..end).map(|value| value.to_string()),
+    )) as ArrayRef;
+    let field = Arc::new(Float64Array::from_iter_values(
+        (start..end).map(|value| value as f64),
+    )) as ArrayRef;
+    let ts = Arc::new(TimestampMillisecondArray::from_iter_values(
+        (start..end).map(|value| value as i64 * 1000),
+    )) as ArrayRef;
+    let payload = DfRecordBatch::try_new(schema, vec![tag, field, ts]).unwrap();
+    let (schema, record_batch) = encode_to_flight_data(payload.clone());
+
+    RegionBulkInsertsRequest {
+        region_id,
+        payload,
+        raw_data: ArrowIpc {
+            schema: schema.data_header,
+            data_header: record_batch.data_header,
+            payload: record_batch.data_body,
+        },
+        partition_expr_version: None,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
