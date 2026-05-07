@@ -17,34 +17,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, Rows, SemanticType, WriteHint};
+use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::ColumnSchema;
-use datatypes::value::ValueRef;
 use either::Either;
-use mito_codec::row_converter::SparsePrimaryKeyCodec;
-use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::ColumnMetadata;
-use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
-    MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
-};
 use store_api::region_engine::{RegionEngine, RegionRole, SettableRegionRoleState};
 use store_api::region_request::{
-    PathType, RegionCloseRequest, RegionCreateRequest, RegionOpenRequest, RegionPutRequest,
-    RegionRequest,
+    PathType, RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
-use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
 
 use crate::compaction::compactor::{OpenCompactionRegionRequest, open_compaction_region};
 use crate::config::MitoConfig;
-use crate::engine::MITO_ENGINE_NAME;
 use crate::error;
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::region::options::RegionOptions;
@@ -155,210 +141,6 @@ async fn test_engine_reopen_region_with_format(flat_format: bool) {
 
     reopen_region(&engine, region_id, table_dir, false, Default::default()).await;
     assert!(engine.is_region_exists(region_id));
-}
-
-#[tokio::test]
-async fn test_reopen_time_series_sparse_memtable_with_bulk() {
-    let mut env = TestEnv::with_prefix("reopen-time-series-sparse-with-bulk").await;
-    let engine = env
-        .create_engine(MitoConfig {
-            default_flat_format: false,
-            ..Default::default()
-        })
-        .await;
-
-    let region_id = RegionId::new(1, 1);
-    let table_dir = "test_reopen_partition_tree_sparse".to_string();
-
-    // Metric-engine-shaped schema. The first PK column must be `__table_id` so
-    // PartitionTree marks the region as partitioned, which is required for its
-    // sparse primary-key write path.
-    let column_metadatas = vec![
-        ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
-                ConcreteDataType::uint32_datatype(),
-                false,
-            ),
-            semantic_type: SemanticType::Tag,
-            column_id: ReservedColumnId::table_id(),
-        },
-        ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
-                ConcreteDataType::uint64_datatype(),
-                false,
-            ),
-            semantic_type: SemanticType::Tag,
-            column_id: ReservedColumnId::tsid(),
-        },
-        ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "tag_0".to_string(),
-                ConcreteDataType::string_datatype(),
-                true,
-            ),
-            semantic_type: SemanticType::Tag,
-            column_id: 0,
-        },
-        ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "field_0".to_string(),
-                ConcreteDataType::float64_datatype(),
-                true,
-            ),
-            semantic_type: SemanticType::Field,
-            column_id: 1,
-        },
-        ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "ts".to_string(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            ),
-            semantic_type: SemanticType::Timestamp,
-            column_id: 2,
-        },
-    ];
-    let primary_key_column_ids = vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 0];
-    let request = RegionCreateRequest {
-        engine: MITO_ENGINE_NAME.to_string(),
-        column_metadatas,
-        primary_key: primary_key_column_ids.clone(),
-        options: HashMap::from([
-            ("memtable.type".to_string(), "partition_tree".to_string()),
-            (
-                MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING.to_string(),
-                "sparse".to_string(),
-            ),
-        ]),
-        table_dir: table_dir.clone(),
-        path_type: PathType::Bare,
-        partition_expr_json: None,
-    };
-    engine
-        .handle_request(region_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
-    assert_eq!(
-        PrimaryKeyEncoding::Sparse,
-        engine
-            .get_region(region_id)
-            .unwrap()
-            .metadata()
-            .primary_key_encoding
-    );
-
-    // Write sparse-shaped rows (the layout metric-engine sends in production):
-    // `[__primary_key (Binary), ts, field_0]` with `WriteHint::Sparse`.
-    let pk_codec = SparsePrimaryKeyCodec::from_columns(primary_key_column_ids.iter().copied());
-    put_sparse_rows(&engine, region_id, &pk_codec, 0, 3).await;
-
-    // Reopen with `memtable.type=bulk` *without* flushing. The unflushed rows
-    // must replay from WAL into the new BulkMemtable and stay readable after
-    // the migration.
-    reopen_region(
-        &engine,
-        region_id,
-        table_dir,
-        true,
-        HashMap::from([("memtable.type".to_string(), "bulk".to_string())]),
-    )
-    .await;
-
-    let expected = "\
-+------------+--------+-------+---------+---------------------+
-| __table_id | __tsid | tag_0 | field_0 | ts                  |
-+------------+--------+-------+---------+---------------------+
-| 1          | 0      | 0     | 0.0     | 1970-01-01T00:00:00 |
-| 1          | 1      | 1     | 1.0     | 1970-01-01T00:00:01 |
-| 1          | 2      | 2     | 2.0     | 1970-01-01T00:00:02 |
-+------------+--------+-------+---------+---------------------+";
-    let stream = engine
-        .scan_to_stream(region_id, ScanRequest::default())
-        .await
-        .unwrap();
-    let batches = RecordBatches::try_collect(stream).await.unwrap();
-    assert_eq!(expected, batches.pretty_print().unwrap());
-}
-
-/// Pushes sparse-shaped rows for the metric-engine schema. Each row has the
-/// shape `[__primary_key (Binary), ts (timestamp_ms), field_0 (f64)]`. The
-/// primary key encodes `(__table_id=1, __tsid=i, tag_0=i.to_string())`.
-async fn put_sparse_rows(
-    engine: &crate::engine::MitoEngine,
-    region_id: RegionId,
-    pk_codec: &SparsePrimaryKeyCodec,
-    start: usize,
-    end: usize,
-) {
-    let schema = vec![
-        PbColumnSchema {
-            column_name: PRIMARY_KEY_COLUMN_NAME.to_string(),
-            datatype: ColumnDataType::Binary as i32,
-            semantic_type: SemanticType::Tag as i32,
-            datatype_extension: None,
-            options: None,
-        },
-        PbColumnSchema {
-            column_name: "ts".to_string(),
-            datatype: ColumnDataType::TimestampMillisecond as i32,
-            semantic_type: SemanticType::Timestamp as i32,
-            datatype_extension: None,
-            options: None,
-        },
-        PbColumnSchema {
-            column_name: "field_0".to_string(),
-            datatype: ColumnDataType::Float64 as i32,
-            semantic_type: SemanticType::Field as i32,
-            datatype_extension: None,
-            options: None,
-        },
-    ];
-    let mut rows = Vec::with_capacity(end - start);
-    for i in start..end {
-        let tag_value = i.to_string();
-        let mut buffer = Vec::new();
-        pk_codec
-            .encode_to_vec(
-                [
-                    (ReservedColumnId::table_id(), ValueRef::UInt32(1)),
-                    (ReservedColumnId::tsid(), ValueRef::UInt64(i as u64)),
-                    (0, ValueRef::String(&tag_value)),
-                ]
-                .into_iter(),
-                &mut buffer,
-            )
-            .unwrap();
-        rows.push(Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::BinaryValue(buffer)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value(i as f64)),
-                },
-            ],
-        });
-    }
-    let num_rows = rows.len();
-    let result = engine
-        .handle_request(
-            region_id,
-            RegionRequest::Put(RegionPutRequest {
-                rows: Rows { schema, rows },
-                hint: Some(WriteHint {
-                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
-                }),
-                partition_expr_version: None,
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(num_rows, result.affected_rows);
 }
 
 #[tokio::test]
