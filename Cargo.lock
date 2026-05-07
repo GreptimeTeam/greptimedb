@@ -8971,7 +8971,8 @@ dependencies = [
 [[package]]
 name = "object_store_opendal"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08298874eee5935c95bcaa393148834f9c53d904461ca15584a041d8a1c907c2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9059,7 +9060,8 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "opendal"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97b31d3d8e99a85d83b73ec26647f5607b80578ed9375810b6e44ffa3590a236"
 dependencies = [
  "ctor",
  "opendal-core",
@@ -9080,7 +9082,8 @@ dependencies = [
 [[package]]
 name = "opendal-core"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1849dd2687e173e776d3af5fce1ba3ae47b9dd37a09d1c4deba850ef45fe00ca"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -9107,7 +9110,8 @@ dependencies = [
 [[package]]
 name = "opendal-layer-concurrent-limit"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "048b1b29c503263bdd80a9afe46a68cd02ea9bd361185b1feab4b151078998e9"
 dependencies = [
  "futures",
  "http 1.3.1",
@@ -9118,7 +9122,8 @@ dependencies = [
 [[package]]
 name = "opendal-layer-logging"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2645adc988b12eda106e2679ae529facfbbaa868ceb706f6f8125c6af15c47b"
 dependencies = [
  "log",
  "opendal-core",
@@ -9127,7 +9132,8 @@ dependencies = [
 [[package]]
 name = "opendal-layer-observe-metrics-common"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9130f0ac11569edc0f70b0e64078b9a12e37a128849d27ea62b0ca7568e8eb97"
 dependencies = [
  "futures",
  "http 1.3.1",
@@ -9137,7 +9143,8 @@ dependencies = [
 [[package]]
 name = "opendal-layer-prometheus"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eef98056f8198b5053005e1fbe7d163562f56d9f3be1b73a3792667e7cbaf7be"
 dependencies = [
  "opendal-core",
  "opendal-layer-observe-metrics-common",
@@ -9147,7 +9154,8 @@ dependencies = [
 [[package]]
 name = "opendal-layer-retry"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4eac134ffa4ddda6131a640a84a5315996424b9416c85052f8c64c1a33b70ad4"
 dependencies = [
  "backon",
  "log",
@@ -9157,7 +9165,8 @@ dependencies = [
 [[package]]
 name = "opendal-layer-timeout"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "619586ab7480c2e3009f6d18eabab18957bc094778fd130bcc38924970a90f4c"
 dependencies = [
  "opendal-core",
  "tokio",
@@ -9166,7 +9175,8 @@ dependencies = [
 [[package]]
 name = "opendal-layer-tracing"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f569b1cfae56851662e0db0e2d8df2f417d40aa281536c13f0c5211e7b56cd6f"
 dependencies = [
  "futures",
  "http 1.3.1",
@@ -9177,7 +9187,8 @@ dependencies = [
 [[package]]
 name = "opendal-service-azblob"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7452bf3ec61cfd81ac9ad9ada17825931e9e371d44a045c6bfab9596c0a2ac3b"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -9197,7 +9208,8 @@ dependencies = [
 [[package]]
 name = "opendal-service-azure-common"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffb0e45d6c8dcf66ce2da20e241bcb80e6e540e109a4ff20f318f6c9b4c54e0c"
 dependencies = [
  "http 1.3.1",
  "opendal-core",
@@ -9206,7 +9218,8 @@ dependencies = [
 [[package]]
 name = "opendal-service-fs"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf0be0417abeeb0053376d816b90fceb9ca98f20dfb54ebf1f2a282729f83663"
 dependencies = [
  "bytes",
  "log",
@@ -9219,7 +9232,8 @@ dependencies = [
 [[package]]
 name = "opendal-service-gcs"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70a49477a10163431896d106136117f5670717f9c9e49cf6f710528800c6633a"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9239,7 +9253,8 @@ dependencies = [
 [[package]]
 name = "opendal-service-http"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fe73e6978feec293acfb92bfa94bdb9cf1b5be3f7c3f93a4333a25455826005"
 dependencies = [
  "http 1.3.1",
  "log",
@@ -9250,7 +9265,8 @@ dependencies = [
 [[package]]
 name = "opendal-service-oss"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29c8a917829ad06d21b639558532cb0101fe49b040d946d673a73018683fac05"
 dependencies = [
  "bytes",
  "http 1.3.1",
@@ -9266,7 +9282,8 @@ dependencies = [
 [[package]]
 name = "opendal-service-s3"
 version = "0.56.0"
-source = "git+https://github.com/apache/opendal.git?tag=v0.56.0-rc.2#8332367dd7629bebc7759a11a5bbbd941dd060e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dadddeb9bb50b0d30927dd914c298c4ddca47e4c1cfa7674d311f0cf9b051c8"
 dependencies = [
  "base64 0.22.1",
  "bytes",
