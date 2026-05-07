@@ -27,7 +27,6 @@ use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
-use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
@@ -36,7 +35,7 @@ use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 use crate::config::MitoConfig;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
-use crate::memtable::bulk::{BulkMemtableBuilder, BulkMemtableConfig, CompactDispatcher};
+use crate::memtable::bulk::{BulkMemtableBuilder, CompactDispatcher};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
@@ -68,15 +67,6 @@ pub use time_partition::filter_record_batch;
 ///
 /// Should be unique under the same region.
 pub type MemtableId = u32;
-
-/// Config for memtables.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum MemtableConfig {
-    Bulk(BulkMemtableConfig),
-    #[default]
-    TimeSeries,
-}
 
 /// Options for querying ranges from a memtable.
 #[derive(Clone)]
@@ -755,25 +745,6 @@ mod tests {
 
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
-
-    #[test]
-    fn test_deserialize_memtable_config() {
-        let s = r#"
-type = "bulk"
-merge_threshold = 8
-encode_row_threshold = 1024
-encode_bytes_threshold = 4096
-max_merge_groups = 4
-"#;
-        let config: MemtableConfig = toml::from_str(s).unwrap();
-        let MemtableConfig::Bulk(memtable_config) = config else {
-            unreachable!()
-        };
-        assert_eq!(8, memtable_config.merge_threshold);
-        assert_eq!(1024, memtable_config.encode_row_threshold);
-        assert_eq!(4096, memtable_config.encode_bytes_threshold);
-        assert_eq!(4, memtable_config.max_merge_groups);
-    }
 
     #[test]
     fn test_alloc_tracker_without_manager() {
