@@ -21,7 +21,7 @@ use criterion::{BenchmarkGroup, Criterion, criterion_group, criterion_main};
 use datatypes::prelude::ValueRef;
 use datatypes::value::Value;
 use mito_codec::row_converter::sparse::{RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID};
-use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec, SparseValues};
+use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
 use store_api::storage::ColumnId;
 
 fn encode_sparse(c: &mut Criterion) {
@@ -241,12 +241,12 @@ trait ValueLookup {
     fn lookup_or_null(&self, col: ColumnId) -> &Value;
 }
 
-impl ValueLookup for SparseValues {
+impl ValueLookup for HashMap<ColumnId, Value> {
     fn lookup_get(&self, col: ColumnId) -> Option<&Value> {
         self.get(&col)
     }
     fn lookup_or_null(&self, col: ColumnId) -> &Value {
-        self.get_or_null(col)
+        self.get(&col).unwrap_or(&Value::Null)
     }
 }
 
@@ -310,12 +310,12 @@ impl<const CAP: usize> ValueLookup for HybridValues<CAP> {
     }
 }
 
-fn build_sparse_values(pairs: &[(ColumnId, Value)]) -> SparseValues {
-    let mut sv = SparseValues::with_capacity(pairs.len());
+fn build_hashmap_values(pairs: &[(ColumnId, Value)]) -> HashMap<ColumnId, Value> {
+    let mut m = HashMap::with_capacity(pairs.len());
     for (c, v) in pairs {
-        sv.insert(*c, v.clone());
+        m.insert(*c, v.clone());
     }
-    sv
+    m
 }
 
 fn build_vec_values(pairs: &[(ColumnId, Value)]) -> Vec<(ColumnId, Value)> {
@@ -469,7 +469,7 @@ fn bench_sparse_values_lookup(c: &mut Criterion) {
             &column_ids,
             last_id,
             missing_id,
-            || build_sparse_values(&pairs),
+            || build_hashmap_values(&pairs),
         );
 
         run_lookup_workloads(&mut group, "vec", &column_ids, last_id, missing_id, || {
