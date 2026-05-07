@@ -47,7 +47,7 @@ impl Client {
     /// Writable requests are sent to a randomly selected metasrv peer. This is
     /// intended for tests, examples, or controlled admin tooling, not production
     /// metadata write paths that require leader-aware routing.
-    pub fn new_writable(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
+    pub(super) fn new_writable(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
         Self::new_with_read_only(id, role, channel_manager, false)
     }
 
