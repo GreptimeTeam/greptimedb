@@ -14,17 +14,15 @@
 
 pub mod cached_kv;
 
-use std::fmt::Write;
-
 use api::v1::meta::{
     BatchDeleteRequest as PbBatchDeleteRequest, BatchDeleteResponse as PbBatchDeleteResponse,
     BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
     BatchPutRequest as PbBatchPutRequest, BatchPutResponse as PbBatchPutResponse,
     CompareAndPutRequest as PbCompareAndPutRequest,
     CompareAndPutResponse as PbCompareAndPutResponse, DeleteRangeRequest as PbDeleteRangeRequest,
-    DeleteRangeResponse as PbDeleteRangeResponse, KeyValue as PbKeyValue,
-    PutRequest as PbPutRequest, PutResponse as PbPutResponse, RangeRequest as PbRangeRequest,
-    RangeResponse as PbRangeResponse, ResponseHeader, store_server,
+    DeleteRangeResponse as PbDeleteRangeResponse, PutRequest as PbPutRequest,
+    PutResponse as PbPutResponse, RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse,
+    ResponseHeader, store_server,
 };
 use common_meta::kv_backend::KvBackend;
 use common_meta::rpc::store::{
@@ -39,102 +37,12 @@ use crate::metasrv::Metasrv;
 use crate::metrics::METRIC_META_KV_REQUEST_ELAPSED;
 use crate::service::GrpcResult;
 
-const MAX_LOGGED_KEY_BYTES: usize = 16;
-
-trait StoreWriteRequestSummary {
-    fn summary(&self) -> String;
-}
-
-fn key_summary(key: &[u8]) -> String {
-    let preview_len = key.len().min(MAX_LOGGED_KEY_BYTES);
-    let mut hex_prefix = String::with_capacity(preview_len * 2 + 3);
-    for byte in &key[..preview_len] {
-        let _ = write!(&mut hex_prefix, "{byte:02x}");
-    }
-    if key.len() > preview_len {
-        hex_prefix.push_str("...");
-    }
-
-    format!("len={}, hex_prefix={}", key.len(), hex_prefix)
-}
-
-fn optional_key_summary(key: Option<&[u8]>) -> String {
-    key.map(key_summary).unwrap_or_else(|| "none".to_string())
-}
-
-fn total_value_len(kvs: &[PbKeyValue]) -> usize {
-    kvs.iter()
-        .fold(0usize, |total, kv| total.saturating_add(kv.value.len()))
-}
-
-impl StoreWriteRequestSummary for PbPutRequest {
-    fn summary(&self) -> String {
-        format!(
-            "header={:?}, key=({}), value_len={}, prev_kv={}",
-            self.header,
-            key_summary(&self.key),
-            self.value.len(),
-            self.prev_kv
-        )
-    }
-}
-
-impl StoreWriteRequestSummary for PbBatchPutRequest {
-    fn summary(&self) -> String {
-        format!(
-            "header={:?}, kv_count={}, first_key={}, total_value_len={}, prev_kv={}",
-            self.header,
-            self.kvs.len(),
-            optional_key_summary(self.kvs.first().map(|kv| kv.key.as_slice())),
-            total_value_len(&self.kvs),
-            self.prev_kv
-        )
-    }
-}
-
-impl StoreWriteRequestSummary for PbBatchDeleteRequest {
-    fn summary(&self) -> String {
-        format!(
-            "header={:?}, key_count={}, first_key={}, prev_kv={}",
-            self.header,
-            self.keys.len(),
-            optional_key_summary(self.keys.first().map(Vec::as_slice)),
-            self.prev_kv
-        )
-    }
-}
-
-impl StoreWriteRequestSummary for PbCompareAndPutRequest {
-    fn summary(&self) -> String {
-        format!(
-            "header={:?}, key=({}), expect_len={}, value_len={}",
-            self.header,
-            key_summary(&self.key),
-            self.expect.len(),
-            self.value.len()
-        )
-    }
-}
-
-impl StoreWriteRequestSummary for PbDeleteRangeRequest {
-    fn summary(&self) -> String {
-        format!(
-            "header={:?}, key=({}), range_end=({}), prev_kv={}",
-            self.header,
-            key_summary(&self.key),
-            key_summary(&self.range_end),
-            self.prev_kv
-        )
-    }
-}
-
 macro_rules! check_store_leader {
-    ($self:expr, $request:expr, $resp_ty:ty, $msg:expr) => {
+    ($self:expr, $resp_ty:ty, $msg:expr) => {
         if !$self.is_leader() {
             common_telemetry::warn!(
-                "The current metasrv is not the leader, but a {} request has reached the meta. Detail: {}.",
-                $msg,
-                StoreWriteRequestSummary::summary($request.get_ref())
+                "The current metasrv is not the leader, but a {} request has reached the meta.",
+                $msg
             );
             let mut resp: $resp_ty = Default::default();
             resp.header = Some(api::v1::meta::ResponseHeader::failed(
@@ -146,12 +54,11 @@ macro_rules! check_store_leader {
 }
 
 macro_rules! check_leader_cache_ready {
-    ($self:expr, $request:expr, $resp_ty:ty, $msg:expr) => {
+    ($self:expr, $resp_ty:ty, $msg:expr) => {
         if !$self.is_leader_cache_ready() {
             common_telemetry::warn!(
-                "The current metasrv leader cache is not ready, but a {} request has reached the meta. Detail: {}.",
-                $msg,
-                StoreWriteRequestSummary::summary($request.get_ref())
+                "The current metasrv leader cache is not ready, but a {} request has reached the meta.",
+                $msg
             );
             let mut resp: $resp_ty = Default::default();
             resp.header = Some(api::v1::meta::ResponseHeader::failed(
@@ -184,8 +91,8 @@ impl store_server::Store for Metasrv {
     }
 
     async fn put(&self, req: Request<PbPutRequest>) -> GrpcResult<PbPutResponse> {
-        check_store_leader!(self, req, PbPutResponse, "`put`");
-        check_leader_cache_ready!(self, req, PbPutResponse, "`put`");
+        check_store_leader!(self, PbPutResponse, "`put`");
+        check_leader_cache_ready!(self, PbPutResponse, "`put`");
 
         let req = req.into_inner();
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
@@ -223,8 +130,8 @@ impl store_server::Store for Metasrv {
     }
 
     async fn batch_put(&self, req: Request<PbBatchPutRequest>) -> GrpcResult<PbBatchPutResponse> {
-        check_store_leader!(self, req, PbBatchPutResponse, "`batch_put`");
-        check_leader_cache_ready!(self, req, PbBatchPutResponse, "`batch_put`");
+        check_store_leader!(self, PbBatchPutResponse, "`batch_put`");
+        check_leader_cache_ready!(self, PbBatchPutResponse, "`batch_put`");
 
         let req = req.into_inner();
 
@@ -248,8 +155,8 @@ impl store_server::Store for Metasrv {
         &self,
         req: Request<PbBatchDeleteRequest>,
     ) -> GrpcResult<PbBatchDeleteResponse> {
-        check_store_leader!(self, req, PbBatchDeleteResponse, "`batch_delete`");
-        check_leader_cache_ready!(self, req, PbBatchDeleteResponse, "`batch_delete`");
+        check_store_leader!(self, PbBatchDeleteResponse, "`batch_delete`");
+        check_leader_cache_ready!(self, PbBatchDeleteResponse, "`batch_delete`");
 
         let req = req.into_inner();
 
@@ -273,8 +180,8 @@ impl store_server::Store for Metasrv {
         &self,
         req: Request<PbCompareAndPutRequest>,
     ) -> GrpcResult<PbCompareAndPutResponse> {
-        check_store_leader!(self, req, PbCompareAndPutResponse, "`compare_and_put`");
-        check_leader_cache_ready!(self, req, PbCompareAndPutResponse, "`compare_and_put`");
+        check_store_leader!(self, PbCompareAndPutResponse, "`compare_and_put`");
+        check_leader_cache_ready!(self, PbCompareAndPutResponse, "`compare_and_put`");
 
         let req = req.into_inner();
 
@@ -298,8 +205,8 @@ impl store_server::Store for Metasrv {
         &self,
         req: Request<PbDeleteRangeRequest>,
     ) -> GrpcResult<PbDeleteRangeResponse> {
-        check_store_leader!(self, req, PbDeleteRangeResponse, "`delete_range`");
-        check_leader_cache_ready!(self, req, PbDeleteRangeResponse, "`delete_range`");
+        check_store_leader!(self, PbDeleteRangeResponse, "`delete_range`");
+        check_leader_cache_ready!(self, PbDeleteRangeResponse, "`delete_range`");
 
         let req = req.into_inner();
 
@@ -332,7 +239,6 @@ mod tests {
     use tokio::sync::broadcast;
     use tonic::IntoRequest;
 
-    use super::{StoreWriteRequestSummary, key_summary};
     use crate::metasrv::Metasrv;
     use crate::metasrv::builder::MetasrvBuilder;
 
@@ -405,45 +311,6 @@ mod tests {
             .build()
             .await
             .unwrap()
-    }
-
-    #[test]
-    fn test_key_summary_truncates_hex_prefix() {
-        let key: Vec<u8> = (0..20).collect();
-
-        assert_eq!(
-            "len=20, hex_prefix=000102030405060708090a0b0c0d0e0f...",
-            key_summary(&key)
-        );
-    }
-
-    #[test]
-    fn test_store_write_request_summary_redacts_values() {
-        let put = PutRequest {
-            key: b"k1".to_vec(),
-            value: b"secret-value".to_vec(),
-            prev_kv: true,
-            ..Default::default()
-        };
-        let summary = StoreWriteRequestSummary::summary(&put);
-        assert!(summary.contains("key=(len=2, hex_prefix=6b31)"));
-        assert!(summary.contains("value_len=12"));
-        assert!(!summary.contains("secret-value"));
-        assert!(!summary.contains("value:"));
-
-        let compare_and_put = CompareAndPutRequest {
-            key: b"k2".to_vec(),
-            expect: b"old-secret".to_vec(),
-            value: b"new-secret".to_vec(),
-            ..Default::default()
-        };
-        let summary = StoreWriteRequestSummary::summary(&compare_and_put);
-        assert!(summary.contains("expect_len=10"));
-        assert!(summary.contains("value_len=10"));
-        assert!(!summary.contains("old-secret"));
-        assert!(!summary.contains("new-secret"));
-        assert!(!summary.contains("expect:"));
-        assert!(!summary.contains("value:"));
     }
 
     #[tokio::test]

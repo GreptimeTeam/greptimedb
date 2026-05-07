@@ -42,11 +42,8 @@ impl Client {
         Self::new_with_read_only(id, role, channel_manager, true)
     }
 
-    /// Builds a writable direct Store RPC client.
-    ///
-    /// Writable requests are sent to a randomly selected metasrv peer. This is
-    /// intended for tests, examples, or controlled admin tooling, not production
-    /// metadata write paths that require leader-aware routing.
+    /// Builds a writable direct Store RPC client for tests.
+    #[cfg(test)]
     pub(super) fn new_writable(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
         Self::new_with_read_only(id, role, channel_manager, false)
     }

@@ -91,6 +91,7 @@ pub struct MetaClientBuilder {
     role: Role,
     enable_heartbeat: bool,
     enable_store: bool,
+    #[cfg(test)]
     enable_direct_store_writes: bool,
     enable_procedure: bool,
     enable_access_cluster_info: bool,
@@ -155,12 +156,11 @@ impl MetaClientBuilder {
         }
     }
 
-    /// Enables direct Store write RPCs for tests, examples, or controlled admin tooling.
+    /// Enables direct Store write RPCs for tests.
     ///
-    /// This is not a leader-aware production write client: writable Store requests
-    /// are sent to a randomly selected metasrv peer and may receive `NotLeader`.
     /// Production metadata writes should use metasrv-owned write paths instead.
-    pub fn enable_direct_store_writes_for_admin(self) -> Self {
+    #[cfg(test)]
+    pub(super) fn enable_direct_store_writes_for_test(self) -> Self {
         Self {
             enable_store: true,
             enable_direct_store_writes: true,
@@ -235,11 +235,14 @@ impl MetaClientBuilder {
             .enable_heartbeat
             .then(|| ConfigClient::new(self.id, self.role, mgr.clone()));
         let store = self.enable_store.then(|| {
-            if self.enable_direct_store_writes {
-                StoreClient::new_writable(self.id, self.role, mgr.clone())
-            } else {
-                StoreClient::new(self.id, self.role, mgr.clone())
+            #[cfg(test)]
+            {
+                if self.enable_direct_store_writes {
+                    return StoreClient::new_writable(self.id, self.role, mgr.clone());
+                }
             }
+
+            StoreClient::new(self.id, self.role, mgr.clone())
         });
         let procedure = self.enable_procedure.then(|| {
             let mgr = self.ddl_channel_manager.unwrap_or(mgr.clone());
