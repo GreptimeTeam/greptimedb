@@ -467,6 +467,26 @@ mod tests {
     }
 
     #[test]
+    fn test_start_command_debug_sanitizes_store_addrs() {
+        let password = "sensitive-value";
+        let cmd = StartCommand {
+            store_addrs: Some(vec![
+                format!("mysql://user:{password}@localhost:3306/greptime_meta"),
+                format!(
+                    "host=localhost port=5432 user=postgres password={password} dbname=postgres"
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let debug = format!("{cmd:?}");
+
+        assert!(!debug.contains(password));
+        assert!(debug.contains("localhost:3306/greptime_meta"));
+        assert!(debug.contains("password=***"));
+    }
+
+    #[test]
     fn test_config_precedence_order() {
         let mut file = create_named_temp_file();
         let toml_str = r#"

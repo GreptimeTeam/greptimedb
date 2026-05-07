@@ -19,6 +19,7 @@ use common_error::ext::BoxedError;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
+use common_meta::kv_backend::util::sanitize_connection_string;
 use meta_srv::metasrv::BackendClientOptions;
 use meta_srv::utils::etcd::create_etcd_client_with_tls;
 use serde::{Deserialize, Serialize};
@@ -134,7 +135,7 @@ impl StoreConfig {
         } else {
             common_telemetry::info!(
                 "Building kvbackend with store addrs: {:?}, backend: {:?}",
-                store_addrs,
+                sanitize_store_addrs(store_addrs),
                 self.backend
             );
             let kvbackend = match self.backend {
@@ -222,5 +223,37 @@ impl StoreConfig {
                 Ok(Arc::new(chroot_kvbackend))
             }
         }
+    }
+}
+
+fn sanitize_store_addrs(store_addrs: &[String]) -> Vec<String> {
+    store_addrs
+        .iter()
+        .map(|addr| sanitize_connection_string(addr))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_store_addrs() {
+        let password = "sensitive-value";
+        let store_addrs = vec![
+            format!("mysql://user:{password}@localhost:3306/greptime_meta"),
+            format!("host=localhost port=5432 user=postgres password={password} dbname=postgres"),
+        ];
+
+        let sanitized = sanitize_store_addrs(&store_addrs);
+
+        assert_eq!(
+            sanitized,
+            vec![
+                "localhost:3306/greptime_meta".to_string(),
+                "host=localhost port=5432 user=postgres password=*** dbname=postgres".to_string()
+            ]
+        );
+        assert!(!format!("{sanitized:?}").contains(password));
     }
 }
