@@ -101,6 +101,7 @@ impl PromQueryInterceptor for NoopInterceptor {
 
     fn post_execute(
         &self,
+        _query: &PromQuery,
         output: Output,
         _query_ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error> {
@@ -125,7 +126,7 @@ fn test_prom_interceptor() {
     assert!(fail.is_err());
 
     let output = Output::new_with_affected_rows(1);
-    let two = PromQueryInterceptor::post_execute(&di, output, ctx);
+    let two = PromQueryInterceptor::post_execute(&di, &query, output, ctx);
     assert!(two.is_ok());
     matches!(
         two.unwrap(),

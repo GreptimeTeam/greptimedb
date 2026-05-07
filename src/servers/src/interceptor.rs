@@ -58,7 +58,7 @@ pub trait SqlQueryInterceptor {
     /// Called before sql is actually executed. This hook is not called at the moment.
     fn pre_execute(
         &self,
-        _statement: &Statement,
+        _statement: Option<&Statement>,
         _plan: Option<&LogicalPlan>,
         _query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
@@ -69,6 +69,7 @@ pub trait SqlQueryInterceptor {
     /// output if needed.
     fn post_execute(
         &self,
+        _statement: Option<&Statement>,
         output: Output,
         _query_ctx: QueryContextRef,
     ) -> Result<Output, Self::Error> {
@@ -111,7 +112,7 @@ where
 
     fn pre_execute(
         &self,
-        statement: &Statement,
+        statement: Option<&Statement>,
         plan: Option<&LogicalPlan>,
         query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
@@ -124,11 +125,12 @@ where
 
     fn post_execute(
         &self,
+        statement: Option<&Statement>,
         output: Output,
         query_ctx: QueryContextRef,
     ) -> Result<Output, Self::Error> {
         if let Some(this) = self {
-            this.post_execute(output, query_ctx)
+            this.post_execute(statement, output, query_ctx)
         } else {
             Ok(output)
         }
@@ -234,6 +236,7 @@ pub trait PromQueryInterceptor {
     /// output if needed.
     fn post_execute(
         &self,
+        _query: &PromQuery,
         output: Output,
         _query_ctx: QueryContextRef,
     ) -> Result<Output, Self::Error> {
@@ -265,11 +268,12 @@ where
 
     fn post_execute(
         &self,
+        query: &PromQuery,
         output: Output,
         query_ctx: QueryContextRef,
     ) -> Result<Output, Self::Error> {
         if let Some(this) = self {
-            this.post_execute(output, query_ctx)
+            this.post_execute(query, output, query_ctx)
         } else {
             Ok(output)
         }
