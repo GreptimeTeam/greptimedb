@@ -343,6 +343,19 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Failed to create default value for column {} of region {}",
+        column,
+        region_id
+    ))]
+    CreateDefault {
+        region_id: RegionId,
+        column: String,
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unexpected request: {}", reason))]
     UnexpectedRequest {
         reason: String,
@@ -394,7 +407,8 @@ impl ErrorExt for Error {
             | UnsupportedAlterKind { .. }
             | UnsupportedRemapManifestsRequest { .. }
             | UnsupportedSyncRegionFromRequest { .. }
-            | InvalidRequest { .. } => StatusCode::InvalidArguments,
+            | InvalidRequest { .. }
+            | CreateDefault { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. }
             | UnsupportedRegionRequest { .. }
