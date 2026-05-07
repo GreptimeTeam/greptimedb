@@ -37,6 +37,7 @@ use crate::config::MitoConfig;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::{BulkMemtableBuilder, BulkMemtableConfig, CompactDispatcher};
+use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
@@ -440,30 +441,12 @@ impl MemtableBuilderProvider {
             );
         }
 
-        if primary_key_encoding == PrimaryKeyEncoding::Sparse {
-            common_telemetry::info!(
-                "Overriding memtable config, use BulkMemtable for sparse primary key encoding"
-            );
-            return Arc::new(
-                BulkMemtableBuilder::new(
-                    self.write_buffer_manager.clone(),
-                    !dedup,
-                    merge_mode,
-                )
-                .with_compact_dispatcher(self.compact_dispatcher.clone()),
-            );
-        }
-
         // The format is not flat.
         match &options.memtable {
             Some(MemtableOptions::Bulk(config)) => Arc::new(
-                BulkMemtableBuilder::new(
-                    self.write_buffer_manager.clone(),
-                    !dedup,
-                    merge_mode,
-                )
-                .with_config(config.clone())
-                .with_compact_dispatcher(self.compact_dispatcher.clone()),
+                BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
+                    .with_config(config.clone())
+                    .with_compact_dispatcher(self.compact_dispatcher.clone()),
             ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
@@ -471,20 +454,33 @@ impl MemtableBuilderProvider {
                 merge_mode,
             )),
             Some(MemtableOptions::PartitionTree(opts)) => {
-                common_telemetry::info!(
-                    "PartitionTreeMemtable is removed, falling back to BulkMemtable, options: {:?}",
-                    opts
-                );
-                Arc::new(
-                    BulkMemtableBuilder::new(
-                        self.write_buffer_manager.clone(),
-                        !dedup,
+                Arc::new(PartitionTreeMemtableBuilder::new(
+                    PartitionTreeConfig {
+                        index_max_keys_per_shard: opts.index_max_keys_per_shard,
+                        data_freeze_threshold: opts.data_freeze_threshold,
+                        fork_dictionary_bytes: opts.fork_dictionary_bytes,
+                        dedup,
                         merge_mode,
-                    )
-                    .with_compact_dispatcher(self.compact_dispatcher.clone()),
-                )
+                    },
+                    self.write_buffer_manager.clone(),
+                ))
             }
-            None => self.default_primary_key_memtable_builder(dedup, merge_mode),
+            None => {
+                if primary_key_encoding == PrimaryKeyEncoding::Sparse {
+                    common_telemetry::info!(
+                        "Overriding memtable config, use BulkMemtable for sparse primary key encoding"
+                    );
+                    return Arc::new(
+                        BulkMemtableBuilder::new(
+                            self.write_buffer_manager.clone(),
+                            !dedup,
+                            merge_mode,
+                        )
+                        .with_compact_dispatcher(self.compact_dispatcher.clone()),
+                    );
+                }
+                self.default_primary_key_memtable_builder(dedup, merge_mode)
+            }
         }
     }
 

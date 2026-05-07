@@ -127,10 +127,10 @@ impl RegionOptions {
     pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
         self.primary_key_encoding.unwrap_or_else(|| {
             self.memtable
-            .as_ref()
-            .map_or(PrimaryKeyEncoding::default(), |memtable| {
-                memtable.primary_key_encoding()
-            })
+                .as_ref()
+                .map_or(PrimaryKeyEncoding::default(), |memtable| {
+                    memtable.primary_key_encoding()
+                })
         })
     }
 }
