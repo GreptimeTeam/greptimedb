@@ -51,7 +51,6 @@ use crate::sst::parquet::file_range::PreFilterMode;
 
 mod builder;
 pub mod bulk;
-pub mod partition_tree;
 pub mod simple_bulk_memtable;
 mod stats;
 pub mod time_partition;

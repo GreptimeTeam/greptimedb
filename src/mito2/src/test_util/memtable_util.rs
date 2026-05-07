@@ -20,7 +20,6 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
 use common_time::Timestamp;
-use datatypes::arrow::array::UInt64Array;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::schema::ColumnSchema;
@@ -34,12 +33,10 @@ use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::partition_tree::data::{DataBatch, DataBuffer};
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
     MemtableRef, MemtableStats, RangesOptions,
 };
-use crate::read::timestamp_array_to_i64_slice;
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
@@ -203,46 +200,6 @@ pub fn build_key_values(
         values,
         sequence,
     )
-}
-
-pub(crate) fn write_rows_to_buffer(
-    buffer: &mut DataBuffer,
-    schema: &RegionMetadataRef,
-    pk_index: u16,
-    ts: Vec<i64>,
-    v0: Vec<Option<f64>>,
-    sequence: u64,
-) {
-    let kvs = crate::test_util::memtable_util::build_key_values_with_ts_seq_values(
-        schema,
-        "whatever".to_string(),
-        1,
-        ts.into_iter(),
-        v0.into_iter(),
-        sequence,
-    );
-
-    for kv in kvs.iter() {
-        buffer.write_row(pk_index, &kv);
-    }
-}
-
-/// Extracts pk index, timestamps and sequences from [DataBatch].
-pub(crate) fn extract_data_batch(batch: &DataBatch) -> (u16, Vec<(i64, u64)>) {
-    let rb = batch.slice_record_batch();
-    let ts = timestamp_array_to_i64_slice(rb.column(1));
-    let seq = rb
-        .column(2)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .unwrap()
-        .values();
-    let ts_and_seq = ts
-        .iter()
-        .zip(seq.iter())
-        .map(|(ts, seq)| (*ts, *seq))
-        .collect::<Vec<_>>();
-    (batch.pk_index(), ts_and_seq)
 }
 
 /// Builds key values with timestamps (ms) and sequences for test.

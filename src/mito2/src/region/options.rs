@@ -36,12 +36,19 @@ use strum::EnumString;
 
 use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
 use crate::memtable::bulk::BulkMemtableConfig;
-use crate::memtable::partition_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
 use crate::sst::FormatType;
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
 const MEMTABLE_PARTITION_TREE_PREFIX: &str = "memtable.partition_tree.";
+
+// Legacy defaults preserved for backward compatibility of the deprecated
+// `memtable.type='partition_tree'` option. The runtime ignores these and
+// falls back to BulkMemtable; they only feed `PartitionTreeOptions::default`
+// so existing region options round-trip through SHOW CREATE TABLE.
+const PARTITION_TREE_DICTIONARY_SIZE_FACTOR: u64 = 8;
+const PARTITION_TREE_DEFAULT_MAX_KEYS_PER_SHARD: usize = 8192;
+const PARTITION_TREE_DEFAULT_FREEZE_THRESHOLD: usize = 131072;
 
 pub(crate) fn parse_wal_options(
     options_map: &HashMap<String, String>,
@@ -401,7 +408,7 @@ impl Default for PartitionTreeOptions {
         let mut fork_dictionary_bytes = ReadableSize::mb(512);
         if let Some(total_memory) = get_total_memory_readable() {
             let adjust_dictionary_bytes = std::cmp::min(
-                total_memory / crate::memtable::partition_tree::DICTIONARY_SIZE_FACTOR,
+                total_memory / PARTITION_TREE_DICTIONARY_SIZE_FACTOR,
                 fork_dictionary_bytes,
             );
             if adjust_dictionary_bytes.0 > 0 {
@@ -409,8 +416,8 @@ impl Default for PartitionTreeOptions {
             }
         }
         Self {
-            index_max_keys_per_shard: DEFAULT_MAX_KEYS_PER_SHARD,
-            data_freeze_threshold: DEFAULT_FREEZE_THRESHOLD,
+            index_max_keys_per_shard: PARTITION_TREE_DEFAULT_MAX_KEYS_PER_SHARD,
+            data_freeze_threshold: PARTITION_TREE_DEFAULT_FREEZE_THRESHOLD,
             fork_dictionary_bytes,
             primary_key_encoding: PrimaryKeyEncoding::Dense,
         }

@@ -417,29 +417,6 @@ lazy_static! {
 }
 
 lazy_static! {
-    /// Partition tree memtable data buffer freeze metrics
-    pub static ref PARTITION_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
-        "greptime_partition_tree_buffer_freeze_stage_elapsed",
-        "mito partition tree data buffer freeze stage elapsed",
-        &[STAGE_LABEL],
-        // 0.01 ~ 1000
-        exponential_buckets(0.01, 10.0, 6).unwrap(),
-    )
-    .unwrap();
-
-    /// Partition tree memtable read path metrics
-    pub static ref PARTITION_TREE_READ_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
-        "greptime_partition_tree_read_stage_elapsed",
-        "mito partition tree read stage elapsed",
-        &[STAGE_LABEL],
-        // 0.01 ~ 1000
-        exponential_buckets(0.01, 10.0, 6).unwrap(),
-    )
-    .unwrap();
-
-    // ------- End of partition tree memtable metrics.
-
-
     // Manifest related metrics:
 
     /// Elapsed time of manifest operation. Labeled with "op".
