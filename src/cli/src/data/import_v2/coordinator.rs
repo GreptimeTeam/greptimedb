@@ -13,13 +13,10 @@
 // limitations under the License.
 
 use std::collections::BTreeSet;
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
-use backon::Retryable;
-use common_error::ext::ErrorExt;
 use common_telemetry::{info, warn};
 
 use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus};
@@ -31,7 +28,6 @@ use crate::data::import_v2::state::{
     delete_import_state, load_import_state, save_import_state, try_acquire_import_state_lock,
 };
 use crate::data::path::data_dir_for_schema_chunk;
-use crate::data::retry::default_retry_policy;
 
 #[async_trait]
 pub(crate) trait ImportTaskExecutor {
@@ -195,7 +191,7 @@ where
         save_import_state(&config.state_path, &state).await?;
 
         let task_start = Instant::now();
-        let result = import_task_with_retry(executor, task, tokio::time::sleep).await;
+        let result = executor.import_task(task).await;
 
         match result {
             Ok(()) => {
@@ -312,23 +308,6 @@ fn validate_state_matches(state: &ImportState, config: &ImportResumeConfig) -> R
     Ok(())
 }
 
-async fn import_task_with_retry<E, S, Fut>(
-    executor: &E,
-    task: &ImportTaskKey,
-    sleep: S,
-) -> Result<()>
-where
-    E: ImportTaskExecutor + Sync,
-    S: Fn(Duration) -> Fut + 'static,
-    Fut: Future<Output = ()> + 'static,
-{
-    (|| executor.import_task(task))
-        .retry(default_retry_policy())
-        .when(|error| error.status_code().is_retryable())
-        .sleep(sleep)
-        .await
-}
-
 fn state_mismatch(config: &ImportResumeConfig, reason: String) -> Result<()> {
     ImportStateMismatchSnafu {
         path: config.state_path.display().to_string(),
@@ -377,7 +356,6 @@ fn validate_config_tasks(config: &ImportResumeConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::future::ready;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -674,48 +652,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_import_task_with_retry_retries_retryable_task_error() {
-        let task = ImportTaskKey::new(1, "public");
+    async fn test_import_with_resume_does_not_retry_retryable_task_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("import_state.json");
+        let failed_task = ImportTaskKey::new(1, "public");
+        let tasks = vec![failed_task.clone()];
         let imported = Arc::new(Mutex::new(Vec::new()));
         let attempts = Arc::new(AtomicUsize::new(0));
         let executor = RecordingExecutor {
             imported: imported.clone(),
-            fail_task: Some(task.clone()),
-            failure_mode: Some(FailureMode::RetryableThenSuccess { failures: 2 }),
+            fail_task: Some(failed_task.clone()),
+            // If task import were retried, the second attempt would succeed.
+            // COPY DATABASE FROM failures are ambiguous, so retryable errors
+            // must still stop immediately to avoid duplicate rows.
+            failure_mode: Some(FailureMode::RetryableThenSuccess { failures: 1 }),
             attempts: attempts.clone(),
         };
 
-        import_task_with_retry(&executor, &task, |_| ready(()))
-            .await
-            .unwrap();
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-        assert_eq!(imported.lock().unwrap().clone(), vec![task]);
-    }
-
-    #[tokio::test]
-    async fn test_import_task_with_retry_stops_on_non_retryable_task_error() {
-        let task = ImportTaskKey::new(1, "public");
-        let imported = Arc::new(Mutex::new(Vec::new()));
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let executor = RecordingExecutor {
-            imported,
-            fail_task: Some(task.clone()),
-            failure_mode: Some(FailureMode::Fatal),
-            attempts: attempts.clone(),
-        };
-
-        let error = import_task_with_retry(&executor, &task, |_| ready(()))
+        let error = run_import_with_resume(config(path.clone(), tasks), &executor)
             .await
             .unwrap_err();
 
         assert!(matches!(
             error,
             crate::data::import_v2::error::Error::TestTaskFailed {
-                retryable: false,
+                retryable: true,
                 ..
             }
         ));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(imported.lock().unwrap().is_empty());
+
+        let state = load_import_state(&path).await.unwrap().unwrap();
+        assert_eq!(
+            state.task_status(failed_task.chunk_id, &failed_task.schema),
+            Some(ImportTaskStatus::Failed)
+        );
     }
 }
