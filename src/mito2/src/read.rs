@@ -72,6 +72,41 @@ use crate::error::{
     Result,
 };
 use crate::memtable::{BoxedBatchIterator, BoxedRecordBatchIterator};
+
+pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
+    use datatypes::arrow::array::{
+        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray,
+    };
+    use datatypes::arrow::datatypes::{DataType, TimeUnit};
+
+    match arr.data_type() {
+        DataType::Timestamp(t, _) => match t {
+            TimeUnit::Second => arr
+                .as_any()
+                .downcast_ref::<TimestampSecondArray>()
+                .unwrap()
+                .values(),
+            TimeUnit::Millisecond => arr
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .values(),
+            TimeUnit::Microsecond => arr
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap()
+                .values(),
+            TimeUnit::Nanosecond => arr
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap()
+                .values(),
+        },
+        _ => unreachable!(),
+    }
+}
+
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
 /// Rows are sorted by primary key, timestamp, sequence desc, op_type desc. Fields

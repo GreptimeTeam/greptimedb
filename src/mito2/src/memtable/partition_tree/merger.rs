@@ -297,7 +297,8 @@ mod tests {
     use store_api::metadata::RegionMetadataRef;
 
     use super::*;
-    use crate::memtable::partition_tree::data::{DataBuffer, timestamp_array_to_i64_slice};
+    use crate::memtable::partition_tree::data::DataBuffer;
+    use crate::read::timestamp_array_to_i64_slice;
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     fn write_rows_to_buffer(

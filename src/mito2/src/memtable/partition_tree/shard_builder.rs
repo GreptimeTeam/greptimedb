@@ -319,7 +319,7 @@ mod tests {
 
     use super::*;
     use crate::memtable::KeyValues;
-    use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
+    use crate::read::timestamp_array_to_i64_slice;
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, encode_key_by_kv, metadata_for_test,
     };

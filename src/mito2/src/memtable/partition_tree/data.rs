@@ -50,6 +50,7 @@ use crate::memtable::partition_tree::merger::{DataBatchKey, DataNode, DataSource
 use crate::metrics::{
     PARTITION_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED, PARTITION_TREE_READ_STAGE_ELAPSED,
 };
+use crate::read::timestamp_array_to_i64_slice;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
@@ -425,40 +426,6 @@ fn build_row_sort_indices_and_columns(
     );
 
     Ok((indices_to_take, columns))
-}
-
-pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
-    use datatypes::arrow::array::{
-        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray,
-    };
-    use datatypes::arrow::datatypes::{DataType, TimeUnit};
-
-    match arr.data_type() {
-        DataType::Timestamp(t, _) => match t {
-            TimeUnit::Second => arr
-                .as_any()
-                .downcast_ref::<TimestampSecondArray>()
-                .unwrap()
-                .values(),
-            TimeUnit::Millisecond => arr
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .values(),
-            TimeUnit::Microsecond => arr
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .unwrap()
-                .values(),
-            TimeUnit::Nanosecond => arr
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .unwrap()
-                .values(),
-        },
-        _ => unreachable!(),
-    }
 }
 
 enum LazyFieldVector {

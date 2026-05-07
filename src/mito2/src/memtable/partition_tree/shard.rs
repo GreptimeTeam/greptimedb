@@ -432,9 +432,9 @@ mod tests {
     use super::*;
     use crate::memtable::KeyValues;
     use crate::memtable::partition_tree::PkIndex;
-    use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
     use crate::memtable::partition_tree::dict::KeyDictBuilder;
     use crate::memtable::stats::WriteMetrics;
+    use crate::read::timestamp_array_to_i64_slice;
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, encode_keys, metadata_for_test,
     };

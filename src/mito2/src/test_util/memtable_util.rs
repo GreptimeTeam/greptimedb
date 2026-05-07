@@ -34,11 +34,12 @@ use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::partition_tree::data::{DataBatch, DataBuffer, timestamp_array_to_i64_slice};
+use crate::memtable::partition_tree::data::{DataBatch, DataBuffer};
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
     MemtableRef, MemtableStats, RangesOptions,
 };
+use crate::read::timestamp_array_to_i64_slice;
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
