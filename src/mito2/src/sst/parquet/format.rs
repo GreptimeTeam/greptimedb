@@ -623,7 +623,10 @@ impl FormatProjection {
                 .or_insert_with(|| parquet_read_cols.len() - 1);
         }
 
-        Self::append_fixed_root_columns(&mut parquet_read_cols, sst_column_num);
+        // In SST schema, fixed-position columns are always in the tail:
+        // `time index, __primary_key, __sequence, __op_type`.
+        Self::append_time_index_if_needed(&mut parquet_read_cols, sst_column_num);
+        Self::append_fixed_internal_columns(&mut parquet_read_cols, sst_column_num);
 
         Self {
             parquet_read_cols: ParquetReadColumns::from_deduped(parquet_read_cols),
@@ -649,18 +652,31 @@ impl FormatProjection {
         parquet_read_cols.push(parquet_col);
     }
 
-    fn append_fixed_root_columns(
+    fn append_time_index_if_needed(
         parquet_read_cols: &mut Vec<ParquetReadColumn>,
         sst_column_num: usize,
     ) {
-        for index in sst_column_num - FIXED_POS_COLUMN_NUM..sst_column_num {
-            let needs_append = parquet_read_cols
-                .last()
-                .map(|col| col.root_index() != index)
-                .unwrap_or(true);
-            if needs_append {
-                parquet_read_cols.push(ParquetReadColumn::new(index));
-            }
+        let time_index = sst_column_num - FIXED_POS_COLUMN_NUM;
+        // Existing projected roots are already sorted by SST root index, and may
+        // already include the time index, so we compare against the last root to
+        // decide whether we still need to append `time index`.
+        let needs_time_index = parquet_read_cols
+            .last()
+            .map(|col| col.root_index() != time_index)
+            .unwrap_or(true);
+        if needs_time_index {
+            parquet_read_cols.push(ParquetReadColumn::new(time_index));
+        }
+    }
+
+    // Append internal columns in fixed order: `__primary_key`, `__sequence`,
+    // `__op_type`.
+    fn append_fixed_internal_columns(
+        parquet_read_cols: &mut Vec<ParquetReadColumn>,
+        sst_column_num: usize,
+    ) {
+        for index in sst_column_num - INTERNAL_COLUMN_NUM..sst_column_num {
+            parquet_read_cols.push(ParquetReadColumn::new(index));
         }
     }
 }
