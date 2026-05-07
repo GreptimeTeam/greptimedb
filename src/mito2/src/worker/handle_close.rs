@@ -20,7 +20,9 @@ use store_api::logstore::provider::Provider;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
+use crate::error::RegionStateSnafu;
 use crate::flush::FlushReason;
+use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::request::OptionOutputTx;
 use crate::worker::RegionWorkerLoop;
 
@@ -47,6 +49,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .memtables
                 .is_empty()
         {
+            if !region.is_flushable() {
+                sender.send(
+                    RegionStateSnafu {
+                        region_id,
+                        state: region.state(),
+                        expect: RegionRoleState::Leader(RegionLeaderState::Writable),
+                    }
+                    .fail(),
+                );
+                return;
+            }
+
             info!("Region {} has pending data, waiting for flush", region_id);
             self.handle_flush_request(
                 region_id,
@@ -69,6 +83,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
         region.stop().await;
+        self.fail_region_stalled_requests_as_not_found(&region_id);
+        self.reject_region_edit_queue_as_not_found(region_id);
         // Clean flush status.
         self.flush_scheduler.on_region_closed(region_id);
         // Clean compaction status.

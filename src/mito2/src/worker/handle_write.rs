@@ -26,8 +26,8 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionStateSnafu, RejectWriteSnafu,
-    Result,
+    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionNotFoundSnafu, RegionStateSnafu,
+    RejectWriteSnafu, Result,
 };
 use crate::metrics;
 use crate::metrics::{
@@ -191,6 +191,34 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.stalling_count
             .sub((requests.len() + bulk.len()) as i64);
         reject_write_requests(&mut requests, &mut bulk);
+    }
+
+    /// Fails a specific region's stalled requests if the region no longer exists.
+    pub(crate) fn fail_region_stalled_requests_as_not_found(&mut self, region_id: &RegionId) {
+        debug!(
+            "Fails stalled requests for region {} as region not found",
+            region_id
+        );
+        let (requests, bulk) = self.stalled_requests.remove(region_id);
+        self.stalling_count
+            .sub((requests.len() + bulk.len()) as i64);
+
+        for req in requests {
+            req.sender.send(
+                RegionNotFoundSnafu {
+                    region_id: req.request.region_id,
+                }
+                .fail(),
+            );
+        }
+        for req in bulk {
+            req.sender.send(
+                RegionNotFoundSnafu {
+                    region_id: req.region_id,
+                }
+                .fail(),
+            );
+        }
     }
 
     /// Handles a specific region's stalled requests.

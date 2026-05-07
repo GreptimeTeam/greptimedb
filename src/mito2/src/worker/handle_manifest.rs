@@ -87,9 +87,31 @@ impl RegionEditQueue {
     fn dequeue(&mut self) -> Option<RegionEditRequest> {
         self.requests.pop_front()
     }
+
+    fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+
+    fn reject_all_as_not_found(mut self) {
+        while let Some(request) = self.requests.pop_front() {
+            let _ = request.tx.send(
+                RegionNotFoundSnafu {
+                    region_id: self.region_id,
+                }
+                .fail(),
+            );
+        }
+    }
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Rejects queued region edit requests as region not found.
+    pub(crate) fn reject_region_edit_queue_as_not_found(&mut self, region_id: RegionId) {
+        if let Some(edit_queue) = self.region_edit_queues.remove(&region_id) {
+            edit_queue.reject_all_as_not_found();
+        }
+    }
+
     /// Handles region change result.
     pub(crate) async fn handle_manifest_region_change_result(
         &mut self,
@@ -302,6 +324,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let region = match self.regions.get_region(edit_result.region_id) {
             Some(region) => region,
             None => {
+                // Fail writes stalled behind this edit if the region was removed before the
+                // edit-completion notification reached the worker.
+                self.fail_region_stalled_requests_as_not_found(&edit_result.region_id);
+                self.reject_region_edit_queue_as_not_found(edit_result.region_id);
                 let _ = edit_result.sender.send(
                     RegionNotFoundSnafu {
                         region_id: edit_result.region_id,
@@ -348,9 +374,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .await;
         }
 
-        if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id)
-            && let Some(request) = edit_queue.dequeue()
-        {
+        let next_request =
+            if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
+                let request = edit_queue.dequeue();
+                if edit_queue.is_empty() {
+                    self.region_edit_queues.remove(&edit_result.region_id);
+                }
+                request
+            } else {
+                None
+            };
+        if let Some(request) = next_request {
             self.handle_region_edit(request);
         }
 
