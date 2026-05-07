@@ -668,4 +668,24 @@ mod tests {
         let result = EnvVars::from_extensions(&extensions).unwrap();
         assert!(result.is_none());
     }
+
+    #[test]
+    fn test_env_vars_option_take_writes_once() {
+        let mut env_vars = Some(EnvVars::new(HashMap::from([(
+            "ZONE".to_string(),
+            "us-east-1a".to_string(),
+        )])));
+
+        let mut first_extensions = HashMap::new();
+        if let Some(env_vars) = env_vars.take() {
+            env_vars.into_extensions(&mut first_extensions);
+        }
+        assert!(first_extensions.contains_key(EnvVars::ENV_VARS_KEY));
+
+        let mut second_extensions = HashMap::new();
+        if let Some(env_vars) = env_vars.take() {
+            env_vars.into_extensions(&mut second_extensions);
+        }
+        assert!(!second_extensions.contains_key(EnvVars::ENV_VARS_KEY));
+    }
 }
