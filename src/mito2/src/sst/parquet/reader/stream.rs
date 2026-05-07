@@ -60,6 +60,8 @@ pub struct NestedSchemaAligner<S> {
     /// Whether all projected roots are present and the stream can pass batches
     /// through.
     all_roots_present: bool,
+    /// The cache for whether incoming batches already match output schema.
+    is_schema_matched: Option<bool>,
 }
 
 pub(crate) type ProjectedRecordBatchStream = BoxStream<'static, Result<RecordBatch>>;
@@ -96,6 +98,7 @@ where
             projected_root_presence,
             expected_input_col_num,
             all_roots_present,
+            is_schema_matched: None,
         })
     }
 }
@@ -122,7 +125,15 @@ where
                     )?
                 };
 
-                if rb.schema() == this.output_schema {
+                if !this.all_roots_present {
+                    return Poll::Ready(Some(Ok(rb)));
+                }
+
+                let is_schema_matched = *this
+                    .is_schema_matched
+                    .get_or_insert_with(|| rb.schema() == this.output_schema);
+
+                if is_schema_matched {
                     Poll::Ready(Some(Ok(rb)))
                 } else {
                     Poll::Ready(Some(align_batch_to_schema(rb, &this.output_schema)))
