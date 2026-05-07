@@ -199,6 +199,10 @@ impl InvertedIndexer {
                             .push_with_name(&target.to_string(), None)
                             .await
                             .context(PushIndexValueSnafu)?;
+                        self.index_creator
+                            .advance_with_name(target_key)
+                            .await
+                            .context(PushIndexValueSnafu)?;
                     } else {
                         IndexValueCodec::encode_nonnull_value(
                             value_ref,
@@ -208,6 +212,10 @@ impl InvertedIndexer {
                         .context(EncodeSnafu)?;
                         self.index_creator
                             .push_with_name(&target.to_string(), Some(&self.value_buf))
+                            .await
+                            .context(PushIndexValueSnafu)?;
+                        self.index_creator
+                            .advance_with_name(target_key)
                             .await
                             .context(PushIndexValueSnafu)?;
                     }
@@ -253,6 +261,10 @@ impl InvertedIndexer {
 
                     self.index_creator
                         .push_with_name_n(&target.to_string(), elem, *count)
+                        .await
+                        .context(PushIndexValueSnafu)?;
+                    self.index_creator
+                        .advance_with_name_n(target_key, *count)
                         .await
                         .context(PushIndexValueSnafu)?;
                 }
@@ -337,6 +349,10 @@ impl InvertedIndexer {
                         .push_with_name_n(&target.to_string(), value, n)
                         .await
                         .context(PushIndexValueSnafu)?;
+                    self.index_creator
+                        .advance_with_name_n(target_key, n)
+                        .await
+                        .context(PushIndexValueSnafu)?;
                 }
                 // fields
                 None => {
@@ -356,6 +372,10 @@ impl InvertedIndexer {
                                 .push_with_name(&target.to_string(), None)
                                 .await
                                 .context(PushIndexValueSnafu)?;
+                            self.index_creator
+                                .advance_with_name(target_key)
+                                .await
+                                .context(PushIndexValueSnafu)?;
                         } else {
                             IndexValueCodec::encode_nonnull_value(
                                 value,
@@ -365,6 +385,10 @@ impl InvertedIndexer {
                             .context(EncodeSnafu)?;
                             self.index_creator
                                 .push_with_name(&target.to_string(), Some(&self.value_buf))
+                                .await
+                                .context(PushIndexValueSnafu)?;
+                            self.index_creator
+                                .advance_with_name(target_key)
                                 .await
                                 .context(PushIndexValueSnafu)?;
                         }

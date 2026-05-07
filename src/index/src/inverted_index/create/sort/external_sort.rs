@@ -78,15 +78,15 @@ pub struct ExternalSorter {
 
 #[async_trait]
 impl Sorter for ExternalSorter {
-    /// Pushes n identical values into the sorter, adding them to the in-memory buffer and dumping
-    /// the buffer to an external file if necessary
+    /// Pushes n identical values into the sorter, adding them to current row.
+    /// This does not advance row/segment.
     async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()> {
         if n == 0 {
             return Ok(());
         }
 
-        let segment_index_range = self.segment_index_range(n);
-        self.total_row_count += n;
+        let segment_index = self.segment_index(self.total_row_count);
+        let segment_index_range = segment_index..=segment_index;
 
         if let Some(value) = value {
             let memory_diff = self.push_not_null(value, segment_index_range);
@@ -95,6 +95,11 @@ impl Sorter for ExternalSorter {
             self.segment_null_bitmap.insert_range(segment_index_range);
             Ok(())
         }
+    }
+
+    async fn advance_n(&mut self, n: usize) -> Result<()> {
+        self.total_row_count += n;
+        Ok(())
     }
 
     /// Finalizes the sorting operation, merging data from both in-memory buffer and external files
@@ -254,15 +259,6 @@ impl ExternalSorter {
         )
     }
 
-    /// Determines the segment index range for the row index range
-    /// `[row_begin, row_begin + n - 1]`
-    fn segment_index_range(&self, n: usize) -> RangeInclusive<usize> {
-        let row_begin = self.total_row_count;
-        let start = self.segment_index(row_begin);
-        let end = self.segment_index(row_begin + n - 1);
-        start..=end
-    }
-
     /// Determines the segment index for the given row index
     fn segment_index(&self, row_index: usize) -> usize {
         row_index / self.segment_row_count
@@ -329,7 +325,10 @@ mod tests {
                 dictionary_values_and_sorted_result(row_count, segment_row_count);
 
             for (value, n) in dic_values {
-                sorter.push_n(value.as_deref(), n).await.unwrap();
+                for _ in 0..n {
+                    sorter.push(value.as_deref()).await.unwrap();
+                    sorter.advance().await.unwrap();
+                }
             }
 
             sorted_result
@@ -339,6 +338,7 @@ mod tests {
 
             for value in mock_values {
                 sorter.push(value.as_deref()).await.unwrap();
+                sorter.advance().await.unwrap();
             }
 
             sorted_result
