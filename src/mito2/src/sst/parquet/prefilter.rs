@@ -927,8 +927,8 @@ mod tests {
     fn test_prefilter_primary_key_drops_single_dictionary_batch() {
         let metadata = Arc::new(sst_region_metadata());
         let filters = Arc::new(new_test_filters(&[col("tag_0").eq(lit("b"))]));
-        let mut primary_key_filter = build_primary_key_codec(metadata.as_ref())
-            .primary_key_filter(&metadata, filters);
+        let mut primary_key_filter =
+            build_primary_key_codec(metadata.as_ref()).primary_key_filter(&metadata, filters);
         let pk_a = new_primary_key(&["a", "x"]);
         let batch = new_raw_batch(&[pk_a.as_slice(), pk_a.as_slice()], &[10, 11]);
         let pk_col_idx = primary_key_column_index(batch.num_columns());
@@ -946,8 +946,8 @@ mod tests {
         let filters = Arc::new(new_test_filters(&[col("tag_0")
             .eq(lit("a"))
             .or(col("tag_0").eq(lit("c")))]));
-        let mut primary_key_filter = build_primary_key_codec(metadata.as_ref())
-            .primary_key_filter(&metadata, filters);
+        let mut primary_key_filter =
+            build_primary_key_codec(metadata.as_ref()).primary_key_filter(&metadata, filters);
         let pk_a = new_primary_key(&["a", "x"]);
         let pk_b = new_primary_key(&["b", "x"]);
         let pk_c = new_primary_key(&["c", "x"]);
@@ -1196,8 +1196,7 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata());
         let filters = Arc::new(new_test_filters(&[col("tag_0").eq(lit("a"))]));
         let mut pk_filter = Some(Box::new(CachedPrimaryKeyFilter::new(
-            build_primary_key_codec(metadata.as_ref())
-                .primary_key_filter(&metadata, filters),
+            build_primary_key_codec(metadata.as_ref()).primary_key_filter(&metadata, filters),
         )) as Box<dyn PrimaryKeyFilter>);
         let pk_a = new_primary_key(&["a", "x"]);
         let pk_b = new_primary_key(&["b", "x"]);

@@ -580,8 +580,7 @@ mod tests {
 
         for (op, value, expected) in cases {
             let filters = Arc::new(vec![create_filter_with_op("pod", op, value)]);
-            let mut filter =
-                DensePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone());
+            let mut filter = DensePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone());
             assert_eq!(expected, filter.matches(&pk).unwrap());
         }
     }
@@ -601,8 +600,7 @@ mod tests {
 
         for (op, value, expected) in cases {
             let filters = Arc::new(vec![create_filter_with_op("pod", op, value)]);
-            let mut filter =
-                SparsePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone());
+            let mut filter = SparsePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone());
             assert_eq!(expected, filter.matches(&pk).unwrap());
         }
     }

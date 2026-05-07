@@ -617,5 +617,4 @@ mod tests {
 
         assert_eq!(put_output, bulk_output);
     }
-
 }
