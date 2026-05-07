@@ -23,13 +23,13 @@ use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
 };
 use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 use store_api::storage::{ColumnId, TableId};
 
-use crate::engine::PhysicalColumnInfo;
 use crate::error::{EncodePrimaryKeySnafu, Result, TableIdCountMismatchSnafu};
 
 /// A row modifier modifies [`Rows`].
@@ -267,7 +267,7 @@ struct IterIndex {
 impl IterIndex {
     fn new(
         row_schema: &[ColumnSchema],
-        physical_columns: &HashMap<String, PhysicalColumnInfo>,
+        physical_columns: &HashMap<String, ColumnMetadata>,
     ) -> Self {
         let mut reserved_indices = SmallVec::<[ValueIndex; 2]>::new();
         // Uses BTreeMap to keep the primary key column name order (lexicographical)
@@ -345,7 +345,7 @@ pub struct RowsIter {
 }
 
 impl RowsIter {
-    pub fn new(rows: Rows, physical_columns: &HashMap<String, PhysicalColumnInfo>) -> Self {
+    pub fn new(rows: Rows, physical_columns: &HashMap<String, ColumnMetadata>) -> Self {
         let index: IterIndex = IterIndex::new(&rows.schema, physical_columns);
         Self { rows, index }
     }
@@ -462,20 +462,22 @@ mod tests {
         }
     }
 
-    fn make_info(column_id: ColumnId) -> PhysicalColumnInfo {
-        PhysicalColumnInfo {
-            column_id,
-            data_type: datatypes::prelude::ConcreteDataType::string_datatype(),
-            is_nullable: false,
-            default_constraint: None,
+    fn make_info(name: &str, column_id: ColumnId) -> ColumnMetadata {
+        ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                name.to_string(),
+                datatypes::prelude::ConcreteDataType::string_datatype(),
+                false,
+            ),
             semantic_type: SemanticType::Tag,
+            column_id,
         }
     }
 
-    fn test_name_to_column_id() -> HashMap<String, PhysicalColumnInfo> {
+    fn test_name_to_column_id() -> HashMap<String, ColumnMetadata> {
         HashMap::from([
-            ("namespace".to_string(), make_info(1)),
-            ("host".to_string(), make_info(2)),
+            ("namespace".to_string(), make_info("namespace", 1)),
+            ("host".to_string(), make_info("host", 2)),
         ])
     }
 
@@ -677,11 +679,11 @@ mod tests {
     }
 
     /// Helper function to create a name_to_column_id map
-    fn create_name_to_column_id(labels: &[&str]) -> HashMap<String, PhysicalColumnInfo> {
+    fn create_name_to_column_id(labels: &[&str]) -> HashMap<String, ColumnMetadata> {
         labels
             .iter()
             .enumerate()
-            .map(|(idx, name)| (name.to_string(), make_info(idx as ColumnId + 1)))
+            .map(|(idx, name)| (name.to_string(), make_info(name, idx as ColumnId + 1)))
             .collect()
     }
 
@@ -712,7 +714,7 @@ mod tests {
     fn extract_tsid(
         schema: Vec<ColumnSchema>,
         row: Row,
-        name_to_column_id: &HashMap<String, PhysicalColumnInfo>,
+        name_to_column_id: &HashMap<String, ColumnMetadata>,
         table_id: TableId,
     ) -> u64 {
         let rows = Rows {

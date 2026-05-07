@@ -40,7 +40,7 @@ use common_runtime::RepeatedTask;
 use mito2::engine::MitoEngine;
 pub(crate) use options::IndexOptions;
 use snafu::{OptionExt, ResultExt};
-pub(crate) use state::{MetricEngineState, PhysicalColumnInfo};
+pub(crate) use state::MetricEngineState;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{

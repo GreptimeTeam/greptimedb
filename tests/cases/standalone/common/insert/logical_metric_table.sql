@@ -32,6 +32,7 @@ INSERT INTO t_default (host, ts) VALUES ('host1', 0), ('host2', 1);
 
 SELECT host, ts, val FROM t_default ORDER BY host;
 
+-- SQLNESS REPLACE (region\s\d+\(\d+\,\s\d+\)) region
 INSERT INTO t_default (host, val) VALUES ('host3', 3);
 
 DROP TABLE t_default;

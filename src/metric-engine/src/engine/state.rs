@@ -19,60 +19,19 @@ use std::collections::{HashMap, HashSet};
 use api::v1::SemanticType;
 use common_telemetry::warn;
 use common_time::timestamp::TimeUnit;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::ColumnDefaultConstraint;
 use snafu::OptionExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::RegionId;
 
 use crate::engine::options::PhysicalRegionOptions;
 use crate::error::{PhysicalRegionNotFoundSnafu, Result};
 use crate::metrics::LOGICAL_REGION_COUNT;
 use crate::utils::to_data_region_id;
 
-/// Metadata cached for each physical column in a physical region.
-///
-/// Only the subset needed for validation and row-modification is cached here
-/// to avoid holding the full [`ColumnMetadata`] in memory for every column.
-#[derive(Debug, Clone)]
-pub struct PhysicalColumnInfo {
-    pub column_id: ColumnId,
-    pub data_type: ConcreteDataType,
-    pub is_nullable: bool,
-    pub default_constraint: Option<ColumnDefaultConstraint>,
-    pub semantic_type: SemanticType,
-}
-
-impl From<&ColumnMetadata> for PhysicalColumnInfo {
-    fn from(metadata: &ColumnMetadata) -> Self {
-        Self {
-            column_id: metadata.column_id,
-            data_type: metadata.column_schema.data_type.clone(),
-            is_nullable: metadata.column_schema.is_nullable(),
-            default_constraint: metadata.column_schema.default_constraint().cloned(),
-            semantic_type: metadata.semantic_type,
-        }
-    }
-}
-
-impl From<ColumnMetadata> for PhysicalColumnInfo {
-    fn from(metadata: ColumnMetadata) -> Self {
-        let is_nullable = metadata.column_schema.is_nullable();
-        let default_constraint = metadata.column_schema.default_constraint().cloned();
-        Self {
-            column_id: metadata.column_id,
-            data_type: metadata.column_schema.data_type,
-            is_nullable,
-            default_constraint,
-            semantic_type: metadata.semantic_type,
-        }
-    }
-}
-
 pub struct PhysicalRegionState {
     logical_regions: HashSet<RegionId>,
-    physical_columns: HashMap<String, PhysicalColumnInfo>,
+    physical_columns: HashMap<String, ColumnMetadata>,
     /// Name of the time index column, cached at region load so that the write
     /// path doesn't have to scan `physical_columns` for the timestamp on every
     /// row batch. The time index is fixed at region creation and never
@@ -89,7 +48,7 @@ pub struct PhysicalRegionState {
 
 impl PhysicalRegionState {
     pub fn new(
-        physical_columns: HashMap<String, PhysicalColumnInfo>,
+        physical_columns: HashMap<String, ColumnMetadata>,
         primary_key_encoding: PrimaryKeyEncoding,
         options: PhysicalRegionOptions,
         time_index_unit: TimeUnit,
@@ -99,12 +58,12 @@ impl PhysicalRegionState {
         // `create_data_region_request` and the open path).
         let time_index_column_name = physical_columns
             .iter()
-            .find(|(_, info)| info.semantic_type == SemanticType::Timestamp)
+            .find(|(_, meta)| meta.semantic_type == SemanticType::Timestamp)
             .map(|(name, _)| name.clone())
             .unwrap_or_default();
         let field_column_name = physical_columns
             .iter()
-            .find(|(_, info)| info.semantic_type == SemanticType::Field)
+            .find(|(_, meta)| meta.semantic_type == SemanticType::Field)
             .map(|(name, _)| name.clone())
             .unwrap_or_default();
         Self {
@@ -124,7 +83,7 @@ impl PhysicalRegionState {
     }
 
     /// Returns a reference to the physical columns.
-    pub fn physical_columns(&self) -> &HashMap<String, PhysicalColumnInfo> {
+    pub fn physical_columns(&self) -> &HashMap<String, ColumnMetadata> {
         &self.physical_columns
     }
 
@@ -167,7 +126,7 @@ impl MetricEngineState {
     pub fn add_physical_region(
         &mut self,
         physical_region_id: RegionId,
-        physical_columns: HashMap<String, PhysicalColumnInfo>,
+        physical_columns: HashMap<String, ColumnMetadata>,
         primary_key_encoding: PrimaryKeyEncoding,
         options: PhysicalRegionOptions,
         time_index_unit: TimeUnit,
@@ -189,25 +148,25 @@ impl MetricEngineState {
     pub fn add_physical_columns(
         &mut self,
         physical_region_id: RegionId,
-        physical_columns: impl IntoIterator<Item = (String, PhysicalColumnInfo)>,
+        physical_columns: impl IntoIterator<Item = (String, ColumnMetadata)>,
     ) {
         let physical_region_id = to_data_region_id(physical_region_id);
         let state = self.physical_regions.get_mut(&physical_region_id).unwrap();
-        for (col, info) in physical_columns {
+        for (col, meta) in physical_columns {
             // The time index is fixed at region creation and alter cannot add
             // a new one; keep the cached name in sync defensively.
             debug_assert_ne!(
-                info.semantic_type,
+                meta.semantic_type,
                 SemanticType::Timestamp,
                 "unexpected time index column {col} added to an existing physical region"
             );
-            if info.semantic_type == SemanticType::Field {
+            if meta.semantic_type == SemanticType::Field {
                 warn!(
                     "Unexpected field column {col} added to physical region {physical_region_id}; cached field column remains {}",
                     state.field_column_name
                 );
             }
-            state.physical_columns.insert(col, info);
+            state.physical_columns.insert(col, meta);
         }
     }
 

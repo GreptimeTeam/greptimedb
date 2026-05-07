@@ -23,6 +23,7 @@ use common_telemetry::{error, info};
 use fxhash::FxHashMap;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{
     AffectedRows, RegionDeleteRequest, RegionPutRequest, RegionRequest,
 };
@@ -31,7 +32,8 @@ use store_api::storage::{RegionId, TableId};
 use crate::engine::MetricEngineInner;
 use crate::error::{
     ColumnNotFoundSnafu, CreateDefaultSnafu, ForbiddenPhysicalAlterSnafu, InvalidRequestSnafu,
-    LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, UnsupportedRegionRequestSnafu,
+    LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, UnexpectedRequestSnafu,
+    UnsupportedRegionRequestSnafu,
 };
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
 use crate::row_modifier::{RowsIter, TableIdInput};
@@ -545,14 +547,14 @@ impl MetricEngineInner {
                 api::helper::is_column_type_value_eq(
                     col.datatype,
                     col.datatype_extension.clone(),
-                    &info.data_type
+                    &info.column_schema.data_type
                 ),
                 InvalidRequestSnafu {
                     region_id: logical_region_id,
                     reason: format!(
                         "column {} expect type {:?}, given: {}({})",
                         col.column_name,
-                        info.data_type,
+                        info.column_schema.data_type,
                         api::v1::ColumnDataType::try_from(col.datatype)
                             .map(|v| v.as_str_name())
                             .unwrap_or("Unknown"),
@@ -590,14 +592,14 @@ impl MetricEngineInner {
         if check_fields {
             let field_name = physical_state.field_column_name();
             if !rows.schema.iter().any(|col| col.column_name == field_name) {
-                let field_info =
+                let field_meta =
                     physical_columns
                         .get(field_name)
                         .with_context(|| ColumnNotFoundSnafu {
                             name: field_name,
                             region_id: logical_region_id,
                         })?;
-                Self::fill_missing_field_column(logical_region_id, field_name, field_info, rows)?;
+                Self::fill_missing_field_column(logical_region_id, field_name, field_meta, rows)?;
             }
         }
 
@@ -607,32 +609,39 @@ impl MetricEngineInner {
     fn fill_missing_field_column(
         logical_region_id: RegionId,
         field_name: &str,
-        field_info: &crate::engine::state::PhysicalColumnInfo,
+        field_meta: &ColumnMetadata,
         rows: &mut Rows,
     ) -> Result<()> {
-        let Some(default_constraint) = field_info.default_constraint.as_ref() else {
-            return InvalidRequestSnafu {
-                region_id: logical_region_id,
-                reason: format!("missing required field column {field_name}"),
+        ensure!(
+            !field_meta.column_schema.is_default_impure(),
+            UnexpectedRequestSnafu {
+                reason: format!(
+                    "unexpected impure default value with region_id: {logical_region_id}, column: {field_name}, default_value: {:?}",
+                    field_meta.column_schema.default_constraint(),
+                ),
             }
-            .fail();
-        };
+        );
 
-        let default_value = default_constraint
-            .create_default(&field_info.data_type, field_info.is_nullable)
+        let default_value = field_meta
+            .column_schema
+            .create_default()
             .context(CreateDefaultSnafu {
                 region_id: logical_region_id,
                 column: field_name,
+            })?
+            .with_context(|| InvalidRequestSnafu {
+                region_id: logical_region_id,
+                reason: format!("missing required field column {field_name}"),
             })?;
         let default_value = api::helper::to_grpc_value(default_value);
         let (datatype, datatype_extension) =
-            ColumnDataTypeWrapper::try_from(field_info.data_type.clone())
+            ColumnDataTypeWrapper::try_from(field_meta.column_schema.data_type.clone())
                 .map_err(|e| {
                     InvalidRequestSnafu {
                         region_id: logical_region_id,
                         reason: format!(
                             "no protobuf type for field column {field_name} ({:?}): {e}",
-                            field_info.data_type
+                            field_meta.column_schema.data_type
                         ),
                     }
                     .build()
@@ -688,12 +697,17 @@ impl MetricEngineInner {
 mod tests {
     use std::collections::HashSet;
 
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema};
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use common_function::utils::partition_expr_version;
     use common_recordbatch::RecordBatches;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::value::Value as PartitionValue;
     use partition::expr::col;
+    use store_api::metadata::ColumnMetadata;
     use store_api::metric_engine_consts::{
         DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
         MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
@@ -1571,5 +1585,89 @@ mod tests {
             "expected field-completeness rejection, got: {message}"
         );
         assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_fill_missing_field_column_nullable_no_default() {
+        let field_meta = ColumnMetadata {
+            column_id: 1,
+            semantic_type: SemanticType::Field,
+            column_schema: ColumnSchema::new(
+                "greptime_value".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true, // nullable, no default
+            ),
+        };
+        let mut rows = Rows {
+            schema: vec![PbColumnSchema {
+                column_name: "ts".to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as _,
+                datatype_extension: None,
+                options: None,
+            }],
+            rows: vec![Row {
+                values: vec![Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(0)),
+                }],
+            }],
+        };
+
+        MetricEngineInner::fill_missing_field_column(
+            RegionId::new(1, 1),
+            "greptime_value",
+            &field_meta,
+            &mut rows,
+        )
+        .unwrap();
+
+        assert_eq!(rows.schema.len(), 2);
+        assert_eq!(rows.schema[1].column_name, "greptime_value");
+        assert_eq!(rows.rows[0].values.len(), 2);
+        assert!(
+            rows.rows[0].values[1].value_data.is_none(),
+            "missing nullable field should be filled with null"
+        );
+    }
+
+    #[test]
+    fn test_fill_missing_field_column_rejects_impure_default() {
+        let field_meta = ColumnMetadata {
+            column_id: 1,
+            semantic_type: SemanticType::Field,
+            column_schema: ColumnSchema::new(
+                "greptime_value".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_default_constraint(Some(ColumnDefaultConstraint::Function("now()".to_string())))
+            .unwrap(),
+        };
+        let mut rows = Rows {
+            schema: vec![PbColumnSchema {
+                column_name: "ts".to_string(),
+                datatype: api::v1::ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as _,
+                datatype_extension: None,
+                options: None,
+            }],
+            rows: vec![Row {
+                values: vec![Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(0)),
+                }],
+            }],
+        };
+
+        let err = MetricEngineInner::fill_missing_field_column(
+            RegionId::new(1, 1),
+            "greptime_value",
+            &field_meta,
+            &mut rows,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("impure default value"),
+            "expected impure-default rejection, got: {err}"
+        );
     }
 }

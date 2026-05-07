@@ -20,7 +20,6 @@ use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{AlterKind, RegionAlterRequest};
 use store_api::storage::RegionId;
 
-use crate::engine::state::PhysicalColumnInfo;
 use crate::error::{AddingFieldColumnSnafu, Result};
 
 /// Extract new columns from the create requests.
@@ -30,7 +29,7 @@ use crate::error::{AddingFieldColumnSnafu, Result};
 /// This function will panic if the alter kind is not `AddColumns`.
 pub fn extract_new_columns<'a>(
     requests: &'a [(RegionId, RegionAlterRequest)],
-    physical_columns: &HashMap<String, PhysicalColumnInfo>,
+    physical_columns: &HashMap<String, ColumnMetadata>,
     new_column_names: &mut HashSet<&'a str>,
     new_columns: &mut Vec<ColumnMetadata>,
 ) -> Result<()> {
