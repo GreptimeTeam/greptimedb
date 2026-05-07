@@ -66,7 +66,7 @@ pub struct HeartbeatTask {
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     region_alive_keeper: Arc<RegionAliveKeeper>,
     resource_stat: ResourceStatRef,
-    env_vars: Option<EnvVars>,
+    env_vars: EnvVars,
 }
 
 impl Drop for HeartbeatTask {
@@ -115,7 +115,7 @@ impl HeartbeatTask {
             resp_handler_executor,
             region_alive_keeper,
             resource_stat,
-            env_vars: Some(EnvVars::from_config(&opts.heartbeat_env_vars)),
+            env_vars: EnvVars::from_config(&opts.heartbeat_env_vars),
         })
     }
 
@@ -260,7 +260,8 @@ impl HeartbeatTask {
             .mito_engine()
             .context(RegionEngineNotFoundSnafu { name: "mito" })?
             .gc_limiter();
-        let mut env_vars = self.env_vars.clone();
+        let heartbeat_env_vars = self.env_vars.clone();
+        let mut env_vars = Some(heartbeat_env_vars.clone());
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -304,9 +305,7 @@ impl HeartbeatTask {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
                                     let mut extensions = std::collections::HashMap::new();
-                                    if let Some(env_vars) = env_vars.take() {
-                                        env_vars.into_extensions(&mut extensions);
-                                    }
+                                    EnvVars::take_into_extensions(&mut env_vars, &mut extensions);
                                     let gc_stat = gc_limiter.gc_stat();
                                     gc_stat.into_extensions(&mut extensions);
 
@@ -335,9 +334,7 @@ impl HeartbeatTask {
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
 
                         let mut extensions = std::collections::HashMap::new();
-                        if let Some(env_vars) = env_vars.take() {
-                            env_vars.into_extensions(&mut extensions);
-                        }
+                        EnvVars::take_into_extensions(&mut env_vars, &mut extensions);
                         let gc_stat = gc_limiter.gc_stat();
                         gc_stat.into_extensions(&mut extensions);
 
@@ -384,6 +381,7 @@ impl HeartbeatTask {
                             Ok((new_tx, new_config)) => {
                                 info!("Reconnected to metasrv, heartbeat config: {}", new_config);
                                 tx = new_tx;
+                                env_vars = Some(heartbeat_env_vars.clone());
                                 // Update retry_interval from new config
                                 retry_interval = new_config.retry_interval;
                                 // Update region_alive_keeper's heartbeat interval

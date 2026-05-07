@@ -46,7 +46,7 @@ pub struct HeartbeatTask {
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     start_time_ms: u64,
     resource_stat: ResourceStatRef,
-    env_vars: Option<EnvVars>,
+    env_vars: EnvVars,
 }
 
 impl HeartbeatTask {
@@ -69,7 +69,7 @@ impl HeartbeatTask {
             resp_handler_executor,
             start_time_ms: common_time::util::current_time_millis() as u64,
             resource_stat,
-            env_vars: Some(EnvVars::from_config(&opts.heartbeat_env_vars)),
+            env_vars: EnvVars::from_config(&opts.heartbeat_env_vars),
         }
     }
 
@@ -205,7 +205,7 @@ impl HeartbeatTask {
         let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
         let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
         let resource_stat = self.resource_stat.clone();
-        let mut env_vars = self.env_vars.clone();
+        let mut env_vars = Some(self.env_vars.clone());
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
@@ -237,9 +237,7 @@ impl HeartbeatTask {
                 };
 
                 if let Some(mut req) = req {
-                    if let Some(env_vars) = env_vars.take() {
-                        env_vars.into_extensions(&mut req.extensions);
-                    }
+                    EnvVars::take_into_extensions(&mut env_vars, &mut req.extensions);
                     if let Err(e) = req_sender.send(req.clone()).await {
                         error!(e; "Failed to send heartbeat to metasrv");
                         break;
