@@ -45,6 +45,7 @@ datafusion-optimizer.workspace = true
 datafusion-physical-expr.workspace = true
 datafusion-sql.workspace = true
 datatypes.workspace = true
+either.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 greptime-proto.workspace = true

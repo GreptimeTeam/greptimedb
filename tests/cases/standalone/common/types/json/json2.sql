@@ -32,4 +32,10 @@ insert into json2_table
 values (9, '{"a": {"x": true}, "c": "s9", "d": [{"e": {"g": -0.9}}]}'),
        (10, '{"a": {"b": 10}, "y": false}');
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+explain select j.a.b from json2_table;
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+explain select j.a.x::bool from json2_table;
+
 drop table json2_table;
