@@ -50,7 +50,7 @@ pub(crate) struct ImportResumeConfig {
 pub(crate) struct ImportResumeSession {
     config: ImportResumeConfig,
     state: ImportState,
-    _lock: ImportStateLockGuard,
+    lock: ImportStateLockGuard,
 }
 
 impl ImportResumeSession {
@@ -126,7 +126,7 @@ pub(crate) async fn prepare_import_resume(
     Ok(ImportResumeSession {
         config,
         state,
-        _lock: lock,
+        lock,
     })
 }
 
@@ -138,13 +138,15 @@ where
     E: ImportTaskExecutor + Sync,
 {
     let ImportResumeSession {
-        config, mut state, ..
+        config,
+        mut state,
+        lock,
     } = session;
 
     // The state machine requires DDL to be explicitly marked completed before
-    // data import; otherwise a crash after data is imported but before DDL is
-    // confirmed would skip DDL on the next resume even though tables may not
-    // exist. Surface the misuse instead of silently importing.
+    // data import; otherwise a caller could import data and leave a state that
+    // replays DDL on the next resume. Surface the misuse instead of silently
+    // importing.
     if !state.ddl_completed {
         return ImportStateDdlIncompleteSnafu {
             path: config.state_path.display().to_string(),
@@ -244,6 +246,7 @@ where
 
     delete_import_state(&config.state_path).await?;
     info!("Data import finished in {:?}", import_start.elapsed());
+    drop(lock);
     Ok(())
 }
 

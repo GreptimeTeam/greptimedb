@@ -129,7 +129,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to determine import state path for snapshot '{}'", snapshot_id))]
+    #[snafu(display(
+        "Failed to determine import state path for snapshot '{}'. Set HOME, USERPROFILE, or run from a valid current directory.",
+        snapshot_id
+    ))]
     ImportStatePathUnavailable {
         snapshot_id: String,
         #[snafu(implicit)]
