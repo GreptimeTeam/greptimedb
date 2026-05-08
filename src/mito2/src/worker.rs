@@ -1073,8 +1073,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         BackgroundNotify::RegionEdit(edit_result)
                             if edit_result.update_region_state
                     ) {
-                        // The current batch's write buffers may contain writes that arrived while
-                        // this edit was in flight. Classify them before restoring edit progress.
+                        // Region state must be Editing when reach here.
+                        // This call only moves write/bulk write request into stall queue. When region edit result
+                        // is processed inside handle_background_notify and region state is switched back to Writable,
+                        // stalled request will be processed before the next region edit is dequeued from
+                        // RegionEditQueue immediately in handle_region_edit_result. It not only ensured pending writes
+                        // are processed in time, but also prevents them from starvation.
+                        // TODO(hl): maybe we need to merge those queues for pending requests like pending_ddl,
+                        // region edits and stalled request, so we can simplify the coordination between these queues.
                         self.handle_buffered_region_write_requests(
                             &region_id,
                             write_requests,
