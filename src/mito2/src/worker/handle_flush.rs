@@ -293,9 +293,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let flush_on_close = request.flush_reason == FlushReason::Closing;
         let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
 
-        // Notifies waiters and observes the flush timer.
-        request.on_success();
-
         // In async mode, create indexes after flush.
         if self.config.index.build_mode == IndexBuildMode::Async {
             self.handle_rebuild_index(
@@ -314,7 +311,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // no need to handle requests and schedule compactions.
             self.remove_region(region_id).await;
             info!("Region {} closed after flush", region_id);
+            request.on_success();
         } else {
+            // Notifies waiters and observes the flush timer.
+            request.on_success();
             // Handle pending requests for the region.
             if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =
                 self.flush_scheduler.on_flush_success(region_id)

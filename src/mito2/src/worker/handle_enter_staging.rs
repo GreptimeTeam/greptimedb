@@ -278,7 +278,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .sender
             .send(enter_staging_result.result.map(|_| 0));
         // Handles the stalled requests.
-        self.handle_region_stalled_requests(&enter_staging_result.region_id)
+        self.handle_region_stalled_requests(&enter_staging_result.region_id, true)
             .await;
     }
 
