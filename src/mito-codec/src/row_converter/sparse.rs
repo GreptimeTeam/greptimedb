@@ -192,9 +192,6 @@ impl SparseOffsetsCache {
                 return Some(entry.1);
             }
         }
-        if self.overflow.is_empty() {
-            return None;
-        }
         self.overflow.get(&column_id).copied()
     }
 
