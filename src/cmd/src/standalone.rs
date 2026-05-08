@@ -187,7 +187,10 @@ impl App for Instance {
             .context(error::ShutdownFrontendSnafu)?;
 
         self.leader_services_controller
-            .stop(self.procedure_manager.clone())
+            .stop(
+                self.procedure_manager.clone(),
+                self.datanode.region_server(),
+            )
             .await?;
 
         self.datanode
@@ -746,7 +749,11 @@ pub trait StandaloneLeaderServicesController: Send + Sync {
     ) -> Result<()>;
 
     /// Stops services started by [`StandaloneLeaderServicesController::start`].
-    async fn stop(&self, procedure_manager: ProcedureManagerRef) -> Result<()>;
+    async fn stop(
+        &self,
+        procedure_manager: ProcedureManagerRef,
+        region_server: RegionServer,
+    ) -> Result<()>;
 }
 
 pub struct DefaultStandaloneLeaderServicesController;
@@ -769,7 +776,11 @@ impl StandaloneLeaderServicesController for DefaultStandaloneLeaderServicesContr
             .context(error::StartWalProviderSnafu)
     }
 
-    async fn stop(&self, procedure_manager: ProcedureManagerRef) -> Result<()> {
+    async fn stop(
+        &self,
+        procedure_manager: ProcedureManagerRef,
+        _region_server: RegionServer,
+    ) -> Result<()> {
         procedure_manager
             .stop()
             .await
