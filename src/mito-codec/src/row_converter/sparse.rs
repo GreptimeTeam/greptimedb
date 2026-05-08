@@ -142,17 +142,16 @@ const TAGS_START_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SI
 
 /// Inline capacity for the small-vec fast path of [`SparseOffsetsCache`].
 ///
-/// Most sparse primary keys carry only a handful of tags; a linear scan over
-/// a small pre-reserved `Vec` beats a `HashMap` lookup in that regime (no
-/// hash, better cache behavior). Primary keys with more than this many tags
-/// spill the remainder into a `HashMap`.
+/// Most sparse primary keys carry only a handful of tags, so a linear scan
+/// over a short `Vec` beats a `HashMap` lookup. Tags beyond this capacity
+/// spill into the overflow `HashMap`.
 const SPARSE_OFFSETS_INLINE_CAP: usize = 32;
 
 /// A lazily populated cache of tag column offsets inside a sparse primary key.
 #[derive(Debug, Clone)]
 pub struct SparseOffsetsCache {
-    /// Small-vec fast path, pre-reserved to [`SPARSE_OFFSETS_INLINE_CAP`] so
-    /// the common case never reallocates.
+    /// Small-vec fast path. Reserves [`SPARSE_OFFSETS_INLINE_CAP`] slots on
+    /// the first insert.
     inline: Vec<(ColumnId, usize)>,
     /// Overflow for columns beyond the inline capacity. Lazily allocated.
     overflow: HashMap<ColumnId, usize>,
