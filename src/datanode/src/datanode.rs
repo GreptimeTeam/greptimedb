@@ -163,6 +163,7 @@ pub struct DatanodeBuilder {
     kv_backend: KvBackendRef,
     cache_registry: Option<Arc<LayeredCacheRegistry>>,
     topic_stats_reporter: Option<Box<dyn TopicStatsReporter>>,
+    open_regions_writable_override: Option<bool>,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<mito2::extension::BoxedExtensionRangeProviderFactory>,
 }
@@ -176,6 +177,7 @@ impl DatanodeBuilder {
             meta_client: None,
             kv_backend,
             cache_registry: None,
+            open_regions_writable_override: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
             topic_stats_reporter: None,
@@ -202,6 +204,14 @@ impl DatanodeBuilder {
 
     pub fn with_table_provider_factory(&mut self, factory: TableProviderFactoryRef) -> &mut Self {
         self.table_provider_factory = Some(factory);
+        self
+    }
+
+    /// Overrides whether regions opened during datanode startup should become writable.
+    ///
+    /// When unset, the builder uses its default writable policy for reopened regions.
+    pub fn with_open_regions_writable_override(&mut self, writable: bool) -> &mut Self {
+        self.open_regions_writable_override = Some(writable);
         self
     }
 
@@ -274,10 +284,13 @@ impl DatanodeBuilder {
 
         let region_open_requests =
             build_region_open_requests(node_id, self.kv_backend.clone()).await?;
+        let open_with_writable = self
+            .open_regions_writable_override
+            .unwrap_or(!controlled_by_metasrv);
         let open_all_regions = open_all_regions(
             region_server.clone(),
             region_open_requests,
-            !controlled_by_metasrv,
+            open_with_writable,
             self.opts.init_regions_parallelism,
             // Ignore nonexistent regions in recovery mode.
             is_recovery_mode,
