@@ -1437,6 +1437,7 @@ max_in_flight_write_bytes = "0KiB"
 write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false
 init_regions_parallelism = 16
+heartbeat_env_vars = []
 
 [http]
 addr = "127.0.0.1:4000"

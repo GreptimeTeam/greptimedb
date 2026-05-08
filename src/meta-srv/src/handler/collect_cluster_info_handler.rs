@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::meta::{HeartbeatRequest, NodeInfo as PbNodeInfo, Role};
 use common_meta::cluster::{
     DatanodeStatus, FlownodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus,
 };
+use common_meta::datanode::EnvVars;
 use common_meta::heartbeat::utils::get_flownode_workloads;
 use common_meta::peer::Peer;
 use common_meta::rpc::store::PutRequest;
+use common_telemetry::warn;
 use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
 
@@ -42,7 +46,7 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer, info)) = extract_base_info(req) else {
+        let Some((key, peer, info, env_vars)) = extract_base_info(req) else {
             return Ok(HandleControl::Continue);
         };
 
@@ -58,6 +62,7 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             cpu_usage_millicores: info.cpu_usage_millicores,
             memory_usage_bytes: info.memory_usage_bytes,
             hostname: info.hostname,
+            env_vars,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -80,7 +85,7 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer, info)) = extract_base_info(req) else {
+        let Some((key, peer, info, env_vars)) = extract_base_info(req) else {
             return Ok(HandleControl::Continue);
         };
         let flownode_workloads = get_flownode_workloads(req.node_workloads.as_ref());
@@ -99,6 +104,7 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
             cpu_usage_millicores: info.cpu_usage_millicores,
             memory_usage_bytes: info.memory_usage_bytes,
             hostname: info.hostname,
+            env_vars,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -122,7 +128,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer, info)) = extract_base_info(req) else {
+        let Some((key, peer, info, env_vars)) = extract_base_info(req) else {
             return Ok(HandleControl::Continue);
         };
 
@@ -155,6 +161,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             cpu_usage_millicores: info.cpu_usage_millicores,
             memory_usage_bytes: info.memory_usage_bytes,
             hostname: info.hostname,
+            env_vars,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -163,7 +170,9 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
     }
 }
 
-fn extract_base_info(request: &HeartbeatRequest) -> Option<(NodeInfoKey, Peer, PbNodeInfo)> {
+fn extract_base_info(
+    request: &HeartbeatRequest,
+) -> Option<(NodeInfoKey, Peer, PbNodeInfo, HashMap<String, String>)> {
     let HeartbeatRequest { peer, info, .. } = request;
     let key = NodeInfoKey::new(request)?;
     let Some(peer) = &peer else {
@@ -173,7 +182,17 @@ fn extract_base_info(request: &HeartbeatRequest) -> Option<(NodeInfoKey, Peer, P
         return None;
     };
 
-    Some((key, peer.clone(), info.clone()))
+    let env_vars = EnvVars::from_extensions(&request.extensions)
+        .inspect_err(|e| {
+            warn!(e;
+                "Failed to deserialize __env_vars from heartbeat extensions, peer: {}", peer
+            );
+        })
+        .unwrap_or_default()
+        .map(|e| e.vars)
+        .unwrap_or_default();
+
+    Some((key, peer.clone(), info.clone(), env_vars))
 }
 
 async fn put_into_memory_store(ctx: &mut Context, key: NodeInfoKey, value: NodeInfo) -> Result<()> {

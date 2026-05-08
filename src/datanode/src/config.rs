@@ -83,6 +83,10 @@ pub struct DatanodeOptions {
     pub query: QueryOptions,
     pub memory: MemoryOptions,
 
+    /// Environment variable keys to read and report in heartbeat messages.
+    /// The values of these env vars at startup will be sent to metasrv.
+    pub heartbeat_env_vars: Vec<String>,
+
     /// Deprecated options, please use the new options instead.
     #[deprecated(note = "Please use `grpc.bind_addr` instead.")]
     pub rpc_addr: Option<String>,
@@ -136,6 +140,7 @@ impl Default for DatanodeOptions {
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
+            heartbeat_env_vars: vec![],
 
             // Deprecated options
             rpc_addr: None,
@@ -149,7 +154,11 @@ impl Default for DatanodeOptions {
 
 impl Configurable for DatanodeOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["meta_client.metasrv_addrs", "wal.broker_endpoints"])
+        Some(&[
+            "heartbeat_env_vars",
+            "meta_client.metasrv_addrs",
+            "wal.broker_endpoints",
+        ])
     }
 }
 
