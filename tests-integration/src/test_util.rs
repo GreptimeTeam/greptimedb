@@ -627,7 +627,7 @@ pub async fn setup_test_prom_app_with_frontend(
             PromValidationMode::Strict,
             None,
         )
-        .with_prometheus_handler(frontend_ref)
+        .with_prometheus_handler(frontend_ref, None)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
     let app = http_server.build(http_server.make_app()).unwrap();
@@ -685,7 +685,7 @@ pub async fn setup_grpc_server_with(
     let grpc_builder = grpc_builder
         .database_handler(greptime_request_handler)
         .flight_handler(flight_handler)
-        .prometheus_handler(fe_instance_ref.clone(), user_provider.clone())
+        .prometheus_handler(fe_instance_ref.clone(), user_provider.clone(), None)
         .otel_arrow_handler(OtelArrowServiceHandler::new(fe_instance_ref, user_provider))
         .with_tls_config(grpc_config.tls)
         .unwrap();

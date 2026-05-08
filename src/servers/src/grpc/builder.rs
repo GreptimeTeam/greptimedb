@@ -44,6 +44,7 @@ use crate::grpc::prom_query_gateway::PrometheusGatewayService;
 use crate::grpc::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
 use crate::grpc::{GrpcServer, GrpcServerConfig};
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
+use crate::interceptor::PromQueryInterceptorRef;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 use crate::request_memory_limiter::ServerMemoryLimiter;
@@ -147,12 +148,14 @@ impl GrpcServerBuilder {
         mut self,
         prometheus_handler: PrometheusHandlerRef,
         user_provider: Option<UserProviderRef>,
+        interceptor: Option<PromQueryInterceptorRef<crate::error::Error>>,
     ) -> Self {
         add_service!(
             self,
             PrometheusGatewayServer::new(PrometheusGatewayService::new(
                 prometheus_handler,
                 user_provider,
+                interceptor,
             ))
         );
         self

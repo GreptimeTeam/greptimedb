@@ -21,6 +21,7 @@ use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
 use servers::error::{self, InternalSnafu, NotSupportedSnafu, Result};
+use servers::http::prometheus::{PromSeriesMatrix, PromSeriesVector};
 use servers::interceptor::{GrpcQueryInterceptor, PromQueryInterceptor, SqlQueryInterceptor};
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ensure;
@@ -109,6 +110,22 @@ impl PromQueryInterceptor for NoopInterceptor {
             OutputData::AffectedRows(1) => Ok(Output::new_with_affected_rows(2)),
             _ => Ok(output),
         }
+    }
+
+    fn pre_serializing_vector(
+        &self,
+        series: PromSeriesVector,
+        _query_ctx: QueryContextRef,
+    ) -> std::result::Result<PromSeriesVector, Self::Error> {
+        Ok(series)
+    }
+
+    fn pre_serializing_matrix(
+        &self,
+        series: PromSeriesMatrix,
+        _query_ctx: QueryContextRef,
+    ) -> std::result::Result<PromSeriesMatrix, Self::Error> {
+        Ok(series)
     }
 }
 

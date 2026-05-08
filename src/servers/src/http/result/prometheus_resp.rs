@@ -32,15 +32,18 @@ use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::value::ValueType;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    ArrowSnafu, CollectRecordbatchSnafu, Result, UnexpectedResultSnafu, status_code_to_http_status,
+    ArrowSnafu, CollectRecordbatchSnafu, Error, Result, UnexpectedResultSnafu,
+    status_code_to_http_status,
 };
 use crate::http::header::{GREPTIME_DB_HEADER_METRICS, collect_plan_metrics};
 use crate::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusResponse,
 };
+use crate::interceptor::{PromQueryInterceptor, PromQueryInterceptorRef};
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PrometheusJsonResponse {
@@ -121,13 +124,15 @@ impl PrometheusJsonResponse {
         result: Result<Output>,
         metric_name: Option<String>,
         result_type: ValueType,
+        interceptor: Option<&PromQueryInterceptorRef<Error>>,
+        query_ctx: QueryContextRef,
     ) -> Self {
         let response: Result<Self> = try {
             let result = result?;
             let mut resp =
                 match result.data {
                     OutputData::RecordBatches(batches) => Self::success(
-                        Self::record_batches_to_data(batches, metric_name, result_type)?,
+                        Self::record_batches_to_data(batches, metric_name, result_type, interceptor, query_ctx.clone())?,
                     ),
                     OutputData::Stream(stream) => {
                         let record_batches = RecordBatches::try_collect(stream)
@@ -137,6 +142,8 @@ impl PrometheusJsonResponse {
                             record_batches,
                             metric_name,
                             result_type,
+                            interceptor,
+                            query_ctx.clone(),
                         )?)
                     }
                     OutputData::AffectedRows(_) => Self::error(
@@ -185,6 +192,8 @@ impl PrometheusJsonResponse {
         batches: RecordBatches,
         metric_name: Option<String>,
         result_type: ValueType,
+        interceptor: Option<&PromQueryInterceptorRef<Error>>,
+        query_ctx: QueryContextRef,
     ) -> Result<PrometheusResponse> {
         // Return empty result if no batches
         if batches.iter().next().is_none() {
@@ -306,17 +315,19 @@ impl PrometheusJsonResponse {
         };
 
         // accumulate data into result
-        buffer.into_iter().for_each(|(tags, mut values)| {
+        for (tags, mut values) in buffer {
             let metric = tags
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect::<BTreeMap<_, _>>();
             match result {
                 PromQueryResult::Vector(ref mut v) => {
-                    v.push(PromSeriesVector {
+                    let series = PromSeriesVector {
                         metric,
                         value: values.pop(),
-                    });
+                    };
+                    let series = interceptor.pre_serializing_vector(series, query_ctx.clone())?;
+                    v.push(series);
                 }
                 PromQueryResult::Matrix(ref mut v) => {
                     // sort values by timestamp
@@ -324,7 +335,9 @@ impl PrometheusJsonResponse {
                         values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
                     }
 
-                    v.push(PromSeriesMatrix { metric, values });
+                    let series = PromSeriesMatrix { metric, values };
+                    let series = interceptor.pre_serializing_matrix(series, query_ctx.clone())?;
+                    v.push(series);
                 }
                 PromQueryResult::Scalar(ref mut v) => {
                     *v = values.pop();
@@ -333,7 +346,7 @@ impl PrometheusJsonResponse {
                     // TODO(ruihang): Not supported yet
                 }
             }
-        });
+        }
 
         // sort matrix by metric
         // see: https://prometheus.io/docs/prometheus/3.5/querying/api/#range-vectors

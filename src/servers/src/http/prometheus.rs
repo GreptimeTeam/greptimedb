@@ -69,6 +69,7 @@ use crate::error::{
     NotSupportedSnafu, ParseTimestampSnafu, Result, TableNotFoundSnafu, UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
+use crate::interceptor::PromQueryInterceptorRef;
 use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL, is_database_selection_label};
 use crate::prometheus_handler::PrometheusHandlerRef;
 
@@ -183,13 +184,19 @@ pub struct FormatQuery {
     query: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct PromState {
+    pub handler: PrometheusHandlerRef,
+    pub interceptor: Option<PromQueryInterceptorRef<Error>>,
+}
+
 #[axum_macros::debug_handler]
 #[tracing::instrument(
     skip_all,
     fields(protocol = "prometheus", request_type = "format_query")
 )]
 pub async fn format_query(
-    State(_handler): State<PrometheusHandlerRef>,
+    State(_state): State<PromState>,
     Query(params): Query<InstantQuery>,
     Extension(_query_ctx): Extension<QueryContext>,
     Form(form_params): Form<InstantQuery>,
@@ -249,7 +256,7 @@ macro_rules! try_call_return_response {
     fields(protocol = "prometheus", request_type = "instant_query")
 )]
 pub async fn instant_query(
-    State(handler): State<PrometheusHandlerRef>,
+    State(state): State<PromState>,
     Query(params): Query<InstantQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<InstantQuery>,
@@ -290,7 +297,7 @@ pub async fn instant_query(
         debug!("Find metric name matchers: {:?}", name_matchers);
 
         let metric_names =
-            try_call_return_response!(handler.query_metric_names(name_matchers, &query_ctx).await);
+            try_call_return_response!(state.handler.query_metric_names(name_matchers, &query_ctx).await);
 
         debug!("Find metric names: {:?}", metric_names);
 
@@ -307,7 +314,8 @@ pub async fn instant_query(
             let mut prom_query = prom_query.clone();
             let mut promql_expr = promql_expr.clone();
             let query_ctx = query_ctx.clone();
-            let handler = handler.clone();
+            let handler = state.handler.clone();
+            let interceptor = state.interceptor.clone();
 
             async move {
                 update_metric_name_matcher(&mut promql_expr, &metric);
@@ -318,7 +326,7 @@ pub async fn instant_query(
                 );
                 prom_query.query = new_query;
 
-                do_instant_query(&handler, &prom_query, query_ctx).await
+                do_instant_query(&handler, &prom_query, query_ctx, interceptor.as_ref()).await
             }
         }))
         .await;
@@ -331,7 +339,7 @@ pub async fn instant_query(
             })
             .unwrap()
     } else {
-        do_instant_query(&handler, &prom_query, query_ctx).await
+        do_instant_query(&state.handler, &prom_query, query_ctx, state.interceptor.as_ref()).await
     }
 }
 
@@ -340,13 +348,14 @@ async fn do_instant_query(
     handler: &PrometheusHandlerRef,
     prom_query: &PromQuery,
     query_ctx: QueryContextRef,
+    interceptor: Option<&PromQueryInterceptorRef<Error>>,
 ) -> PrometheusJsonResponse {
-    let result = handler.do_query(prom_query, query_ctx).await;
+    let result = handler.do_query(prom_query, query_ctx.clone()).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name, result_type),
         Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
     };
-    PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
+    PrometheusJsonResponse::from_query_result(result, metric_name, result_type, interceptor, query_ctx).await
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -366,7 +375,7 @@ pub struct RangeQuery {
     fields(protocol = "prometheus", request_type = "range_query")
 )]
 pub async fn range_query(
-    State(handler): State<PrometheusHandlerRef>,
+    State(state): State<PromState>,
     Query(params): Query<RangeQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<RangeQuery>,
@@ -401,7 +410,7 @@ pub async fn range_query(
         debug!("Find metric name matchers: {:?}", name_matchers);
 
         let metric_names =
-            try_call_return_response!(handler.query_metric_names(name_matchers, &query_ctx).await);
+            try_call_return_response!(state.handler.query_metric_names(name_matchers, &query_ctx).await);
 
         debug!("Find metric names: {:?}", metric_names);
 
@@ -416,7 +425,8 @@ pub async fn range_query(
             let mut prom_query = prom_query.clone();
             let mut promql_expr = promql_expr.clone();
             let query_ctx = query_ctx.clone();
-            let handler = handler.clone();
+            let handler = state.handler.clone();
+            let interceptor = state.interceptor.clone();
 
             async move {
                 update_metric_name_matcher(&mut promql_expr, &metric);
@@ -427,7 +437,7 @@ pub async fn range_query(
                 );
                 prom_query.query = new_query;
 
-                do_range_query(&handler, &prom_query, query_ctx).await
+                do_range_query(&handler, &prom_query, query_ctx, interceptor.as_ref()).await
             }
         }))
         .await;
@@ -441,7 +451,7 @@ pub async fn range_query(
             })
             .unwrap()
     } else {
-        do_range_query(&handler, &prom_query, query_ctx).await
+        do_range_query(&state.handler, &prom_query, query_ctx, state.interceptor.as_ref()).await
     }
 }
 
@@ -450,13 +460,14 @@ async fn do_range_query(
     handler: &PrometheusHandlerRef,
     prom_query: &PromQuery,
     query_ctx: QueryContextRef,
+    interceptor: Option<&PromQueryInterceptorRef<Error>>,
 ) -> PrometheusJsonResponse {
-    let result = handler.do_query(prom_query, query_ctx).await;
+    let result = handler.do_query(prom_query, query_ctx.clone()).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
         Ok((metric_name, _)) => metric_name,
     };
-    PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix).await
+    PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix, interceptor, query_ctx).await
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -534,7 +545,7 @@ macro_rules! handle_schema_err {
     fields(protocol = "prometheus", request_type = "labels_query")
 )]
 pub async fn labels_query(
-    State(handler): State<PrometheusHandlerRef>,
+    State(state): State<PromState>,
     Query(params): Query<LabelsQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<LabelsQuery>,
@@ -553,7 +564,7 @@ pub async fn labels_query(
         .start_timer();
 
     // Fetch all tag columns. It will be used as white-list for tag names.
-    let mut labels = match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await
+    let mut labels = match get_all_column_names(&catalog, &schema, &state.handler.catalog_manager()).await
     {
         Ok(labels) => labels,
         Err(e) => return PrometheusJsonResponse::error(e.status_code(), e.output_msg()),
@@ -596,7 +607,7 @@ pub async fn labels_query(
             alias: None,
         };
 
-        let result = handler.do_query(&prom_query, query_ctx.clone()).await;
+        let result = state.handler.do_query(&prom_query, query_ctx.clone()).await;
         handle_schema_err!(
             retrieve_labels_name_from_query_result(result, &mut fetched_labels, &mut merge_map)
                 .await
@@ -1285,7 +1296,7 @@ pub struct LabelValueQuery {
     fields(protocol = "prometheus", request_type = "label_values_query")
 )]
 pub async fn label_values_query(
-    State(handler): State<PrometheusHandlerRef>,
+    State(state): State<PromState>,
     Path(label_name): Path<String>,
     Extension(mut query_ctx): Extension<QueryContext>,
     Query(params): Query<LabelValueQuery>,
@@ -1299,7 +1310,7 @@ pub async fn label_values_query(
         .start_timer();
 
     if label_name == METRIC_NAME_LABEL {
-        let catalog_manager = handler.catalog_manager();
+        let catalog_manager = state.handler.catalog_manager();
 
         let mut table_names = try_call_return_response!(
             retrieve_table_names(&query_ctx, catalog_manager, params.matches.0).await
@@ -1309,7 +1320,7 @@ pub async fn label_values_query(
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
     } else if label_name == FIELD_NAME_LABEL {
         let field_columns = handle_schema_err!(
-            retrieve_field_names(&query_ctx, handler.catalog_manager(), params.matches.0).await
+            retrieve_field_names(&query_ctx, state.handler.catalog_manager(), params.matches.0).await
         )
         .unwrap_or_default();
         let mut field_columns = field_columns.into_iter().collect::<Vec<_>>();
@@ -1317,7 +1328,7 @@ pub async fn label_values_query(
         truncate_results(&mut field_columns, params.limit);
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(field_columns));
     } else if is_database_selection_label(&label_name) {
-        let catalog_manager = handler.catalog_manager();
+        let catalog_manager = state.handler.catalog_manager();
 
         let mut schema_names = try_call_return_response!(
             retrieve_schema_names(&query_ctx, catalog_manager, params.matches.0).await
@@ -1364,7 +1375,7 @@ pub async fn label_values_query(
         let VectorSelector { matchers, .. } = vector_selector;
         // Only use and filter matchers.
         let matchers = matchers.matchers;
-        let result = handler
+        let result = state.handler
             .query_label_values(name, label_name.clone(), matchers, start, end, &query_ctx)
             .await;
         if let Some(result) = handle_schema_err!(result) {
@@ -1581,7 +1592,7 @@ pub struct SeriesQuery {
     fields(protocol = "prometheus", request_type = "series_query")
 )]
 pub async fn series_query(
-    State(handler): State<PrometheusHandlerRef>,
+    State(state): State<PromState>,
     Query(params): Query<SeriesQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<SeriesQuery>,
@@ -1633,7 +1644,7 @@ pub async fn series_query(
             lookback: lookback.clone(),
             alias: None,
         };
-        let result = handler.do_query(&prom_query, query_ctx.clone()).await;
+        let result = state.handler.do_query(&prom_query, query_ctx.clone()).await;
 
         handle_schema_err!(
             retrieve_series_from_query_result(
@@ -1641,7 +1652,7 @@ pub async fn series_query(
                 &mut series,
                 &query_ctx,
                 &table_name,
-                &handler.catalog_manager(),
+                &state.handler.catalog_manager(),
                 &mut merge_map,
             )
             .await
@@ -1668,7 +1679,7 @@ pub struct ParseQuery {
     fields(protocol = "prometheus", request_type = "parse_query")
 )]
 pub async fn parse_query(
-    State(_handler): State<PrometheusHandlerRef>,
+    State(_state): State<PromState>,
     Query(params): Query<ParseQuery>,
     Extension(_query_ctx): Extension<QueryContext>,
     Form(form_params): Form<ParseQuery>,
