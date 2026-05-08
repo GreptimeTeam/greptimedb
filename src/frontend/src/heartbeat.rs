@@ -205,10 +205,13 @@ impl HeartbeatTask {
         let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
         let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
         let resource_stat = self.resource_stat.clone();
-        let mut env_vars = Some(self.env_vars.clone());
+        let env_vars = self.env_vars.clone();
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
+
+            let mut extensions = std::collections::HashMap::new();
+            env_vars.into_extensions(&mut extensions);
 
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
@@ -217,8 +220,10 @@ impl HeartbeatTask {
                     total_cpu_millicores,
                     total_memory_bytes,
                 ),
+                extensions,
                 ..Default::default()
             };
+
             loop {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
@@ -236,8 +241,7 @@ impl HeartbeatTask {
                     }
                 };
 
-                if let Some(mut req) = req {
-                    EnvVars::take_into_extensions(&mut env_vars, &mut req.extensions);
+                if let Some(req) = req {
                     if let Err(e) = req_sender.send(req.clone()).await {
                         error!(e; "Failed to send heartbeat to metasrv");
                         break;

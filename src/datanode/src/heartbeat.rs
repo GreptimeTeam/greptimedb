@@ -260,8 +260,8 @@ impl HeartbeatTask {
             .mito_engine()
             .context(RegionEngineNotFoundSnafu { name: "mito" })?
             .gc_limiter();
-        let heartbeat_env_vars = self.env_vars.clone();
-        let mut env_vars = Some(heartbeat_env_vars.clone());
+        let mut env_var_extensions = HashMap::new();
+        self.env_vars.into_extensions(&mut env_var_extensions);
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -304,8 +304,7 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
-                                    let mut extensions = std::collections::HashMap::new();
-                                    EnvVars::take_into_extensions(&mut env_vars, &mut extensions);
+                                    let mut extensions = env_var_extensions.clone();
                                     let gc_stat = gc_limiter.gc_stat();
                                     gc_stat.into_extensions(&mut extensions);
 
@@ -333,8 +332,7 @@ impl HeartbeatTask {
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
 
-                        let mut extensions = std::collections::HashMap::new();
-                        EnvVars::take_into_extensions(&mut env_vars, &mut extensions);
+                        let mut extensions = env_var_extensions.clone();
                         let gc_stat = gc_limiter.gc_stat();
                         gc_stat.into_extensions(&mut extensions);
 
@@ -381,7 +379,6 @@ impl HeartbeatTask {
                             Ok((new_tx, new_config)) => {
                                 info!("Reconnected to metasrv, heartbeat config: {}", new_config);
                                 tx = new_tx;
-                                env_vars = Some(heartbeat_env_vars.clone());
                                 // Update retry_interval from new config
                                 retry_interval = new_config.retry_interval;
                                 // Update region_alive_keeper's heartbeat interval

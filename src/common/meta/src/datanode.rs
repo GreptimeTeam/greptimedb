@@ -401,15 +401,6 @@ impl EnvVars {
         extensions.insert(Self::ENV_VARS_KEY.to_string(), bytes);
     }
 
-    pub fn take_into_extensions(
-        env_vars: &mut Option<Self>,
-        extensions: &mut HashMap<String, Vec<u8>>,
-    ) {
-        if let Some(env_vars) = env_vars.take() {
-            env_vars.into_extensions(extensions);
-        }
-    }
-
     pub fn from_extensions(extensions: &HashMap<String, Vec<u8>>) -> Result<Option<Self>> {
         extensions
             .get(Self::ENV_VARS_KEY)
