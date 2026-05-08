@@ -79,6 +79,9 @@ mod tests {
         assert_eq!(roundtrip.current_schema(), "s1");
         assert_eq!(roundtrip.snapshots(), HashMap::from([(10, 100)]));
         assert_eq!(roundtrip.sst_min_sequences(), HashMap::from([(10, 90)]));
-        assert_eq!(roundtrip.extension("flow.return_region_seq").as_deref(), Some("true"));
+        assert_eq!(
+            roundtrip.extension("flow.return_region_seq").as_deref(),
+            Some("true")
+        );
     }
 }
