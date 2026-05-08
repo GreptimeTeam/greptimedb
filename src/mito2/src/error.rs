@@ -58,13 +58,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to encode sparse primary key, reason: {}", reason))]
-    EncodeSparsePrimaryKey {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("OpenDAL operator failed"))]
     OpenDal {
         #[snafu(implicit)]
@@ -1346,7 +1339,6 @@ impl ErrorExt for Error {
 
             WriteParquet { .. } => StatusCode::StorageUnavailable,
             WriteGroup { source, .. } => source.status_code(),
-            EncodeSparsePrimaryKey { .. } => StatusCode::Unexpected,
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
