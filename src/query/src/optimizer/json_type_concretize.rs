@@ -97,9 +97,9 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
 
     let Some(Expr::Column(column)) = f.args.first() else {
         return plan_err!(
-            "First argument of {} is expected to be a column expr, actual: {}",
+            "First argument of {} is expected to be a column expr, actual: {:?}",
             JsonGetWithType::NAME,
-            f.args[0]
+            f.args.first()
         );
     };
 
@@ -111,9 +111,9 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
         .flatten()
     else {
         return plan_err!(
-            "Second argument of {} is expected to be a string literal, actual: {}",
+            "Second argument of {} is expected to be a string literal, actual: {:?}",
             JsonGetWithType::NAME,
-            f.args[1]
+            f.args.get(1)
         );
     };
 
