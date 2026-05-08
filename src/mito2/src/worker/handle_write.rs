@@ -223,10 +223,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     /// Handles a specific region's stalled requests.
     ///
-    /// `allow_stall` should remain true for ordinary backpressure retry paths. Region-edit
-    /// completion passes false because those requests were blocked by `Editing`, and should be
-    /// handled before the next queued edit can reserve another committed sequence. Global reject
-    /// backpressure still applies before the stall check.
+    /// `allow_stall` should be false for backpressure retry paths to avoid stalling the same
+    /// requests again. It should remain true for non-backpressure retries, such as requests stalled
+    /// by alter, staging, and region editing. Global reject backpressure still applies before the
+    /// stall check.
     pub(crate) async fn handle_region_stalled_requests(
         &mut self,
         region_id: &RegionId,

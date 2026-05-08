@@ -20,9 +20,7 @@ use store_api::logstore::provider::Provider;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
-use crate::error::RegionStateSnafu;
 use crate::flush::FlushReason;
-use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::request::OptionOutputTx;
 use crate::worker::RegionWorkerLoop;
 
