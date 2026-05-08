@@ -23,6 +23,7 @@ async-stream.workspace = true
 async-trait.workspace = true
 auth.workspace = true
 axum.workspace = true
+base64.workspace = true
 cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
@@ -64,6 +65,7 @@ meta-srv = { workspace = true, features = ["mock"] }
 mito2.workspace = true
 object-store.workspace = true
 operator = { workspace = true, features = ["testing"] }
+plugins.workspace = true
 prost.workspace = true
 query.workspace = true
 rand.workspace = true
