@@ -266,8 +266,7 @@ enum WorkerCommand {
 fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
     let physical_table = ctx
         .extension(PHYSICAL_TABLE_KEY)
-        .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-        .to_string();
+        .unwrap_or_else(|| GREPTIME_PHYSICAL_TABLE.to_string());
     BatchKey {
         catalog: ctx.current_catalog().to_string(),
         schema: ctx.current_schema(),
@@ -1225,8 +1224,7 @@ async fn flush_batch(
     // into physical format and write them together.
     let physical_table_name = ctx
         .extension(PHYSICAL_TABLE_KEY)
-        .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-        .to_string();
+        .unwrap_or_else(|| GREPTIME_PHYSICAL_TABLE.to_string());
     let partition_provider = PartitionManagerPhysicalFlushAdapter { partition_manager };
     let node_requester = NodeManagerPhysicalFlushAdapter { node_manager };
     let catalog_provider = CatalogManagerPhysicalFlushAdapter { catalog_manager };

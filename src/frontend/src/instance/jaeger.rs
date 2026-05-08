@@ -264,9 +264,9 @@ impl JaegerQueryHandler for Instance {
                 // so we only need to return 1 span for each trace
                 let table_name = ctx
                     .extension(JAEGER_QUERY_TABLE_NAME_KEY)
-                    .unwrap_or(TRACE_TABLE_NAME);
+                    .unwrap_or_else(|| TRACE_TABLE_NAME.to_string());
 
-                let table = get_table(ctx.clone(), self.catalog_manager(), table_name).await?;
+                let table = get_table(ctx.clone(), self.catalog_manager(), &table_name).await?;
 
                 Ok(find_traces_rank_3(
                     table,
@@ -307,7 +307,7 @@ async fn query_trace_table(
 ) -> ServerResult<Output> {
     let trace_table_name = ctx
         .extension(JAEGER_QUERY_TABLE_NAME_KEY)
-        .unwrap_or(TRACE_TABLE_NAME);
+        .unwrap_or_else(|| TRACE_TABLE_NAME.to_string());
 
     // If only select services, use the trace services table.
     // If querying operations (distinct by span_name and span_kind), use the trace operations table.
@@ -316,14 +316,14 @@ async fn query_trace_table(
             [SelectExpr::Expression(x)] => x == &col(SERVICE_NAME_COLUMN),
             _ => false,
         } {
-            &trace_services_table_name(trace_table_name)
+            &trace_services_table_name(&trace_table_name)
         } else if !distincts.is_empty()
             && distincts.contains(&col(SPAN_NAME_COLUMN))
             && distincts.contains(&col(SPAN_KIND_COLUMN))
         {
-            &trace_operations_table_name(trace_table_name)
+            &trace_operations_table_name(&trace_table_name)
         } else {
-            trace_table_name
+            &trace_table_name
         }
     };
 

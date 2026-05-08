@@ -620,7 +620,7 @@ impl Inserter {
             AutoCreateTableType::Trace => {
                 let trace_table_name = ctx
                     .extension(TRACE_TABLE_NAME_SESSION_KEY)
-                    .unwrap_or(TRACE_TABLE_NAME);
+                    .unwrap_or_else(|| TRACE_TABLE_NAME.to_string());
 
                 let trace_table_partitions = if let Some(trace_table_partitions) =
                     ctx.extension(TRACE_TABLE_PARTITIONS_HINT_KEY)
@@ -642,8 +642,8 @@ impl Inserter {
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
-                    if create_table.table_name == trace_services_table_name(trace_table_name)
-                        || create_table.table_name == trace_operations_table_name(trace_table_name)
+                    if create_table.table_name == trace_services_table_name(&trace_table_name)
+                        || create_table.table_name == trace_operations_table_name(&trace_table_name)
                     {
                         // Disable append mode for auxiliary tables (services/operations) since they require upsert behavior.
                         create_table
@@ -1057,7 +1057,7 @@ pub fn fill_table_options_for_create(
 ) {
     for key in VALID_TABLE_OPTION_KEYS {
         if let Some(value) = ctx.extension(key) {
-            table_options.insert(key.to_string(), value.to_string());
+            table_options.insert(key.to_string(), value);
         }
     }
 
@@ -1070,13 +1070,13 @@ pub fn fill_table_options_for_create(
         }
         AutoCreateTableType::Physical => {
             if let Some(append_mode) = ctx.extension(APPEND_MODE_KEY) {
-                table_options.insert(APPEND_MODE_KEY.to_string(), append_mode.to_string());
+                table_options.insert(APPEND_MODE_KEY.to_string(), append_mode);
             }
             if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
-                table_options.insert(MERGE_MODE_KEY.to_string(), merge_mode.to_string());
+                table_options.insert(MERGE_MODE_KEY.to_string(), merge_mode);
             }
             if let Some(time_window) = ctx.extension(TWCS_TIME_WINDOW) {
-                table_options.insert(TWCS_TIME_WINDOW.to_string(), time_window.to_string());
+                table_options.insert(TWCS_TIME_WINDOW.to_string(), time_window);
                 // We need to set the compaction type explicitly.
                 table_options.insert(
                     COMPACTION_TYPE.to_string(),

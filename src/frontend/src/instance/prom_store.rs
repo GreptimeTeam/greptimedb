@@ -67,8 +67,7 @@ fn auto_create_table_type_for_prom_remote_write(
     if with_metric_engine {
         let physical_table = ctx
             .extension(PHYSICAL_TABLE_PARAM)
-            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-            .to_string();
+            .unwrap_or_else(|| GREPTIME_PHYSICAL_TABLE.to_string());
         AutoCreateTableType::Logical(physical_table)
     } else {
         AutoCreateTableType::Physical
@@ -378,8 +377,7 @@ impl PromStoreProtocolHandler for Instance {
         let output = if with_metric_engine {
             let physical_table = ctx
                 .extension(PHYSICAL_TABLE_PARAM)
-                .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-                .to_string();
+                .unwrap_or_else(|| GREPTIME_PHYSICAL_TABLE.to_string());
             self.handle_metric_row_inserts(request, ctx.clone(), physical_table.clone())
                 .await
                 .map_err(BoxedError::new)

@@ -148,8 +148,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         } else {
             let physical_table = ctx
                 .extension(PHYSICAL_TABLE_PARAM)
-                .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-                .to_string();
+                .unwrap_or_else(|| GREPTIME_PHYSICAL_TABLE.to_string());
             self.handle_metric_row_inserts(requests, ctx, physical_table.clone())
                 .await
                 .map_err(BoxedError::new)

@@ -81,7 +81,7 @@ impl GrpcQueryHandler for Instance {
                         self.handle_metric_row_inserts(
                             requests,
                             ctx.clone(),
-                            physical_table.to_string(),
+                            physical_table,
                         )
                         .await?
                     }

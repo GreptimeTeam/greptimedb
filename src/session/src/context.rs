@@ -41,25 +41,17 @@ pub type ConnInfoRef = Arc<ConnInfo>;
 
 const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 
-#[derive(Debug, Builder, Clone)]
+#[derive(Debug, Builder)]
 #[builder(pattern = "owned")]
 #[builder(build_fn(skip))]
 pub struct QueryContext {
     current_catalog: String,
-    /// mapping of RegionId to SequenceNumber, for snapshot read, meaning that the read should only
-    /// container data that was committed before(and include) the given sequence number
-    /// this field will only be filled if extensions contains a pair of "snapshot_read" and "true"
-    snapshot_seqs: Arc<RwLock<HashMap<u64, u64>>>,
-    /// Mappings of the RegionId to the minimal sequence of SST file to scan.
-    sst_min_sequences: Arc<RwLock<HashMap<u64, u64>>>,
     // we use Arc<RwLock>> for modifiable fields
     #[builder(default)]
     mutable_session_data: Arc<RwLock<MutableInner>>,
     #[builder(default)]
-    mutable_query_context_data: Arc<RwLock<QueryContextMutableFields>>,
+    mutable_query_context_data: RwLock<QueryContextMutableFields>,
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
-    #[builder(default)]
-    extensions: HashMap<String, String>,
     /// The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
@@ -85,6 +77,32 @@ pub struct QueryContextMutableFields {
     explain_format: Option<String>,
     /// Explain options to control the verbose analyze output.
     explain_options: Option<ExplainOptions>,
+    /// key-value extensions
+    extensions: HashMap<String, String>,
+    /// mapping of RegionId to SequenceNumber, for snapshot read, meaning that the read should only
+    /// container data that was committed before(and include) the given sequence number
+    /// this field will only be filled if extensions contains a pair of "snapshot_read" and "true"
+    snapshot_seqs: HashMap<u64, u64>,
+    /// Mappings of the RegionId to the minimal sequence of SST file to scan.
+    sst_min_sequences: HashMap<u64, u64>,
+}
+
+impl Clone for QueryContext {
+    fn clone(&self) -> Self {
+        Self {
+            current_catalog: self.current_catalog.clone(),
+            mutable_session_data: self.mutable_session_data.clone(),
+            mutable_query_context_data: RwLock::new(
+                self.mutable_query_context_data.read().unwrap().clone(),
+            ),
+            sql_dialect: self.sql_dialect.clone(),
+            configuration_parameter: self.configuration_parameter.clone(),
+            channel: self.channel,
+            process_id: self.process_id,
+            conn_info: self.conn_info.clone(),
+            protocol_ctx: self.protocol_ctx.clone(),
+        }
+    }
 }
 
 impl Display for QueryContext {
@@ -166,16 +184,16 @@ impl From<api::v1::QueryContext> for QueryContext {
             .timezone(parse_timezone(Some(&ctx.timezone)))
             .extensions(ctx.extensions)
             .channel(ctx.channel.into())
-            .snapshot_seqs(Arc::new(RwLock::new(
+            .snapshot_seqs(
                 sequences
                     .map(|x| x.snapshot_seqs.clone())
                     .unwrap_or_default(),
-            )))
-            .sst_min_sequences(Arc::new(RwLock::new(
+            )
+            .sst_min_sequences(
                 sequences
                     .map(|x| x.sst_min_sequences.clone())
                     .unwrap_or_default(),
-            )))
+            )
             .explain_options(ctx.explain)
             .build()
     }
@@ -186,27 +204,24 @@ impl From<QueryContext> for api::v1::QueryContext {
         QueryContext {
             current_catalog,
             mutable_session_data: mutable_inner,
-            extensions,
             channel,
-            snapshot_seqs,
-            sst_min_sequences,
             mutable_query_context_data,
             ..
         }: QueryContext,
     ) -> Self {
-        let explain = mutable_query_context_data.read().unwrap().explain_options;
+        let query_data = mutable_query_context_data.read().unwrap();
         let mutable_inner = mutable_inner.read().unwrap();
         api::v1::QueryContext {
             current_catalog,
             current_schema: mutable_inner.schema.clone(),
             timezone: mutable_inner.timezone.to_string(),
-            extensions,
+            extensions: query_data.extensions.clone(),
             channel: channel as u32,
             snapshot_seqs: Some(api::v1::SnapshotSequences {
-                snapshot_seqs: snapshot_seqs.read().unwrap().clone(),
-                sst_min_sequences: sst_min_sequences.read().unwrap().clone(),
+                snapshot_seqs: query_data.snapshot_seqs.clone(),
+                sst_min_sequences: query_data.sst_min_sequences.clone(),
             }),
-            explain,
+            explain: query_data.explain_options,
         }
     }
 }
@@ -313,15 +328,28 @@ impl QueryContext {
     }
 
     pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
-        self.extensions.insert(key.into(), value.into());
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .extensions
+            .insert(key.into(), value.into());
     }
 
-    pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
-        self.extensions.get(key.as_ref()).map(|v| v.as_str())
+    pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<String> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .extensions
+            .get(key.as_ref())
+            .cloned()
     }
 
     pub fn extensions(&self) -> HashMap<String, String> {
-        self.extensions.clone()
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .extensions
+            .clone()
     }
 
     /// Default to double quote and fallback to back quote
@@ -430,21 +458,35 @@ impl QueryContext {
     }
 
     pub fn snapshots(&self) -> HashMap<u64, u64> {
-        self.snapshot_seqs.read().unwrap().clone()
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .snapshot_seqs
+            .clone()
     }
 
     pub fn sst_min_sequences(&self) -> HashMap<u64, u64> {
-        self.sst_min_sequences.read().unwrap().clone()
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .sst_min_sequences
+            .clone()
     }
 
     pub fn get_snapshot(&self, region_id: u64) -> Option<u64> {
-        self.snapshot_seqs.read().unwrap().get(&region_id).cloned()
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .snapshot_seqs
+            .get(&region_id)
+            .cloned()
     }
 
     pub fn set_snapshot(&self, region_id: u64, sequence: u64) {
-        self.snapshot_seqs
+        self.mutable_query_context_data
             .write()
             .unwrap()
+            .snapshot_seqs
             .insert(region_id, sequence);
     }
 
@@ -455,9 +497,10 @@ impl QueryContext {
 
     /// Finds the minimal sequence of SST files to scan of a Region.
     pub fn sst_min_sequence(&self, region_id: u64) -> Option<u64> {
-        self.sst_min_sequences
+        self.mutable_query_context_data
             .read()
             .unwrap()
+            .sst_min_sequences
             .get(&region_id)
             .copied()
     }
@@ -487,14 +530,11 @@ impl QueryContextBuilder {
             current_catalog: self
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
-            snapshot_seqs: self.snapshot_seqs.unwrap_or_default(),
-            sst_min_sequences: self.sst_min_sequences.unwrap_or_default(),
             mutable_session_data: self.mutable_session_data.unwrap_or_default(),
             mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
-            extensions: self.extensions.unwrap_or_default(),
             configuration_parameter: self
                 .configuration_parameter
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
@@ -505,9 +545,39 @@ impl QueryContextBuilder {
         }
     }
 
+    pub fn extensions(mut self, extensions: HashMap<String, String>) -> Self {
+        self.mutable_query_context_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .extensions = extensions;
+        self
+    }
+
+    pub fn snapshot_seqs(mut self, seqs: HashMap<u64, u64>) -> Self {
+        self.mutable_query_context_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .snapshot_seqs = seqs;
+        self
+    }
+
+    pub fn sst_min_sequences(mut self, seqs: HashMap<u64, u64>) -> Self {
+        self.mutable_query_context_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .sst_min_sequences = seqs;
+        self
+    }
+
     pub fn set_extension(mut self, key: String, value: String) -> Self {
-        self.extensions
-            .get_or_insert_with(HashMap::new)
+        self.mutable_query_context_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .extensions
             .insert(key, value);
         self
     }

@@ -606,7 +606,6 @@ impl CatalogManager for DummyCatalogManager {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
 
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
@@ -628,14 +627,14 @@ mod tests {
                 "flow.return_region_seq".to_string(),
                 "true".to_string(),
             )]))
-            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+            .snapshot_seqs(HashMap::from([(
                 region_id.as_u64(),
                 42_u64,
-            )]))))
-            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+            )]))
+            .sst_min_sequences(HashMap::from([(
                 region_id.as_u64(),
                 7_u64,
-            )]))))
+            )]))
             .build();
 
         let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
@@ -666,14 +665,14 @@ mod tests {
     fn test_scan_request_from_query_context_keeps_snapshot_fields() {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
-            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+            .snapshot_seqs(HashMap::from([(
                 region_id.as_u64(),
                 100,
-            )]))))
-            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+            )]))
+            .sst_min_sequences(HashMap::from([(
                 region_id.as_u64(),
                 90,
-            )]))))
+            )]))
             .build();
 
         let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
@@ -691,10 +690,10 @@ mod tests {
                 FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
                 format!(r#"{{"{}":10}}"#, region_id.as_u64()),
             )]))
-            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+            .snapshot_seqs(HashMap::from([(
                 region_id.as_u64(),
                 42_u64,
-            )]))))
+            )]))
             .build();
 
         let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
@@ -708,10 +707,10 @@ mod tests {
     fn test_apply_cached_snapshot_to_request_updates_cached_scan_request() {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
-            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+            .snapshot_seqs(HashMap::from([(
                 region_id.as_u64(),
                 88_u64,
-            )]))))
+            )]))
             .build();
         let mut request = ScanRequest {
             snapshot_on_scan: true,
@@ -728,10 +727,10 @@ mod tests {
     fn test_apply_cached_snapshot_to_request_skips_sink_scan() {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
-            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+            .snapshot_seqs(HashMap::from([(
                 region_id.as_u64(),
                 88_u64,
-            )]))))
+            )]))
             .build();
         let mut request = ScanRequest {
             snapshot_on_scan: true,
@@ -748,10 +747,10 @@ mod tests {
     fn test_bind_snapshot_bound_region_seq_reuses_existing_snapshot() {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
-            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+            .snapshot_seqs(HashMap::from([(
                 region_id.as_u64(),
                 42_u64,
-            )]))))
+            )]))
             .build();
 
         let err = bind_snapshot_bound_region_seq(&query_ctx, region_id, 99).unwrap_err();
@@ -809,14 +808,14 @@ mod tests {
                     region_id.table_id().to_string(),
                 ),
             ]))
-            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+            .snapshot_seqs(HashMap::from([(
                 region_id.as_u64(),
                 88_u64,
-            )]))))
-            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+            )]))
+            .sst_min_sequences(HashMap::from([(
                 region_id.as_u64(),
                 77_u64,
-            )]))))
+            )]))
             .build();
 
         let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
