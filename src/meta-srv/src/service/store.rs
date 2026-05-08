@@ -24,7 +24,6 @@ use api::v1::meta::{
     PutResponse as PbPutResponse, RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse,
     ResponseHeader, store_server,
 };
-use common_meta::kv_backend::KvBackend;
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
     PutRequest, RangeRequest,
@@ -32,42 +31,10 @@ use common_meta::rpc::store::{
 use snafu::ResultExt;
 use tonic::{Request, Response};
 
-use crate::error;
+use crate::error::{self};
 use crate::metasrv::Metasrv;
 use crate::metrics::METRIC_META_KV_REQUEST_ELAPSED;
 use crate::service::GrpcResult;
-
-macro_rules! check_store_leader {
-    ($self:expr, $resp_ty:ty, $msg:expr) => {
-        if !$self.is_leader() {
-            common_telemetry::warn!(
-                "The current metasrv is not the leader, but a {} request has reached the meta.",
-                $msg
-            );
-            let mut resp: $resp_ty = Default::default();
-            resp.header = Some(api::v1::meta::ResponseHeader::failed(
-                api::v1::meta::Error::is_not_leader(),
-            ));
-            return Ok(tonic::Response::new(resp));
-        }
-    };
-}
-
-macro_rules! check_leader_cache_ready {
-    ($self:expr, $resp_ty:ty, $msg:expr) => {
-        if !$self.is_leader_cache_ready() {
-            common_telemetry::warn!(
-                "The current metasrv leader cache is not ready, but a {} request has reached the meta.",
-                $msg
-            );
-            let mut resp: $resp_ty = Default::default();
-            resp.header = Some(api::v1::meta::ResponseHeader::failed(
-                api::v1::meta::Error::is_not_leader(),
-            ));
-            return Ok(tonic::Response::new(resp));
-        }
-    };
-}
 
 #[async_trait::async_trait]
 impl store_server::Store for Metasrv {
@@ -91,18 +58,15 @@ impl store_server::Store for Metasrv {
     }
 
     async fn put(&self, req: Request<PbPutRequest>) -> GrpcResult<PbPutResponse> {
-        check_store_leader!(self, PbPutResponse, "`put`");
-        check_leader_cache_ready!(self, PbPutResponse, "`put`");
-
         let req = req.into_inner();
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[self.leader_cached_kv_backend().name(), "put"])
+            .with_label_values(&[self.kv_backend().name(), "put"])
             .start_timer();
 
         let req: PutRequest = req.into();
 
         let res = self
-            .leader_cached_kv_backend()
+            .kv_backend()
             .put(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -130,19 +94,16 @@ impl store_server::Store for Metasrv {
     }
 
     async fn batch_put(&self, req: Request<PbBatchPutRequest>) -> GrpcResult<PbBatchPutResponse> {
-        check_store_leader!(self, PbBatchPutResponse, "`batch_put`");
-        check_leader_cache_ready!(self, PbBatchPutResponse, "`batch_put`");
-
         let req = req.into_inner();
 
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[self.leader_cached_kv_backend().name(), "batch_put"])
+            .with_label_values(&[self.kv_backend().name(), "batch_put"])
             .start_timer();
 
         let req: BatchPutRequest = req.into();
 
         let res = self
-            .leader_cached_kv_backend()
+            .kv_backend()
             .batch_put(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -155,19 +116,16 @@ impl store_server::Store for Metasrv {
         &self,
         req: Request<PbBatchDeleteRequest>,
     ) -> GrpcResult<PbBatchDeleteResponse> {
-        check_store_leader!(self, PbBatchDeleteResponse, "`batch_delete`");
-        check_leader_cache_ready!(self, PbBatchDeleteResponse, "`batch_delete`");
-
         let req = req.into_inner();
 
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[self.leader_cached_kv_backend().name(), "batch_delete"])
+            .with_label_values(&[self.kv_backend().name(), "batch_delete"])
             .start_timer();
 
         let req: BatchDeleteRequest = req.into();
 
         let res = self
-            .leader_cached_kv_backend()
+            .kv_backend()
             .batch_delete(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -180,19 +138,16 @@ impl store_server::Store for Metasrv {
         &self,
         req: Request<PbCompareAndPutRequest>,
     ) -> GrpcResult<PbCompareAndPutResponse> {
-        check_store_leader!(self, PbCompareAndPutResponse, "`compare_and_put`");
-        check_leader_cache_ready!(self, PbCompareAndPutResponse, "`compare_and_put`");
-
         let req = req.into_inner();
 
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[self.leader_cached_kv_backend().name(), "compare_and_put"])
+            .with_label_values(&[self.kv_backend().name(), "compare_and_put"])
             .start_timer();
 
         let req: CompareAndPutRequest = req.into();
 
         let res = self
-            .leader_cached_kv_backend()
+            .kv_backend()
             .compare_and_put(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -205,19 +160,16 @@ impl store_server::Store for Metasrv {
         &self,
         req: Request<PbDeleteRangeRequest>,
     ) -> GrpcResult<PbDeleteRangeResponse> {
-        check_store_leader!(self, PbDeleteRangeResponse, "`delete_range`");
-        check_leader_cache_ready!(self, PbDeleteRangeResponse, "`delete_range`");
-
         let req = req.into_inner();
 
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[self.leader_cached_kv_backend().name(), "delete_range"])
+            .with_label_values(&[self.kv_backend().name(), "delete_range"])
             .start_timer();
 
         let req: DeleteRangeRequest = req.into();
 
         let res = self
-            .leader_cached_kv_backend()
+            .kv_backend()
             .delete_range(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -233,80 +185,15 @@ mod tests {
 
     use api::v1::meta::store_server::Store;
     use api::v1::meta::*;
-    use common_meta::election::{Election, LeaderChangeMessage, LeaderValue, MetasrvNodeInfo};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_telemetry::tracing_context::W3cTrace;
-    use tokio::sync::broadcast;
     use tonic::IntoRequest;
 
     use crate::metasrv::Metasrv;
     use crate::metasrv::builder::MetasrvBuilder;
 
-    struct FixedElection {
-        is_leader: bool,
-    }
-
-    #[async_trait::async_trait]
-    impl Election for FixedElection {
-        type Leader = LeaderValue;
-
-        fn is_leader(&self) -> bool {
-            self.is_leader
-        }
-
-        fn in_leader_infancy(&self) -> bool {
-            false
-        }
-
-        async fn register_candidate(
-            &self,
-            _node_info: &MetasrvNodeInfo,
-        ) -> common_meta::error::Result<()> {
-            Ok(())
-        }
-
-        async fn all_candidates(&self) -> common_meta::error::Result<Vec<MetasrvNodeInfo>> {
-            Ok(vec![])
-        }
-
-        async fn campaign(&self) -> common_meta::error::Result<()> {
-            Ok(())
-        }
-
-        async fn leader(&self) -> common_meta::error::Result<Self::Leader> {
-            Ok(LeaderValue("leader".to_string()))
-        }
-
-        async fn resign(&self) -> common_meta::error::Result<()> {
-            Ok(())
-        }
-
-        fn subscribe_leader_change(&self) -> broadcast::Receiver<LeaderChangeMessage> {
-            let (_tx, rx) = broadcast::channel(1);
-            rx
-        }
-    }
-
     async fn new_metasrv() -> Metasrv {
         MetasrvBuilder::new()
-            .kv_backend(Arc::new(MemoryKvBackend::new()))
-            .build()
-            .await
-            .unwrap()
-    }
-
-    async fn new_follower_metasrv() -> Metasrv {
-        MetasrvBuilder::new()
-            .election(Some(Arc::new(FixedElection { is_leader: false })))
-            .kv_backend(Arc::new(MemoryKvBackend::new()))
-            .build()
-            .await
-            .unwrap()
-    }
-
-    async fn new_leader_without_ready_cache_metasrv() -> Metasrv {
-        MetasrvBuilder::new()
-            .election(Some(Arc::new(FixedElection { is_leader: true })))
             .kv_backend(Arc::new(MemoryKvBackend::new()))
             .build()
             .await
@@ -389,153 +276,5 @@ mod tests {
         let res = metasrv.delete_range(req.into_request()).await;
 
         let _ = res.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_write_requests_rejected_when_not_leader() {
-        let metasrv = new_follower_metasrv().await;
-
-        let mut req = PutRequest {
-            key: b"k1".to_vec(),
-            value: b"v1".to_vec(),
-            ..Default::default()
-        };
-        req.set_header(1, Role::Datanode, W3cTrace::new());
-        assert!(
-            metasrv
-                .put(req.into_request())
-                .await
-                .unwrap()
-                .into_inner()
-                .header
-                .unwrap()
-                .is_not_leader()
-        );
-
-        let mut req = BatchPutRequest::default();
-        req.set_header(1, Role::Datanode, W3cTrace::new());
-        assert!(
-            metasrv
-                .batch_put(req.into_request())
-                .await
-                .unwrap()
-                .into_inner()
-                .header
-                .unwrap()
-                .is_not_leader()
-        );
-
-        let mut req = BatchDeleteRequest::default();
-        req.set_header(1, Role::Datanode, W3cTrace::new());
-        assert!(
-            metasrv
-                .batch_delete(req.into_request())
-                .await
-                .unwrap()
-                .into_inner()
-                .header
-                .unwrap()
-                .is_not_leader()
-        );
-
-        let mut req = CompareAndPutRequest::default();
-        req.set_header(1, Role::Datanode, W3cTrace::new());
-        assert!(
-            metasrv
-                .compare_and_put(req.into_request())
-                .await
-                .unwrap()
-                .into_inner()
-                .header
-                .unwrap()
-                .is_not_leader()
-        );
-
-        let mut req = DeleteRangeRequest::default();
-        req.set_header(1, Role::Datanode, W3cTrace::new());
-        assert!(
-            metasrv
-                .delete_range(req.into_request())
-                .await
-                .unwrap()
-                .into_inner()
-                .header
-                .unwrap()
-                .is_not_leader()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_write_requests_rejected_when_leader_cache_not_ready() {
-        let metasrv = new_leader_without_ready_cache_metasrv().await;
-
-        let mut req = PutRequest {
-            key: b"k1".to_vec(),
-            value: b"v1".to_vec(),
-            ..Default::default()
-        };
-        req.set_header(1, Role::Datanode, W3cTrace::new());
-        assert!(
-            metasrv
-                .put(req.into_request())
-                .await
-                .unwrap()
-                .into_inner()
-                .header
-                .unwrap()
-                .is_not_leader()
-        );
-
-        let mut req = BatchPutRequest::default();
-        req.set_header(1, Role::Datanode, W3cTrace::new());
-        assert!(
-            metasrv
-                .batch_put(req.into_request())
-                .await
-                .unwrap()
-                .into_inner()
-                .header
-                .unwrap()
-                .is_not_leader()
-        );
-
-        let mut req = BatchDeleteRequest::default();
-        req.set_header(1, Role::Datanode, W3cTrace::new());
-        assert!(
-            metasrv
-                .batch_delete(req.into_request())
-                .await
-                .unwrap()
-                .into_inner()
-                .header
-                .unwrap()
-                .is_not_leader()
-        );
-
-        let mut req = CompareAndPutRequest::default();
-        req.set_header(1, Role::Datanode, W3cTrace::new());
-        assert!(
-            metasrv
-                .compare_and_put(req.into_request())
-                .await
-                .unwrap()
-                .into_inner()
-                .header
-                .unwrap()
-                .is_not_leader()
-        );
-
-        let mut req = DeleteRangeRequest::default();
-        req.set_header(1, Role::Datanode, W3cTrace::new());
-        assert!(
-            metasrv
-                .delete_range(req.into_request())
-                .await
-                .unwrap()
-                .into_inner()
-                .header
-                .unwrap()
-                .is_not_leader()
-        );
     }
 }
