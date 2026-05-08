@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -31,6 +31,11 @@ use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::extension::json::is_json_extension_type;
+use datatypes::schema::Schema;
+use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::types::json_type::JsonNativeType;
 use futures::StreamExt;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
@@ -424,7 +429,7 @@ impl ScanRegion {
         let read_col_ids = read_cols.column_ids();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
-        let mapper = match self.request.projection_indices() {
+        let mut mapper = match self.request.projection_indices() {
             Some(p) => FlatProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
                 p.to_vec(),
@@ -432,6 +437,7 @@ impl ScanRegion {
             )?,
             None => FlatProjectionMapper::all(&self.version.metadata)?,
         };
+        concretize_json_types(&mut mapper, &self.request.json_type_hint);
 
         let ssts = &self.version.ssts;
         let mut files = Vec::new();
@@ -725,6 +731,34 @@ impl ScanRegion {
 
         Some(Arc::new(applier))
     }
+}
+
+fn concretize_json_types(
+    mapper: &mut FlatProjectionMapper,
+    json_type_hint: &HashMap<String, JsonNativeType>,
+) {
+    let output_schema = mapper.output_schema();
+    let output_arrow_schema = output_schema.arrow_schema();
+    if !output_arrow_schema.has_json_extension_field() {
+        return;
+    }
+
+    let mut column_schemas = output_schema.column_schemas().to_vec();
+    for (idx, column_schema) in column_schemas.iter_mut().enumerate() {
+        if !is_json_extension_type(&output_arrow_schema.fields()[idx]) {
+            continue;
+        }
+        let Some(json_type) = json_type_hint.get(&column_schema.name) else {
+            continue;
+        };
+        column_schema.data_type = ConcreteDataType::from(json_type);
+    }
+
+    let output_schema = Arc::new(Schema::new_with_version(
+        column_schemas,
+        output_schema.version(),
+    ));
+    mapper.with_output_schema(output_schema);
 }
 
 /// Returns true if the time range of a SST `file` matches the `predicate`.

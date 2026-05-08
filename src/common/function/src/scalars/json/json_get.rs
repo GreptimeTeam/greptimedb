@@ -63,25 +63,18 @@ trait JsonGetResultBuilder {
     fn build(&mut self) -> ArrayRef;
 }
 
-fn result_builder(
-    len: usize,
-    with_type: Option<&DataType>,
-) -> Result<Box<dyn JsonGetResultBuilder>> {
-    let builder = if let Some(t) = with_type {
-        match t {
-            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
-                Box::new(StringResultBuilder(StringViewBuilder::with_capacity(len)))
-                    as Box<dyn JsonGetResultBuilder>
-            }
-            DataType::Int64 => Box::new(IntResultBuilder(Int64Builder::with_capacity(len))),
-            DataType::Float64 => Box::new(FloatResultBuilder(Float64Builder::with_capacity(len))),
-            DataType::Boolean => Box::new(BoolResultBuilder(BooleanBuilder::with_capacity(len))),
-            t => {
-                return exec_err!("json_get with unknown type {t}");
-            }
+fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetResultBuilder>> {
+    let builder = match with_type {
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
+            Box::new(StringResultBuilder(StringViewBuilder::with_capacity(len)))
+                as Box<dyn JsonGetResultBuilder>
         }
-    } else {
-        Box::new(StringResultBuilder(StringViewBuilder::with_capacity(len)))
+        DataType::Int64 => Box::new(IntResultBuilder(Int64Builder::with_capacity(len))),
+        DataType::Float64 => Box::new(FloatResultBuilder(Float64Builder::with_capacity(len))),
+        DataType::Boolean => Box::new(BoolResultBuilder(BooleanBuilder::with_capacity(len))),
+        t => {
+            return exec_err!("json_get with unknown type {t}");
+        }
     };
     Ok(builder)
 }
@@ -339,7 +332,7 @@ fn jsonb_get(
     Ok(())
 }
 
-fn json_struct_get(array: &ArrayRef, path: &str, with_type: Option<&DataType>) -> Result<ArrayRef> {
+fn json_struct_get(array: &ArrayRef, path: &str, with_type: &DataType) -> Result<ArrayRef> {
     let path = path.trim_start_matches("$");
 
     // Fast path: if the JSON array fields can be directly indexed into by the `path`, simply get
@@ -356,20 +349,13 @@ fn json_struct_get(array: &ArrayRef, path: &str, with_type: Option<&DataType>) -
             return exec_err!("unknown JSON array datatype: {}", current.data_type());
         };
         let Some(sub_json) = json.column_by_name(segment) else {
-            return Ok(new_null_array(
-                with_type.unwrap_or(&DataType::Utf8View),
-                array.len(),
-            ));
+            return Ok(new_null_array(with_type, array.len()));
         };
         current = sub_json;
     }
 
     // Build the result array with optional value mapper.
-    fn build_with<F>(
-        input: &ArrayRef,
-        with_type: Option<&DataType>,
-        value_mapper: F,
-    ) -> Result<ArrayRef>
+    fn build_with<F>(input: &ArrayRef, with_type: &DataType, value_mapper: F) -> Result<ArrayRef>
     where
         for<'a> F: Fn(&'a Value) -> Option<&'a Value>,
     {
@@ -397,20 +383,18 @@ fn json_struct_get(array: &ArrayRef, path: &str, with_type: Option<&DataType>) -
     }
 
     if direct {
-        let casted = if let Some(with_type) = with_type
-            && current.data_type() != with_type
-        {
+        let casted = if current.data_type() != with_type {
             match (current.data_type(), with_type) {
                 (DataType::Binary, _) => {
                     // Fall back to the slow path if the found JSON sub-array is serialized to bytes
                     // (because of JSON type conflicting)
-                    build_with(current, Some(with_type), |v| Some(v))?
+                    build_with(current, with_type, |v| Some(v))?
                 }
                 (DataType::List(_) | DataType::Struct(_), with_type) if with_type.is_string() => {
                     // Special handle for wanted array is string (Arrow cast is not working here if
                     // the datatype is list or struct), because it could be used in displaying the
                     // result.
-                    build_with(current, Some(with_type), |v| Some(v))?
+                    build_with(current, with_type, |v| Some(v))?
                 }
                 (_, with_type) if with_type.is_string() => {
                     // Same special handle for wanted array is string as above, except for simply
@@ -510,17 +494,22 @@ impl Function for JsonGetWithType {
             );
         };
 
-        let with_type = args.args.get(2).map(|x| x.data_type());
+        let with_type = args
+            .args
+            .get(2)
+            .map(|x| x.data_type())
+            .unwrap_or(DataType::Utf8View);
+
         let result = match arg0.data_type() {
             DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                 let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
                 let jsons = arg0.as_binary_view();
 
-                let mut builder = result_builder(len, with_type.as_ref())?;
+                let mut builder = result_builder(len, &with_type)?;
                 jsonb_get(jsons, path, builder.as_mut())?;
                 builder.build()
             }
-            DataType::Struct(_) => json_struct_get(&arg0, path, with_type.as_ref())?,
+            DataType::Struct(_) => json_struct_get(&arg0, path, &with_type)?,
             _ => {
                 return exec_err!("JSON_GET not supported argument type {}", arg0.data_type());
             }
