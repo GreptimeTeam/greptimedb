@@ -49,18 +49,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .memtables
                 .is_empty()
         {
-            if !region.is_flushable() {
-                sender.send(
-                    RegionStateSnafu {
-                        region_id,
-                        state: region.state(),
-                        expect: RegionRoleState::Leader(RegionLeaderState::Writable),
-                    }
-                    .fail(),
-                );
-                return;
-            }
-
             info!("Region {} has pending data, waiting for flush", region_id);
             self.handle_flush_request(
                 region_id,
