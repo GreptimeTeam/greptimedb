@@ -1362,7 +1362,7 @@ mod tests {
 
     #[test]
     fn test_last_non_null_create_options_preserve_default_with_append_mode_false() {
-        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         ctx.set_extension(APPEND_MODE_KEY, "false");
         let ctx = Arc::new(ctx);
         let mut table_options = Default::default();
@@ -1378,7 +1378,7 @@ mod tests {
 
     #[test]
     fn test_last_non_null_create_options_use_last_row_with_append_mode_true() {
-        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         ctx.set_extension(APPEND_MODE_KEY, "true");
         let ctx = Arc::new(ctx);
         let mut table_options = Default::default();

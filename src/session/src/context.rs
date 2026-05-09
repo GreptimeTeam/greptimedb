@@ -327,7 +327,7 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().user_info = user;
     }
 
-    pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
+    pub fn set_extension<S1: Into<String>, S2: Into<String>>(&self, key: S1, value: S2) {
         self.mutable_query_context_data
             .write()
             .unwrap()

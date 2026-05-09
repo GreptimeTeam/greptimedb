@@ -132,7 +132,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
         let ctx = if !is_legacy {
-            let mut c = (*ctx).clone();
+            let c = (*ctx).clone();
             c.set_extension(OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM.to_string());
             Arc::new(c)
         } else {

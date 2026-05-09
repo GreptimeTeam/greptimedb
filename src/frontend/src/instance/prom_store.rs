@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn test_auto_create_table_type_for_prom_remote_write_metric_engine() {
-        let mut query_ctx = QueryContext::with(
+        let query_ctx = QueryContext::with(
             common_catalog::consts::DEFAULT_CATALOG_NAME,
             common_catalog::consts::DEFAULT_SCHEMA_NAME,
         );
