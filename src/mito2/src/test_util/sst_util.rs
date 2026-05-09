@@ -306,8 +306,8 @@ pub fn new_record_batch_with_custom_sequence(
 }
 
 /// Creates a FlatSource from flat format RecordBatches.
-pub fn new_flat_source_from_record_batches(batches: Vec<RecordBatch>) -> FlatSource {
-    FlatSource::Iter(Box::new(batches.into_iter().map(Ok)))
+pub(crate) fn new_flat_source_from_record_batches(batches: Vec<RecordBatch>) -> FlatSource {
+    FlatSource::new_iter(batches[0].schema(), Box::new(batches.into_iter().map(Ok)))
 }
 
 /// Creates a new region metadata for testing SSTs with binary datatype.

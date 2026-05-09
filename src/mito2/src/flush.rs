@@ -761,7 +761,7 @@ fn memtable_flat_sources(
             );
             flat_sources
                 .sources
-                .push((FlatSource::Iter(iter), max_sequence));
+                .push((FlatSource::new_iter(schema, iter), max_sequence));
         };
     } else {
         let min_flush_rows = *ENCODE_ROW_THRESHOLD;
@@ -824,9 +824,10 @@ fn memtable_flat_sources(
                     std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
                 )?;
 
-                flat_sources
-                    .sources
-                    .push((FlatSource::Iter(maybe_dedup), max_sequence));
+                flat_sources.sources.push((
+                    FlatSource::new_iter(schema.clone(), maybe_dedup),
+                    max_sequence,
+                ));
                 last_iter_rows = 0;
                 current_ranges.clear();
             }
@@ -857,7 +858,7 @@ fn memtable_flat_sources(
 
             flat_sources
                 .sources
-                .push((FlatSource::Iter(maybe_dedup), max_sequence));
+                .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
         }
     }
 
@@ -1530,14 +1531,10 @@ mod tests {
             // Consume the iterator and count rows
             let mut total_rows = 0usize;
             for (source, _sequence) in flat_sources.sources {
-                match source {
-                    crate::read::FlatSource::Iter(iter) => {
-                        for rb in iter {
-                            total_rows += rb.unwrap().num_rows();
-                        }
-                    }
-                    crate::read::FlatSource::Stream(_) => unreachable!(),
-                }
+                total_rows += source
+                    .take_iter()
+                    .map(|x| x.unwrap().num_rows())
+                    .sum::<usize>();
             }
             assert_eq!(1, total_rows, "dedup should keep a single row");
         }
@@ -1560,14 +1557,10 @@ mod tests {
 
             let mut total_rows = 0usize;
             for (source, _sequence) in flat_sources.sources {
-                match source {
-                    crate::read::FlatSource::Iter(iter) => {
-                        for rb in iter {
-                            total_rows += rb.unwrap().num_rows();
-                        }
-                    }
-                    crate::read::FlatSource::Stream(_) => unreachable!(),
-                }
+                total_rows += source
+                    .take_iter()
+                    .map(|x| x.unwrap().num_rows())
+                    .sum::<usize>();
             }
             assert_eq!(2, total_rows, "append_mode should preserve duplicates");
         }

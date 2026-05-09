@@ -244,10 +244,12 @@ impl ObjbenchCommand {
             ..Default::default()
         };
 
+        let source =
+            FlatSource::new_stream(region_meta.schema.arrow_schema().clone(), reader_stream);
         let write_req = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata: region_meta,
-            source: FlatSource::Stream(reader_stream),
+            source,
             cache_manager,
             storage: None,
             max_sequence: None,
