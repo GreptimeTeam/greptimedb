@@ -72,7 +72,7 @@ use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::result::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::result::json_result::JsonResponse;
 use crate::http::result::null_result::NullResponse;
-use crate::interceptor::{LogIngestInterceptorRef, PromQueryInterceptorRef};
+use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
 use crate::pending_rows_batcher::PendingRowsBatcher;
@@ -606,15 +606,11 @@ impl HttpServerBuilder {
         }
     }
 
-    pub fn with_prometheus_handler(
-        self,
-        handler: PrometheusHandlerRef,
-        interceptor: Option<PromQueryInterceptorRef<crate::error::Error>>,
-    ) -> Self {
+    pub fn with_prometheus_handler(self, handler: PrometheusHandlerRef) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus/api/v1"),
-                HttpServer::route_prometheus(handler, interceptor),
+                HttpServer::route_prometheus(handler),
             ),
             ..self
         }
@@ -1101,16 +1097,7 @@ impl HttpServer {
     /// Route Prometheus [HTTP API].
     ///
     /// [HTTP API]: https://prometheus.io/docs/prometheus/latest/querying/api/
-    pub fn route_prometheus<S>(
-        prometheus_handler: PrometheusHandlerRef,
-        interceptor: Option<PromQueryInterceptorRef<crate::error::Error>>,
-    ) -> Router<S> {
-        use crate::http::prometheus::PromState;
-
-        let state = PromState {
-            handler: prometheus_handler,
-            interceptor,
-        };
+    pub fn route_prometheus<S>(prometheus_handler: PrometheusHandlerRef) -> Router<S> {
         Router::new()
             .route(
                 "/format_query",
@@ -1127,7 +1114,7 @@ impl HttpServer {
                 routing::get(label_values_query),
             )
             .layer(ServiceBuilder::new().layer(CompressionLayer::new()))
-            .with_state(state)
+            .with_state(prometheus_handler)
     }
 
     /// Route Prometheus remote [read] and [write] API. In other places the related modules are

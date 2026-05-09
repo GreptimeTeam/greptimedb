@@ -882,9 +882,12 @@ impl PrometheusHandler for Instance {
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
-        interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
+        let QueryStatement::Promql(eval_stmt, _) = &stmt else {
+            unreachable!("query is parsed from promql");
+        };
 
-        // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
+        interceptor.pre_execute(query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
+
         let query_statement = if let QueryStatement::Promql(eval_stmt, alias) = stmt {
             CatalogQueryStatement::Promql(eval_stmt, alias)
         } else {

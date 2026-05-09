@@ -23,13 +23,13 @@ use common_error::ext::ErrorExt;
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use log_query::LogQuery;
+use promql_parser::parser::Expr;
 use query::parser::PromQuery;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 use table::TableRef;
 use vrl::value::Value;
 
-use crate::http::prometheus::{PromSeriesMatrix, PromSeriesVector};
 
 /// SqlQueryInterceptor can track life cycle of a sql query and customize or
 /// abort its execution at given point.
@@ -226,6 +226,7 @@ pub trait PromQueryInterceptor {
     fn pre_execute(
         &self,
         _query: &PromQuery,
+        _expr: &Expr,
         _plan: Option<&LogicalPlan>,
         _query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
@@ -241,28 +242,6 @@ pub trait PromQueryInterceptor {
     ) -> Result<Output, Self::Error> {
         Ok(output)
     }
-
-    /// Called for each vector series before it is serialized into the
-    /// Prometheus response. The implementation can modify the series
-    /// if needed.
-    fn pre_serializing_vector(
-        &self,
-        series: PromSeriesVector,
-        _query_ctx: QueryContextRef,
-    ) -> Result<PromSeriesVector, Self::Error> {
-        Ok(series)
-    }
-
-    /// Called for each matrix series before it is serialized into the
-    /// Prometheus response. The implementation can modify the series
-    /// if needed.
-    fn pre_serializing_matrix(
-        &self,
-        series: PromSeriesMatrix,
-        _query_ctx: QueryContextRef,
-    ) -> Result<PromSeriesMatrix, Self::Error> {
-        Ok(series)
-    }
 }
 
 pub type PromQueryInterceptorRef<E> =
@@ -277,11 +256,12 @@ where
     fn pre_execute(
         &self,
         query: &PromQuery,
+        expr: &Expr,
         plan: Option<&LogicalPlan>,
         query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
         if let Some(this) = self {
-            this.pre_execute(query, plan, query_ctx)
+            this.pre_execute(query, expr, plan, query_ctx)
         } else {
             Ok(())
         }
@@ -296,30 +276,6 @@ where
             this.post_execute(output, query_ctx)
         } else {
             Ok(output)
-        }
-    }
-
-    fn pre_serializing_vector(
-        &self,
-        series: PromSeriesVector,
-        query_ctx: QueryContextRef,
-    ) -> Result<PromSeriesVector, Self::Error> {
-        if let Some(this) = self {
-            this.pre_serializing_vector(series, query_ctx)
-        } else {
-            Ok(series)
-        }
-    }
-
-    fn pre_serializing_matrix(
-        &self,
-        series: PromSeriesMatrix,
-        query_ctx: QueryContextRef,
-    ) -> Result<PromSeriesMatrix, Self::Error> {
-        if let Some(this) = self {
-            this.pre_serializing_matrix(series, query_ctx)
-        } else {
-            Ok(series)
         }
     }
 }
@@ -333,11 +289,12 @@ where
     fn pre_execute(
         &self,
         query: &PromQuery,
+        expr: &Expr,
         plan: Option<&LogicalPlan>,
         query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
         if let Some(this) = self {
-            this.pre_execute(query, plan, query_ctx)
+            this.pre_execute(query, expr, plan, query_ctx)
         } else {
             Ok(())
         }
@@ -352,30 +309,6 @@ where
             this.post_execute(output, query_ctx)
         } else {
             Ok(output)
-        }
-    }
-
-    fn pre_serializing_vector(
-        &self,
-        series: PromSeriesVector,
-        query_ctx: QueryContextRef,
-    ) -> Result<PromSeriesVector, Self::Error> {
-        if let Some(this) = self {
-            this.pre_serializing_vector(series, query_ctx)
-        } else {
-            Ok(series)
-        }
-    }
-
-    fn pre_serializing_matrix(
-        &self,
-        series: PromSeriesMatrix,
-        query_ctx: QueryContextRef,
-    ) -> Result<PromSeriesMatrix, Self::Error> {
-        if let Some(this) = self {
-            this.pre_serializing_matrix(series, query_ctx)
-        } else {
-            Ok(series)
         }
     }
 }

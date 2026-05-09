@@ -33,7 +33,7 @@ use servers::http::event::LogValidatorRef;
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::utils::router::RouterConfigurator;
 use servers::http::{HttpServer, HttpServerBuilder};
-use servers::interceptor::{LogIngestInterceptorRef, PromQueryInterceptorRef};
+use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
@@ -141,7 +141,6 @@ where
             } else {
                 None
             };
-            let prom_interceptor = self.plugins.get::<PromQueryInterceptorRef<ServerError>>();
             builder = builder
                 .with_prom_handler(
                     self.instance.clone(),
@@ -150,7 +149,7 @@ where
                     opts.http.prom_validation_mode,
                     pending_rows_batcher,
                 )
-                .with_prometheus_handler(self.instance.clone(), prom_interceptor);
+                .with_prometheus_handler(self.instance.clone());
         }
 
         if opts.otlp.enable {
@@ -243,12 +242,10 @@ where
             .clone()
             .unwrap_or_else(|| Arc::new(greptime_request_handler.clone()) as FlightCraftRef);
 
-        let prom_interceptor = self.plugins.get::<PromQueryInterceptorRef<ServerError>>();
-
         let grpc_server = builder
             .name(name)
             .database_handler(greptime_request_handler.clone())
-            .prometheus_handler(self.instance.clone(), user_provider.clone(), prom_interceptor)
+            .prometheus_handler(self.instance.clone(), user_provider.clone())
             .otel_arrow_handler(OtelArrowServiceHandler::new(
                 self.instance.clone(),
                 user_provider.clone(),

@@ -31,18 +31,16 @@ use session::context::{Channel, QueryContext};
 use snafu::OptionExt;
 use tonic::{Request, Response};
 
-use crate::error::{Error, InvalidQuerySnafu};
+use crate::error::InvalidQuerySnafu;
 use crate::grpc::TonicResult;
 use crate::grpc::context_auth::auth;
 use crate::grpc::greptime_handler::create_query_context;
 use crate::http::prometheus::{PrometheusJsonResponse, retrieve_metric_name_and_result_type};
-use crate::interceptor::PromQueryInterceptorRef;
 use crate::prometheus_handler::PrometheusHandlerRef;
 
 pub struct PrometheusGatewayService {
     handler: PrometheusHandlerRef,
     user_provider: Option<UserProviderRef>,
-    interceptor: Option<PromQueryInterceptorRef<Error>>,
 }
 
 #[async_trait]
@@ -106,15 +104,10 @@ impl PrometheusGateway for PrometheusGatewayService {
 }
 
 impl PrometheusGatewayService {
-    pub fn new(
-        handler: PrometheusHandlerRef,
-        user_provider: Option<UserProviderRef>,
-        interceptor: Option<PromQueryInterceptorRef<Error>>,
-    ) -> Self {
+    pub fn new(handler: PrometheusHandlerRef, user_provider: Option<UserProviderRef>) -> Self {
         Self {
             handler,
             user_provider,
-            interceptor,
         }
     }
 
@@ -129,7 +122,7 @@ impl PrometheusGatewayService {
             .with_label_values(&[db.as_str()])
             .start_timer();
 
-        let result = self.handler.do_query(&query, ctx.clone()).await;
+        let result = self.handler.do_query(&query, ctx).await;
         let (metric_name, mut result_type) =
             match retrieve_metric_name_and_result_type(&query.query) {
                 Ok((metric_name, result_type)) => (metric_name, result_type),
@@ -142,13 +135,6 @@ impl PrometheusGatewayService {
             result_type = ValueType::Matrix;
         };
 
-        PrometheusJsonResponse::from_query_result(
-            result,
-            metric_name,
-            result_type,
-            self.interceptor.as_ref(),
-            ctx,
-        )
-        .await
+        PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
     }
 }
