@@ -26,8 +26,9 @@ use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
-use datafusion_expr::Expr;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::utils::expr_to_columns;
+use datafusion_expr::{Expr, Volatility};
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -1900,6 +1901,8 @@ pub(crate) struct PhysicalFilterContext {
     semantic_type: SemanticType,
     /// Schema containing only the referenced column.
     schema: SchemaRef,
+    /// Whether the original logical expression is immutable across queries.
+    stable: bool,
 }
 
 impl PhysicalFilterContext {
@@ -1940,6 +1943,7 @@ impl PhysicalFilterContext {
                 error!(e; "Unable to build physical filter for {expr}, schema: {schema:?}");
             })
             .ok()?;
+        let stable = expr_is_immutable(expr);
 
         Some(Self {
             filter: physical_expr,
@@ -1947,6 +1951,7 @@ impl PhysicalFilterContext {
             column_name,
             semantic_type: column_metadata.semantic_type,
             schema,
+            stable,
         })
     }
 
@@ -1996,6 +2001,25 @@ impl PhysicalFilterContext {
     pub(crate) fn schema(&self) -> &SchemaRef {
         &self.schema
     }
+
+    /// Returns true if the original logical expression is immutable across queries.
+    pub(crate) fn is_stable(&self) -> bool {
+        self.stable
+    }
+}
+
+fn expr_is_immutable(expr: &Expr) -> bool {
+    let mut is_immutable = true;
+    let _ = expr.apply(|expr| {
+        if let Expr::ScalarFunction(function) = expr
+            && function.func.signature().volatility != Volatility::Immutable
+        {
+            is_immutable = false;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+    is_immutable
 }
 
 /// Prune a column by its default value.
@@ -2274,6 +2298,68 @@ mod tests {
         );
 
         assert!(!selection.is_empty());
+    }
+
+    #[test]
+    fn test_expr_is_immutable_checks_scalar_function_volatility() {
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        struct TestVolatilityUdf {
+            name: String,
+            signature: Signature,
+        }
+
+        impl TestVolatilityUdf {
+            fn new(name: &str, volatility: Volatility) -> Self {
+                Self {
+                    name: name.to_string(),
+                    signature: Signature::variadic_any(volatility),
+                }
+            }
+        }
+
+        impl ScalarUDFImpl for TestVolatilityUdf {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                &self.name
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+                Ok(DataType::Int64)
+            }
+
+            fn invoke_with_args(
+                &self,
+                _args: ScalarFunctionArgs,
+            ) -> datafusion_common::Result<ColumnarValue> {
+                Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(1))))
+            }
+        }
+
+        let expr = |name: &str, volatility| {
+            Expr::ScalarFunction(ScalarFunction::new_udf(
+                Arc::new(ScalarUDF::new_from_impl(TestVolatilityUdf::new(
+                    name, volatility,
+                ))),
+                vec![],
+            ))
+        };
+
+        assert!(expr_is_immutable(&expr(
+            "immutable_udf",
+            Volatility::Immutable
+        )));
+        assert!(!expr_is_immutable(&expr("stable_udf", Volatility::Stable)));
+        assert!(!expr_is_immutable(&expr(
+            "volatile_udf",
+            Volatility::Volatile
+        )));
     }
 
     fn expected_metadata_with_reused_tag_name(

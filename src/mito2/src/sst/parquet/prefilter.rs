@@ -37,6 +37,7 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use table::predicate::Predicate;
 
+use crate::cache::{PrefilterKey, PrefilterKeyParts};
 use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu,
     RecordBatchSnafu, Result, UnexpectedSnafu,
@@ -372,6 +373,13 @@ pub(crate) fn build_reader_filter_plan(
         }
     }
 
+    let cache_key_parts = prefilter_physical_filters
+        .iter()
+        .all(|filter| filter.is_stable())
+        .then(|| {
+            build_prefilter_key_parts(predicate, expected_metadata, pre_filter_mode, read_format)
+        });
+
     let pk_filter_exprs =
         (!primary_key_filters.is_empty()).then_some(Arc::new(primary_key_filters));
     let prefilter_builder = PrefilterContextBuilder::new(
@@ -381,6 +389,7 @@ pub(crate) fn build_reader_filter_plan(
         prefilter_simple_filters.clone(),
         prefilter_physical_filters,
         parquet_schema,
+        cache_key_parts,
     );
 
     if prefilter_builder.is_some() {
@@ -400,6 +409,35 @@ pub(crate) fn build_reader_filter_plan(
     }
 }
 
+fn build_prefilter_key_parts(
+    predicate: &Predicate,
+    expected_metadata: Option<&RegionMetadata>,
+    pre_filter_mode: PreFilterMode,
+    read_format: &FlatReadFormat,
+) -> PrefilterKeyParts {
+    let mut exprs = predicate
+        .exprs()
+        .iter()
+        .map(|expr| format!("{expr:?}"))
+        .collect::<Vec<_>>();
+    exprs.sort();
+
+    let schema_version = expected_metadata
+        .map(|metadata| metadata.schema_version)
+        .unwrap_or_else(|| read_format.metadata().schema_version);
+
+    let mut projected_columns = read_format.parquet_read_columns().root_indices().to_vec();
+    projected_columns.sort_unstable();
+    projected_columns.dedup();
+
+    PrefilterKeyParts::new(
+        Arc::new(exprs),
+        schema_version,
+        pre_filter_mode.skip_fields(),
+        Arc::new(projected_columns),
+    )
+}
+
 /// Context for prefiltering a row group.
 pub(crate) struct PrefilterContext {
     /// Projection mask for reading prefilter columns.
@@ -411,6 +449,8 @@ pub(crate) struct PrefilterContext {
     /// Physical filters that can be evaluated directly from the prefilter batch.
     /// Physical expressions are only applied in the prefilter phase.
     physical_filters: Vec<PhysicalFilterContext>,
+    /// Static cache key parts shared across row groups.
+    cache_key_parts: Option<PrefilterKeyParts>,
 }
 
 /// Pre-built state for constructing [PrefilterContext] per row group.
@@ -425,6 +465,7 @@ pub(crate) struct PrefilterContextBuilder {
     physical_filters: Vec<PhysicalFilterContext>,
     codec: Arc<dyn PrimaryKeyCodec>,
     metadata: RegionMetadataRef,
+    cache_key_parts: Option<PrefilterKeyParts>,
 }
 
 impl PrefilterContextBuilder {
@@ -441,6 +482,7 @@ impl PrefilterContextBuilder {
         filters: Vec<SimpleFilterContext>,
         physical_filters: Vec<PhysicalFilterContext>,
         parquet_schema: &SchemaDescriptor,
+        cache_key_parts: Option<PrefilterKeyParts>,
     ) -> Option<Self> {
         let metadata = read_format.metadata();
         let use_raw_tag_columns = read_format.batch_has_raw_pk_columns();
@@ -493,6 +535,7 @@ impl PrefilterContextBuilder {
             physical_filters,
             codec: Arc::clone(codec),
             metadata: metadata.clone(),
+            cache_key_parts,
         })
     }
 
@@ -509,6 +552,7 @@ impl PrefilterContextBuilder {
             pk_filter,
             filters: self.filters.clone(),
             physical_filters: self.physical_filters.clone(),
+            cache_key_parts: self.cache_key_parts.clone(),
         }
     }
 }
@@ -568,6 +612,34 @@ pub(crate) async fn execute_prefilter(
     reader_builder: &RowGroupReaderBuilder,
     build_ctx: &RowGroupBuildContext<'_>,
 ) -> Result<PrefilterResult> {
+    let cache_key = prefilter_ctx.cache_key_parts.as_ref().map(|parts| {
+        PrefilterKey::from_parts(
+            parts,
+            reader_builder.file_handle().file_id().file_id(),
+            build_ctx.row_group_idx as u32,
+            build_ctx.row_selection.as_ref(),
+        )
+    });
+
+    if let Some(key) = cache_key.as_ref()
+        && let Some(refined_selection) = reader_builder.cache_strategy().get_prefilter_result(key)
+    {
+        let rows_before_filter = build_ctx.row_selection.as_ref().map_or_else(
+            || {
+                reader_builder
+                    .parquet_metadata()
+                    .row_group(build_ctx.row_group_idx)
+                    .num_rows() as usize
+            },
+            RowSelection::row_count,
+        );
+        let filtered_rows = rows_before_filter.saturating_sub(refined_selection.row_count());
+        return Ok(PrefilterResult {
+            refined_selection: refined_selection.as_ref().clone(),
+            filtered_rows,
+        });
+    }
+
     let mut stream = reader_builder
         .build_with_projection(
             build_ctx.row_group_idx,
@@ -613,6 +685,12 @@ pub(crate) async fn execute_prefilter(
             None => prefilter_selection,
         }
     };
+
+    if let Some(key) = cache_key {
+        reader_builder
+            .cache_strategy()
+            .put_prefilter_result(key, Arc::new(refined_selection.clone()));
+    }
 
     Ok(PrefilterResult {
         refined_selection,
@@ -998,6 +1076,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             &parquet_schema,
+            None,
         );
         assert!(builder.is_none());
     }
@@ -1132,6 +1211,106 @@ mod tests {
         );
         assert!(pk_prefilter_plan.prefilter_builder.is_some());
         assert!(pk_prefilter_plan.remaining_simple_filters.is_empty());
+    }
+
+    #[test]
+    fn test_prefilter_cache_key_parts_are_stable_under_expr_order() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let parquet_schema = parquet_schema(&read_format);
+        let codec = build_primary_key_codec(metadata.as_ref());
+
+        let expr_a = col("tag_0").eq(lit("a"));
+        let expr_b = col("field_0").in_list(vec![lit(1_u64), lit(2_u64)], false);
+        let plan_ab = build_reader_filter_plan(
+            Some(&Predicate::new(vec![expr_a.clone(), expr_b.clone()])),
+            None,
+            PreFilterMode::All,
+            &read_format,
+            &parquet_schema,
+            &codec,
+        );
+        let plan_ba = build_reader_filter_plan(
+            Some(&Predicate::new(vec![expr_b, expr_a])),
+            None,
+            PreFilterMode::All,
+            &read_format,
+            &parquet_schema,
+            &codec,
+        );
+
+        let parts_ab = plan_ab.prefilter_builder.unwrap().cache_key_parts;
+        let parts_ba = plan_ba.prefilter_builder.unwrap().cache_key_parts;
+        assert!(parts_ab.is_some());
+        assert_eq!(parts_ab, parts_ba);
+    }
+
+    #[test]
+    fn test_prefilter_cache_key_parts_distinguish_mode_and_projection() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let full_read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let field_0 = metadata.column_by_name("field_0").unwrap().column_id;
+        let ts = metadata.time_index_column().column_id;
+        let projected_read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids([field_0, ts]),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        let predicate = Predicate::new(vec![col("tag_0").eq(lit("a"))]);
+        let all_plan = build_reader_filter_plan(
+            Some(&predicate),
+            None,
+            PreFilterMode::All,
+            &full_read_format,
+            &parquet_schema(&full_read_format),
+            &codec,
+        );
+        let skip_fields_plan = build_reader_filter_plan(
+            Some(&predicate),
+            None,
+            PreFilterMode::SkipFields,
+            &full_read_format,
+            &parquet_schema(&full_read_format),
+            &codec,
+        );
+        let projected_plan = build_reader_filter_plan(
+            Some(&predicate),
+            None,
+            PreFilterMode::All,
+            &projected_read_format,
+            &parquet_schema(&projected_read_format),
+            &codec,
+        );
+
+        let all_parts = all_plan.prefilter_builder.unwrap().cache_key_parts;
+        let skip_fields_parts = skip_fields_plan.prefilter_builder.unwrap().cache_key_parts;
+        let projected_parts = projected_plan.prefilter_builder.unwrap().cache_key_parts;
+        assert!(all_parts.is_some());
+        assert_ne!(all_parts, skip_fields_parts);
+        assert_ne!(all_parts, projected_parts);
     }
 
     #[test]
