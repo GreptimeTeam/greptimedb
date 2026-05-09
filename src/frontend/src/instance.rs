@@ -593,11 +593,8 @@ impl Instance {
 
                     match self.query_statement(stmt.clone(), query_ctx.clone()).await {
                         Ok(output) => {
-                            let output_result = query_interceptor.post_execute(
-                                Some(&stmt),
-                                output,
-                                query_ctx.clone(),
-                            );
+                            let output_result =
+                                query_interceptor.post_execute(output, query_ctx.clone());
                             results.push(output_result);
                         }
                         Err(e) => {
@@ -712,7 +709,7 @@ impl Instance {
             self.exec_plan_with_timeout(plan, query_ctx.clone()).await
         };
 
-        result.and_then(|output| query_interceptor.post_execute(stmt.as_ref(), output, query_ctx))
+        result.and_then(|output| query_interceptor.post_execute(output, query_ctx))
     }
 
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_promql_query")]
@@ -941,7 +938,7 @@ impl PrometheusHandler for Instance {
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
-        Ok(interceptor.post_execute(query, output, query_ctx)?)
+        Ok(interceptor.post_execute(output, query_ctx)?)
     }
 
     async fn query_metric_names(

@@ -21,7 +21,6 @@ use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
 use servers::error::{self, InternalSnafu, NotSupportedSnafu, Result};
-use servers::http::prometheus::{PromSeriesMatrix, PromSeriesVector};
 use servers::interceptor::{GrpcQueryInterceptor, PromQueryInterceptor, SqlQueryInterceptor};
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ensure;
@@ -102,7 +101,6 @@ impl PromQueryInterceptor for NoopInterceptor {
 
     fn post_execute(
         &self,
-        _query: &PromQuery,
         output: Output,
         _query_ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error> {
@@ -110,22 +108,6 @@ impl PromQueryInterceptor for NoopInterceptor {
             OutputData::AffectedRows(1) => Ok(Output::new_with_affected_rows(2)),
             _ => Ok(output),
         }
-    }
-
-    fn pre_serializing_vector(
-        &self,
-        series: PromSeriesVector,
-        _query_ctx: QueryContextRef,
-    ) -> std::result::Result<PromSeriesVector, Self::Error> {
-        Ok(series)
-    }
-
-    fn pre_serializing_matrix(
-        &self,
-        series: PromSeriesMatrix,
-        _query_ctx: QueryContextRef,
-    ) -> std::result::Result<PromSeriesMatrix, Self::Error> {
-        Ok(series)
     }
 }
 
@@ -143,7 +125,7 @@ fn test_prom_interceptor() {
     assert!(fail.is_err());
 
     let output = Output::new_with_affected_rows(1);
-    let two = PromQueryInterceptor::post_execute(&di, &query, output, ctx);
+    let two = PromQueryInterceptor::post_execute(&di, output, ctx);
     assert!(two.is_ok());
     matches!(
         two.unwrap(),

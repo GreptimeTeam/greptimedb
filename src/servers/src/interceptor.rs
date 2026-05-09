@@ -71,7 +71,6 @@ pub trait SqlQueryInterceptor {
     /// output if needed.
     fn post_execute(
         &self,
-        _statement: Option<&Statement>,
         output: Output,
         _query_ctx: QueryContextRef,
     ) -> Result<Output, Self::Error> {
@@ -127,12 +126,11 @@ where
 
     fn post_execute(
         &self,
-        statement: Option<&Statement>,
         output: Output,
         query_ctx: QueryContextRef,
     ) -> Result<Output, Self::Error> {
         if let Some(this) = self {
-            this.post_execute(statement, output, query_ctx)
+            this.post_execute(output, query_ctx)
         } else {
             Ok(output)
         }
@@ -238,7 +236,6 @@ pub trait PromQueryInterceptor {
     /// output if needed.
     fn post_execute(
         &self,
-        _query: &PromQuery,
         output: Output,
         _query_ctx: QueryContextRef,
     ) -> Result<Output, Self::Error> {
@@ -292,12 +289,11 @@ where
 
     fn post_execute(
         &self,
-        query: &PromQuery,
         output: Output,
         query_ctx: QueryContextRef,
     ) -> Result<Output, Self::Error> {
         if let Some(this) = self {
-            this.post_execute(query, output, query_ctx)
+            this.post_execute(output, query_ctx)
         } else {
             Ok(output)
         }
@@ -349,12 +345,11 @@ where
 
     fn post_execute(
         &self,
-        query: &PromQuery,
         output: Output,
         query_ctx: QueryContextRef,
     ) -> Result<Output, Self::Error> {
         if let Some(this) = self {
-            this.post_execute(query, output, query_ctx)
+            this.post_execute(output, query_ctx)
         } else {
             Ok(output)
         }
