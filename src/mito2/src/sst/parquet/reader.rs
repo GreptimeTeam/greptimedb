@@ -681,6 +681,7 @@ impl ParquetReaderBuilder {
         }
 
         self.prune_row_groups_by_inverted_index(
+            read_format.metadata(),
             row_group_size,
             num_row_groups,
             &mut output,
@@ -807,6 +808,7 @@ impl ParquetReaderBuilder {
     /// the correctness of the index.
     async fn prune_row_groups_by_inverted_index(
         &self,
+        sst_metadata: &RegionMetadataRef,
         row_group_size: usize,
         num_row_groups: usize,
         output: &mut RowGroupSelection,
@@ -825,12 +827,19 @@ impl ParquetReaderBuilder {
             &self.inverted_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
-            let predicate_key = index_applier.predicate_key();
+            let Ok(Some(plan)) = index_applier
+                .plan_for_sst(sst_metadata)
+                .inspect_err(|e| warn!(e; "failed to build compatible plan for sst"))
+            else {
+                continue;
+            };
+
             // Fast path: return early if the result is in the cache.
-            let cached = self
-                .cache_strategy
-                .index_result_cache()
-                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+            let cached = self.cache_strategy.index_result_cache().and_then(|cache| {
+                let file_id = self.file_handle.file_id().file_id();
+                cache.get(&plan.predicate_key, file_id)
+            });
+
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
             {
@@ -847,9 +856,11 @@ impl ParquetReaderBuilder {
                 .apply(
                     self.file_handle.index_id(),
                     Some(file_size_hint),
+                    &plan.index_applier,
                     metrics.inverted_index_apply_metrics.as_mut(),
                 )
                 .await;
+
             let selection = match apply_res {
                 Ok(apply_output) => RowGroupSelection::from_inverted_index_apply_output(
                     row_group_size,
@@ -863,7 +874,7 @@ impl ParquetReaderBuilder {
             };
 
             self.apply_index_result_and_update_cache(
-                predicate_key,
+                &plan.predicate_key,
                 self.file_handle.file_id().file_id(),
                 selection,
                 output,
@@ -1832,8 +1843,20 @@ impl SimpleFilterContext {
                 match sst_meta.column_by_id(column.column_id) {
                     Some(sst_column) => {
                         debug_assert_eq!(column.semantic_type, sst_column.semantic_type);
-
-                        (column, MaybeFilter::Filter(filter))
+                        // Schema evolution can make the same column id have different
+                        // concrete data types across SSTs. In that case, evaluating
+                        // this simple filter against current SST column may raise an
+                        // invalid cross-type comparison error (e.g. Float64 == Utf8).
+                        // Degrade to matched (no pruning) for this SST and leave
+                        // correctness to upper query filtering.
+                        let maybe_filter = if sst_column.column_schema.data_type
+                            == column.column_schema.data_type
+                        {
+                            MaybeFilter::Filter(filter)
+                        } else {
+                            MaybeFilter::Matched
+                        };
+                        (column, maybe_filter)
                     }
                     None => {
                         // If the column is not present in the SST metadata, we evaluate the filter

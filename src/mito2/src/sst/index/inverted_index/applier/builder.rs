@@ -25,9 +25,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
-use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
-use index::target::IndexTarget;
 use mito_codec::index::IndexValueCodec;
 use mito_codec::row_converter::SortField;
 use object_store::ObjectStore;
@@ -39,9 +37,7 @@ use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::inverted_index::InvertedIndexCacheRef;
-use crate::error::{
-    BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, EncodeSnafu, Result,
-};
+use crate::error::{ColumnNotFoundSnafu, ConvertValueSnafu, EncodeSnafu, Result};
 use crate::sst::index::inverted_index::applier::InvertedIndexApplier;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
@@ -137,31 +133,36 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             return Ok(None);
         }
 
-        let predicates = self
-            .output
-            .iter()
-            .map(|(column_id, predicates)| {
-                (
-                    format!("{}", IndexTarget::ColumnId(*column_id)),
-                    predicates.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let applier = PredicatesIndexApplier::try_from(predicates);
+        let expected_predicate_column_types = self.expected_predicate_column_types();
 
         Ok(Some(
             InvertedIndexApplier::new(
                 self.table_dir,
                 self.path_type,
                 self.object_store,
-                Box::new(applier.context(BuildIndexApplierSnafu)?),
                 self.puffin_manager_factory,
                 self.output,
-            )
+                expected_predicate_column_types,
+            )?
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)
             .with_index_cache(self.inverted_index_cache),
         ))
+    }
+
+    /// Returns `(column_id, data_type)` pairs for predicate columns
+    /// collected in `self.output`.
+    ///
+    /// The data types are resolved from the latest region manifest. Columns
+    /// that no longer exist in the latest metadata are skipped.
+    fn expected_predicate_column_types(&self) -> BTreeMap<ColumnId, ConcreteDataType> {
+        self.output
+            .keys()
+            .filter_map(|col_id| {
+                let col = self.metadata.column_by_id(*col_id)?;
+                Some((*col_id, col.column_schema.data_type.clone()))
+            })
+            .collect()
     }
 
     /// Recursively traverses expressions to collect predicates.
