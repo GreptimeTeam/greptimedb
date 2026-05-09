@@ -38,4 +38,10 @@ explain select j.a.b from json2_table;
 -- SQLNESS REPLACE (peers.*) REDACTED
 explain select j.a.x::bool from json2_table;
 
+select j.a.b from json2_table order by ts;
+
+select j.c, j.y from json2_table order by ts;
+
+select j.d from json2_table order by ts;
+
 drop table json2_table;

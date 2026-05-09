@@ -15,6 +15,7 @@
 //! Dummy catalog for region server.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +31,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::types::json_type::JsonNativeType;
 use futures::stream::BoxStream;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
@@ -284,6 +286,10 @@ impl DummyTableProvider {
 
     pub fn with_sequence(&self, sequence: u64) {
         self.scan_request.lock().unwrap().memtable_max_sequence = Some(sequence);
+    }
+
+    pub(crate) fn with_json_type_hint(&self, hint: HashMap<String, JsonNativeType>) {
+        self.scan_request.lock().unwrap().json_type_hint = hint;
     }
 
     /// Gets the scan request of the provider.

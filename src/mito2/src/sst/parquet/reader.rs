@@ -33,6 +33,7 @@ use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
+use datatypes::schema::ext::ArrowSchemaExt;
 use futures::StreamExt;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
@@ -436,8 +437,11 @@ impl ParquetReaderBuilder {
             .unwrap_or_else(|| region_meta.schema.clone());
 
         // Create ArrowReaderMetadata for async stream building.
-        let arrow_reader_options =
-            ArrowReaderOptions::new().with_schema(read_format.arrow_schema().clone());
+        let mut arrow_reader_options = ArrowReaderOptions::new();
+        if !read_format.arrow_schema().has_json_extension_field() {
+            arrow_reader_options =
+                arrow_reader_options.with_schema(read_format.arrow_schema().clone());
+        }
         let arrow_metadata =
             ArrowReaderMetadata::try_new(parquet_meta.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;

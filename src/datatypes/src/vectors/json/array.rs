@@ -22,7 +22,7 @@ use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
 use arrow_schema::{DataType, FieldRef};
 use serde_json::Value;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 
 use crate::arrow_array::{StringArray, binary_array_value, string_array_value};
 use crate::error::{
@@ -90,14 +90,12 @@ impl JsonArray<'_> {
         Ok(value)
     }
 
-    /// Align a JSON array to the `expect` data type. The `expect` data type is often the "largest"
-    /// JSON type after some insertions in the table schema, while the JSON array previously
-    /// written in the SST could be lagged behind it. So it's important to "align" the JSON array by
-    /// setting the missing fields with null arrays, or casting the data.
+    /// Align a JSON array to the `expect` data type. The alignment mostly does three things:
     ///
-    /// It's an error if the to-be-aligned array contains extra fields that are not in the `expect`
-    /// data type. Forcing to align that kind of array will result in data loss, something we
-    /// generally not wanted.
+    /// 1. set the missing fields with null arrays;
+    /// 2. discard the fields that are not in the `expect` data type;
+    /// 3. cast the fields to the ones with same names in the `expect` if their data types are not
+    ///    matched.
     pub fn try_align(&self, expect: &DataType) -> Result<ArrayRef> {
         if self.inner.data_type() == expect {
             return Ok(self.inner.clone());
@@ -155,10 +153,7 @@ impl JsonArray<'_> {
                     i += 1;
                 }
                 Ordering::Greater => {
-                    return AlignJsonArraySnafu {
-                        reason: format!("extra fields are found: [{}]", array_field.name()),
-                    }
-                    .fail();
+                    j += 1;
                 }
             }
         }
@@ -167,19 +162,6 @@ impl JsonArray<'_> {
                 aligned.push(new_null_array(field.data_type(), struct_array.len()));
             }
         }
-        ensure!(
-            j >= array_fields.len(),
-            AlignJsonArraySnafu {
-                reason: format!(
-                    "extra fields are found: [{}]",
-                    array_fields[j..]
-                        .iter()
-                        .map(|x| x.name().as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            }
-        );
 
         let json_array = StructArray::try_new(
             expect_fields.clone(),
@@ -475,17 +457,6 @@ mod test {
         )
         .test()?;
 
-        // Test align failed.
-        TestCase::new(
-            StructArray::try_from(vec![
-                ("i", Arc::new(Int64Array::from(vec![1])) as ArrayRef),
-                ("j", Arc::new(Int64Array::from(vec![2])) as ArrayRef),
-            ])
-            .unwrap(),
-            Fields::from(vec![Field::new("i", DataType::Int64, true)]),
-            Err("Failed to align JSON array, reason: extra fields are found: [j]".to_string()),
-        )
-        .test()?;
         Ok(())
     }
 }

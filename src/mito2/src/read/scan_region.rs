@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -31,6 +31,11 @@ use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::extension::json::is_json_extension_type;
+use datatypes::schema::Schema;
+use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::types::json_type::JsonNativeType;
 use futures::StreamExt;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
@@ -424,7 +429,7 @@ impl ScanRegion {
         let read_col_ids = read_cols.column_ids();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
-        let mapper = match self.request.projection_indices() {
+        let mut mapper = match self.request.projection_indices() {
             Some(p) => FlatProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
                 p.to_vec(),
@@ -432,6 +437,7 @@ impl ScanRegion {
             )?,
             None => FlatProjectionMapper::all(&self.version.metadata)?,
         };
+        concretize_json_types(&mut mapper, &self.request.json_type_hint);
 
         let ssts = &self.version.ssts;
         let mut files = Vec::new();
@@ -725,6 +731,34 @@ impl ScanRegion {
 
         Some(Arc::new(applier))
     }
+}
+
+fn concretize_json_types(
+    mapper: &mut FlatProjectionMapper,
+    json_type_hint: &HashMap<String, JsonNativeType>,
+) {
+    let output_schema = mapper.output_schema();
+    let output_arrow_schema = output_schema.arrow_schema();
+    if !output_arrow_schema.has_json_extension_field() {
+        return;
+    }
+
+    let mut column_schemas = output_schema.column_schemas().to_vec();
+    for (idx, column_schema) in column_schemas.iter_mut().enumerate() {
+        if !is_json_extension_type(&output_arrow_schema.fields()[idx]) {
+            continue;
+        }
+        let Some(json_type) = json_type_hint.get(&column_schema.name) else {
+            continue;
+        };
+        column_schema.data_type = ConcreteDataType::from(json_type);
+    }
+
+    let output_schema = Arc::new(Schema::new_with_version(
+        column_schemas,
+        output_schema.version(),
+    ));
+    mapper.with_output_schema(output_schema);
 }
 
 /// Returns true if the time range of a SST `file` matches the `predicate`.
@@ -1735,15 +1769,19 @@ impl PredicateGroup {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use datafusion::physical_plan::expressions::lit as physical_lit;
     use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
+    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::JsonObjectType;
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
-    use store_api::metadata::RegionMetadataBuilder;
-    use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::{RegionId, TimeSeriesDistribution, TimeSeriesRowSelector};
 
     use super::*;
     use crate::cache::CacheManager;
@@ -1773,6 +1811,113 @@ mod tests {
     /// Helper to create a timestamp millisecond literal.
     fn ts_lit(val: i64) -> datafusion_expr::Expr {
         lit(ScalarValue::TimestampMillisecond(Some(val), None))
+    }
+
+    fn metadata_with_json_field() -> RegionMetadataRef {
+        let mut json_column = ColumnSchema::new(
+            "payload",
+            ConcreteDataType::from(&JsonNativeType::Object(JsonObjectType::new())),
+            true,
+        );
+        json_column
+            .with_extension_type(&JsonExtensionType::new(Arc::new(JsonMetadata::default())))
+            .unwrap();
+
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "host",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: json_column,
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("value", ConcreteDataType::int64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .primary_key(vec![1]);
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn concrete_json_type_hint() -> JsonNativeType {
+        JsonNativeType::Object(JsonObjectType::from([
+            ("active".to_string(), JsonNativeType::Bool),
+            ("name".to_string(), JsonNativeType::String),
+        ]))
+    }
+
+    #[test]
+    fn test_concretize_json_types_rewrites_json_output_schema() -> Result<()> {
+        let metadata = metadata_with_json_field();
+        let mut mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3])?;
+        let output_schema = mapper.output_schema();
+        let original_arrow_schema = output_schema.arrow_schema();
+        assert!(original_arrow_schema.has_json_extension_field());
+        assert!(is_json_extension_type(&original_arrow_schema.fields()[1]));
+
+        let expected_type = concrete_json_type_hint();
+        concretize_json_types(
+            &mut mapper,
+            &HashMap::from([("payload".to_string(), expected_type.clone())]),
+        );
+
+        let output_schema = mapper.output_schema();
+        let output_arrow_schema = output_schema.arrow_schema();
+        assert!(output_arrow_schema.has_json_extension_field());
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            output_schema.column_schemas()[0].data_type
+        );
+        assert_eq!(
+            ConcreteDataType::from(&expected_type),
+            output_schema.column_schemas()[1].data_type
+        );
+        assert_eq!(
+            ConcreteDataType::int64_datatype(),
+            output_schema.column_schemas()[2].data_type
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_concretize_json_types_keeps_json_without_hint() {
+        let metadata = metadata_with_json_field();
+        let mut mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+
+        concretize_json_types(
+            &mut mapper,
+            &HashMap::from([("missing".to_string(), JsonNativeType::String)]),
+        );
+
+        let output_schema = mapper.output_schema();
+        let output_arrow_schema = output_schema.arrow_schema();
+        assert!(output_arrow_schema.has_json_extension_field());
+        assert!(is_json_extension_type(&output_arrow_schema.fields()[1]));
+
+        // Assert that the expected JSON type stays un-concretized: empty object.
+        assert_eq!(
+            ConcreteDataType::from(&JsonNativeType::Object(JsonObjectType::new())),
+            output_schema.column_schemas()[1].data_type
+        );
     }
 
     #[tokio::test]

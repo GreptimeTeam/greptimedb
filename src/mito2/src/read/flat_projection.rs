@@ -18,14 +18,18 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu, NewDfRecordBatchSnafu};
+use common_recordbatch::error::{
+    ArrowComputeSnafu, DataTypesSnafu, ExternalSnafu, NewDfRecordBatchSnafu,
+};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
+use datatypes::vectors::json::array::JsonArray;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
@@ -238,6 +242,10 @@ impl FlatProjectionMapper {
         self.output_schema.clone()
     }
 
+    pub(crate) fn with_output_schema(&mut self, schema: SchemaRef) {
+        self.output_schema = schema;
+    }
+
     /// Converts a flat format [RecordBatch] to a normal [RecordBatch].
     ///
     /// The batch must match the `projection` using to build the mapper.
@@ -283,6 +291,14 @@ impl FlatProjectionMapper {
                     array = casted;
                 }
             }
+
+            let field = &self.output_schema.arrow_schema().fields()[output_idx];
+            if is_json_extension_type(field) {
+                array = JsonArray::from(&array)
+                    .try_align(field.data_type())
+                    .context(DataTypesSnafu)?;
+            }
+
             arrays.push(array);
         }
 
