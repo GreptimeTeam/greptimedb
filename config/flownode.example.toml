@@ -97,14 +97,6 @@ metadata_cache_ttl = "10m"
 # TTI of the metadata cache.
 metadata_cache_tti = "5m"
 
-## The heartbeat options.
-[heartbeat]
-## Interval for sending heartbeat messages to the metasrv.
-interval = "3s"
-
-## Interval for retrying to send heartbeat messages to the metasrv.
-retry_interval = "3s"
-
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
