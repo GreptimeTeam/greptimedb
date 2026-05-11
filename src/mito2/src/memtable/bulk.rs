@@ -1362,6 +1362,11 @@ impl BulkMemtableBuilder {
         self.compact_dispatcher = Some(compact_dispatcher);
         self
     }
+
+    #[cfg(test)]
+    pub(crate) fn config(&self) -> &BulkMemtableConfig {
+        &self.config
+    }
 }
 
 impl MemtableBuilder for BulkMemtableBuilder {

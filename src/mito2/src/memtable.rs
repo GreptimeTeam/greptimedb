@@ -413,32 +413,26 @@ impl MemtableBuilderProvider {
             .map(|format| format == FormatType::Flat)
             .unwrap_or(self.config.default_flat_format);
         if flat_format {
-            if options.memtable.is_some() {
+            if options.memtable.is_some()
+                && !matches!(&options.memtable, Some(MemtableOptions::Bulk(_)))
+            {
                 common_telemetry::info!(
                     "Overriding memtable config, use BulkMemtable under flat format"
                 );
             }
 
-            return Arc::new(
-                BulkMemtableBuilder::new(
-                    self.write_buffer_manager.clone(),
-                    !dedup, // append_mode: true if not dedup, false if dedup
-                    merge_mode,
-                )
-                .with_compact_dispatcher(self.compact_dispatcher.clone()),
-            );
+            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options));
         }
 
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
-            if options.memtable.is_some() {
+            if options.memtable.is_some()
+                && !matches!(&options.memtable, Some(MemtableOptions::Bulk(_)))
+            {
                 common_telemetry::info!(
                     "Overriding memtable config, use BulkMemtable for sparse primary key encoding"
                 );
             }
-            return Arc::new(
-                BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
-                    .with_compact_dispatcher(self.compact_dispatcher.clone()),
-            );
+            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options));
         }
 
         // The format is not flat.
@@ -464,6 +458,26 @@ impl MemtableBuilderProvider {
             }
             None => self.default_primary_key_memtable_builder(dedup, merge_mode),
         }
+    }
+
+    fn bulk_memtable_builder(
+        &self,
+        dedup: bool,
+        merge_mode: MergeMode,
+        options: &RegionOptions,
+    ) -> BulkMemtableBuilder {
+        let mut builder = BulkMemtableBuilder::new(
+            self.write_buffer_manager.clone(),
+            !dedup, // append_mode: true if not dedup, false if dedup
+            merge_mode,
+        )
+        .with_compact_dispatcher(self.compact_dispatcher.clone());
+
+        if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
+            builder = builder.with_config(config.clone());
+        }
+
+        builder
     }
 
     fn default_primary_key_memtable_builder(
@@ -745,6 +759,7 @@ mod tests {
 
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
+    use crate::memtable::bulk::BulkMemtableConfig;
 
     #[test]
     fn test_alloc_tracker_without_manager() {
@@ -796,5 +811,26 @@ mod tests {
 
         assert_eq!(0, manager.memory_usage());
         assert_eq!(0, manager.mutable_usage());
+    }
+
+    #[test]
+    fn test_forced_bulk_memtable_preserves_bulk_config() {
+        let provider = MemtableBuilderProvider::new(None, Arc::new(MitoConfig::default()));
+        let config = BulkMemtableConfig {
+            merge_threshold: 7,
+            encode_row_threshold: 11,
+            encode_bytes_threshold: 13,
+            max_merge_groups: 17,
+        };
+        let options = RegionOptions {
+            memtable: Some(MemtableOptions::Bulk(config.clone())),
+            primary_key_encoding: Some(PrimaryKeyEncoding::Sparse),
+            ..Default::default()
+        };
+
+        let builder =
+            provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
+
+        assert_eq!(&config, builder.config());
     }
 }
