@@ -620,6 +620,7 @@ impl RegionSupervisor {
                     allow_duplication: true,
                     exclude_peer_ids,
                     workload_filter: Some(accept_ingest_workload),
+                    extensions: Default::default(),
                 };
                 let peers = selector.select(&self.selector_context, opt).await?;
                 ensure!(

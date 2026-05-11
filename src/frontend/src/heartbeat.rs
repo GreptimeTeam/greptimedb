@@ -57,14 +57,7 @@ impl HeartbeatTask {
         resource_stat: ResourceStatRef,
     ) -> Self {
         HeartbeatTask {
-            // if internal grpc is configured, use its address as the peer address
-            // otherwise use the public grpc address, because peer address only promises to be reachable
-            // by other components, it doesn't matter whether it's internal or external
-            peer_addr: if let Some(internal) = &opts.internal_grpc {
-                addrs::resolve_addr(&internal.bind_addr, Some(&internal.server_addr))
-            } else {
-                addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr))
-            },
+            peer_addr: frontend_peer_addr(opts),
             meta_client,
             resp_handler_executor,
             start_time_ms: common_time::util::current_time_millis() as u64,
@@ -271,5 +264,16 @@ impl HeartbeatTask {
                 break;
             }
         }
+    }
+}
+
+pub(crate) fn frontend_peer_addr(opts: &FrontendOptions) -> String {
+    // if internal grpc is configured, use its address as the peer address
+    // otherwise use the public grpc address, because peer address only promises to be reachable
+    // by other components, it doesn't matter whether it's internal or external
+    if let Some(internal) = &opts.internal_grpc {
+        addrs::resolve_addr(&internal.bind_addr, Some(&internal.server_addr))
+    } else {
+        addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr))
     }
 }

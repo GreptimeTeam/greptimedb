@@ -15,7 +15,6 @@
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::{ErrorCode, ResponseHeader};
 use common_meta::cluster::{NodeInfo, NodeStatus};
-use common_meta::peer::Peer;
 use common_time::util::SystemTimer;
 use tonic::{Code, Status};
 
@@ -49,14 +48,14 @@ pub(crate) fn alive_frontends(
     timer: &impl SystemTimer,
     nodes: Vec<NodeInfo>,
     active_duration: std::time::Duration,
-) -> Vec<Peer> {
+) -> Vec<NodeInfo> {
     nodes
         .into_iter()
         .filter_map(|node| {
             if matches!(node.status, NodeStatus::Frontend(_))
                 && is_active_node(timer, node.last_activity_ts, active_duration)
             {
-                Some(node.peer)
+                Some(node)
             } else {
                 None
             }
@@ -69,17 +68,17 @@ pub(crate) fn alive_datanodes(
     nodes: Vec<NodeInfo>,
     active_duration: std::time::Duration,
     filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-) -> Vec<Peer> {
+) -> Vec<NodeInfo> {
     let filter = filter.unwrap_or(|_| true);
 
     nodes
         .into_iter()
         .filter_map(|node| {
-            if let NodeStatus::Datanode(status) = node.status
+            if let NodeStatus::Datanode(status) = &node.status
                 && is_active_node(timer, node.last_activity_ts, active_duration)
             {
-                let workloads = NodeWorkloads::Datanode(status.workloads);
-                filter(&workloads).then_some(node.peer)
+                let workloads = NodeWorkloads::Datanode(status.workloads.clone());
+                filter(&workloads).then_some(node)
             } else {
                 None
             }
@@ -92,17 +91,17 @@ pub(crate) fn alive_flownodes(
     nodes: Vec<NodeInfo>,
     active_duration: std::time::Duration,
     filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-) -> Vec<Peer> {
+) -> Vec<NodeInfo> {
     let filter = filter.unwrap_or(|_| true);
 
     nodes
         .into_iter()
         .filter_map(|node| {
-            if let NodeStatus::Flownode(status) = node.status
+            if let NodeStatus::Flownode(status) = &node.status
                 && is_active_node(timer, node.last_activity_ts, active_duration)
             {
-                let workloads = NodeWorkloads::Flownode(status.workloads);
-                filter(&workloads).then_some(node.peer)
+                let workloads = NodeWorkloads::Flownode(status.workloads.clone());
+                filter(&workloads).then_some(node)
             } else {
                 None
             }
@@ -202,7 +201,10 @@ mod tests {
 
         assert_eq!(
             vec![1],
-            peers.into_iter().map(|peer| peer.id).collect::<Vec<_>>()
+            peers
+                .into_iter()
+                .map(|node| node.peer.id)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -229,7 +231,10 @@ mod tests {
 
         assert_eq!(
             vec![1],
-            peers.into_iter().map(|peer| peer.id).collect::<Vec<_>>()
+            peers
+                .into_iter()
+                .map(|node| node.peer.id)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -249,7 +254,10 @@ mod tests {
 
         assert_eq!(
             vec![1],
-            peers.into_iter().map(|peer| peer.id).collect::<Vec<_>>()
+            peers
+                .into_iter()
+                .map(|node| node.peer.id)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -282,7 +290,10 @@ mod tests {
 
         assert_eq!(
             vec![1],
-            peers.into_iter().map(|peer| peer.id).collect::<Vec<_>>()
+            peers
+                .into_iter()
+                .map(|node| node.peer.id)
+                .collect::<Vec<_>>()
         );
     }
 }

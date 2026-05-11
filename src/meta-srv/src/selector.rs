@@ -20,7 +20,7 @@ pub mod round_robin;
 pub(crate) mod test_utils;
 pub mod weight_compute;
 pub mod weighted_choose;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use serde::{Deserialize, Serialize};
@@ -66,6 +66,8 @@ pub struct SelectorOptions {
     pub exclude_peer_ids: HashSet<u64>,
     /// The filter to select the peers based on their workloads.
     pub workload_filter: Option<fn(&NodeWorkloads) -> bool>,
+    /// Additional placement context, such as the frontend identity that originated the request.
+    pub extensions: HashMap<String, String>,
 }
 
 impl Default for SelectorOptions {
@@ -75,6 +77,7 @@ impl Default for SelectorOptions {
             allow_duplication: false,
             exclude_peer_ids: HashSet::new(),
             workload_filter: None,
+            extensions: HashMap::new(),
         }
     }
 }

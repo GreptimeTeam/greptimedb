@@ -86,6 +86,7 @@ impl FrontendSelector for MetaClientSelector {
 
         peers
             .into_iter()
+            .map(|node| node.peer)
             .filter(predicate)
             .map(|peer| {
                 let channel = self

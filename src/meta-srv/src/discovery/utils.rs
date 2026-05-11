@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_meta::DatanodeId;
-use common_meta::cluster::NodeInfo;
+use common_meta::cluster::{NodeInfo, NodeStatus};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_time::util::SystemTimer;
@@ -117,6 +117,84 @@ pub async fn alive_frontends(
         .filter_map(|(_, node_info)| {
             if active_filter(now, &node_info) {
                 Some(node_info.peer)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>())
+}
+
+/// Returns the alive frontend node infos.
+pub async fn alive_frontend_infos(
+    timer: &impl SystemTimer,
+    lister: &impl NodeInfoAccessor,
+    active_duration: Duration,
+) -> Result<Vec<NodeInfo>> {
+    let active_filter = build_active_filter(active_duration);
+    let node_infos = lister.node_infos(NodeInfoType::Frontend).await?;
+    let now = timer.current_time_millis();
+    Ok(node_infos
+        .into_iter()
+        .filter_map(|(_, node_info)| active_filter(now, &node_info).then_some(node_info))
+        .collect::<Vec<_>>())
+}
+
+/// Returns the alive datanode node infos.
+pub async fn alive_datanode_infos(
+    timer: &impl SystemTimer,
+    lister: &impl NodeInfoAccessor,
+    active_duration: Duration,
+    condition: Option<fn(&NodeWorkloads) -> bool>,
+) -> Result<Vec<NodeInfo>> {
+    alive_node_infos(
+        timer,
+        lister,
+        NodeInfoType::Datanode,
+        active_duration,
+        condition,
+    )
+    .await
+}
+
+/// Returns the alive flownode node infos.
+pub async fn alive_flownode_infos(
+    timer: &impl SystemTimer,
+    lister: &impl NodeInfoAccessor,
+    active_duration: Duration,
+    condition: Option<fn(&NodeWorkloads) -> bool>,
+) -> Result<Vec<NodeInfo>> {
+    alive_node_infos(
+        timer,
+        lister,
+        NodeInfoType::Flownode,
+        active_duration,
+        condition,
+    )
+    .await
+}
+
+async fn alive_node_infos(
+    timer: &impl SystemTimer,
+    lister: &impl NodeInfoAccessor,
+    node_info_type: NodeInfoType,
+    active_duration: Duration,
+    condition: Option<fn(&NodeWorkloads) -> bool>,
+) -> Result<Vec<NodeInfo>> {
+    let active_filter = build_active_filter(active_duration);
+    let condition = condition.unwrap_or(|_| true);
+    let node_infos = lister.node_infos(node_info_type).await?;
+    let now = timer.current_time_millis();
+    Ok(node_infos
+        .into_iter()
+        .filter_map(|(_, node_info)| {
+            let workloads = match &node_info.status {
+                NodeStatus::Datanode(status) => NodeWorkloads::Datanode(status.workloads.clone()),
+                NodeStatus::Flownode(status) => NodeWorkloads::Flownode(status.workloads.clone()),
+                _ => return None,
+            };
+
+            if active_filter(now, &node_info) && condition(&workloads) {
+                Some(node_info)
             } else {
                 None
             }

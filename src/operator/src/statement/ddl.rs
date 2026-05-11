@@ -105,7 +105,7 @@ use crate::error::{
 use crate::expr_helper::{self, RepartitionRequest};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
-use crate::utils::to_meta_query_context;
+use crate::utils::{to_meta_query_context, to_meta_query_context_with_origin_frontend};
 
 #[derive(Debug, Clone, Copy)]
 struct DdlSubmitOptions {
@@ -1824,7 +1824,10 @@ impl StatementExecutor {
             .collect::<Result<Vec<_>>>()?;
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_origin_frontend(
+                query_context,
+                self.origin_frontend_addr.as_deref(),
+            ),
             DdlTask::new_create_table(create_table, partitions, table_info),
         );
 
@@ -1840,7 +1843,10 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_origin_frontend(
+                query_context,
+                self.origin_frontend_addr.as_deref(),
+            ),
             DdlTask::new_create_logical_tables(tables_data),
         );
 

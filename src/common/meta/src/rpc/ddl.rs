@@ -58,6 +58,9 @@ use crate::error::{
 };
 use crate::key::FlowId;
 
+/// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
+pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
+
 /// DDL tasks
 #[derive(Debug, Clone)]
 pub enum DdlTask {

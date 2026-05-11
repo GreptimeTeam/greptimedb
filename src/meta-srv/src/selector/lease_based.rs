@@ -36,7 +36,10 @@ impl Selector for LeaseBasedSelector {
             .peer_discovery
             .active_datanodes(opts.workload_filter)
             .await
-            .context(ListActiveDatanodesSnafu)?;
+            .context(ListActiveDatanodesSnafu)?
+            .into_iter()
+            .map(|node| node.peer)
+            .collect::<Vec<_>>();
 
         // 2. compute weight array, but the weight of each item is the same.
         let mut weight_array = alive_datanodes

@@ -55,7 +55,10 @@ where
             .peer_discovery
             .active_datanodes(opts.workload_filter)
             .await
-            .context(ListActiveDatanodesSnafu)?;
+            .context(ListActiveDatanodesSnafu)?
+            .into_iter()
+            .map(|node| node.peer)
+            .collect::<Vec<_>>();
 
         // 2. get stat kvs and filter out expired datanodes.
         let stat_keys = alive_datanodes

@@ -19,7 +19,7 @@ use common_meta::cluster::{
     DatanodeStatus, FlownodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus,
 };
 use common_meta::datanode::EnvVars;
-use common_meta::heartbeat::utils::get_flownode_workloads;
+use common_meta::heartbeat::utils::{get_datanode_workloads, get_flownode_workloads};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::PutRequest;
 use common_telemetry::warn;
@@ -132,27 +132,41 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             return Ok(HandleControl::Continue);
         };
 
-        let Some(stat) = &acc.stat else {
-            return Ok(HandleControl::Continue);
-        };
+        let (last_activity_ts, status) = if let Some(stat) = &acc.stat {
+            let leader_regions = stat
+                .region_stats
+                .iter()
+                .filter(|s| matches!(s.role, RegionRole::Leader | RegionRole::StagingLeader))
+                .count();
+            let follower_regions = stat.region_stats.len() - leader_regions;
 
-        let leader_regions = stat
-            .region_stats
-            .iter()
-            .filter(|s| matches!(s.role, RegionRole::Leader | RegionRole::StagingLeader))
-            .count();
-        let follower_regions = stat.region_stats.len() - leader_regions;
+            (
+                stat.timestamp_millis,
+                DatanodeStatus {
+                    rcus: stat.rcus,
+                    wcus: stat.wcus,
+                    leader_regions,
+                    follower_regions,
+                    workloads: stat.datanode_workloads.clone(),
+                },
+            )
+        } else {
+            (
+                common_time::util::current_time_millis(),
+                DatanodeStatus {
+                    rcus: 0,
+                    wcus: 0,
+                    leader_regions: 0,
+                    follower_regions: 0,
+                    workloads: get_datanode_workloads(req.node_workloads.as_ref()),
+                },
+            )
+        };
 
         let value = NodeInfo {
             peer,
-            last_activity_ts: stat.timestamp_millis,
-            status: NodeStatus::Datanode(DatanodeStatus {
-                rcus: stat.rcus,
-                wcus: stat.wcus,
-                leader_regions,
-                follower_regions,
-                workloads: stat.datanode_workloads.clone(),
-            }),
+            last_activity_ts,
+            status: NodeStatus::Datanode(status),
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
@@ -210,4 +224,64 @@ async fn put_into_memory_store(ctx: &mut Context, key: NodeInfoKey, value: NodeI
         .context(SaveClusterInfoSnafu)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use api::v1::meta::RequestHeader;
+
+    use super::*;
+    use crate::handler::test_utils::TestEnv;
+
+    #[tokio::test]
+    async fn test_datanode_cluster_info_saved_without_stats() {
+        let env = TestEnv::new();
+        let mut ctx = env.ctx();
+        let handler = CollectDatanodeClusterInfoHandler;
+        let mut acc = HeartbeatAccumulator::default();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("AZ".to_string(), "az-a".to_string());
+        let mut extensions = HashMap::new();
+        EnvVars::new(env_vars).into_extensions(&mut extensions);
+
+        let req = HeartbeatRequest {
+            header: Some(RequestHeader {
+                role: Role::Datanode as i32,
+                ..Default::default()
+            }),
+            peer: Some(Peer::new(42, "127.0.0.1:4001".to_string())),
+            info: Some(PbNodeInfo {
+                version: "1.0.0".to_string(),
+                git_commit: "abcdef".to_string(),
+                start_time_ms: 123,
+                ..Default::default()
+            }),
+            extensions,
+            ..Default::default()
+        };
+
+        handler.handle(&req, &mut ctx, &mut acc).await.unwrap();
+
+        let key = NodeInfoKey {
+            role: common_meta::cluster::Role::Datanode,
+            node_id: 42,
+        };
+        let key: Vec<u8> = (&key).into();
+        let kv = ctx.in_memory.get(&key).await.unwrap().unwrap();
+        let node_info = NodeInfo::try_from(kv.value).unwrap();
+
+        assert_eq!(node_info.peer.id, 42);
+        assert_eq!(
+            node_info.env_vars.get("AZ").map(String::as_str),
+            Some("az-a")
+        );
+        assert!(matches!(
+            node_info.status,
+            NodeStatus::Datanode(DatanodeStatus { workloads, .. })
+                if workloads == get_datanode_workloads(req.node_workloads.as_ref())
+        ));
+    }
 }

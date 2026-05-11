@@ -353,10 +353,15 @@ impl DdlManager {
     pub async fn submit_create_table_task(
         &self,
         create_table_task: CreateTableTask,
+        query_context: QueryContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure = CreateTableProcedure::new(create_table_task, context)?;
+        let procedure = CreateTableProcedure::new_with_query_context(
+            create_table_task,
+            query_context,
+            context,
+        )?;
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -593,7 +598,7 @@ impl DdlManager {
             debug!("Submitting Ddl task: {:?}", request.task);
             match request.task {
                 CreateTable(create_table_task) => {
-                    handle_create_table_task(self, create_table_task).await
+                    handle_create_table_task(self, create_table_task, request.query_context).await
                 }
                 DropTable(drop_table_task) => handle_drop_table_task(self, drop_table_task).await,
                 AlterTable(alter_table_task) => {
@@ -746,9 +751,10 @@ async fn handle_drop_table_task(
 async fn handle_create_table_task(
     ddl_manager: &DdlManager,
     create_table_task: CreateTableTask,
+    query_context: QueryContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
-        .submit_create_table_task(create_table_task)
+        .submit_create_table_task(create_table_task, query_context)
         .await?;
 
     let procedure_id = id.to_string();

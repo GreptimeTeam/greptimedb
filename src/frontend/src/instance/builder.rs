@@ -48,6 +48,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{self, ExternalSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
+use crate::heartbeat::frontend_peer_addr;
 use crate::instance::Instance;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 
@@ -232,7 +233,8 @@ impl FrontendBuilder {
             inserter.clone(),
             partition_manager,
             Some(process_manager.clone()),
-        );
+        )
+        .with_origin_frontend_addr(frontend_peer_addr(&self.options));
 
         let statement_executor =
             if let Some(configurator) = plugins.get::<StatementExecutorConfiguratorRef>() {
