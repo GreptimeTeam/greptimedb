@@ -866,7 +866,11 @@ impl InstanceCreator {
 
     /// Overrides whether regions opened during startup should become writable.
     ///
-    /// `None` keeps the default startup behavior.
+    /// `None` keeps the default startup behavior (regions open writable).
+    ///
+    /// Warning: setting this to `false` in standalone mode will leave reopened regions
+    /// permanently read-only. Standalone has no metasrv heartbeat or region-role
+    /// reconciliation, so there is no path to promote regions to Leader after startup.
     pub fn with_open_regions_writable_override(mut self, writable: bool) -> Self {
         self.open_regions_writable_override = Some(writable);
         self

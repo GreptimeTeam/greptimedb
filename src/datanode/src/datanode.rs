@@ -209,7 +209,13 @@ impl DatanodeBuilder {
 
     /// Overrides whether regions opened during datanode startup should become writable.
     ///
-    /// When unset, the builder uses its default writable policy for reopened regions.
+    /// When unset, the builder uses its default writable policy for reopened regions
+    /// (writable only when no metasrv client is configured).
+    ///
+    /// Warning: setting this to `true` on a metasrv-controlled datanode (one built
+    /// with `with_meta_client`) will promote regions to Leader before heartbeat and
+    /// lease coordination begin, bypassing the metasrv safety contract and creating a
+    /// potential split-brain window during startup.
     pub fn with_open_regions_writable_override(&mut self, writable: bool) -> &mut Self {
         self.open_regions_writable_override = Some(writable);
         self
