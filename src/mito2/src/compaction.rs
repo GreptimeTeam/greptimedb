@@ -992,7 +992,8 @@ struct CompactionSstReaderBuilder<'a> {
 }
 
 impl CompactionSstReaderBuilder<'_> {
-    /// Builds [BoxedRecordBatchStream] that reads all SST files and yields batches in flat format for compaction.
+    /// Build a [FlatSource] that yields Arrow `RecordBatch`s from reading all the input SST files,
+    /// for compaction. The schema of the [FlatSource] is unified.
     async fn build_flat_sst_reader(self) -> Result<FlatSource> {
         let scan_input = self.build_scan_input()?.with_compaction(true);
 

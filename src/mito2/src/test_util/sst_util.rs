@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
+use arrow_schema::Schema;
 use common_time::Timestamp;
 use datatypes::arrow::array::{
     ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringDictionaryBuilder,
@@ -307,7 +308,13 @@ pub fn new_record_batch_with_custom_sequence(
 
 /// Creates a FlatSource from flat format RecordBatches.
 pub(crate) fn new_flat_source_from_record_batches(batches: Vec<RecordBatch>) -> FlatSource {
-    FlatSource::new_iter(batches[0].schema(), Box::new(batches.into_iter().map(Ok)))
+    FlatSource::new_iter(
+        batches
+            .first()
+            .map(|x| x.schema())
+            .unwrap_or_else(|| Arc::new(Schema::empty())),
+        Box::new(batches.into_iter().map(Ok)),
+    )
 }
 
 /// Creates a new region metadata for testing SSTs with binary datatype.
