@@ -64,9 +64,7 @@ type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>>>>;
 /// Terminal metrics associated with a query output.
 ///
 /// For streaming outputs, metrics are only final after the stream is fully
-/// drained and [`Self::is_ready`] returns `true`. Region watermark helpers keep
-/// the RFC distinction between proved regions, unproved participating regions,
-/// and non-participating regions.
+/// drained and [`Self::is_ready`] returns `true`.
 #[derive(Debug, Clone, Default)]
 pub struct OutputMetrics {
     inner: Arc<OutputMetricsInner>,
@@ -285,7 +283,7 @@ where
                 }
                 Some(FlightMessage::Metrics(_)) => {
                     return IllegalFlightMessagesSnafu {
-                        reason: "'AffectedRows' Flight metadata already carries Metrics and cannot be followed by another Metrics message".to_string(),
+                        reason: "'AffectedRows' Flight metadata already carries Metrics and cannot be followed by another Metrics message",
                     }
                     .fail();
                 }

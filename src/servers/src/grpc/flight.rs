@@ -578,11 +578,21 @@ fn to_flight_data_stream(
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {
-            let terminal_metrics = terminal_recordbatch_metrics_from_plan_if_requested(
+            let terminal_metrics = match terminal_recordbatch_metrics_from_plan_if_requested(
                 output.meta.plan,
                 should_emit_terminal_metrics,
-            )
-            .and_then(|metrics| serde_json::to_string(&metrics).ok());
+            ) {
+                Some(metrics) => match serde_json::to_string(&metrics) {
+                    Ok(metrics) => Some(metrics),
+                    Err(e) => {
+                        let stream = tokio_stream::once(Err(Status::internal(format!(
+                            "Failed to serialize terminal metrics: {e}"
+                        ))));
+                        return Box::pin(stream) as _;
+                    }
+                },
+                None => None,
+            };
             let affected_rows = FlightEncoder::default().encode(FlightMessage::AffectedRows {
                 rows,
                 metrics: terminal_metrics,
