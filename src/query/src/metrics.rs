@@ -26,8 +26,11 @@ use futures::Stream;
 use futures_util::ready;
 use lazy_static::lazy_static;
 use prometheus::*;
+use session::context::QueryContextRef;
 
 use crate::dist_plan::MergeScanExec;
+use crate::error::Result;
+use crate::options::FlowQueryExtensions;
 
 /// Intermediate merge state for one participating region while collecting
 /// terminal correctness watermarks across merge-scan sub-stages.
@@ -201,6 +204,27 @@ impl Stream for RegionWatermarkMetricsStream {
     }
 }
 
+/// Returns whether terminal region watermark metrics should be collected for the query context.
+pub fn should_collect_region_watermark_from_query_ctx(query_ctx: &QueryContextRef) -> Result<bool> {
+    Ok(
+        FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())?
+            .is_some_and(|extensions| extensions.should_collect_region_watermark()),
+    )
+}
+
+/// Attaches terminal region watermark metrics to `stream` when collection is requested.
+pub fn maybe_attach_region_watermark_metrics(
+    stream: SendableRecordBatchStream,
+    plan: Arc<dyn ExecutionPlan>,
+    should_collect_region_watermark: bool,
+) -> SendableRecordBatchStream {
+    if should_collect_region_watermark {
+        Box::pin(RegionWatermarkMetricsStream::new(stream, plan))
+    } else {
+        stream
+    }
+}
+
 pub fn terminal_recordbatch_metrics_from_plan(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Option<RecordBatchMetrics> {
@@ -212,6 +236,18 @@ pub fn terminal_recordbatch_metrics_from_plan(
             region_watermarks,
             ..Default::default()
         })
+    }
+}
+
+/// Collects terminal record-batch metrics from `plan` only when requested.
+pub fn terminal_recordbatch_metrics_from_plan_if_requested(
+    plan: Option<Arc<dyn ExecutionPlan>>,
+    should_collect_region_watermark: bool,
+) -> Option<RecordBatchMetrics> {
+    if should_collect_region_watermark {
+        plan.and_then(terminal_recordbatch_metrics_from_plan)
+    } else {
+        None
     }
 }
 
@@ -230,11 +266,69 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
                 merge_scan.sub_stage_metrics(),
             );
         }
-
         stack.extend(plan.children().into_iter().cloned());
     }
 
     finalize_region_watermarks(merged)
+}
+
+/// Merge a batch of per-region watermark entries into the global merged state.
+///
+/// # Merge strategy: correctness over maximum
+///
+/// Flow checkpoint advancement requires provable watermarks so that incremental
+/// queries never miss rows. This merge uses correctness-first semantics:
+///
+/// | Current state  | New entry       | Result            | Rationale |
+/// |---------------|-----------------|-------------------|-----------|
+/// | Participated  | Proved(seq)     | Proved(seq)       | First proof for the region |
+/// | Participated  | Unproved         | Unproved          | One branch cannot prove → region is unsafe |
+/// | Proved(old)   | Proved(same)    | Proved(old)       | Convergent proof, keep |
+/// | Proved(old)   | Proved(diff)    | Conflict([old,diff]) | Ambiguous → degrade to unproved |
+/// | Unproved      | _anything_      | Unproved          | Already unsafe, stays unsafe |
+/// | Conflict{..}  | Proved(seq)     | Conflict[...seq]  | Record for diagnostics |
+///
+/// Using `max(old, new)` would be incorrect because it could advance a
+/// checkpoint past rows that a competing MergeScan sub-stage has not yet
+/// scanned, causing Flow to skip data.
+fn merge_region_watermark_entries(
+    merged: &mut BTreeMap<u64, MergeState>,
+    entries: impl IntoIterator<Item = RegionWatermarkEntry>,
+) {
+    for entry in entries {
+        merged
+            .entry(entry.region_id)
+            .and_modify(|existing| match entry.watermark {
+                None => match existing {
+                    MergeState::Participated | MergeState::Proved(_) => {
+                        *existing = MergeState::Unproved;
+                    }
+                    MergeState::Unproved | MergeState::Conflict { .. } => {}
+                },
+                Some(seq) => match existing {
+                    MergeState::Participated => {
+                        *existing = MergeState::Proved(seq);
+                    }
+                    MergeState::Unproved => {}
+                    MergeState::Proved(existing_seq) if *existing_seq == seq => {}
+                    MergeState::Proved(existing_seq) => {
+                        let old_seq = *existing_seq;
+                        *existing = MergeState::Conflict {
+                            watermarks: vec![old_seq, seq],
+                        };
+                    }
+                    MergeState::Conflict { watermarks } => {
+                        if !watermarks.contains(&seq) {
+                            watermarks.push(seq);
+                        }
+                    }
+                },
+            })
+            .or_insert(match entry.watermark {
+                Some(seq) => MergeState::Proved(seq),
+                None => MergeState::Unproved,
+            });
+    }
 }
 
 fn merge_merge_scan_region_watermarks(
@@ -242,45 +336,15 @@ fn merge_merge_scan_region_watermarks(
     regions: impl IntoIterator<Item = u64>,
     sub_stage_metrics: impl IntoIterator<Item = RecordBatchMetrics>,
 ) {
+    // Regions listed by MergeScanExec participated even when no sub-stage can
+    // prove a watermark. Keep them as explicit `None` entries so callers can
+    // distinguish unproved participation from non-participation.
     for region_id in regions {
         merged.entry(region_id).or_insert(MergeState::Participated);
     }
 
     for metrics in sub_stage_metrics {
-        for entry in metrics.region_watermarks {
-            merged
-                .entry(entry.region_id)
-                .and_modify(|existing| match entry.watermark {
-                    None => match existing {
-                        MergeState::Participated | MergeState::Proved(_) => {
-                            *existing = MergeState::Unproved;
-                        }
-                        MergeState::Unproved | MergeState::Conflict { .. } => {}
-                    },
-                    Some(seq) => match existing {
-                        MergeState::Participated => {
-                            *existing = MergeState::Proved(seq);
-                        }
-                        MergeState::Unproved => {}
-                        MergeState::Proved(existing_seq) if *existing_seq == seq => {}
-                        MergeState::Proved(existing_seq) => {
-                            let old_seq = *existing_seq;
-                            *existing = MergeState::Conflict {
-                                watermarks: vec![old_seq, seq],
-                            };
-                        }
-                        MergeState::Conflict { watermarks } => {
-                            if !watermarks.contains(&seq) {
-                                watermarks.push(seq);
-                            }
-                        }
-                    },
-                })
-                .or_insert(match entry.watermark {
-                    Some(seq) => MergeState::Proved(seq),
-                    None => MergeState::Unproved,
-                });
-        }
+        merge_region_watermark_entries(merged, metrics.region_watermarks);
     }
 }
 

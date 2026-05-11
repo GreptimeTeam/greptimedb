@@ -399,7 +399,7 @@ impl ErrorExt for Error {
 
             Error::PrometheusLabelValuesQueryPlan { source, .. } => source.status_code(),
 
-            Error::CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
+            Error::CollectRecordbatch { source, .. } => source.status_code(),
 
             Error::SqlExecIntercepted { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
