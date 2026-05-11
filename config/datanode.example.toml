@@ -80,14 +80,6 @@ watch = false
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
 
-## The heartbeat options.
-[heartbeat]
-## Interval for sending heartbeat messages to the metasrv.
-interval = "3s"
-
-## Interval for retrying to send heartbeat messages to the metasrv.
-retry_interval = "3s"
-
 ## The metasrv client options.
 [meta_client]
 ## The addresses of the metasrv.
