@@ -38,6 +38,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_with::{DisplayFromStr, serde_as};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceRange};
 use tokio::sync::Semaphore;
@@ -99,16 +100,21 @@ static ENCODE_BYTES_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
 });
 
 /// Configuration for bulk memtable.
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct BulkMemtableConfig {
     /// Threshold for triggering merge of parts.
+    #[serde_as(as = "DisplayFromStr")]
     pub merge_threshold: usize,
     /// Row threshold for encoding parts.
+    #[serde_as(as = "DisplayFromStr")]
     pub encode_row_threshold: usize,
     /// Bytes threshold for encoding parts.
+    #[serde_as(as = "DisplayFromStr")]
     pub encode_bytes_threshold: usize,
     /// Maximum number of groups for parallel merging.
+    #[serde_as(as = "DisplayFromStr")]
     pub max_merge_groups: usize,
 }
 

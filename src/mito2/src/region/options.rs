@@ -673,6 +673,25 @@ mod tests {
         };
         assert_eq!(expect, options);
 
+        let map = make_map(&[
+            ("memtable.type", "bulk"),
+            ("memtable.bulk.merge_threshold", "7"),
+            ("memtable.bulk.encode_row_threshold", "11"),
+            ("memtable.bulk.encode_bytes_threshold", "13"),
+            ("memtable.bulk.max_merge_groups", "17"),
+        ]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig {
+                merge_threshold: 7,
+                encode_row_threshold: 11,
+                encode_bytes_threshold: 13,
+                max_merge_groups: 17,
+            })),
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+
         let map = make_map(&[("memtable.type", "partition_tree")]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
