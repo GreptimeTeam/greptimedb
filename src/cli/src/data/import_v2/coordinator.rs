@@ -316,10 +316,13 @@ fn state_mismatch(config: &ImportResumeConfig, reason: String) -> Result<()> {
     .fail()
 }
 
-fn task_set_from_state(state: &ImportState, state_path: &Path) -> Result<BTreeSet<(u32, String)>> {
+fn task_set_from_state<'a>(
+    state: &'a ImportState,
+    state_path: &Path,
+) -> Result<BTreeSet<(u32, &'a str)>> {
     let mut tasks = BTreeSet::new();
     for task in &state.tasks {
-        if !tasks.insert((task.chunk_id, task.schema.clone())) {
+        if !tasks.insert((task.chunk_id, task.schema.as_str())) {
             return ImportStateMismatchSnafu {
                 path: state_path.display().to_string(),
                 reason: format!(
@@ -333,10 +336,10 @@ fn task_set_from_state(state: &ImportState, state_path: &Path) -> Result<BTreeSe
     Ok(tasks)
 }
 
-fn task_set_from_config(config: &ImportResumeConfig) -> Result<BTreeSet<(u32, String)>> {
+fn task_set_from_config(config: &ImportResumeConfig) -> Result<BTreeSet<(u32, &str)>> {
     let mut tasks = BTreeSet::new();
     for task in &config.tasks {
-        if !tasks.insert((task.chunk_id, task.schema.clone())) {
+        if !tasks.insert((task.chunk_id, task.schema.as_str())) {
             return ImportStateMismatchSnafu {
                 path: config.state_path.display().to_string(),
                 reason: format!(
