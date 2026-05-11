@@ -596,6 +596,16 @@ auto_flush_interval = "1h"
 ## @toml2docs:none-default="Auto"
 #+ selector_result_cache_size = "512MB"
 
+## Cache size for flat range scan results. Setting it to 0 to disable the cache.
+## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+## @toml2docs:none-default="Auto"
+#+ range_result_cache_size = "512MB"
+
+## Cache size for prefilter results. Setting it to 0 to disable the cache.
+## If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
+## @toml2docs:none-default="Auto"
+#+ prefilter_result_cache_size = "128MB"
+
 ## Whether to enable the write cache, it's enabled by default when using object storage. It is recommended to enable it when using object storage for better performance.
 enable_write_cache = false
 
