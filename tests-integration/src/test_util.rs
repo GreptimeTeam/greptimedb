@@ -22,8 +22,10 @@ use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
 use common_base::Plugins;
 use common_config::Configurable;
+use common_meta::key::TableMetadataManager;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
+use common_meta::kv_backend::KvBackendRef;
 use common_query::Output;
 use common_runtime::runtime::BuilderBuild;
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
@@ -907,6 +909,17 @@ pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {
         .unwrap();
 
     let table_metadata_manager = catalog_manager.table_metadata_manager_ref();
+    prepare_another_catalog_and_schema_with_manager(table_metadata_manager).await;
+}
+
+pub(crate) async fn prepare_another_catalog_and_schema_with_kv_backend(kv_backend: KvBackendRef) {
+    let table_metadata_manager = TableMetadataManager::new(kv_backend);
+    prepare_another_catalog_and_schema_with_manager(&table_metadata_manager).await;
+}
+
+async fn prepare_another_catalog_and_schema_with_manager(
+    table_metadata_manager: &TableMetadataManager,
+) {
     table_metadata_manager
         .catalog_manager()
         .create(CatalogNameKey::new("another_catalog"), true)
