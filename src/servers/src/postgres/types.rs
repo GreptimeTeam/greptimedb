@@ -398,8 +398,8 @@ pub(super) fn parameters_to_scalar_values(
             return Err(invalid_parameter_error(
                 "unknown_parameter_type",
                 Some(format!(
-                    "Cannot get parameter type information for parameter {}",
-                    idx
+                    "Cannot get type for parameter {}, try to provide a type using ${}::<type>",
+                    idx, idx
                 )),
             ));
         };
