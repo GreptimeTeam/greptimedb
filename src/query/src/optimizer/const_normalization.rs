@@ -306,7 +306,7 @@ impl NormalizationTarget {
     fn normalize_constant(&self, constant: &ScalarValue) -> Option<ScalarValue> {
         match self.kind {
             NormalizationKind::TimestampDowncast { .. } => None,
-            NormalizationKind::Lossless => cast_literal_losslessly(constant, &self.data_type),
+            NormalizationKind::Lossless => try_cast_literal_to_type(constant, &self.data_type),
         }
     }
 
@@ -508,11 +508,6 @@ fn extract_constant_scalar(expr: &Expr) -> Result<Option<ScalarValue>> {
     }
 }
 
-/// Casts a literal only when DataFusion can prove the cast preserves the value.
-fn cast_literal_losslessly(value: &ScalarValue, target_type: &DataType) -> Option<ScalarValue> {
-    try_cast_literal_to_type(value, target_type)
-}
-
 #[derive(Clone, Copy)]
 enum CastInputKind {
     Cast,
@@ -623,7 +618,7 @@ mod tests {
     use table::predicate::build_time_range_predicate;
 
     use super::{
-        ConstNormalizationRule, PatternMatchKind, cast_literal_losslessly, lower_bound_for_ge,
+        ConstNormalizationRule, PatternMatchKind, lower_bound_for_ge, try_cast_literal_to_type,
     };
 
     #[test]
@@ -925,7 +920,7 @@ mod tests {
         ];
 
         for (source, expected) in cases {
-            let casted = cast_literal_losslessly(
+            let casted = try_cast_literal_to_type(
                 &ScalarValue::TimestampNanosecond(Some(source), None),
                 &DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
             )
