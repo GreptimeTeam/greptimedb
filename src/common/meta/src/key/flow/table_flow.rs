@@ -36,7 +36,7 @@ use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use crate::rpc::KeyValue;
 use crate::rpc::store::RangeRequest;
 
-const TABLE_FLOW_KEY_PREFIX: &str = "source_table";
+pub const TABLE_FLOW_KEY_PREFIX: &str = "source_table";
 
 lazy_static! {
     static ref TABLE_FLOW_KEY_PATTERN: Regex = Regex::new(&format!(

@@ -29,6 +29,7 @@ pub mod range;
 pub mod range_cache;
 #[cfg(not(feature = "test"))]
 pub(crate) mod range_cache;
+pub(crate) mod read_columns;
 pub mod scan_region;
 pub mod scan_util;
 pub(crate) mod seq_scan;
@@ -41,6 +42,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::OpType;
+use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use common_time::Timestamp;
 use datafusion_common::arrow::array::UInt8Array;
@@ -1104,19 +1106,59 @@ impl Source {
 }
 
 /// Async [RecordBatch] reader and iterator wrapper for flat format.
-pub enum FlatSource {
+pub struct FlatSource {
+    schema: SchemaRef,
+    inner: FlatSourceInner,
+}
+
+impl FlatSource {
+    /// Create a [FlatSource] from a [BoxedRecordBatchIterator] and its schema.
+    pub fn new_iter(schema: SchemaRef, iter: BoxedRecordBatchIterator) -> Self {
+        Self {
+            schema,
+            inner: FlatSourceInner::Iter(iter),
+        }
+    }
+
+    /// Create a [FlatSource] from a [BoxedRecordBatchStream] and its schema.
+    pub fn new_stream(schema: SchemaRef, stream: BoxedRecordBatchStream) -> Self {
+        Self {
+            schema,
+            inner: FlatSourceInner::Stream(stream),
+        }
+    }
+
+    #[expect(unused)]
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        self.inner.next_batch().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_iter(self) -> BoxedRecordBatchIterator {
+        match self.inner {
+            FlatSourceInner::Iter(iter) => iter,
+            FlatSourceInner::Stream(_) => unreachable!(),
+        }
+    }
+}
+
+enum FlatSourceInner {
     /// Source from a [BoxedRecordBatchIterator].
     Iter(BoxedRecordBatchIterator),
     /// Source from a [BoxedRecordBatchStream].
     Stream(BoxedRecordBatchStream),
 }
 
-impl FlatSource {
+impl FlatSourceInner {
     /// Returns next [RecordBatch] from this data source.
     pub async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
-            FlatSource::Iter(iter) => iter.next().transpose(),
-            FlatSource::Stream(stream) => stream.try_next().await,
+            Self::Iter(iter) => iter.next().transpose(),
+            Self::Stream(stream) => stream.try_next().await,
         }
     }
 }

@@ -21,13 +21,17 @@ use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
     Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
 };
-use auth::user_provider_from_option;
+use auth::{UserProviderRef, user_provider_from_option};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use chrono::Utc;
+use cmd::options::GreptimeOptions;
+use common_base::Plugins;
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, TRACE_TABLE_NAME, trace_operations_table_name,
     trace_services_table_name,
 };
+use common_config::Configurable;
 use common_error::status_code::StatusCode as ErrorCode;
 use common_frontend::slow_query_event::{
     SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
@@ -60,6 +64,7 @@ use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Respon
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
+use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
@@ -135,6 +140,7 @@ macro_rules! http_tests {
                 test_pipeline_skip_error,
                 test_pipeline_filter,
                 test_pipeline_create_table,
+                test_pipeline_index_options,
 
                 test_otlp_metrics_new,
                 test_otlp_traces_v0,
@@ -152,6 +158,7 @@ macro_rules! http_tests {
 
                 test_influxdb_write,
                 test_influxdb_write_with_hints,
+                test_influxdb_write_with_append_mode_hint,
                 test_http_memory_limit,
             );
         )*
@@ -184,7 +191,7 @@ pub async fn test_http_auth(store_type: StorageType) {
     // 2. wrong auth
     let res = client
         .get("/v1/sql?db=public&sql=show tables;")
-        .header("Authorization", "basic Z3JlcHRpbWVfdXNlcjp3cm9uZ19wd2Q=")
+        .header("Authorization", basic_auth("greptime_user", "wrong_pwd"))
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -192,10 +199,7 @@ pub async fn test_http_auth(store_type: StorageType) {
     // 3. right auth
     let res = client
         .get("/v1/sql?db=public&sql=show tables;")
-        .header(
-            "Authorization",
-            "basic Z3JlcHRpbWVfdXNlcjpncmVwdGltZV9wd2Q=",
-        )
+        .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -203,19 +207,13 @@ pub async fn test_http_auth(store_type: StorageType) {
     // 4. readonly user cannot write
     let res = client
         .get("/v1/sql?db=public&sql=show tables;")
-        .header(
-            "Authorization",
-            "basic cmVhZG9ubHlfdXNlcjpyZWFkb25seV9wd2Q=",
-        )
+        .header("Authorization", basic_auth("readonly_user", "readonly_pwd"))
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .get("/v1/sql?db=public&sql=create table auth_test(ts timestamp time index);")
-        .header(
-            "Authorization",
-            "basic cmVhZG9ubHlfdXNlcjpyZWFkb25seV9wd2Q=",
-        )
+        .header("Authorization", basic_auth("readonly_user", "readonly_pwd"))
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
@@ -225,7 +223,7 @@ pub async fn test_http_auth(store_type: StorageType) {
         .get("/v1/sql?db=public&sql=show tables;")
         .header(
             "Authorization",
-            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+            basic_auth("writeonly_user", "writeonly_pwd"),
         )
         .send()
         .await;
@@ -234,7 +232,7 @@ pub async fn test_http_auth(store_type: StorageType) {
         .get("/v1/sql?db=public&sql=create table auth_test(ts timestamp time index);")
         .header(
             "Authorization",
-            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+            basic_auth("writeonly_user", "writeonly_pwd"),
         )
         .send()
         .await;
@@ -243,7 +241,7 @@ pub async fn test_http_auth(store_type: StorageType) {
         .get("/v1/sql?db=public&sql=insert into auth_test values(1);")
         .header(
             "Authorization",
-            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+            basic_auth("writeonly_user", "writeonly_pwd"),
         )
         .send()
         .await;
@@ -252,11 +250,70 @@ pub async fn test_http_auth(store_type: StorageType) {
         .get("/v1/sql?db=public&sql=select * from auth_test;")
         .header(
             "Authorization",
-            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+            basic_auth("writeonly_user", "writeonly_pwd"),
         )
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    guard.remove_all().await;
+}
+
+fn basic_auth(username: &str, password: &str) -> String {
+    format!(
+        "basic {}",
+        BASE64_STANDARD.encode(format!("{username}:{password}"))
+    )
+}
+
+pub async fn test_http_auth_from_standalone_user_provider_config() {
+    common_telemetry::init_default_ut_logging();
+
+    let config = tempfile::NamedTempFile::new().unwrap();
+    let user_provider = "static_user_provider:cmd:greptime_user=greptime_pwd";
+    std::fs::write(
+        config.path(),
+        format!("user_provider = \"{user_provider}\"\n"),
+    )
+    .unwrap();
+
+    let options =
+        GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    let fe_opts = options.component.frontend_options();
+
+    let mut plugins = Plugins::new();
+    plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+        .await
+        .unwrap();
+    let user_provider = plugins.get::<UserProviderRef>();
+
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
+        StorageType::File,
+        "sql_api_user_provider_config",
+        user_provider,
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .send()
+        .await;
+    let status = res.status();
+    let body = res.text().await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "unexpected response body: {body}"
+    );
+
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
 
     guard.remove_all().await;
 }
@@ -1435,6 +1492,7 @@ max_in_flight_write_bytes = "0KiB"
 write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false
 init_regions_parallelism = 16
+heartbeat_env_vars = []
 
 [http]
 addr = "127.0.0.1:4000"
@@ -1537,7 +1595,6 @@ experimental_min_refresh_duration = "5s"
 grpc_conn_timeout = "5s"
 experimental_grpc_max_retries = 3
 experimental_frontend_scan_timeout = "30s"
-experimental_frontend_activity_timeout = "1m"
 experimental_max_filter_num_per_query = 20
 experimental_time_window_merge_threshold = 3
 read_preference = "Leader"
@@ -3076,6 +3133,82 @@ transform:
     guard.remove_all().await;
 }
 
+pub async fn test_pipeline_index_options(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_index_options").await;
+
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: ts
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - field: message
+    type: string
+    index:
+      type: fulltext
+      options:
+        analyzer: Chinese
+        case_sensitive: true
+        backend: bloom
+        granularity: 2048
+        false_positive_rate: 0.02
+  - field: trace_id
+    type: int64
+    index:
+      type: skipping
+      options:
+        granularity: 1024
+        false_positive_rate: 0.05
+        type: BLOOM
+  - field: ts
+    type: time
+    index: timestamp
+"#;
+
+    let res = client
+        .post("/v1/pipelines/index_options")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let data_body = r#"
+[
+  {
+    "message": "hello greptime",
+    "trace_id": 42,
+    "ts": "2024-05-25 20:16:37.217"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/ingest?db=public&table=pipeline_index_options&pipeline_name=index_options")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let expected_schema = "[[\"pipeline_index_options\",\"CREATE TABLE IF NOT EXISTS \\\"pipeline_index_options\\\" (\\n  \\\"message\\\" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true', false_positive_rate = '0.02', granularity = '2048'),\\n  \\\"trace_id\\\" BIGINT NULL SKIPPING INDEX WITH(false_positive_rate = '0.05', granularity = '1024', type = 'BLOOM'),\\n  \\\"ts\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"ts\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true'\\n)\"]]";
+    validate_data(
+        "pipeline_index_options_schema",
+        &client,
+        "show create table pipeline_index_options",
+        expected_schema,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_pipeline_dispatcher(storage_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -3694,6 +3827,42 @@ pub async fn test_influxdb_write_with_hints(storage_type: StorageType) {
     assert!(
         resp.contains("skip_wal = 'true'"),
         "expected skip_wal = 'true' in SHOW CREATE TABLE output, got: {resp}"
+    );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_influxdb_write_with_append_mode_hint(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(
+        storage_type,
+        "test_influxdb_write_with_append_mode_hint",
+    )
+    .await;
+
+    let client = TestClient::new(app).await;
+
+    let result = client
+        .post("/v1/influxdb/write?db=public")
+        .header("x-greptime-hint-append_mode", "true")
+        .body("append_mode_table,host=host1 cpu=1.2 1664370459457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+
+    let res = client
+        .get("/v1/sql?sql=show create table append_mode_table")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+    assert!(
+        resp.contains("append_mode = 'true'"),
+        "expected append_mode = 'true' in SHOW CREATE TABLE output, got: {resp}"
+    );
+    assert!(
+        resp.contains("merge_mode = 'last_row'"),
+        "expected merge_mode = 'last_row' in SHOW CREATE TABLE output, got: {resp}"
     );
 
     guard.remove_all().await;

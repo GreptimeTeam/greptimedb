@@ -80,6 +80,24 @@ pub fn checkpoint_file(version: ManifestVersion) -> String {
     format!("{version:020}.checkpoint")
 }
 
+/// Returns a lexicographic `start_after` key for an object-store `list`
+/// request over the manifest directory at `path`.
+///
+/// `path` must be the same directory prefix passed to `lister_with(path)`
+/// and must end with `/`. OpenDAL resolves `start_after` against the
+/// operator root, not relative to the listed path, so the caller must
+/// supply the full prefix — otherwise the bound is compared against keys
+/// that already share a longer prefix and is silently a no-op.
+pub(crate) fn list_start_after(path: &str, version: ManifestVersion) -> String {
+    debug_assert!(
+        path.ends_with('/'),
+        "list_start_after: path must end with '/', got {path:?}",
+    );
+    // Manifest files are named `{version:020}.{json,checkpoint}[.gz]` and sort lexicographically;
+    // `{path}{version:020}` is a strict prefix of `{path}{version:020}.{json,checkpoint}[.gz]`.
+    format!("{path}{version:020}")
+}
+
 pub fn gen_path(path: &str, file: &str, compress_type: CompressionType) -> String {
     if compress_type == CompressionType::Uncompressed {
         format!("{}{}", path, file)
@@ -198,11 +216,19 @@ impl ManifestObjectStore {
     }
 
     /// Returns an iterator of manifests from normal or staging directory.
-    pub(crate) async fn manifest_lister(&self, is_staging: bool) -> Result<Option<Lister>> {
+    ///
+    /// `start_after` is forwarded to the non-staging lister to skip entries
+    /// whose name is lexicographically less than or equal to it. It is
+    /// ignored for the staging directory.
+    pub(crate) async fn manifest_lister(
+        &self,
+        is_staging: bool,
+        start_after: Option<&str>,
+    ) -> Result<Option<Lister>> {
         if is_staging {
             self.staging_storage.manifest_lister().await
         } else {
-            self.delta_storage.manifest_lister().await
+            self.delta_storage.manifest_lister(start_after).await
         }
     }
 
@@ -243,9 +269,14 @@ impl ManifestObjectStore {
         keep_last_checkpoint: bool,
     ) -> Result<usize> {
         // Stores (entry, is_checkpoint, version) in a Vec.
+        //
+        // `start_after` is intentionally `None` here: a previous deletion
+        // may have been interrupted and left stale files at versions below
+        // the current checkpoint; we need the lister to surface them so
+        // cleanup can finish.
         let entries: Vec<_> = self
             .delta_storage
-            .get_paths(|entry| {
+            .get_paths(None, |entry| {
                 let file_name = entry.name();
                 let is_checkpoint = is_checkpoint_file(file_name);
                 if is_delta_file(file_name) || is_checkpoint_file(file_name) {
@@ -448,12 +479,16 @@ mod tests {
     use crate::manifest::storage::checkpoint::CheckpointMetadata;
 
     fn new_test_manifest_store() -> ManifestObjectStore {
+        new_test_manifest_store_at("/")
+    }
+
+    fn new_test_manifest_store_at(path: &str) -> ManifestObjectStore {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_manifest_log_store");
         let builder = Fs::default().root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
         ManifestObjectStore::new(
-            "/",
+            path,
             object_store,
             CompressionType::Uncompressed,
             Default::default(),
@@ -717,5 +752,67 @@ mod tests {
         );
 
         assert_eq!(log_store.total_manifest_size(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_start_after_uncompress() {
+        let mut log_store = new_test_manifest_store();
+        log_store.set_compress_type(CompressionType::Uncompressed);
+        test_scan_with_start_after_case(log_store).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_start_after_compress() {
+        let mut log_store = new_test_manifest_store();
+        log_store.set_compress_type(CompressionType::Gzip);
+        test_scan_with_start_after_case(log_store).await;
+    }
+
+    // OpenDAL resolves `start_after` against the operator
+    // root, so the bound must embed the manifest directory prefix. Running the
+    // same assertions against a non-root path exercises that composition.
+    #[tokio::test]
+    async fn test_scan_with_start_after_nested_path() {
+        let mut log_store = new_test_manifest_store_at("/nested/region-1/");
+        log_store.set_compress_type(CompressionType::Uncompressed);
+        test_scan_with_start_after_case(log_store).await;
+    }
+
+    async fn test_scan_with_start_after_case(mut log_store: ManifestObjectStore) {
+        for v in 0..10 {
+            log_store
+                .save(v, format!("hello, {v}").as_bytes(), false)
+                .await
+                .unwrap();
+        }
+        // A checkpoint at version 5 shares the directory; scan must still
+        // return only delta files in range.
+        log_store
+            .save_checkpoint(5, "checkpoint".as_bytes())
+            .await
+            .unwrap();
+
+        // start > 0: `start_after` must skip pre-start deltas without losing any.
+        let entries = log_store.delta_storage.scan(3, 10).await.unwrap();
+        let versions: Vec<_> = entries.iter().map(|(v, _)| *v).collect();
+        assert_eq!(versions, vec![3, 4, 5, 6, 7, 8, 9]);
+
+        // start == 0: `start_after` is skipped; every delta is returned.
+        let entries = log_store.delta_storage.scan(0, 10).await.unwrap();
+        let versions: Vec<_> = entries.iter().map(|(v, _)| *v).collect();
+        assert_eq!(versions, (0..10).collect::<Vec<_>>());
+
+        // Upper bound exclusive.
+        let entries = log_store.delta_storage.scan(7, 9).await.unwrap();
+        let versions: Vec<_> = entries.iter().map(|(v, _)| *v).collect();
+        assert_eq!(versions, vec![7, 8]);
+
+        // Start beyond any existing file returns empty.
+        let entries = log_store
+            .delta_storage
+            .scan(10, ManifestVersion::MAX)
+            .await
+            .unwrap();
+        assert!(entries.is_empty());
     }
 }

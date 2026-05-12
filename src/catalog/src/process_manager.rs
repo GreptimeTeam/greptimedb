@@ -173,7 +173,7 @@ impl ProcessManager {
         let mut processes = vec![];
         if let Some(remote_frontend_selector) = self.frontend_selector.as_ref() {
             let frontends = remote_frontend_selector
-                .select(|node| node.peer.addr != self.server_addr)
+                .select(|peer| peer.addr != self.server_addr)
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             for mut f in frontends {
@@ -211,7 +211,7 @@ impl ProcessManager {
                 .frontend_selector
                 .as_ref()
                 .context(error::MetaClientMissingSnafu)?
-                .select(|node| node.peer.addr == server_addr)
+                .select(|peer| peer.addr == server_addr)
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             ensure!(

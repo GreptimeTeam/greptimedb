@@ -163,7 +163,7 @@ pub fn column_to_schema(
     } else {
         false
     };
-    if is_json2_column || matches!(column.data_type(), SqlDataType::JSON) {
+    if is_json2_column {
         let settings = column
             .extensions
             .build_json_structure_settings()?

@@ -16,10 +16,7 @@ use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, Peer};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::rpc::store::{
-    BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
-    PutRequest, RangeRequest,
-};
+use common_meta::rpc::store::{BatchGetRequest, RangeRequest};
 use meta_client::client::MetaClientBuilder;
 use tracing::{Level, event, subscriber};
 use tracing_subscriber::FmtSubscriber;
@@ -67,14 +64,6 @@ async fn run() {
         }
     });
 
-    // put
-    let put = PutRequest::new()
-        .with_key(b"key1".to_vec())
-        .with_value(b"value1".to_vec())
-        .with_prev_kv();
-    let res = meta_client.put(put).await.unwrap();
-    event!(Level::INFO, "put result: {:#?}", res);
-
     // get
     let range = RangeRequest::new().with_key(b"key1".to_vec());
     let res = meta_client.range(range.clone()).await.unwrap();
@@ -85,60 +74,10 @@ async fn run() {
     let res = meta_client.range(range2.clone()).await.unwrap();
     event!(Level::INFO, "get prefix result: {:#?}", res);
 
-    // batch put
-    let batch_put = BatchPutRequest::new()
-        .add_kv(b"batch_put1".to_vec(), b"batch_put_v1".to_vec())
-        .add_kv(b"batch_put2".to_vec(), b"batch_put_v2".to_vec())
-        .with_prev_kv();
-    let res = meta_client.batch_put(batch_put).await.unwrap();
-    event!(Level::INFO, "batch put result: {:#?}", res);
-
-    // cas
-    let cas = CompareAndPutRequest::new()
-        .with_key(b"batch_put1".to_vec())
-        .with_expect(b"batch_put_v_fail".to_vec())
-        .with_value(b"batch_put_v111".to_vec());
-
-    let res = meta_client.compare_and_put(cas).await.unwrap();
-    event!(Level::INFO, "cas 0 result: {:#?}", res);
-
-    let cas = CompareAndPutRequest::new()
-        .with_key(b"batch_put1".to_vec())
-        .with_expect(b"batch_put_v1".to_vec())
-        .with_value(b"batch_put_v111".to_vec());
-
-    let res = meta_client.compare_and_put(cas).await.unwrap();
-    event!(Level::INFO, "cas 1 result: {:#?}", res);
-
-    // delete
-    let delete_range = DeleteRangeRequest::new().with_key(b"key1".to_vec());
-    let res = meta_client.delete_range(delete_range).await.unwrap();
-    event!(Level::INFO, "delete range result: {:#?}", res);
-
-    // get none
-    let res = meta_client.range(range).await.unwrap();
-    event!(Level::INFO, "get range result: {:#?}", res);
-
-    // batch delete
-    // put two
-    let batch_put = BatchPutRequest::new()
-        .add_kv(b"batch_put1".to_vec(), b"batch_put_v1".to_vec())
-        .add_kv(b"batch_put2".to_vec(), b"batch_put_v2".to_vec())
-        .with_prev_kv();
-    let res = meta_client.batch_put(batch_put).await.unwrap();
-    event!(Level::INFO, "batch put result: {:#?}", res);
-
-    // delete one
-    let batch_delete = BatchDeleteRequest::new()
-        .add_key(b"batch_put1".to_vec())
-        .with_prev_kv();
-    let res = meta_client.batch_delete(batch_delete).await.unwrap();
-    event!(Level::INFO, "batch delete result: {:#?}", res);
-
-    // get other one
+    // batch get
     let batch_get = BatchGetRequest::new()
-        .add_key(b"batch_put1".to_vec())
-        .add_key(b"batch_put2".to_vec());
+        .add_key(b"key1".to_vec())
+        .add_key(b"key2".to_vec());
 
     let res = meta_client.batch_get(batch_get).await.unwrap();
     event!(Level::INFO, "batch get result: {:#?}", res);

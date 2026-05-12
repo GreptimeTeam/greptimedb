@@ -23,9 +23,11 @@ use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
+use crate::Error;
 use crate::data_type::DataType;
 use crate::error::{
     DeserializeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, MergeJsonDatatypeSnafu, Result,
+    UnsupportedArrowTypeSnafu,
 };
 use crate::prelude::ConcreteDataType;
 use crate::scalars::ScalarVectorBuilder;
@@ -49,8 +51,9 @@ pub enum JsonNumberType {
     F64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum JsonNativeType {
+    #[default]
     Null,
     Bool,
     Number(JsonNumberType),
@@ -78,6 +81,41 @@ impl JsonNativeType {
 
     pub fn f64() -> Self {
         Self::Number(JsonNumberType::F64)
+    }
+
+    /// Merge other [JsonNativeType] into this.
+    /// Conflicting fields will be resolved to the "Variant" type.
+    pub fn merge(&mut self, other: &JsonNativeType) {
+        if self == other {
+            return;
+        }
+
+        fn merge_object(this: &mut JsonObjectType, that: &JsonObjectType) {
+            // merge "that" into "this" directly:
+            for (type_name, that_type) in that {
+                if let Some(this_type) = this.get_mut(type_name) {
+                    this_type.merge(that_type);
+                } else {
+                    this.insert(type_name.clone(), that_type.clone());
+                }
+            }
+        }
+
+        let zelf = std::mem::take(self);
+        *self = match (zelf, other) {
+            (JsonNativeType::Object(mut this), JsonNativeType::Object(that)) => {
+                merge_object(&mut this, that);
+                JsonNativeType::Object(this)
+            }
+            (JsonNativeType::Array(mut this), JsonNativeType::Array(that)) => {
+                this.merge(that);
+                JsonNativeType::Array(this)
+            }
+            (JsonNativeType::Null, that) => that.clone(),
+            (this, JsonNativeType::Null) => this,
+            (this, that) if this == *that => this,
+            _ => JsonNativeType::Variant,
+        };
     }
 }
 
@@ -136,6 +174,56 @@ impl From<&ConcreteDataType> for JsonNativeType {
             ConcreteDataType::Binary(_) => JsonNativeType::Variant,
             _ => unreachable!(),
         }
+    }
+}
+
+impl TryFrom<&ArrowDataType> for JsonNativeType {
+    type Error = Error;
+
+    fn try_from(t: &ArrowDataType) -> Result<Self> {
+        let t = match t {
+            ArrowDataType::Null => JsonNativeType::Null,
+            ArrowDataType::Boolean => JsonNativeType::Bool,
+            ArrowDataType::Int8
+            | ArrowDataType::Int16
+            | ArrowDataType::Int32
+            | ArrowDataType::Int64 => JsonNativeType::i64(),
+            ArrowDataType::UInt8
+            | ArrowDataType::UInt16
+            | ArrowDataType::UInt32
+            | ArrowDataType::UInt64 => JsonNativeType::u64(),
+            ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => {
+                JsonNativeType::f64()
+            }
+            ArrowDataType::Binary
+            | ArrowDataType::FixedSizeBinary(_)
+            | ArrowDataType::LargeBinary
+            | ArrowDataType::BinaryView => JsonNativeType::Variant,
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+                JsonNativeType::String
+            }
+            ArrowDataType::List(field)
+            | ArrowDataType::ListView(field)
+            | ArrowDataType::FixedSizeList(field, _)
+            | ArrowDataType::LargeList(field)
+            | ArrowDataType::LargeListView(field) => {
+                JsonNativeType::Array(Box::new(Self::try_from(field.data_type())?))
+            }
+            ArrowDataType::Struct(fields) => {
+                let mut object = JsonObjectType::new();
+                for field in fields {
+                    object.insert(field.name().clone(), Self::try_from(field.data_type())?);
+                }
+                JsonNativeType::Object(object)
+            }
+            t => {
+                return UnsupportedArrowTypeSnafu {
+                    arrow_type: t.clone(),
+                }
+                .fail();
+            }
+        };
+        Ok(t)
     }
 }
 
@@ -229,11 +317,10 @@ impl JsonType {
             return Ok(());
         }
 
-        match (&self.format, &other.format) {
+        match (&mut self.format, &other.format) {
             (JsonFormat::Jsonb, JsonFormat::Jsonb) => Ok(()),
             (JsonFormat::Json2(this), JsonFormat::Json2(that)) => {
-                let merged = merge(this.as_ref(), that.as_ref());
-                self.format = JsonFormat::Json2(Box::new(merged));
+                this.merge(that);
                 Ok(())
             }
             _ => MergeJsonDatatypeSnafu {
@@ -289,31 +376,9 @@ pub(crate) fn plain_json_struct_type(item_type: ConcreteDataType) -> StructType 
     StructType::new(Arc::new(vec![field]))
 }
 
-fn merge(this: &JsonNativeType, that: &JsonNativeType) -> JsonNativeType {
-    fn merge_object(this: &JsonObjectType, that: &JsonObjectType) -> JsonObjectType {
-        let mut this = this.clone();
-        // merge "that" into "this" directly:
-        for (type_name, that_type) in that {
-            if let Some(this_type) = this.get_mut(type_name) {
-                let merged_type = merge(this_type, that_type);
-                *this_type = merged_type;
-            } else {
-                this.insert(type_name.clone(), that_type.clone());
-            }
-        }
-        this
-    }
-
-    match (this, that) {
-        (this, that) if this == that => this.clone(),
-        (JsonNativeType::Array(this), JsonNativeType::Array(that)) => {
-            JsonNativeType::Array(Box::new(merge(this.as_ref(), that.as_ref())))
-        }
-        (JsonNativeType::Object(this), JsonNativeType::Object(that)) => {
-            JsonNativeType::Object(merge_object(this, that))
-        }
-        (JsonNativeType::Null, x) | (x, JsonNativeType::Null) => x.clone(),
-        _ => JsonNativeType::Variant,
+impl From<&ArrowDataType> for JsonType {
+    fn from(t: &ArrowDataType) -> Self {
+        JsonType::new_json2(JsonNativeType::from(&ConcreteDataType::from_arrow_type(t)))
     }
 }
 

@@ -239,7 +239,7 @@ pub fn maybe_watch_server_tls_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::install_ring_crypto_provider;
+    use crate::install_default_crypto_provider;
     use crate::tls::TlsMode::Disable;
 
     #[test]
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn test_tls_file_change_watch() {
         common_telemetry::init_default_ut_logging();
-        let _ = install_ring_crypto_provider();
+        let _ = install_default_crypto_provider();
 
         let dir = tempfile::tempdir().unwrap();
         let cert_path = dir.path().join("server.crt");

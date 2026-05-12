@@ -88,6 +88,7 @@ impl InformationExtension for StandaloneInformationExtension {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string(),
+            env_vars: Default::default(),
         };
         Ok(vec![node_info])
     }

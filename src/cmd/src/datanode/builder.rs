@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use cache::build_datanode_cache_registry;
-use catalog::kvbackend::MetaKvBackend;
+use catalog::kvbackend::new_read_only_meta_kv_backend;
 use common_base::Plugins;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_telemetry::info;
@@ -99,9 +99,7 @@ impl InstanceBuilder {
         .await
         .context(MetaClientInitSnafu)?;
 
-        let backend = Arc::new(MetaKvBackend {
-            client: client.clone(),
-        });
+        let backend = new_read_only_meta_kv_backend(client.clone());
         let mut builder = DatanodeBuilder::new(dn_opts.clone(), plugins.clone(), backend.clone());
 
         let registry = Arc::new(

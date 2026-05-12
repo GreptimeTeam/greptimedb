@@ -129,9 +129,8 @@ impl GrpcQueryHandler for Instance {
                                 .decode(bytes::Bytes::from(plan), dummy_catalog_list, true)
                                 .await
                                 .context(SubstraitDecodeLogicalPlanSnafu)?;
-                            let query = logical_plan.display_indent().to_string();
                             let output =
-                                self.do_exec_plan_inner(logical_plan, query, ctx.clone()).await?;
+                                self.do_exec_plan_inner(logical_plan, None, ctx.clone()).await?;
 
                             attach_timer(output, timer)
                         }
@@ -467,9 +466,8 @@ impl Instance {
         // Optimize the plan
         let optimized_plan = state.optimize(&analyzed_plan).context(DataFusionSnafu)?;
 
-        let query = optimized_plan.display_indent().to_string();
         let output = self
-            .do_exec_plan_inner(optimized_plan, query, ctx.clone())
+            .do_exec_plan_inner(optimized_plan, None, ctx.clone())
             .await?;
 
         Ok(attach_timer(output, timer))

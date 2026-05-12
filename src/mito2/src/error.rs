@@ -1240,6 +1240,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to cast column"))]
+    CastColumn {
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1329,6 +1337,7 @@ impl ErrorExt for Error {
             | ReadDataPart { .. }
             | BuildEntry { .. }
             | Metadata { .. }
+            | CastColumn { .. }
             | MitoManifestInfo { .. } => StatusCode::Internal,
 
             FetchManifests { source, .. } => source.status_code(),

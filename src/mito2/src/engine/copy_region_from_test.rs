@@ -71,9 +71,7 @@ async fn test_engine_copy_region_from_with_format(flat_format: bool, with_index:
     engine
         .handle_request(
             source_region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -184,9 +182,7 @@ async fn test_engine_copy_region_failure_with_format(flat_format: bool) {
     engine
         .handle_request(
             source_region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();

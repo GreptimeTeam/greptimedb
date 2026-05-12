@@ -1247,7 +1247,10 @@ pub async fn flush_region(engine: &MitoEngine, region_id: RegionId, row_group_si
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest { row_group_size }),
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size,
+                reason: None,
+            }),
         )
         .await
         .unwrap();

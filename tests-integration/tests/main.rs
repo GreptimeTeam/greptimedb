@@ -33,6 +33,11 @@ grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 
 http_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_http_auth_from_standalone_user_provider_config() {
+    http::test_http_auth_from_standalone_user_provider_config().await;
+}
+
 sql_tests!(File);
 
 region_migration_tests!(File);

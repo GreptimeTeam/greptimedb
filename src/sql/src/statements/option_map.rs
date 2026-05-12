@@ -49,6 +49,18 @@ impl OptionMap {
         }
     }
 
+    pub fn from_filtered_string_map(
+        options: &HashMap<String, String>,
+        hidden_keys: &[&str],
+    ) -> Self {
+        Self::from(
+            options
+                .iter()
+                .filter(|(key, _)| !hidden_keys.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone())),
+        )
+    }
+
     pub fn insert(&mut self, k: String, v: String) {
         if REDACTED_OPTIONS.contains(&k.as_str()) {
             self.secrets.insert(k, SecretString::new(Box::new(v)));
@@ -221,6 +233,8 @@ impl VisitMut for OptionMap {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::statements::OptionMap;
 
     #[test]
@@ -236,5 +250,19 @@ mod tests {
         let mut map = OptionMap::default();
         map.insert("a.b".to_string(), "中文comment\n".to_string());
         assert_eq!("'a.b' = '中文comment\\n'", map.kv_pairs()[0]);
+    }
+
+    #[test]
+    fn test_from_filtered_string_map() {
+        let map = OptionMap::from_filtered_string_map(
+            &HashMap::from([
+                ("visible".to_string(), "1".to_string()),
+                ("hidden".to_string(), "2".to_string()),
+            ]),
+            &["hidden"],
+        );
+
+        assert_eq!(map.get("visible"), Some("1"));
+        assert_eq!(map.get("hidden"), None);
     }
 }

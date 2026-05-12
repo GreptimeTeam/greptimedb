@@ -14,6 +14,8 @@
 
 //! Parquet reader.
 
+mod stream;
+
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -22,13 +24,16 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{tracing, warn};
+use common_telemetry::{error, tracing, warn};
+use datafusion::physical_plan::PhysicalExpr;
 use datafusion_expr::Expr;
+use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow::array::ArrayRef;
-use datatypes::arrow::datatypes::Field;
+use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
+use datatypes::schema::ext::ArrowSchemaExt;
 use futures::StreamExt;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
@@ -44,6 +49,7 @@ use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
+use self::stream::{NestedSchemaAligner, ParquetErrorAdapter, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
@@ -55,6 +61,7 @@ use crate::metrics::{
 };
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
+use crate::read::read_columns::ReadColumns;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierRef, BloomFilterIndexApplyMetrics,
@@ -76,9 +83,9 @@ use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::need_override_sequence;
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
-    PrefilterContextBuilder, execute_prefilter, is_usable_primary_key_filter,
+    PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
-use crate::sst::parquet::read_columns::{ParquetReadColumns, build_projection_mask};
+use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_plan};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -120,11 +127,11 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     /// Predicate to push down.
     predicate: Option<Predicate>,
-    /// Metadata of columns to read.
+    /// The columns to read.
     ///
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
-    projection: Option<Vec<ColumnId>>,
+    read_cols: Option<ReadColumns>,
     /// Strategy to cache SST data.
     cache_strategy: CacheStrategy,
     /// Index appliers.
@@ -164,7 +171,7 @@ impl ParquetReaderBuilder {
             file_handle,
             object_store,
             predicate: None,
-            projection: None,
+            read_cols: None,
             cache_strategy: CacheStrategy::Disabled,
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
@@ -192,8 +199,8 @@ impl ParquetReaderBuilder {
     ///
     /// The reader only applies the projection to fields.
     #[must_use]
-    pub fn projection(mut self, projection: Option<Vec<ColumnId>>) -> ParquetReaderBuilder {
-        self.projection = projection;
+    pub fn projection(mut self, read_cols: Option<ReadColumns>) -> ParquetReaderBuilder {
+        self.read_cols = read_cols;
         self
     }
 
@@ -370,30 +377,25 @@ impl ParquetReaderBuilder {
             None
         };
 
-        let mut read_format = if let Some(column_ids) = &self.projection {
-            FlatReadFormat::new(
-                region_meta.clone(),
-                column_ids.iter().copied(),
-                Some(parquet_meta.file_metadata().schema_descr().num_columns()),
-                &file_path,
-                skip_auto_convert,
-            )?
+        let read_cols = if let Some(read_cols) = &self.read_cols {
+            read_cols.clone()
         } else {
-            // Lists all column ids to read, we always use the expected metadata if possible.
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
-            let column_ids: Vec<_> = expected_meta
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .collect();
-            FlatReadFormat::new(
-                region_meta.clone(),
-                column_ids.iter().copied(),
-                Some(parquet_meta.file_metadata().schema_descr().num_columns()),
-                &file_path,
-                skip_auto_convert,
-            )?
+            // Lists all column ids to read, we always use the expected metadata if possible.
+            ReadColumns::from_deduped_column_ids(
+                expected_meta
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id),
+            )
         };
+        let mut read_format = FlatReadFormat::new(
+            region_meta.clone(),
+            read_cols,
+            Some(parquet_meta.file_metadata().schema_descr().num_columns()),
+            &file_path,
+            skip_auto_convert,
+        )?;
         if need_override_sequence(&parquet_meta) {
             read_format
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
@@ -401,11 +403,8 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let parquet_read_cols = ParquetReadColumns::from_deduped_root_indices(
-            read_format.projection_indices().iter().copied(),
-        );
-
-        let projection_mask = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
+        let parquet_read_cols = read_format.parquet_read_columns();
+        let projection_plan = build_projection_plan(parquet_read_cols, parquet_schema_desc);
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
@@ -438,27 +437,14 @@ impl ParquetReaderBuilder {
             .unwrap_or_else(|| region_meta.schema.clone());
 
         // Create ArrowReaderMetadata for async stream building.
-        let arrow_reader_options =
-            ArrowReaderOptions::new().with_schema(read_format.arrow_schema().clone());
+        let mut arrow_reader_options = ArrowReaderOptions::new();
+        if !read_format.arrow_schema().has_json_extension_field() {
+            arrow_reader_options =
+                arrow_reader_options.with_schema(read_format.arrow_schema().clone());
+        }
         let arrow_metadata =
             ArrowReaderMetadata::try_new(parquet_meta.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;
-
-        let filters = if let Some(predicate) = &self.predicate {
-            predicate
-                .exprs()
-                .iter()
-                .filter_map(|expr| {
-                    SimpleFilterContext::new_opt(
-                        &region_meta,
-                        self.expected_metadata.as_deref(),
-                        expr,
-                    )
-                })
-                .collect::<Vec<_>>()
-        } else {
-            vec![]
-        };
 
         let dyn_filters = if let Some(predicate) = &self.predicate {
             predicate.dyn_filters().as_ref().clone()
@@ -468,31 +454,28 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
-        // Extract primary key filters from precomputed filter contexts for prefiltering.
-        let primary_key_filters = {
-            let pk_filters = filters
-                .iter()
-                .filter_map(SimpleFilterContext::primary_key_prefilter)
-                .collect::<Vec<_>>();
-            (!pk_filters.is_empty()).then_some(Arc::new(pk_filters))
-        };
-
-        let prefilter_builder = PrefilterContextBuilder::new(
+        let filter_plan = build_reader_filter_plan(
+            self.predicate.as_ref(),
+            self.expected_metadata.as_deref(),
+            self.pre_filter_mode,
             &read_format,
-            &codec,
-            primary_key_filters.as_ref(),
             parquet_meta.file_metadata().schema_descr(),
+            &codec,
         );
+
+        let output_schema = read_format.output_arrow_schema()?;
 
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
             file_path,
             parquet_meta,
             arrow_metadata,
+            output_schema,
             object_store: self.object_store.clone(),
-            projection: projection_mask,
+            projection: projection_plan,
+            has_nested_projection: parquet_read_cols.has_nested(),
             cache_strategy: self.cache_strategy.clone(),
-            prefilter_builder,
+            prefilter_builder: filter_plan.prefilter_builder,
         };
 
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
@@ -500,7 +483,7 @@ impl ParquetReaderBuilder {
         let context = FileRangeContext::new(
             reader_builder,
             RangeBase {
-                filters,
+                filters: filter_plan.remaining_simple_filters,
                 dyn_filters,
                 read_format,
                 expected_metadata: self.expected_metadata.clone(),
@@ -1633,10 +1616,14 @@ pub(crate) struct RowGroupReaderBuilder {
     parquet_meta: Arc<ParquetMetaData>,
     /// Arrow reader metadata for building async stream.
     arrow_metadata: ArrowReaderMetadata,
+    /// Projected output schema aligned with `projection.projected_root_presence`.
+    output_schema: SchemaRef,
     /// Object store as an Operator.
     object_store: ObjectStore,
     /// Projection mask.
-    projection: ProjectionMask,
+    projection: ProjectionMaskPlan,
+    /// Whether projected read columns include nested paths.
+    has_nested_projection: bool,
     /// Cache.
     cache_strategy: CacheStrategy,
     /// Pre-built prefilter state. `None` if prefiltering is not applicable.
@@ -1646,12 +1633,6 @@ pub(crate) struct RowGroupReaderBuilder {
 /// Context passed to [RowGroupReaderBuilder::build()] carrying all information
 /// needed for prefiltering decisions.
 pub(crate) struct RowGroupBuildContext<'a> {
-    /// Simple filters pushed down. Used by prefilter on other columns.
-    #[allow(dead_code)]
-    pub(crate) filters: &'a [SimpleFilterContext],
-    /// Whether to skip field filters. Used by prefilter on other columns.
-    #[allow(dead_code)]
-    pub(crate) skip_fields: bool,
     /// Index of the row group to read.
     pub(crate) row_group_idx: usize,
     /// Row selection for the row group. `None` means all rows.
@@ -1679,7 +1660,7 @@ impl RowGroupReaderBuilder {
         &self.cache_strategy
     }
 
-    pub(crate) fn has_flat_primary_key_prefilter(&self) -> bool {
+    pub(crate) fn has_predicate_prefilter(&self) -> bool {
         self.prefilter_builder.is_some()
     }
 
@@ -1688,22 +1669,36 @@ impl RowGroupReaderBuilder {
     /// If prefiltering is applicable (based on `build_ctx`), this performs a two-phase read:
     /// 1. Reads only the prefilter columns (e.g. PK column), applies filters to get a refined row selection
     /// 2. Reads the full projection with the refined row selection
+    ///
+    /// The prefilter pass is *best-effort pruning*, not the precise filter for the query.
+    /// Predicates that cannot be lowered to prefilter columns (column not projected,
+    /// expression not supported, etc.) are silently skipped. Correctness rests on the
+    /// DataFusion `FilterExec` above this reader, which always re-applies the original
+    /// predicate. Tag and timestamp predicates that flow through [`SimpleFilterEvaluator`]
+    /// are an exception — the engine enforces them precisely, so the prefilter pass is the
+    /// only place they execute. See [`build_reader_filter_plan`] for the bucketing rules.
+    ///
+    /// When the prefilter result selects no rows, the second read still issues but
+    /// parquet-rs short-circuits before any column-chunk IO: the row-group state machine
+    /// jumps to `Finished` once it sees `num_rows_selected() == 0`, so no fast path is
+    /// added here.
     pub(crate) async fn build(
         &self,
         build_ctx: RowGroupBuildContext<'_>,
-    ) -> Result<ParquetRecordBatchStream<SstAsyncFileReader>> {
+    ) -> Result<ProjectedRecordBatchStream> {
         let prefilter_ctx = self.prefilter_builder.as_ref().map(|b| b.build());
 
         let Some(mut prefilter_ctx) = prefilter_ctx else {
             // No prefilter applicable, build stream with full projection.
-            return self
+            let stream = self
                 .build_with_projection(
                     build_ctx.row_group_idx,
                     build_ctx.row_selection,
-                    self.projection.clone(),
+                    self.projection.mask.clone(),
                     build_ctx.fetch_metrics,
                 )
-                .await;
+                .await?;
+            return self.make_projected_stream(stream);
         };
 
         let prefilter_start = Instant::now();
@@ -1716,13 +1711,32 @@ impl RowGroupReaderBuilder {
 
         let refined_selection = Some(prefilter_result.refined_selection);
 
-        self.build_with_projection(
-            build_ctx.row_group_idx,
-            refined_selection,
-            self.projection.clone(),
-            build_ctx.fetch_metrics,
-        )
-        .await
+        let stream = self
+            .build_with_projection(
+                build_ctx.row_group_idx,
+                refined_selection,
+                self.projection.mask.clone(),
+                build_ctx.fetch_metrics,
+            )
+            .await?;
+        self.make_projected_stream(stream)
+    }
+
+    fn make_projected_stream(
+        &self,
+        stream: ParquetRecordBatchStream<SstAsyncFileReader>,
+    ) -> Result<ProjectedRecordBatchStream> {
+        let stream = ParquetErrorAdapter::new(stream, self.file_path.clone());
+        if !self.has_nested_projection {
+            return Ok(stream.boxed());
+        }
+
+        Ok(NestedSchemaAligner::new(
+            stream,
+            self.projection.projected_root_presence.clone(),
+            self.output_schema.clone(),
+        )?
+        .boxed())
     }
 
     /// Builds a [ParquetRecordBatchStream] with a custom projection mask.
@@ -1766,6 +1780,7 @@ impl RowGroupReaderBuilder {
     }
 }
 
+#[derive(Clone)]
 /// The filter to evaluate or the prune result of the default value.
 pub(crate) enum MaybeFilter {
     /// The filter to evaluate.
@@ -1776,6 +1791,17 @@ pub(crate) enum MaybeFilter {
     Pruned,
 }
 
+impl MaybeFilter {
+    /// Returns the inner filter when it is available.
+    pub(crate) fn as_filter(&self) -> Option<&SimpleFilterEvaluator> {
+        match self {
+            MaybeFilter::Filter(filter) => Some(filter),
+            MaybeFilter::Matched | MaybeFilter::Pruned => None,
+        }
+    }
+}
+
+#[derive(Clone)]
 /// Context to evaluate the column filter for a parquet file.
 pub(crate) struct SimpleFilterContext {
     /// Filter to evaluate.
@@ -1784,8 +1810,6 @@ pub(crate) struct SimpleFilterContext {
     column_id: ColumnId,
     /// Semantic type of the column.
     semantic_type: SemanticType,
-    /// Whether this filter can be applied by flat parquet primary-key prefiltering.
-    usable_primary_key_filter: bool,
 }
 
 impl SimpleFilterContext {
@@ -1799,10 +1823,6 @@ impl SimpleFilterContext {
         expr: &Expr,
     ) -> Option<Self> {
         let filter = SimpleFilterEvaluator::try_new(expr)?;
-        // Parquet PK prefilter always supports the partition column. Only
-        // PartitionTreeMemtable skips it after partition pruning.
-        let usable_primary_key_filter =
-            is_usable_primary_key_filter(sst_meta, expected_meta, &filter);
         let (column_metadata, maybe_filter) = match expected_meta {
             Some(meta) => {
                 // Gets the column metadata from the expected metadata.
@@ -1833,14 +1853,10 @@ impl SimpleFilterContext {
             }
         };
 
-        let usable_primary_key_filter =
-            matches!(maybe_filter, MaybeFilter::Filter(_)) && usable_primary_key_filter;
-
         Some(Self {
             filter: maybe_filter,
             column_id: column_metadata.column_id,
             semantic_type: column_metadata.semantic_type,
-            usable_primary_key_filter,
         })
     }
 
@@ -1858,22 +1874,116 @@ impl SimpleFilterContext {
     pub(crate) fn semantic_type(&self) -> SemanticType {
         self.semantic_type
     }
+}
 
-    /// Returns whether this filter is eligible for flat parquet PK prefiltering.
-    pub(crate) fn usable_primary_key_filter(&self) -> bool {
-        self.usable_primary_key_filter
-    }
+/// Context to evaluate a physical expression for a parquet file.
+#[derive(Clone)]
+pub(crate) struct PhysicalFilterContext {
+    /// Filter to evaluate.
+    filter: Arc<dyn PhysicalExpr>,
+    /// Id of the column to evaluate.
+    column_id: ColumnId,
+    /// Name of the column to evaluate.
+    column_name: String,
+    /// Semantic type of the column.
+    semantic_type: SemanticType,
+    /// Schema containing only the referenced column.
+    schema: SchemaRef,
+}
 
-    /// Returns the filter evaluator when it is eligible for PK prefiltering.
-    pub(crate) fn primary_key_prefilter(&self) -> Option<SimpleFilterEvaluator> {
-        if !self.usable_primary_key_filter {
+impl PhysicalFilterContext {
+    /// Creates a context for the `expr`.
+    ///
+    /// Returns None if the expression doesn't reference exactly one column or the
+    /// column to filter doesn't exist in the SST metadata or the expected metadata.
+    pub(crate) fn new_opt(
+        sst_meta: &RegionMetadataRef,
+        expected_meta: Option<&RegionMetadata>,
+        read_format: &FlatReadFormat,
+        expr: &Expr,
+    ) -> Option<Self> {
+        if !Self::is_prefilter_candidate(expr) {
             return None;
         }
+        let column_name = Self::single_column_name(expr)?;
+        let column_metadata = match expected_meta {
+            Some(meta) => {
+                let column = meta.column_by_name(&column_name)?;
+                let sst_column = sst_meta.column_by_id(column.column_id)?;
+                // Physical expr requires the column name to match the SST column name.
+                if sst_column.column_schema.name != column_name {
+                    return None;
+                }
+                column
+            }
+            None => sst_meta.column_by_name(&column_name)?,
+        };
 
-        match &self.filter {
-            MaybeFilter::Filter(filter) => Some(filter.clone()),
-            MaybeFilter::Matched | MaybeFilter::Pruned => None,
+        // The column must be present in the projected arrow schema for the
+        // prefilter to be able to read it.
+        let (_, field) = read_format.arrow_schema().column_with_name(&column_name)?;
+        let field = field.clone();
+        let schema = Arc::new(ArrowSchema::new(vec![field]));
+        let physical_expr = Predicate::to_physical_expr(expr, &schema)
+            .inspect_err(|e| {
+                error!(e; "Unable to build physical filter for {expr}, schema: {schema:?}");
+            })
+            .ok()?;
+
+        Some(Self {
+            filter: physical_expr,
+            column_id: column_metadata.column_id,
+            column_name,
+            semantic_type: column_metadata.semantic_type,
+            schema,
+        })
+    }
+
+    /// Returns true if the expression is a variant we want to evaluate as a
+    /// physical prefilter. Binary exprs are intentionally excluded because
+    /// [`SimpleFilterEvaluator`] already handles them.
+    // TODO(yingwen): extend more expressions if necessary. For example, allow some cheap scalar functions (e.g. `lower`, `length`, date truncations)
+    fn is_prefilter_candidate(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::InList(_) | Expr::IsNull(_) | Expr::IsNotNull(_) | Expr::Between(_)
+        )
+    }
+
+    fn single_column_name(expr: &Expr) -> Option<String> {
+        let mut columns = HashSet::new();
+        if expr_to_columns(expr, &mut columns).is_err() {
+            return None;
         }
+        if columns.len() != 1 {
+            return None;
+        }
+        columns.iter().next().map(|column| column.name.clone())
+    }
+
+    /// Returns the filter to evaluate.
+    pub(crate) fn filter(&self) -> &Arc<dyn PhysicalExpr> {
+        &self.filter
+    }
+
+    /// Returns the column id.
+    pub(crate) fn column_id(&self) -> ColumnId {
+        self.column_id
+    }
+
+    /// Returns the column name.
+    pub(crate) fn column_name(&self) -> &str {
+        &self.column_name
+    }
+
+    /// Returns the semantic type of the column.
+    pub(crate) fn semantic_type(&self) -> SemanticType {
+        self.semantic_type
+    }
+
+    /// Returns the schema containing only the referenced column.
+    pub(crate) fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
@@ -1930,7 +2040,6 @@ impl ParquetReader {
                     row_group_idx,
                     Some(row_selection),
                     Some(&self.fetch_metrics),
-                    skip_fields,
                 ))
                 .await?;
             self.reader = Some(FlatPruneReader::new_with_row_group_reader(
@@ -1961,7 +2070,6 @@ impl ParquetReader {
                     row_group_idx,
                     Some(row_selection),
                     Some(&fetch_metrics),
-                    skip_fields,
                 ))
                 .await?;
             Some(FlatPruneReader::new_with_row_group_reader(
@@ -1996,17 +2104,14 @@ pub(crate) struct FlatRowGroupReader {
     /// Context for file ranges.
     context: FileRangeContextRef,
     /// Inner parquet record batch stream.
-    stream: ParquetRecordBatchStream<SstAsyncFileReader>,
+    stream: ProjectedRecordBatchStream,
     /// Cached sequence array to override sequences.
     override_sequence: Option<ArrayRef>,
 }
 
 impl FlatRowGroupReader {
     /// Creates a new flat reader from file range.
-    pub(crate) fn new(
-        context: FileRangeContextRef,
-        stream: ParquetRecordBatchStream<SstAsyncFileReader>,
-    ) -> Self {
+    pub(crate) fn new(context: FileRangeContextRef, stream: ProjectedRecordBatchStream) -> Self {
         // The batch length from the reader should be less than or equal to DEFAULT_READ_BATCH_SIZE.
         let override_sequence = context
             .read_format()
@@ -2023,9 +2128,7 @@ impl FlatRowGroupReader {
     pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self.stream.next().await {
             Some(batch_result) => {
-                let record_batch = batch_result.context(ReadParquetSnafu {
-                    path: self.context.file_path(),
-                })?;
+                let record_batch = batch_result?;
 
                 let record_batch = self
                     .context
@@ -2121,10 +2224,12 @@ mod tests {
         let region_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             region_metadata.clone(),
-            region_metadata
-                .column_metadatas
-                .iter()
-                .map(|column| column.column_id),
+            ReadColumns::from_deduped_column_ids(
+                region_metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_id),
+            ),
             None,
             &file_path,
             false,
@@ -2206,32 +2311,82 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_filter_context_marks_usable_primary_key_filter() {
+    fn test_simple_filter_context_uses_default_value_for_mismatched_expected_metadata() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let ctx =
-            SimpleFilterContext::new_opt(&metadata, None, &col("tag_0").eq(lit("a"))).unwrap();
-
-        assert!(ctx.usable_primary_key_filter());
-        assert!(ctx.primary_key_prefilter().is_some());
-    }
-
-    #[test]
-    fn test_simple_filter_context_skips_non_usable_primary_key_filter() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-
-        let field_ctx =
-            SimpleFilterContext::new_opt(&metadata, None, &col("field_0").eq(lit(1_u64))).unwrap();
-        assert!(!field_ctx.usable_primary_key_filter());
-        assert!(field_ctx.primary_key_prefilter().is_none());
-
         let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
-        let mismatched_ctx = SimpleFilterContext::new_opt(
+        let ctx = SimpleFilterContext::new_opt(
             &metadata,
             Some(expected_metadata.as_ref()),
             &col("tag_0").eq(lit("a")),
         )
         .unwrap();
-        assert!(!mismatched_ctx.usable_primary_key_filter());
-        assert!(mismatched_ctx.primary_key_prefilter().is_none());
+        assert!(matches!(
+            ctx.filter(),
+            MaybeFilter::Matched | MaybeFilter::Pruned
+        ));
+    }
+
+    #[test]
+    fn test_physical_filter_context_skips_renamed_column() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        let ctx = PhysicalFilterContext::new_opt(
+            &metadata,
+            Some(expected_metadata.as_ref()),
+            &read_format,
+            &col("tag_0").in_list(vec![lit("a"), lit("b")], false),
+        );
+
+        assert!(ctx.is_none());
+    }
+
+    #[test]
+    fn test_physical_filter_context_only_accepts_prefilter_candidates() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        // InList is on the allowlist — should build a context.
+        let in_list = col("tag_0").in_list(vec![lit("a"), lit("b")], false);
+        assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &in_list).is_some());
+
+        // NOT IN uses the same variant with `negated: true` — also accepted.
+        let not_in = col("tag_0").in_list(vec![lit("a"), lit("b")], true);
+        assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &not_in).is_some());
+
+        // IS NULL / IS NOT NULL are accepted.
+        let is_null = col("tag_0").is_null();
+        assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &is_null).is_some());
+        let is_not_null = col("tag_0").is_not_null();
+        assert!(
+            PhysicalFilterContext::new_opt(&metadata, None, &read_format, &is_not_null).is_some()
+        );
+
+        // BETWEEN is accepted.
+        let between = col("field_0").between(lit(1_u64), lit(10_u64));
+        assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &between).is_some());
+
+        // Binary expr is handled by SimpleFilterEvaluator — rejected here.
+        let binary = col("tag_0").eq(lit("a"));
+        assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &binary).is_none());
     }
 }

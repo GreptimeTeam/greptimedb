@@ -556,6 +556,13 @@ pub(crate) struct SenderBulkRequest {
     pub(crate) partition_expr_version: Option<u64>,
 }
 
+#[derive(Debug)]
+pub(crate) struct BulkInsertRequest {
+    pub(crate) metadata: Option<RegionMetadataRef>,
+    pub(crate) request: RegionBulkInsertsRequest,
+    pub(crate) sender: OptionOutputTx,
+}
+
 /// Request sent to a worker with timestamp
 #[derive(Debug)]
 pub(crate) struct WorkerRequestWithTime {
@@ -609,11 +616,7 @@ pub(crate) enum WorkerRequest {
     SyncRegion(RegionSyncRequest),
 
     /// Bulk inserts request and region metadata.
-    BulkInserts {
-        metadata: Option<RegionMetadataRef>,
-        request: RegionBulkInsertsRequest,
-        sender: OptionOutputTx,
-    },
+    BulkInserts(BulkInsertRequest),
 
     /// Remap manifests request.
     RemapManifests(RemapManifestsRequest),
@@ -748,11 +751,13 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::EnterStaging(v),
             }),
-            RegionRequest::BulkInserts(region_bulk_inserts_request) => WorkerRequest::BulkInserts {
-                metadata: region_metadata,
-                sender: sender.into(),
-                request: region_bulk_inserts_request,
-            },
+            RegionRequest::BulkInserts(region_bulk_inserts_request) => {
+                WorkerRequest::BulkInserts(BulkInsertRequest {
+                    metadata: region_metadata,
+                    sender: sender.into(),
+                    request: region_bulk_inserts_request,
+                })
+            }
             RegionRequest::ApplyStagingManifest(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),

@@ -346,9 +346,7 @@ fn make_region_flush(flush: FlushRequest) -> Result<Vec<(RegionId, RegionRequest
     let region_id = flush.region_id.into();
     Ok(vec![(
         region_id,
-        RegionRequest::Flush(RegionFlushRequest {
-            row_group_size: None,
-        }),
+        RegionRequest::Flush(RegionFlushRequest::default()),
     )])
 }
 
@@ -1404,9 +1402,20 @@ impl Display for UnsetRegionOption {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegionFlushReason {
+    /// Flush triggered before region migration.
+    RegionMigration,
+    /// Flush triggered by repartition procedure.
+    Repartition,
+    /// Flush triggered by remote WAL pruning.
+    RemoteWalPrune,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RegionFlushRequest {
     pub row_group_size: Option<usize>,
+    pub reason: Option<RegionFlushReason>,
 }
 
 #[derive(Debug)]

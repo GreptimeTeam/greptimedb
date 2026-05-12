@@ -477,6 +477,10 @@ impl MergeScanExec {
             .collect()
     }
 
+    pub fn regions(&self) -> &[RegionId] {
+        &self.regions
+    }
+
     pub fn partition_count(&self) -> usize {
         self.target_partition
     }

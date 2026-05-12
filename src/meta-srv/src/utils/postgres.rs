@@ -13,6 +13,10 @@
 // limitations under the License.
 
 use common_error::ext::BoxedError;
+use common_meta::election::ElectionRef;
+use common_meta::election::rds::postgres::{ElectionPgClient, PgElection};
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::rds::PgStore;
 use common_meta::kv_backend::rds::postgres::{
     TlsMode as PgTlsMode, TlsOption as PgTlsOption, create_postgres_tls_connector,
 };
@@ -71,4 +75,78 @@ pub async fn create_postgres_pool(
     };
 
     Ok(pool)
+}
+
+/// Builds a Postgres-backed metadata [`KvBackendRef`].
+///
+/// * `store_addrs` - Postgres connection URLs; only the first address is used.
+/// * `cfg` - optional deadpool config to customize pool/session behavior.
+/// * `tls_config` - optional TLS settings for the Postgres connection.
+/// * `schema_name` - optional schema containing the metadata table.
+/// * `table_name` - metadata KV table name.
+/// * `max_txn_ops` - maximum operations allowed in one metadata transaction.
+/// * `auto_create_schema` - whether to create `schema_name` when it is missing.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_postgres_kv_backend(
+    store_addrs: &[String],
+    cfg: Option<Config>,
+    tls_config: Option<TlsOption>,
+    schema_name: Option<&str>,
+    table_name: &str,
+    max_txn_ops: usize,
+    auto_create_schema: bool,
+) -> Result<KvBackendRef> {
+    let pool = create_postgres_pool(store_addrs, cfg, tls_config).await?;
+    PgStore::with_pg_pool(
+        pool,
+        schema_name,
+        table_name,
+        max_txn_ops,
+        auto_create_schema,
+    )
+    .await
+    .context(error::KvBackendSnafu)
+}
+
+/// Builds a Postgres-backed election implementation.
+///
+/// * `store_addrs` - Postgres connection URLs; only the first address is used.
+/// * `cfg` - optional deadpool config to customize pool/session behavior.
+/// * `tls_config` - optional TLS settings for the Postgres connection.
+/// * `leader_value` - advertised address of this election candidate.
+/// * `store_key_prefix` - prefix for election and candidate keys.
+/// * `candidate_lease_ttl` - TTL for registered candidate metadata.
+/// * `meta_lease_ttl` - TTL for the elected leader metadata.
+/// * `schema_name` - optional schema containing the metadata table.
+/// * `table_name` - metadata KV table name used for election records.
+/// * `lock_id` - Postgres advisory lock id used by the election.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_postgres_election(
+    store_addrs: &[String],
+    cfg: Option<Config>,
+    tls_config: Option<TlsOption>,
+    leader_value: String,
+    store_key_prefix: String,
+    candidate_lease_ttl: std::time::Duration,
+    meta_lease_ttl: std::time::Duration,
+    schema_name: Option<&str>,
+    table_name: &str,
+    lock_id: u64,
+) -> Result<ElectionRef> {
+    let pool = create_postgres_pool(store_addrs, cfg, tls_config).await?;
+    let election_client =
+        ElectionPgClient::new(pool, meta_lease_ttl, meta_lease_ttl, meta_lease_ttl)
+            .context(error::KvBackendSnafu)?;
+    PgElection::with_pg_client(
+        leader_value,
+        election_client,
+        store_key_prefix,
+        candidate_lease_ttl,
+        meta_lease_ttl,
+        schema_name,
+        table_name,
+        lock_id,
+    )
+    .await
+    .context(error::KvBackendSnafu)
 }

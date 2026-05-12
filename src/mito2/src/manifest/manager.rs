@@ -35,8 +35,8 @@ use crate::manifest::action::{
 };
 use crate::manifest::checkpointer::Checkpointer;
 use crate::manifest::storage::{
-    ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file, manifest_compress_type,
-    manifest_dir,
+    ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file, list_start_after,
+    manifest_compress_type, manifest_dir,
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::{ManifestStats, RegionLeaderState, RegionRoleState};
@@ -652,13 +652,17 @@ impl RegionManifestManager {
     pub async fn has_update(&self) -> Result<bool> {
         let last_version = self.last_version();
 
-        let streamer =
-            self.store
-                .manifest_lister(false)
-                .await?
-                .context(error::EmptyManifestDirSnafu {
-                    manifest_dir: self.store.manifest_dir(),
-                })?;
+        // Skip older files at the object-store layer. Files for `v == last_version`
+        // may still appear (`{path}{v:020}` sorts before `{path}{v:020}.json`) but
+        // they are filtered out below by the `version > last_version` check.
+        let start_after = list_start_after(self.store.manifest_dir(), last_version);
+        let streamer = self
+            .store
+            .manifest_lister(false, Some(&start_after))
+            .await?
+            .context(error::EmptyManifestDirSnafu {
+                manifest_dir: self.store.manifest_dir(),
+            })?;
 
         let need_update = streamer
             .try_any(|entry| async move {

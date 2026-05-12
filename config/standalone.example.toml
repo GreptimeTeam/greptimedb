@@ -6,6 +6,11 @@ default_timezone = "UTC"
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
+## The user provider for authentication.
+## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
+## @toml2docs:none-default
+#+ user_provider = "static_user_provider:file:/path/to/users"
+
 ## Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
 ## @toml2docs:none-default

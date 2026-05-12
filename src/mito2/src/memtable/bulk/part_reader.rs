@@ -64,10 +64,13 @@ impl EncodedBulkPartIter {
         let data = encoded_part.data().clone();
         let series_count = encoded_part.metadata().num_series as usize;
 
-        let projection_mask = ProjectionMask::roots(
-            parquet_meta.file_metadata().schema_descr(),
-            context.read_format().projection_indices().iter().copied(),
-        );
+        // TODO(fys): Nested projection pushdown to the memtable layer is not supported yet.
+        let root_indices = context
+            .read_format()
+            .parquet_read_columns()
+            .root_indices_iter();
+        let projection_mask =
+            ProjectionMask::roots(parquet_meta.file_metadata().schema_descr(), root_indices);
         let builder =
             MemtableRowGroupReaderBuilder::try_new(&context, projection_mask, parquet_meta, data)?;
 
@@ -276,7 +279,11 @@ impl BulkPartBatchIter {
 
     /// Applies projection to the RecordBatch if needed.
     fn apply_projection(&self, record_batch: RecordBatch) -> error::Result<RecordBatch> {
-        let projection_indices = self.context.read_format().projection_indices();
+        let projection_indices = self
+            .context
+            .read_format()
+            .parquet_read_columns()
+            .root_indices();
         if projection_indices.len() == record_batch.num_columns() {
             return Ok(record_batch);
         }
@@ -380,7 +387,6 @@ fn apply_combined_filters(
     metrics: &mut MemScanMetricsData,
 ) -> error::Result<Option<RecordBatch>> {
     // Apply PK prefilter on raw batch before convert_batch to reduce conversion overhead.
-    let has_pk_prefilter = pk_filter.is_some();
     let record_batch = if let Some(pk_filter) = pk_filter {
         let rows_before = record_batch.num_rows();
         let prefilter_start = Instant::now();
@@ -413,7 +419,6 @@ fn apply_combined_filters(
         let predicate_mask = context.base.compute_filter_mask_flat(
             &record_batch,
             skip_fields,
-            has_pk_prefilter,
             &mut tag_decode_state,
         )?;
         // If predicate filters out the entire batch, return None early

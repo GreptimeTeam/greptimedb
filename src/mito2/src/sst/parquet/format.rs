@@ -52,8 +52,10 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use crate::error::{
     ConvertVectorSnafu, DecodeSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
+use crate::read::read_columns::ReadColumns;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
+use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
 use crate::sst::to_sst_arrow_schema;
 
 /// Arrow array type for the primary key dictionary.
@@ -95,6 +97,7 @@ impl PrimaryKeyWriteFormat {
     }
 
     /// Gets the arrow schema to store in parquet.
+    #[cfg(test)]
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
@@ -211,7 +214,7 @@ pub struct PrimaryKeyReadFormat {
     /// In SST schema, fields are stored in the front of the schema.
     field_id_to_index: HashMap<ColumnId, usize>,
     /// Indices of columns to read from the SST. It contains all internal columns.
-    projection_indices: Vec<usize>,
+    parquet_read_cols: ParquetReadColumns,
     /// Field column id to their index in the projected schema (
     /// the schema of [Batch]).
     field_id_to_projected_index: HashMap<ColumnId, usize>,
@@ -221,10 +224,7 @@ pub struct PrimaryKeyReadFormat {
 
 impl PrimaryKeyReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    pub fn new(
-        metadata: RegionMetadataRef,
-        column_ids: impl Iterator<Item = ColumnId>,
-    ) -> PrimaryKeyReadFormat {
+    pub fn new(metadata: RegionMetadataRef, read_cols: ReadColumns) -> PrimaryKeyReadFormat {
         let field_id_to_index: HashMap<_, _> = metadata
             .field_columns()
             .enumerate()
@@ -235,14 +235,14 @@ impl PrimaryKeyReadFormat {
         let format_projection = FormatProjection::compute_format_projection(
             &field_id_to_index,
             arrow_schema.fields.len(),
-            column_ids,
+            read_cols,
         );
 
         PrimaryKeyReadFormat {
             metadata,
             arrow_schema,
             field_id_to_index,
-            projection_indices: format_projection.projection_indices,
+            parquet_read_cols: format_projection.parquet_read_cols,
             field_id_to_projected_index: format_projection.column_id_to_projected_index,
             primary_key_codec: None,
         }
@@ -261,9 +261,8 @@ impl PrimaryKeyReadFormat {
         &self.metadata
     }
 
-    /// Gets sorted projection indices to read.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
-        &self.projection_indices
+    pub(crate) fn parquet_read_columns(&self) -> &ParquetReadColumns {
+        &self.parquet_read_cols
     }
 
     /// Gets the field id to projected index.
@@ -579,8 +578,8 @@ impl PrimaryKeyReadFormat {
 
 /// Helper to compute the projection for the SST.
 pub(crate) struct FormatProjection {
-    /// Indices of columns to read from the SST. It contains all internal columns.
-    pub(crate) projection_indices: Vec<usize>,
+    /// The columns to read from the SST. It contains all internal columns.
+    pub(crate) parquet_read_cols: ParquetReadColumns,
     /// Column id to their index in the projected schema (
     /// the schema after projection).
     ///
@@ -595,48 +594,89 @@ impl FormatProjection {
     pub(crate) fn compute_format_projection(
         id_to_index: &HashMap<ColumnId, usize>,
         sst_column_num: usize,
-        column_ids: impl Iterator<Item = ColumnId>,
+        cols: ReadColumns,
     ) -> Self {
-        // Maps column id of a projected column to its index in SST.
-        // It also ignores columns not in the SST.
-        // [(column id, index in SST)]
-        let mut projected_schema: Vec<_> = column_ids
-            .filter_map(|column_id| {
+        let mut projected_columns: Vec<_> = cols
+            .cols
+            .into_iter()
+            .filter_map(|col| {
                 id_to_index
-                    .get(&column_id)
+                    .get(&col.column_id)
                     .copied()
-                    .map(|index| (column_id, index))
+                    .map(|index_of_sst| (col.column_id, index_of_sst, col.nested_paths))
             })
             .collect();
         // Sorts columns by their indices in the SST. SST uses a bitmap for projection.
-        // This ensures the schema of `projected_schema` is the same as the batch returned from the SST.
-        projected_schema.sort_unstable_by_key(|x| x.1);
-        // Dedups the entries to avoid the case that `column_ids` has duplicated columns.
-        projected_schema.dedup_by_key(|x| x.1);
+        // This ensures the schema of `projected_columns` is the same as the batch returned from the SST.
+        projected_columns.sort_unstable_by_key(|(_, index, _)| *index);
 
-        // Collects all projected indices.
-        // It contains the positions of all columns we need to read.
-        let mut projection_indices: Vec<_> = projected_schema
-            .iter()
-            .map(|(_column_id, index)| *index)
-            // We need to add all fixed position columns.
-            .chain(sst_column_num - FIXED_POS_COLUMN_NUM..sst_column_num)
-            .collect();
-        projection_indices.sort_unstable();
-        // Removes duplications.
-        projection_indices.dedup();
-
+        let mut parquet_read_cols: Vec<ParquetReadColumn> =
+            Vec::with_capacity(projected_columns.len() + FIXED_POS_COLUMN_NUM);
         // Creates a map from column id to the index of that column in the projected record batch.
-        let column_id_to_projected_index = projected_schema
-            .into_iter()
-            .map(|(column_id, _)| column_id)
-            .enumerate()
-            .map(|(index, column_id)| (column_id, index))
-            .collect();
+        let mut column_id_to_projected_index = HashMap::with_capacity(projected_columns.len());
+
+        for (col_id, index_of_sst, nested_paths) in projected_columns {
+            Self::merge_or_push_parquet_column(&mut parquet_read_cols, index_of_sst, nested_paths);
+
+            column_id_to_projected_index
+                .entry(col_id)
+                .or_insert_with(|| parquet_read_cols.len() - 1);
+        }
+
+        // In SST schema, fixed-position columns are always in the tail:
+        // `time index, __primary_key, __sequence, __op_type`.
+        Self::append_time_index_if_needed(&mut parquet_read_cols, sst_column_num);
+        Self::append_fixed_internal_columns(&mut parquet_read_cols, sst_column_num);
 
         Self {
-            projection_indices,
+            parquet_read_cols: ParquetReadColumns::from_deduped(parquet_read_cols),
             column_id_to_projected_index,
+        }
+    }
+
+    fn merge_or_push_parquet_column(
+        parquet_read_cols: &mut Vec<ParquetReadColumn>,
+        index_of_sst: usize,
+        nested_paths: Vec<Vec<String>>,
+    ) {
+        // `projected_columns` is sorted by parquet root index, so repeated reads
+        // for the same root column are always adjacent.
+        if let Some(last_col) = parquet_read_cols.last_mut()
+            && last_col.root_index() == index_of_sst
+        {
+            last_col.merge_nested_paths(nested_paths);
+            return;
+        }
+
+        let parquet_col = ParquetReadColumn::new(index_of_sst).with_nested_paths(nested_paths);
+        parquet_read_cols.push(parquet_col);
+    }
+
+    fn append_time_index_if_needed(
+        parquet_read_cols: &mut Vec<ParquetReadColumn>,
+        sst_column_num: usize,
+    ) {
+        let time_index = sst_column_num - FIXED_POS_COLUMN_NUM;
+        // Existing projected roots are already sorted by SST root index, and may
+        // already include the time index, so we compare against the last root to
+        // decide whether we still need to append `time index`.
+        let needs_time_index = parquet_read_cols
+            .last()
+            .map(|col| col.root_index() != time_index)
+            .unwrap_or(true);
+        if needs_time_index {
+            parquet_read_cols.push(ParquetReadColumn::new(time_index));
+        }
+    }
+
+    // Append internal columns in fixed order: `__primary_key`, `__sequence`,
+    // `__op_type`.
+    fn append_fixed_internal_columns(
+        parquet_read_cols: &mut Vec<ParquetReadColumn>,
+        sst_column_num: usize,
+    ) {
+        for index in sst_column_num - INTERNAL_COLUMN_NUM..sst_column_num {
+            parquet_read_cols.push(ParquetReadColumn::new(index));
         }
     }
 }
@@ -670,7 +710,9 @@ impl PrimaryKeyReadFormat {
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> PrimaryKeyReadFormat {
         Self::new(
             Arc::clone(&metadata),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
         )
     }
 }
@@ -799,7 +841,7 @@ mod tests {
     use crate::sst::parquet::flat_format::{
         FlatReadFormat, FlatWriteFormat, sequence_column_index,
     };
-    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema, with_field_id};
 
     const TEST_SEQUENCE: u64 = 1;
     const TEST_OP_TYPE: u8 = OpType::Put as u8;
@@ -850,23 +892,25 @@ mod tests {
 
     fn build_test_arrow_schema() -> SchemaRef {
         let fields = vec![
-            Field::new("field1", ArrowDataType::Int64, true),
-            Field::new("field0", ArrowDataType::Int64, true),
-            Field::new(
+            make_field("field1", ArrowDataType::Int64, true, Some(4)),
+            make_field("field0", ArrowDataType::Int64, true, Some(2)),
+            make_field(
                 "ts",
                 ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
                 false,
+                Some(5),
             ),
-            Field::new(
+            make_field(
                 "__primary_key",
                 ArrowDataType::Dictionary(
                     Box::new(ArrowDataType::UInt32),
                     Box::new(ArrowDataType::Binary),
                 ),
                 false,
+                None,
             ),
-            Field::new("__sequence", ArrowDataType::UInt64, false),
-            Field::new("__op_type", ArrowDataType::UInt8, false),
+            make_field("__sequence", ArrowDataType::UInt64, false, None),
+            make_field("__op_type", ArrowDataType::UInt8, false, None),
         ];
         Arc::new(Schema::new(fields))
     }
@@ -926,17 +970,33 @@ mod tests {
     fn test_projection_indices() {
         let metadata = build_test_region_metadata();
         // Only read tag1
-        let read_format = PrimaryKeyReadFormat::new(metadata.clone(), [3].iter().copied());
-        assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
+        let read_format =
+            PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::from_deduped_column_ids([3]));
+        assert_eq!(
+            &[2, 3, 4, 5],
+            read_format.parquet_read_columns().root_indices()
+        );
         // Only read field1
-        let read_format = PrimaryKeyReadFormat::new(metadata.clone(), [4].iter().copied());
-        assert_eq!(&[0, 2, 3, 4, 5], read_format.projection_indices());
+        let read_format =
+            PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::from_deduped_column_ids([4]));
+        assert_eq!(
+            &[0, 2, 3, 4, 5],
+            read_format.parquet_read_columns().root_indices()
+        );
         // Only read ts
-        let read_format = PrimaryKeyReadFormat::new(metadata.clone(), [5].iter().copied());
-        assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
+        let read_format =
+            PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::from_deduped_column_ids([5]));
+        assert_eq!(
+            &[2, 3, 4, 5],
+            read_format.parquet_read_columns().root_indices()
+        );
         // Read field0, tag0, ts
-        let read_format = PrimaryKeyReadFormat::new(metadata, [2, 1, 5].iter().copied());
-        assert_eq!(&[1, 2, 3, 4, 5], read_format.projection_indices());
+        let read_format =
+            PrimaryKeyReadFormat::new(metadata, ReadColumns::from_deduped_column_ids([2, 1, 5]));
+        assert_eq!(
+            &[1, 2, 3, 4, 5],
+            read_format.parquet_read_columns().root_indices()
+        );
     }
 
     #[test]
@@ -982,7 +1042,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_format =
+            PrimaryKeyReadFormat::new(metadata, ReadColumns::from_deduped_column_ids(column_ids));
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
@@ -1001,7 +1062,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_format =
+            PrimaryKeyReadFormat::new(metadata, ReadColumns::from_deduped_column_ids(column_ids));
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1027,12 +1089,12 @@ mod tests {
     #[test]
     fn test_convert_record_batch_with_override_sequence() {
         let metadata = build_test_region_metadata();
-        let column_ids: Vec<_> = metadata
-            .column_metadatas
-            .iter()
-            .map(|col| col.column_id)
-            .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_format = PrimaryKeyReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
+        );
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1065,6 +1127,14 @@ mod tests {
         );
     }
 
+    fn make_field(name: &str, dt: ArrowDataType, nullable: bool, field_id: Option<u32>) -> Field {
+        let mut field = Field::new(name, dt, nullable);
+        if let Some(id) = field_id {
+            field = with_field_id(field, id);
+        }
+        field
+    }
+
     fn build_test_flat_sst_schema() -> SchemaRef {
         let fields = vec![
             Field::new("tag0", ArrowDataType::Int64, true), // primary key columns first
@@ -1090,11 +1160,37 @@ mod tests {
         Arc::new(Schema::new(fields))
     }
 
+    fn build_test_flat_sst_schema_with_field_ids() -> SchemaRef {
+        let ids = [
+            Some(1u32),
+            Some(3),
+            Some(4),
+            Some(2),
+            Some(5),
+            None,
+            None,
+            None,
+        ];
+        let fields: Vec<_> = build_test_flat_sst_schema()
+            .fields()
+            .iter()
+            .zip(ids)
+            .map(|(f, id)| match id {
+                Some(id) => Arc::new(with_field_id((**f).clone(), id)) as _,
+                None => f.clone(),
+            })
+            .collect();
+        Arc::new(Schema::new(fields))
+    }
+
     #[test]
     fn test_flat_to_sst_arrow_schema() {
         let metadata = build_test_region_metadata();
         let format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
-        assert_eq!(&build_test_flat_sst_schema(), format.arrow_schema());
+        assert_eq!(
+            &build_test_flat_sst_schema_with_field_ids(),
+            format.arrow_schema()
+        );
     }
 
     fn input_columns_for_flat_batch(num_rows: usize) -> Vec<ArrayRef> {
@@ -1117,8 +1213,11 @@ mod tests {
 
         let num_rows = 4;
         let columns: Vec<ArrayRef> = input_columns_for_flat_batch(num_rows);
-        let batch = RecordBatch::try_new(build_test_flat_sst_schema(), columns.clone()).unwrap();
-        let expect_record = RecordBatch::try_new(build_test_flat_sst_schema(), columns).unwrap();
+        let batch =
+            RecordBatch::try_new(build_test_flat_sst_schema_with_field_ids(), columns.clone())
+                .unwrap();
+        let expect_record =
+            RecordBatch::try_new(build_test_flat_sst_schema_with_field_ids(), columns).unwrap();
 
         let actual = format.convert_batch(&batch).unwrap();
         assert_eq!(expect_record, actual);
@@ -1132,7 +1231,8 @@ mod tests {
 
         let num_rows = 4;
         let columns: Vec<ArrayRef> = input_columns_for_flat_batch(num_rows);
-        let batch = RecordBatch::try_new(build_test_flat_sst_schema(), columns).unwrap();
+        let batch =
+            RecordBatch::try_new(build_test_flat_sst_schema_with_field_ids(), columns).unwrap();
 
         let expected_columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1; num_rows])), // tag0
@@ -1144,8 +1244,11 @@ mod tests {
             Arc::new(UInt64Array::from(vec![415411; num_rows])), // overridden sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
-        let expected_record =
-            RecordBatch::try_new(build_test_flat_sst_schema(), expected_columns).unwrap();
+        let expected_record = RecordBatch::try_new(
+            build_test_flat_sst_schema_with_field_ids(),
+            expected_columns,
+        )
+        .unwrap();
 
         let actual = format.convert_batch(&batch).unwrap();
         assert_eq!(expected_record, actual);
@@ -1158,27 +1261,60 @@ mod tests {
         // The projection includes all "fixed position" columns: ts(4), __primary_key(5), __sequence(6), __op_type(7)
 
         // Only read tag1 (column_id=3, index=1) + fixed columns
-        let read_format =
-            FlatReadFormat::new(metadata.clone(), [3].iter().copied(), None, "test", false)
-                .unwrap();
-        assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids([3]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            &[1, 4, 5, 6, 7],
+            read_format.parquet_read_columns().root_indices()
+        );
 
         // Only read field1 (column_id=4, index=2) + fixed columns
-        let read_format =
-            FlatReadFormat::new(metadata.clone(), [4].iter().copied(), None, "test", false)
-                .unwrap();
-        assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids([4]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            &[2, 4, 5, 6, 7],
+            read_format.parquet_read_columns().root_indices()
+        );
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
-        let read_format =
-            FlatReadFormat::new(metadata.clone(), [5].iter().copied(), None, "test", false)
-                .unwrap();
-        assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids([5]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            &[4, 5, 6, 7],
+            read_format.parquet_read_columns().root_indices()
+        );
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
-        let read_format =
-            FlatReadFormat::new(metadata, [2, 1, 5].iter().copied(), None, "test", false).unwrap();
-        assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
+        let read_format = FlatReadFormat::new(
+            metadata,
+            ReadColumns::from_deduped_column_ids([2, 1, 5]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            &[0, 3, 4, 5, 6, 7],
+            read_format.parquet_read_columns().root_indices()
+        );
     }
 
     #[test]
@@ -1186,7 +1322,7 @@ mod tests {
         let metadata = build_test_region_metadata();
         let mut format = FlatReadFormat::new(
             metadata,
-            std::iter::once(1), // Just read tag0
+            ReadColumns::from_deduped_column_ids(std::iter::once(1)), // Just read tag0
             Some(8),
             "test",
             false,
@@ -1403,7 +1539,7 @@ mod tests {
             .collect();
         let format = FlatReadFormat::new(
             metadata.clone(),
-            column_ids.into_iter(),
+            ReadColumns::from_deduped_column_ids(column_ids),
             Some(6),
             "test",
             false,
@@ -1431,26 +1567,7 @@ mod tests {
         ];
 
         // Create schema for old format (without primary key columns)
-        let old_format_fields = vec![
-            Field::new("field1", ArrowDataType::Int64, true),
-            Field::new("field0", ArrowDataType::Int64, true),
-            Field::new(
-                "ts",
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "__primary_key",
-                ArrowDataType::Dictionary(
-                    Box::new(ArrowDataType::UInt32),
-                    Box::new(ArrowDataType::Binary),
-                ),
-                false,
-            ),
-            Field::new("__sequence", ArrowDataType::UInt64, false),
-            Field::new("__op_type", ArrowDataType::UInt8, false),
-        ];
-        let old_schema = Arc::new(Schema::new(old_format_fields));
+        let old_schema = build_test_arrow_schema();
         let record_batch = RecordBatch::try_new(old_schema, columns).unwrap();
 
         // Test conversion with dense encoding
@@ -1467,8 +1584,11 @@ mod tests {
             Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
-        let expected_record_batch =
-            RecordBatch::try_new(build_test_flat_sst_schema(), expected_columns).unwrap();
+        let expected_record_batch = RecordBatch::try_new(
+            build_test_flat_sst_schema_with_field_ids(),
+            expected_columns,
+        )
+        .unwrap();
 
         // Compare the actual result with the expected record batch
         assert_eq!(expected_record_batch, result);
@@ -1485,7 +1605,7 @@ mod tests {
             .collect();
         let format = FlatReadFormat::new(
             metadata.clone(),
-            column_ids.clone().into_iter(),
+            ReadColumns::from_deduped_column_ids(column_ids.clone()),
             None,
             "test",
             false,
@@ -1519,26 +1639,7 @@ mod tests {
         ];
 
         // Create schema for old format (without primary key columns)
-        let old_format_fields = vec![
-            Field::new("field1", ArrowDataType::Int64, true),
-            Field::new("field0", ArrowDataType::Int64, true),
-            Field::new(
-                "ts",
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "__primary_key",
-                ArrowDataType::Dictionary(
-                    Box::new(ArrowDataType::UInt32),
-                    Box::new(ArrowDataType::Binary),
-                ),
-                false,
-            ),
-            Field::new("__sequence", ArrowDataType::UInt64, false),
-            Field::new("__op_type", ArrowDataType::UInt8, false),
-        ];
-        let old_schema = Arc::new(Schema::new(old_format_fields));
+        let old_schema = build_test_arrow_schema();
         let record_batch = RecordBatch::try_new(old_schema, columns).unwrap();
 
         // Test conversion with sparse encoding
@@ -1572,9 +1673,14 @@ mod tests {
         // Compare the actual result with the expected record batch
         assert_eq!(expected_record_batch, result);
 
-        let format =
-            FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), None, "test", true)
-                .unwrap();
+        let format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids(column_ids),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
         // Test conversion with sparse encoding and skip convert.
         let result = format.convert_batch(record_batch.clone(), None).unwrap();
         assert_eq!(record_batch, result);

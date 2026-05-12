@@ -83,6 +83,7 @@ macro_rules! sql_tests {
                 test_postgres_intervalstyle,
                 test_postgres_parameter_inference,
                 test_postgres_uint64_parameter,
+                test_postgres_explain_bind_parameter,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
                 test_mysql_federated_prepare_stmt,
@@ -1345,6 +1346,65 @@ pub async fn test_postgres_uint64_parameter(store_type: StorageType) {
     assert_eq!(1, rows.len());
     let count: i64 = rows[0].get(0);
     assert_eq!(count, 1);
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_explain_bind_parameter(store_type: StorageType) {
+    // Regression test for #8029: EXPLAIN / EXPLAIN ANALYZE must accept bind
+    // parameters over the Postgres extended query protocol.
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_explain_bind_parameter").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    let _ = client
+        .simple_query(
+            "create table t (k varchar(36) not null, ts timestamp(3) not null, time index(ts))",
+        )
+        .await
+        .unwrap();
+    let _ = client
+        .simple_query("insert into t (k, ts) values ('a', 1), ('b', 2), ('c', 3)")
+        .await
+        .unwrap();
+
+    // Sanity check: the underlying SELECT with a bind parameter works.
+    let rows = client
+        .query("SELECT k FROM t WHERE k = $1", &[&"a"])
+        .await
+        .unwrap();
+    assert_eq!(1, rows.len());
+
+    // EXPLAIN with a bind parameter must succeed.
+    let rows = client
+        .query("EXPLAIN SELECT k FROM t WHERE k = $1", &[&"a"])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty(), "EXPLAIN should produce at least one row");
+
+    // EXPLAIN ANALYZE with a bind parameter must also succeed.
+    let rows = client
+        .query("EXPLAIN ANALYZE SELECT k FROM t WHERE k = $1", &[&"a"])
+        .await
+        .unwrap();
+    assert!(
+        !rows.is_empty(),
+        "EXPLAIN ANALYZE should produce at least one row"
+    );
 
     drop(client);
     rx.await.unwrap();

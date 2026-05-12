@@ -173,20 +173,31 @@ impl ErrorExt for Error {
 define_from_tonic_status!(Error, Tonic);
 
 impl Error {
-    pub fn should_retry(&self) -> bool {
-        // TODO(weny): figure out each case of these codes.
-        matches!(
-            self,
-            Self::RegionServer {
-                code: Code::Cancelled,
-                ..
-            } | Self::RegionServer {
-                code: Code::DeadlineExceeded,
-                ..
-            } | Self::RegionServer {
-                code: Code::Unavailable,
-                ..
+    /// Returns the gRPC status code if this error is caused by a gRPC request failure.
+    pub fn tonic_code(&self) -> Option<Code> {
+        match self {
+            Self::FlightGet { tonic_code, .. }
+            | Self::RegionServer {
+                code: tonic_code, ..
             }
-        )
+            | Self::FlowServer {
+                code: tonic_code, ..
+            }
+            | Self::Tonic { tonic_code, .. } => Some(*tonic_code),
+            _ => None,
+        }
+    }
+
+    /// Returns true if the error is a connection error that may be resolved by retrying the request.
+    pub fn is_connection_error(&self) -> bool {
+        matches!(self.tonic_code(), Some(Code::Unavailable))
+    }
+
+    pub fn should_retry(&self) -> bool {
+        self.is_connection_error()
+            || matches!(
+                self.tonic_code(),
+                Some(Code::Cancelled) | Some(Code::DeadlineExceeded)
+            )
     }
 }

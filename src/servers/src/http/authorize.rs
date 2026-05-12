@@ -362,14 +362,13 @@ mod tests {
 
     #[test]
     fn test_decode_basic() {
-        // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
-        let credential = "dXNlcm5hbWU6cGFzc3dvcmQ=";
-        let (username, pwd) = decode_basic(credential).unwrap();
+        let credential = basic_auth_credentials("username", "password");
+        let (username, pwd) = decode_basic(&credential).unwrap();
         assert_eq!("username", username);
         assert_eq!("password", pwd.expose_secret());
 
-        let wrong_credential = "dXNlcm5hbWU6cG Fzc3dvcmQ=";
-        let result = decode_basic(wrong_credential);
+        let wrong_credential = credential.replacen('c', "c ", 1);
+        let result = decode_basic(&wrong_credential);
         assert_matches!(result.err(), Some(error::Error::InvalidBase64Value { .. }));
     }
 
@@ -379,8 +378,8 @@ mod tests {
         let re: Result<AuthScheme> = auth_scheme_str.try_into();
         assert!(re.is_err());
 
-        let auth_scheme_str = "basic dGVzdDp0ZXN0";
-        let scheme: AuthScheme = auth_scheme_str.try_into().unwrap();
+        let auth_scheme_str = basic_auth("test", "test");
+        let scheme: AuthScheme = auth_scheme_str.as_str().try_into().unwrap();
         assert_matches!(scheme, AuthScheme::Basic(username, pwd) if username == "test" && pwd.expose_secret() == "test");
 
         let unsupported = "digest";
@@ -390,19 +389,35 @@ mod tests {
 
     #[test]
     fn test_auth_header() {
-        // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
-        let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
+        let header_value = basic_auth("username", "password");
+        let req = mock_http_request(Some(&header_value), None).unwrap();
 
         let auth_scheme = auth_header(&req).unwrap();
         assert_matches!(auth_scheme, AuthScheme::Basic(username, pwd) if username == "username" && pwd.expose_secret() == "password");
 
-        let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6 cGFzc3dvcmQ="), None).unwrap();
+        let wrong_auth_header = header_value.replacen('c', "c ", 1);
+        let wrong_req = mock_http_request(Some(&wrong_auth_header), None).unwrap();
         let res = auth_header(&wrong_req);
         assert_matches!(res.err(), Some(error::Error::InvalidAuthHeader { .. }));
 
-        let wrong_req = mock_http_request(Some("Digest dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
+        let wrong_req = mock_http_request(
+            Some(&format!(
+                "Digest {}",
+                basic_auth_credentials("username", "password")
+            )),
+            None,
+        )
+        .unwrap();
         let res = auth_header(&wrong_req);
         assert_matches!(res.err(), Some(error::Error::UnsupportedAuthScheme { .. }));
+    }
+
+    fn basic_auth(username: &str, password: &str) -> String {
+        format!("Basic {}", basic_auth_credentials(username, password))
+    }
+
+    fn basic_auth_credentials(username: &str, password: &str) -> String {
+        BASE64_STANDARD.encode(format!("{username}:{password}"))
     }
 
     fn mock_http_request(auth_header: Option<&str>, uri: Option<&str>) -> Result<Request<()>> {

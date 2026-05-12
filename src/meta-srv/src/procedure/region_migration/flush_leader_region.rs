@@ -17,6 +17,7 @@ use std::any::Any;
 use common_procedure::{Context as ProcedureContext, Status};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
+use store_api::region_request::RegionFlushReason;
 use tokio::time::Instant;
 
 use crate::error::{self, Result};
@@ -86,6 +87,7 @@ impl PreFlushRegion {
             leader,
             operation_timeout,
             utils::ErrorStrategy::Ignore,
+            Some(RegionFlushReason::RegionMigration),
         )
         .await
     }

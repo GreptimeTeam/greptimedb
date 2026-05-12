@@ -240,7 +240,7 @@ impl MysqlInstanceShim {
 
         match plan {
             Some(plan) if params.len() == param_num - 1 => {
-                self.save_plan(SqlPlan::Plan(plan, query.clone()), stmt_key)
+                self.save_plan(SqlPlan::Plan(plan, statement), stmt_key)
                     .inspect_err(|e| {
                         error!(e; "Failed to save prepared statement");
                     })?;
@@ -270,7 +270,7 @@ impl MysqlInstanceShim {
         };
 
         let outputs = match sql_plan {
-            SqlPlan::Plan(plan, query) => {
+            SqlPlan::Plan(plan, stmt) => {
                 let param_types = DfLogicalPlanner::get_inferred_parameter_types(&plan)
                     .context(InferParameterTypesSnafu)?
                     .into_iter()
@@ -299,7 +299,7 @@ impl MysqlInstanceShim {
                 );
                 vec![
                     self.query_handler
-                        .do_exec_plan(replaced_plan, query, query_ctx.clone())
+                        .do_exec_plan(replaced_plan, Some(stmt), query_ctx.clone())
                         .await,
                 ]
             }
@@ -823,7 +823,7 @@ mod tests {
         async fn do_exec_plan(
             &self,
             _: LogicalPlan,
-            _: String,
+            _: Option<Statement>,
             _: QueryContextRef,
         ) -> Result<Output> {
             unimplemented!()

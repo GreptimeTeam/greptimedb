@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use common_recordbatch::recordbatch::align_json_array;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryBuilder, DictionaryArray, UInt32Array,
 };
@@ -29,6 +28,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use datatypes::vectors::json::array::JsonArray;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
     build_primary_key_codec_with_fields,
@@ -39,13 +39,13 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{
-    CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
-    NewRecordBatchSnafu, RecordBatchSnafu, Result, UnsupportedOperationSnafu,
+    CompatReaderSnafu, ComputeArrowSnafu, ConvertValueSnafu, CreateDefaultSnafu, DecodeSnafu,
+    EncodeSnafu, NewRecordBatchSnafu, Result, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray};
-use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
+use crate::sst::{internal_fields, tag_maybe_to_dictionary_field, with_field_id};
 
 /// Returns true if `left` and `right` have same columns and primary key encoding.
 pub(crate) fn has_same_columns_and_pk_encoding(
@@ -143,12 +143,19 @@ impl FlatCompatBatch {
             let column_field = &expect_metadata.schema.arrow_schema().fields()[column_index];
             // For tag columns, we need to create a dictionary field.
             if expect_column.semantic_type == SemanticType::Tag {
-                fields.push(tag_maybe_to_dictionary_field(
+                let field = tag_maybe_to_dictionary_field(
                     &expect_column.column_schema.data_type,
                     column_field,
-                ));
+                );
+                fields.push(Arc::new(with_field_id(
+                    (*field).clone(),
+                    expect_column.column_id,
+                )));
             } else {
-                fields.push(column_field.clone());
+                fields.push(Arc::new(with_field_id(
+                    (**column_field).clone(),
+                    expect_column.column_id,
+                )));
             };
 
             if let Some((index, actual_data_type)) = actual_schema_index.get(column_id) {
@@ -240,9 +247,12 @@ impl FlatCompatBatch {
                     let old_column = batch.column(*pos);
 
                     if let Some(ty) = cast_type {
-                        let casted = if let Some(json_type) = ty.as_json() {
-                            align_json_array(old_column, &json_type.as_arrow_type())
-                                .context(RecordBatchSnafu)?
+                        let casted = if let Some(json_type) = ty.as_json()
+                            && json_type.is_json2()
+                        {
+                            JsonArray::from(old_column)
+                                .try_align(&json_type.as_arrow_type())
+                                .context(ConvertValueSnafu)?
                         } else {
                             datatypes::arrow::compute::cast(old_column, &ty.as_arrow_type())
                                 .context(ComputeArrowSnafu)?
@@ -599,6 +609,7 @@ mod tests {
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
@@ -703,7 +714,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            [0, 1, 2, 3].into_iter(),
+            ReadColumns::from_deduped_column_ids([0, 1, 2, 3]),
             None,
             "test",
             false,
@@ -789,16 +800,15 @@ mod tests {
             &[1],
         ));
 
-        // Output projection: tag_1, field_2. Read also includes field_3.
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &expected_metadata,
             vec![1, 2],
-            vec![1, 2, 3],
+            ReadColumns::from_deduped_column_ids([1, 2, 3]),
         )
         .unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            [1, 2, 3].into_iter(),
+            ReadColumns::from_deduped_column_ids([1, 2, 3]),
             None,
             "test",
             false,
@@ -889,7 +899,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            [0, 1, 2, 3].into_iter(),
+            ReadColumns::from_deduped_column_ids([0, 1, 2, 3]),
             None,
             "test",
             false,
@@ -983,7 +993,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            [0, 2, 3].into_iter(),
+            ReadColumns::from_deduped_column_ids([0, 2, 3]),
             None,
             "test",
             true,

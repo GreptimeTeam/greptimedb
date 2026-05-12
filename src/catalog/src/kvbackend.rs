@@ -20,6 +20,6 @@ mod table_cache;
 pub use builder::{
     CatalogManagerConfigurator, CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder,
 };
-pub use client::{CachedKvBackend, CachedKvBackendBuilder, MetaKvBackend};
+pub use client::{CachedKvBackend, CachedKvBackendBuilder, new_read_only_meta_kv_backend};
 pub use manager::KvBackendCatalogManager;
 pub use table_cache::{TableCache, TableCacheRef, new_table_cache};

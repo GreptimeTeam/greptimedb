@@ -36,7 +36,7 @@ lazy_static! {
     .unwrap();
 }
 
-const FLOWNODE_FLOW_KEY_PREFIX: &str = "flownode";
+pub const FLOWNODE_FLOW_KEY_PREFIX: &str = "flownode";
 
 /// The key of mapping [FlownodeId] to [FlowId].
 ///

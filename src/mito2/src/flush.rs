@@ -26,6 +26,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
+use store_api::region_request::RegionFlushReason;
 use store_api::storage::{RegionId, SequenceNumber};
 use strum::IntoStaticStr;
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -221,12 +222,28 @@ pub enum FlushReason {
     EnterStaging,
     /// Flush when region is closing.
     Closing,
+    /// Flush triggered before region migration.
+    RegionMigration,
+    /// Flush triggered by repartition procedure.
+    Repartition,
+    /// Flush triggered by remote WAL pruning.
+    RemoteWalPrune,
 }
 
 impl FlushReason {
     /// Get flush reason as static str.
     fn as_str(&self) -> &'static str {
         self.into()
+    }
+}
+
+impl From<RegionFlushReason> for FlushReason {
+    fn from(reason: RegionFlushReason) -> Self {
+        match reason {
+            RegionFlushReason::RegionMigration => FlushReason::RegionMigration,
+            RegionFlushReason::Repartition => FlushReason::Repartition,
+            RegionFlushReason::RemoteWalPrune => FlushReason::RemoteWalPrune,
+        }
     }
 }
 
@@ -744,7 +761,7 @@ fn memtable_flat_sources(
             );
             flat_sources
                 .sources
-                .push((FlatSource::Iter(iter), max_sequence));
+                .push((FlatSource::new_iter(schema, iter), max_sequence));
         };
     } else {
         let min_flush_rows = *ENCODE_ROW_THRESHOLD;
@@ -807,9 +824,10 @@ fn memtable_flat_sources(
                     std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
                 )?;
 
-                flat_sources
-                    .sources
-                    .push((FlatSource::Iter(maybe_dedup), max_sequence));
+                flat_sources.sources.push((
+                    FlatSource::new_iter(schema.clone(), maybe_dedup),
+                    max_sequence,
+                ));
                 last_iter_rows = 0;
                 current_ranges.clear();
             }
@@ -840,7 +858,7 @@ fn memtable_flat_sources(
 
             flat_sources
                 .sources
-                .push((FlatSource::Iter(maybe_dedup), max_sequence));
+                .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
         }
     }
 
@@ -1513,14 +1531,10 @@ mod tests {
             // Consume the iterator and count rows
             let mut total_rows = 0usize;
             for (source, _sequence) in flat_sources.sources {
-                match source {
-                    crate::read::FlatSource::Iter(iter) => {
-                        for rb in iter {
-                            total_rows += rb.unwrap().num_rows();
-                        }
-                    }
-                    crate::read::FlatSource::Stream(_) => unreachable!(),
-                }
+                total_rows += source
+                    .take_iter()
+                    .map(|x| x.unwrap().num_rows())
+                    .sum::<usize>();
             }
             assert_eq!(1, total_rows, "dedup should keep a single row");
         }
@@ -1543,14 +1557,10 @@ mod tests {
 
             let mut total_rows = 0usize;
             for (source, _sequence) in flat_sources.sources {
-                match source {
-                    crate::read::FlatSource::Iter(iter) => {
-                        for rb in iter {
-                            total_rows += rb.unwrap().num_rows();
-                        }
-                    }
-                    crate::read::FlatSource::Stream(_) => unreachable!(),
-                }
+                total_rows += source
+                    .take_iter()
+                    .map(|x| x.unwrap().num_rows())
+                    .sum::<usize>();
             }
             assert_eq!(2, total_rows, "append_mode should preserve duplicates");
         }

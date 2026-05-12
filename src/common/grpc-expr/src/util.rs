@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 
 use api::v1::column_data_type_extension::TypeExt;
-use api::v1::column_def::{contains_fulltext, contains_skipping};
+use api::v1::column_def::contains_fulltext;
 use api::v1::{
     AddColumn, AddColumns, Column, ColumnDataType, ColumnDataTypeExtension, ColumnDef,
     ColumnOptions, ColumnSchema, CreateTableExpr, JsonTypeExtension, SemanticType,
@@ -27,7 +27,7 @@ use table::table_reference::TableReference;
 
 use crate::error::{
     self, DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu,
-    InvalidStringIndexColumnTypeSnafu, MissingTimestampColumnSnafu, Result,
+    InvalidFulltextIndexColumnTypeSnafu, MissingTimestampColumnSnafu, Result,
     UnknownColumnDataTypeSnafu,
 };
 pub struct ColumnExpr<'a> {
@@ -152,9 +152,8 @@ pub fn build_create_table_expr(
         let column_type = infer_column_datatype(datatype, datatype_extension)?;
 
         ensure!(
-            (!contains_fulltext(options) && !contains_skipping(options))
-                || column_type == ColumnDataType::String,
-            InvalidStringIndexColumnTypeSnafu {
+            !contains_fulltext(options) || column_type == ColumnDataType::String,
+            InvalidFulltextIndexColumnTypeSnafu {
                 column_name,
                 column_type,
             }
@@ -245,6 +244,7 @@ mod tests {
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::column::Values;
     use api::v1::column_data_type_extension::TypeExt;
+    use api::v1::column_def::{options_from_fulltext, options_from_skipping};
     use api::v1::{
         Column, ColumnDataType, ColumnDataTypeExtension, Decimal128, DecimalTypeExtension,
         IntervalMonthDayNano, SemanticType,
@@ -253,7 +253,7 @@ mod tests {
     use common_time::interval::IntervalUnit;
     use common_time::timestamp::TimeUnit;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, SchemaBuilder};
+    use datatypes::schema::{ColumnSchema, FulltextOptions, SchemaBuilder, SkippingIndexOptions};
     use snafu::ResultExt;
 
     use super::*;
@@ -293,6 +293,21 @@ mod tests {
             engine,
             "Created on insertion",
         )
+    }
+
+    fn build_proto_column_schema(
+        column_name: &str,
+        datatype: ColumnDataType,
+        semantic_type: SemanticType,
+        options: Option<ColumnOptions>,
+    ) -> api::v1::ColumnSchema {
+        api::v1::ColumnSchema {
+            column_name: column_name.to_string(),
+            datatype: datatype as i32,
+            semantic_type: semantic_type as i32,
+            options,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -526,6 +541,68 @@ mod tests {
             )
         );
         assert!(host_column.add_if_not_exists);
+    }
+
+    #[test]
+    fn test_build_create_table_expr_allows_skipping_index_on_int_column() {
+        let table_name = TableReference::full("", "", "test_metric");
+        let column_schemas = vec![
+            build_proto_column_schema(
+                "value",
+                ColumnDataType::Int64,
+                SemanticType::Field,
+                options_from_skipping(&SkippingIndexOptions::default()).unwrap(),
+            ),
+            build_proto_column_schema(
+                "ts",
+                ColumnDataType::TimestampMillisecond,
+                SemanticType::Timestamp,
+                None,
+            ),
+        ];
+
+        let result = build_create_table_expr(
+            None,
+            &table_name,
+            ColumnExpr::from_column_schemas(&column_schemas),
+            MITO_ENGINE,
+            "Created on insertion",
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_create_table_expr_rejects_fulltext_index_on_non_string_column() {
+        let table_name = TableReference::full("", "", "test_metric");
+        let column_schemas = vec![
+            build_proto_column_schema(
+                "value",
+                ColumnDataType::Int64,
+                SemanticType::Field,
+                options_from_fulltext(&FulltextOptions {
+                    enable: true,
+                    ..Default::default()
+                })
+                .unwrap(),
+            ),
+            build_proto_column_schema(
+                "ts",
+                ColumnDataType::TimestampMillisecond,
+                SemanticType::Timestamp,
+                None,
+            ),
+        ];
+
+        let result = build_create_table_expr(
+            None,
+            &table_name,
+            ColumnExpr::from_column_schemas(&column_schemas),
+            MITO_ENGINE,
+            "Created on insertion",
+        );
+
+        assert!(result.is_err());
     }
 
     fn mock_insert_batch() -> (Vec<Column>, u32) {

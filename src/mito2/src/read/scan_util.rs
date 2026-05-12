@@ -47,7 +47,7 @@ use crate::sst::file::{FileTimeRange, RegionFileId};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
-use crate::sst::parquet::file_range::FileRange;
+use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
 use crate::sst::parquet::flat_format::time_index_column_index;
 use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderFilterMetrics, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
@@ -1368,7 +1368,7 @@ mod split_tests {
     async fn new_stream_context_with_files(files: Vec<FileHandle>) -> StreamContext {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         let input = ScanInput::new(env.access_layer.clone(), mapper).with_files(files);
 
         StreamContext {
@@ -1577,11 +1577,12 @@ pub(crate) async fn scan_flat_extension_range(
     context: Arc<StreamContext>,
     index: RowGroupIndex,
     partition_metrics: PartitionMetrics,
+    options: crate::extension::ExtensionRangeReadOptions,
 ) -> Result<BoxedRecordBatchStream> {
     use snafu::ResultExt;
 
     let range = context.input.extension_range(index.index);
-    let reader = range.flat_reader(context.as_ref());
+    let reader = range.flat_reader(context.as_ref(), options);
     let stream = reader
         .read(context, partition_metrics, index)
         .await
@@ -1593,10 +1594,12 @@ pub(crate) async fn maybe_scan_flat_other_ranges(
     context: &Arc<StreamContext>,
     index: RowGroupIndex,
     metrics: &PartitionMetrics,
+    pre_filter_mode: PreFilterMode,
 ) -> Result<BoxedRecordBatchStream> {
     #[cfg(feature = "enterprise")]
     {
-        scan_flat_extension_range(context.clone(), index, metrics.clone()).await
+        let options = crate::extension::ExtensionRangeReadOptions { pre_filter_mode };
+        scan_flat_extension_range(context.clone(), index, metrics.clone(), options).await
     }
 
     #[cfg(not(feature = "enterprise"))]
@@ -1604,6 +1607,7 @@ pub(crate) async fn maybe_scan_flat_other_ranges(
         let _ = context;
         let _ = index;
         let _ = metrics;
+        let _ = pre_filter_mode;
 
         crate::error::UnexpectedSnafu {
             reason: "no other ranges scannable in flat format",
@@ -1741,7 +1745,7 @@ mod tests {
     ) -> Arc<StreamContext> {
         let env = SchedulerEnv::new().await;
         let metadata = metadata_for_test();
-        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         let input = ScanInput::new(env.access_layer.clone(), mapper)
             .with_cache(CacheStrategy::Disabled)
             .with_memtables(memtables)
