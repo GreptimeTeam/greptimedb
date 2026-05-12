@@ -126,6 +126,16 @@ impl Default for BulkMemtableConfig {
             encode_bytes_threshold: *ENCODE_BYTES_THRESHOLD,
             max_merge_groups: *MAX_MERGE_GROUPS,
         }
+        .sanitize()
+    }
+}
+
+impl BulkMemtableConfig {
+    fn sanitize(mut self) -> Self {
+        if self.merge_threshold == 0 {
+            self.merge_threshold = DEFAULT_MERGE_THRESHOLD;
+        }
+        self
     }
 }
 
@@ -674,6 +684,7 @@ impl BulkMemtable {
         append_mode: bool,
         merge_mode: MergeMode,
     ) -> Self {
+        let config = config.sanitize();
         let flat_arrow_schema = to_flat_sst_arrow_schema(
             &metadata,
             &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
@@ -1432,6 +1443,24 @@ mod tests {
 
         converter.append_key_values(&key_values)?;
         converter.convert()
+    }
+
+    #[test]
+    fn test_bulk_memtable_sanitizes_zero_merge_threshold() {
+        let metadata = metadata_for_test();
+        let config = BulkMemtableConfig {
+            merge_threshold: 0,
+            ..Default::default()
+        };
+
+        let memtable =
+            BulkMemtable::new(999, config, metadata, None, None, false, MergeMode::LastRow);
+
+        assert_eq!(DEFAULT_MERGE_THRESHOLD, memtable.config.merge_threshold);
+        assert_eq!(
+            DEFAULT_MERGE_THRESHOLD,
+            memtable.compactor.lock().unwrap().config.merge_threshold
+        );
     }
 
     #[test]
