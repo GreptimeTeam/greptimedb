@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use api::region::RegionResponse;
 use api::v1::meta::TopicStat;
+use api::v1::region::remote_dyn_filter_request::Action;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
     ListMetadataRequest, RegionResponse as RegionResponseV1, RemoteDynFilterRequest, SyncRequest,
@@ -728,11 +729,11 @@ impl RegionServer {
             .as_ref()
             .context(error::MissingRequiredFieldSnafu { name: "action" })?
         {
-            api::v1::region::remote_dyn_filter_request::Action::Update(update) => {
+            Action::Update(update) => {
                 self.handle_remote_dyn_filter_update(&request.query_id, update)
                     .await
             }
-            api::v1::region::remote_dyn_filter_request::Action::Unregister(unregister) => {
+            Action::Unregister(unregister) => {
                 self.handle_remote_dyn_filter_unregister(&request.query_id, unregister)
                     .await
             }

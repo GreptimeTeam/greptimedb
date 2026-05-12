@@ -2662,6 +2662,7 @@ version = "1.0.0"
 dependencies = [
  "api",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "common-base",
  "common-error",

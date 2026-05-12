@@ -33,10 +33,7 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
-use session::context::{
-    Channel, QueryContextBuilder, QueryContextRef, REMOTE_QUERY_ID_EXTENSION_KEY,
-    generate_remote_query_id,
-};
+use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::hints::{READ_PREFERENCE_HINT, is_reserved_extension_key};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
@@ -217,11 +214,7 @@ pub(crate) fn create_query_context(
         .current_catalog(catalog)
         .current_schema(schema)
         .timezone(timezone)
-        .channel(channel)
-        .set_extension(
-            REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
-            generate_remote_query_id(),
-        );
+        .channel(channel);
 
     if let Some(x) = extensions
         .iter()
@@ -293,6 +286,7 @@ impl Drop for RequestTimer {
 mod tests {
     use chrono::FixedOffset;
     use common_time::Timezone;
+    use session::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
 
     use super::*;
 

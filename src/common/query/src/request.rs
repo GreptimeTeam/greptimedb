@@ -31,16 +31,56 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionId;
 
+/// Current wire-format version for remote dynamic filter payload updates.
 pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;
 
+/// Serialized predicate payload for remote dynamic filter updates.
+///
+/// The payload is tagged in JSON so receivers can reject unsupported encodings
+/// before decoding engine-specific bytes. For DataFusion expressions the
+/// `payload` bytes are serialized by `serde_json` as a base64 string, for example:
+///
+/// ```json
+/// { "kind": "datafusion", "payload": "CQgH" }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum DynFilterPayload {
-    Datafusion(Vec<u8>),
+    /// A serialized DataFusion [`PhysicalExpr`] encoded as a protobuf
+    /// [`PhysicalExprNode`].
+    Datafusion(#[serde(with = "base64_bytes")] Vec<u8>),
+}
+
+mod base64_bytes {
+    use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&BASE64_STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        BASE64_STANDARD.decode(encoded).map_err(|err| {
+            D::Error::custom(format!("invalid base64 dynamic filter payload: {err}"))
+        })
+    }
 }
 
 impl DynFilterPayload {
+    /// Encodes a DataFusion physical expression into a bounded dynamic filter payload.
+    ///
+    /// This rejects expressions that cannot be safely shipped as dynamic filter
+    /// predicates and fails if the serialized payload exceeds `max_payload_bytes`.
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
@@ -114,21 +154,12 @@ fn validate_decoded_payload_expr(
 ) -> DataFusionResult<()> {
     expr.apply(|node| {
         if let Some(column) = node.as_any().downcast_ref::<Column>() {
-            let Some(field) = input_schema.fields().get(column.index()) else {
+            if input_schema.fields().get(column.index()).is_none() {
                 return Err(DataFusionError::Plan(format!(
                     "Decoded Column '{}' references out-of-bounds index {} for input schema of size {}",
                     column.name(),
                     column.index(),
                     input_schema.fields().len()
-                )));
-            };
-
-            if field.name() != column.name() {
-                return Err(DataFusionError::Plan(format!(
-                    "Decoded Column name/index mismatch: payload has '{}' at index {}, but schema field is '{}'",
-                    column.name(),
-                    column.index(),
-                    field.name()
                 )));
             }
         }
@@ -139,21 +170,33 @@ fn validate_decoded_payload_expr(
     Ok(())
 }
 
+/// A remote dynamic filter update sent from a query coordinator to region servers.
+///
+/// `generation` is monotonic within a `query_id`/`filter_id` pair and matches the
+/// gRPC field name used by `RemoteDynFilterUpdate`. Receivers use it to ignore
+/// stale updates while `is_complete` marks the final payload for the filter.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DynFilterUpdate {
+    /// Protocol version used by this update payload.
     pub protocol_version: u32,
+    /// Internal query identifier that owns this dynamic filter lifecycle.
     pub query_id: String,
+    /// Identifier of the dynamic filter within the query.
     pub filter_id: String,
-    pub epoch: u64,
+    /// Monotonic update generation for this filter.
+    pub generation: u64,
+    /// Whether this update completes the dynamic filter stream.
     pub is_complete: bool,
+    /// Serialized predicate payload carried by this update.
     pub payload: DynFilterPayload,
 }
 
 impl DynFilterUpdate {
+    /// Creates a dynamic filter update with the current protocol version.
     pub fn new(
         query_id: String,
         filter_id: String,
-        epoch: u64,
+        generation: u64,
         is_complete: bool,
         payload: DynFilterPayload,
     ) -> Self {
@@ -161,7 +204,7 @@ impl DynFilterUpdate {
             protocol_version: DYN_FILTER_PROTOCOL_VERSION,
             query_id,
             filter_id,
-            epoch,
+            generation,
             is_complete,
             payload,
         }
@@ -185,6 +228,8 @@ pub struct QueryRequest {
 mod tests {
     use std::sync::Arc;
 
+    use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::physical_expr::expressions::Column;
 
@@ -218,12 +263,53 @@ mod tests {
         );
 
         let json = serde_json::to_string(&update).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         let decoded: DynFilterUpdate = serde_json::from_str(&json).unwrap();
 
+        assert_eq!(value["generation"], serde_json::json!(9));
+        assert!(value.get("epoch").is_none());
+        assert_eq!(
+            value["payload"],
+            serde_json::json!({ "kind": "datafusion", "payload": BASE64_STANDARD.encode([9, 8, 7]) })
+        );
         assert_eq!(decoded, update);
         assert!(decoded.is_complete);
         assert!(
             matches!(decoded.payload, DynFilterPayload::Datafusion(ref bytes) if bytes == &vec![9, 8, 7])
+        );
+    }
+
+    #[test]
+    fn dyn_filter_payload_json_uses_base64_for_empty_and_padded_payloads() {
+        let empty = serde_json::to_value(DynFilterPayload::Datafusion(vec![])).unwrap();
+        let one = serde_json::to_value(DynFilterPayload::Datafusion(vec![1])).unwrap();
+        let two = serde_json::to_value(DynFilterPayload::Datafusion(vec![1, 2])).unwrap();
+
+        assert_eq!(
+            empty,
+            serde_json::json!({"kind": "datafusion", "payload": ""})
+        );
+        assert_eq!(
+            one,
+            serde_json::json!({"kind": "datafusion", "payload": BASE64_STANDARD.encode([1])})
+        );
+        assert_eq!(
+            two,
+            serde_json::json!({"kind": "datafusion", "payload": BASE64_STANDARD.encode([1, 2])})
+        );
+    }
+
+    #[test]
+    fn dyn_filter_payload_json_rejects_invalid_base64() {
+        let err = serde_json::from_value::<DynFilterPayload>(serde_json::json!({
+            "kind": "datafusion",
+            "payload": "not base64!",
+        }))
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("invalid base64 dynamic filter payload")
         );
     }
 
@@ -258,11 +344,26 @@ mod tests {
     }
 
     #[test]
-    fn dyn_filter_payload_decode_rejects_column_name_index_mismatch() {
+    fn dyn_filter_payload_decode_accepts_column_name_mismatch_when_index_is_valid() {
         let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
-        let mismatched_expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new("service", 0));
+        let expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new("service", 0));
 
-        let payload = DynFilterPayload::from_datafusion_expr(&mismatched_expr, 1024).unwrap();
+        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
+        let decoded = payload
+            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .unwrap();
+
+        let decoded = decoded.as_any().downcast_ref::<Column>().unwrap();
+
+        assert_eq!(decoded.index(), 0);
+    }
+
+    #[test]
+    fn dyn_filter_payload_decode_rejects_out_of_bounds_column_index() {
+        let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
+        let expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new("host", 1));
+
+        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
         let err = payload
             .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
             .unwrap_err();

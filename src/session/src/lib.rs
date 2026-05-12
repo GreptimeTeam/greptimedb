@@ -31,10 +31,7 @@ use common_recordbatch::cursor::RecordBatchStreamCursor;
 pub use common_session::ReadPreference;
 use common_time::Timezone;
 use common_time::timezone::get_timezone;
-use context::{
-    ConfigurationVariables, QueryContextBuilder, REMOTE_QUERY_ID_EXTENSION_KEY,
-    generate_remote_query_id,
-};
+use context::{ConfigurationVariables, QueryContextBuilder};
 use derive_more::Debug;
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
@@ -110,10 +107,6 @@ impl Session {
             .channel(self.conn_info.channel)
             .process_id(self.process_id)
             .conn_info(self.conn_info.clone())
-            .set_extension(
-                REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
-                generate_remote_query_id(),
-            )
             .build()
             .into()
     }
