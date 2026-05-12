@@ -1843,23 +1843,19 @@ impl SimpleFilterContext {
                 match sst_meta.column_by_id(column.column_id) {
                     Some(sst_column) => {
                         debug_assert_eq!(column.semantic_type, sst_column.semantic_type);
-                        // Schema evolution can make the same column id have different
-                        // concrete data types across SSTs. In that case, evaluating
-                        // this simple filter against current SST column may raise an
-                        // invalid cross-type comparison error (e.g. Float64 == Utf8).
-                        //
-                        // Only field predicates are safe to drop (`None`) because
-                        // upper FilterExec still evaluates them precisely. Tag/timestamp
-                        // predicates must remain precise in this path, so we keep them
-                        // as `Matched` (no pruning, no dropping).
+                        // Schema evolution can make field columns with the same id have
+                        // different concrete data types across SSTs. In that case,
+                        // evaluating this simple filter against current SST column may
+                        // raise an invalid cross-type comparison error (e.g. Float64 == Utf8).
                         let maybe_filter = if sst_column.column_schema.data_type
                             == column.column_schema.data_type
                         {
                             MaybeFilter::Filter(filter)
-                        } else if column.semantic_type == SemanticType::Field {
-                            return None;
                         } else {
-                            MaybeFilter::Matched
+                            // Altering tag or timestamp column types is not allowed,
+                            // so only field columns can reach this branch.
+                            debug_assert_eq!(column.semantic_type, SemanticType::Field);
+                            return None;
                         };
                         (column, maybe_filter)
                     }
@@ -2385,12 +2381,12 @@ mod tests {
                 false,
             ),
             semantic_type: SemanticType::Timestamp,
-            column_id: 3,
+            column_id: 2,
         };
         let make_field_0 = |data_type| ColumnMetadata {
             column_schema: ColumnSchema::new("field_0".to_string(), data_type, true),
             semantic_type: SemanticType::Field,
-            column_id: 2,
+            column_id: 1,
         };
 
         let mut sst_builder = RegionMetadataBuilder::new(region_id);
@@ -2398,7 +2394,7 @@ mod tests {
             .push_column_metadata(make_tag_0())
             .push_column_metadata(make_field_0(ConcreteDataType::uint64_datatype()))
             .push_column_metadata(make_ts())
-            .primary_key(vec![0, 1]);
+            .primary_key(vec![0]);
         let sst_metadata = Arc::new(sst_builder.build().unwrap());
 
         let mut expected_builder = RegionMetadataBuilder::new(region_id);
@@ -2406,7 +2402,7 @@ mod tests {
             .push_column_metadata(make_tag_0())
             .push_column_metadata(make_field_0(ConcreteDataType::int64_datatype()))
             .push_column_metadata(make_ts())
-            .primary_key(vec![0, 1]);
+            .primary_key(vec![0]);
 
         let expected_metadata = Arc::new(expected_builder.build().unwrap());
 
