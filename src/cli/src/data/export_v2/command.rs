@@ -74,8 +74,8 @@ pub struct ExportListCommand {
 impl ExportListCommand {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         validate_uri(&self.location).map_err(BoxedError::new)?;
-        let storage =
-            OpenDalStorage::from_uri(&self.location, &self.storage).map_err(BoxedError::new)?;
+        let storage = OpenDalStorage::from_parent_uri(&self.location, &self.storage)
+            .map_err(BoxedError::new)?;
 
         Ok(Box::new(ExportList {
             location: self.location.clone(),
