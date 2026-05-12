@@ -878,6 +878,35 @@ mod test {
     }
 
     #[tokio::test]
+    async fn range_from_derived_query_without_by_err() {
+        let queries = [
+            r#"SELECT timestamp, tag_0, avg(field_0) RANGE '5m'
+            FROM (
+                SELECT timestamp, tag_0, field_0, timestamp_2 FROM test_0
+                UNION ALL
+                SELECT timestamp, tag_0, field_0, timestamp_2 FROM test_1
+            )
+            WHERE timestamp >= '1970-01-01 00:00:00'
+            ALIGN '1h'"#,
+            r#"SELECT tmp.timestamp, tmp.tag_0, avg(tmp.field_0) RANGE '5m'
+            FROM (
+                SELECT timestamp, tag_0, field_0, timestamp_2 FROM test_0
+                UNION ALL
+                SELECT timestamp, tag_0, field_0, timestamp_2 FROM test_1
+            ) AS tmp
+            WHERE tmp.timestamp >= '1970-01-01 00:00:00'
+            ALIGN '1h'"#,
+        ];
+
+        for query in queries {
+            assert_eq!(
+                do_union_query(query).await.unwrap_err().to_string(),
+                "Range Query: Cannot infer default BY columns from derived range query input"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn range_in_expr() {
         let query = r#"SELECT sin(avg(field_0 + field_1) RANGE '5m' + 1) FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         let expected = String::from(
