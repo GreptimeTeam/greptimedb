@@ -213,6 +213,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_active_datanodes_uses_lease_liveness_with_stale_node_info() {
+        let client = create_meta_peer_client();
+        let in_memory = client.memory_backend();
+        let lease = default_distributed_time_constants().datanode_lease;
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("AZ".to_string(), "az-a".to_string());
+
+        put_node_info(
+            &in_memory,
+            NodeInfoKey {
+                role: Role::Datanode,
+                node_id: 1,
+            },
+            NodeInfo {
+                peer: Peer::new(1, "127.0.0.1:4001".to_string()),
+                last_activity_ts: current_time_millis() - (lease.as_millis() * 2) as i64,
+                status: NodeStatus::Datanode(DatanodeStatus {
+                    rcus: 0,
+                    wcus: 0,
+                    leader_regions: 0,
+                    follower_regions: 0,
+                    workloads: DatanodeWorkloads {
+                        types: vec![i32::MAX],
+                    },
+                }),
+                version: String::new(),
+                git_commit: String::new(),
+                start_time_ms: 0,
+                total_cpu_millicores: 0,
+                total_memory_bytes: 0,
+                cpu_usage_millicores: 0,
+                memory_usage_bytes: 0,
+                hostname: String::new(),
+                env_vars,
+            },
+        )
+        .await;
+
+        put_lease_value(
+            &in_memory,
+            DatanodeLeaseKey { node_id: 1 },
+            LeaseValue {
+                timestamp_millis: current_time_millis(),
+                node_addr: "127.0.0.1:4001".to_string(),
+                workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                    types: vec![DatanodeWorkloadType::Hybrid as i32],
+                }),
+            },
+        )
+        .await;
+
+        let nodes = client
+            .active_datanodes(Some(accept_ingest_workload))
+            .await
+            .unwrap();
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].peer.id, 1);
+        assert_eq!(
+            nodes[0].env_vars.get("AZ").map(String::as_str),
+            Some("az-a")
+        );
+    }
+
+    #[tokio::test]
     async fn test_active_datanodes_returns_node_info_with_env_vars() {
         let client = create_meta_peer_client();
         let in_memory = client.memory_backend();
@@ -247,6 +313,18 @@ mod tests {
                 memory_usage_bytes: 0,
                 hostname: String::new(),
                 env_vars,
+            },
+        )
+        .await;
+        put_lease_value(
+            &in_memory,
+            DatanodeLeaseKey { node_id: 1 },
+            LeaseValue {
+                timestamp_millis: current_time_millis(),
+                node_addr: "127.0.0.1:4001".to_string(),
+                workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                    types: vec![DatanodeWorkloadType::Hybrid as i32],
+                }),
             },
         )
         .await;

@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_meta::DatanodeId;
-use common_meta::cluster::{NodeInfo, NodeStatus};
+use common_meta::cluster::{DatanodeStatus, NodeInfo, NodeStatus};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_time::util::SystemTimer;
@@ -142,18 +143,70 @@ pub async fn alive_frontend_infos(
 /// Returns the alive datanode node infos.
 pub async fn alive_datanode_infos(
     timer: &impl SystemTimer,
-    lister: &impl NodeInfoAccessor,
+    accessor: &(impl LeaseValueAccessor + NodeInfoAccessor),
     active_duration: Duration,
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<NodeInfo>> {
-    alive_node_infos(
-        timer,
-        lister,
-        NodeInfoType::Datanode,
-        active_duration,
-        condition,
-    )
-    .await
+    let active_filter = build_active_filter(active_duration);
+    let condition = condition.unwrap_or(|_| true);
+    let lease_values = accessor.lease_values(LeaseValueType::Datanode).await?;
+    let mut node_infos = accessor
+        .node_infos(NodeInfoType::Datanode)
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let now = timer.current_time_millis();
+
+    Ok(lease_values
+        .into_iter()
+        .filter_map(|(peer_id, lease_value)| {
+            if !active_filter(now, &lease_value) || !condition(&lease_value.workloads) {
+                return None;
+            }
+
+            let peer = Peer::new(peer_id, lease_value.node_addr.clone());
+            let mut node_info = node_infos
+                .remove(&peer_id)
+                .filter(|node_info| matches!(node_info.status, NodeStatus::Datanode(_)))
+                .unwrap_or_else(|| datanode_node_info_from_lease(peer.clone(), &lease_value));
+            node_info.peer = peer;
+            node_info.last_activity_ts = lease_value.timestamp_millis;
+            if let (NodeStatus::Datanode(status), NodeWorkloads::Datanode(workloads)) =
+                (&mut node_info.status, &lease_value.workloads)
+            {
+                status.workloads = workloads.clone();
+            }
+            Some(node_info)
+        })
+        .collect::<Vec<_>>())
+}
+
+fn datanode_node_info_from_lease(peer: Peer, lease_value: &LeaseValue) -> NodeInfo {
+    let workloads = match &lease_value.workloads {
+        NodeWorkloads::Datanode(workloads) => workloads.clone(),
+        _ => Default::default(),
+    };
+
+    NodeInfo {
+        peer,
+        last_activity_ts: lease_value.timestamp_millis,
+        status: NodeStatus::Datanode(DatanodeStatus {
+            rcus: 0,
+            wcus: 0,
+            leader_regions: 0,
+            follower_regions: 0,
+            workloads,
+        }),
+        version: String::new(),
+        git_commit: String::new(),
+        start_time_ms: 0,
+        total_cpu_millicores: 0,
+        total_memory_bytes: 0,
+        cpu_usage_millicores: 0,
+        memory_usage_bytes: 0,
+        hostname: String::new(),
+        env_vars: Default::default(),
+    }
 }
 
 /// Returns the alive flownode node infos.
