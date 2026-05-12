@@ -458,11 +458,16 @@ fn validate_enum_options(
     for key in options_map.keys() {
         if key == enum_tag_key {
             has_tag = true;
-        } else if enum_option_prefixes
-            .iter()
-            .any(|prefix| key.starts_with(prefix))
+        } else if !has_enum_options
+            && enum_option_prefixes
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
         {
             has_enum_options = true;
+        }
+
+        if has_tag && has_enum_options {
+            break;
         }
     }
 
