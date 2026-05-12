@@ -286,6 +286,7 @@ impl GreptimeDbStandaloneBuilder {
             cache_registry.clone(),
             procedure_executor.clone(),
             node_manager.clone(),
+            instance.frontend_peer_addr().to_string(),
         )
         .await
         .context(StartFlownodeSnafu)
