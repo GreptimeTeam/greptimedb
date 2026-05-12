@@ -1847,12 +1847,17 @@ impl SimpleFilterContext {
                         // concrete data types across SSTs. In that case, evaluating
                         // this simple filter against current SST column may raise an
                         // invalid cross-type comparison error (e.g. Float64 == Utf8).
-                        // Degrade to matched (no pruning) for this SST and leave
-                        // correctness to upper query filtering.
+                        //
+                        // Only field predicates are safe to drop (`None`) because
+                        // upper FilterExec still evaluates them precisely. Tag/timestamp
+                        // predicates must remain precise in this path, so we keep them
+                        // as `Matched` (no pruning, no dropping).
                         let maybe_filter = if sst_column.column_schema.data_type
                             == column.column_schema.data_type
                         {
                             MaybeFilter::Filter(filter)
+                        } else if column.semantic_type == SemanticType::Field {
+                            return None;
                         } else {
                             MaybeFilter::Matched
                         };
@@ -2185,6 +2190,7 @@ mod tests {
     use parquet::arrow::ArrowWriter;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_request::PathType;
+    use store_api::storage::RegionId;
     use table::predicate::Predicate;
 
     use super::*;
@@ -2347,6 +2353,64 @@ mod tests {
             ctx.filter(),
             MaybeFilter::Matched | MaybeFilter::Pruned
         ));
+    }
+
+    #[test]
+    fn test_simple_filter_context_drops_mismatched_field_filter() {
+        let (sst_metadata, latest_metadata) = mock_metadata();
+        let ctx = SimpleFilterContext::new_opt(
+            &sst_metadata,
+            Some(latest_metadata.as_ref()),
+            &col("field_0").eq(lit(1_i64)),
+        );
+
+        assert!(ctx.is_none());
+    }
+
+    fn mock_metadata() -> (RegionMetadataRef, RegionMetadataRef) {
+        let region_id = RegionId::new(1, 1);
+        let make_tag_0 = || ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "tag_0".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 0,
+        };
+        let make_ts = || ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 3,
+        };
+        let make_field_0 = |data_type| ColumnMetadata {
+            column_schema: ColumnSchema::new("field_0".to_string(), data_type, true),
+            semantic_type: SemanticType::Field,
+            column_id: 2,
+        };
+
+        let mut sst_builder = RegionMetadataBuilder::new(region_id);
+        sst_builder
+            .push_column_metadata(make_tag_0())
+            .push_column_metadata(make_field_0(ConcreteDataType::uint64_datatype()))
+            .push_column_metadata(make_ts())
+            .primary_key(vec![0, 1]);
+        let sst_metadata = Arc::new(sst_builder.build().unwrap());
+
+        let mut expected_builder = RegionMetadataBuilder::new(region_id);
+        expected_builder
+            .push_column_metadata(make_tag_0())
+            .push_column_metadata(make_field_0(ConcreteDataType::int64_datatype()))
+            .push_column_metadata(make_ts())
+            .primary_key(vec![0, 1]);
+
+        let expected_metadata = Arc::new(expected_builder.build().unwrap());
+
+        (sst_metadata, expected_metadata)
     }
 
     #[test]

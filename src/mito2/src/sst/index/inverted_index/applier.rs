@@ -43,7 +43,7 @@ use crate::error::{
     ApplyInvertedIndexSnafu, BuildIndexApplierSnafu, MetadataSnafu, PuffinBuildReaderSnafu,
     PuffinReadBlobSnafu, Result,
 };
-use crate::metrics::INDEX_APPLY_ELAPSED;
+use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::RegionIndexId;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
@@ -413,7 +413,7 @@ impl InvertedIndexApplier {
 
 impl Drop for InvertedIndexApplier {
     fn drop(&mut self) {
-        INDEX_APPLY_MEMORY_USAGE.sub(self.index_applier.memory_usage() as i64);
+        INDEX_APPLY_MEMORY_USAGE.sub(self.default_plan.index_applier.memory_usage() as i64);
     }
 }
 
