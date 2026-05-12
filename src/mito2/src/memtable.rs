@@ -447,15 +447,6 @@ impl MemtableBuilderProvider {
                 dedup,
                 merge_mode,
             )),
-            Some(MemtableOptions::PartitionTree(_)) => {
-                common_telemetry::warn!(
-                    "PartitionTreeMemtable is deprecated, falling back to BulkMemtable"
-                );
-                Arc::new(
-                    BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
-                        .with_compact_dispatcher(self.compact_dispatcher.clone()),
-                )
-            }
             None => self.default_primary_key_memtable_builder(dedup, merge_mode),
         }
     }

@@ -73,7 +73,7 @@ Affected Rows: 0
 ---test more options----
 CREATE DATABASE mydb WITH (
        ttl = '1h',
-       'memtable.type'='partition_tree',
+       'memtable.type'='bulk',
        'append_mode'='false',
        'merge_mode'='last_non_null',
        'compaction.type' = 'twcs',
@@ -97,7 +97,7 @@ SHOW FULL DATABASES;
 |                    | 'append_mode'='false'              |
 |                    | 'compaction.twcs.time_window'='1h' |
 |                    | 'compaction.type'='twcs'           |
-|                    | 'memtable.type'='partition_tree'   |
+|                    | 'memtable.type'='bulk'             |
 |                    | 'merge_mode'='last_non_null'       |
 |                    | 'skip_wal'='true'                  |
 |                    |                                    |
@@ -110,25 +110,25 @@ Affected Rows: 0
 
 SHOW CREATE TABLE test1;
 
-+-------+---------------------------------------+
-| Table | Create Table                          |
-+-------+---------------------------------------+
-| test1 | CREATE TABLE IF NOT EXISTS "test1" (  |
-|       |   "host" STRING NULL,                 |
-|       |   "cpu" DOUBLE NULL,                  |
-|       |   "ts" TIMESTAMP(3) NOT NULL,         |
-|       |   TIME INDEX ("ts")                   |
-|       | )                                     |
-|       |                                       |
-|       | ENGINE=mito                           |
-|       | WITH(                                 |
-|       |   append_mode = 'false',              |
-|       |   'memtable.type' = 'partition_tree', |
-|       |   merge_mode = 'last_non_null',       |
-|       |   skip_wal = 'true',                  |
-|       |   ttl = '1h'                          |
-|       | )                                     |
-+-------+---------------------------------------+
++-------+--------------------------------------+
+| Table | Create Table                         |
++-------+--------------------------------------+
+| test1 | CREATE TABLE IF NOT EXISTS "test1" ( |
+|       |   "host" STRING NULL,                |
+|       |   "cpu" DOUBLE NULL,                 |
+|       |   "ts" TIMESTAMP(3) NOT NULL,        |
+|       |   TIME INDEX ("ts")                  |
+|       | )                                    |
+|       |                                      |
+|       | ENGINE=mito                          |
+|       | WITH(                                |
+|       |   append_mode = 'false',             |
+|       |   'memtable.type' = 'bulk',          |
+|       |   merge_mode = 'last_non_null',      |
+|       |   skip_wal = 'true',                 |
+|       |   ttl = '1h'                         |
+|       | )                                    |
++-------+--------------------------------------+
 
 CREATE TABLE test2(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX) WITH (
        'append_mode'='true',
@@ -139,25 +139,25 @@ Affected Rows: 0
 
 SHOW CREATE TABLE test2;
 
-+-------+---------------------------------------+
-| Table | Create Table                          |
-+-------+---------------------------------------+
-| test2 | CREATE TABLE IF NOT EXISTS "test2" (  |
-|       |   "host" STRING NULL,                 |
-|       |   "cpu" DOUBLE NULL,                  |
-|       |   "ts" TIMESTAMP(3) NOT NULL,         |
-|       |   TIME INDEX ("ts")                   |
-|       | )                                     |
-|       |                                       |
-|       | ENGINE=mito                           |
-|       | WITH(                                 |
-|       |   append_mode = 'true',               |
-|       |   'memtable.type' = 'partition_tree', |
-|       |   merge_mode = '',                    |
-|       |   skip_wal = 'false',                 |
-|       |   ttl = '1h'                          |
-|       | )                                     |
-+-------+---------------------------------------+
++-------+--------------------------------------+
+| Table | Create Table                         |
++-------+--------------------------------------+
+| test2 | CREATE TABLE IF NOT EXISTS "test2" ( |
+|       |   "host" STRING NULL,                |
+|       |   "cpu" DOUBLE NULL,                 |
+|       |   "ts" TIMESTAMP(3) NOT NULL,        |
+|       |   TIME INDEX ("ts")                  |
+|       | )                                    |
+|       |                                      |
+|       | ENGINE=mito                          |
+|       | WITH(                                |
+|       |   append_mode = 'true',              |
+|       |   'memtable.type' = 'bulk',          |
+|       |   merge_mode = '',                   |
+|       |   skip_wal = 'false',                |
+|       |   ttl = '1h'                         |
+|       | )                                    |
++-------+--------------------------------------+
 
 INSERT INTO test2 VALUES('host1', 1.0, '2023-10-01 00:00:00');
 

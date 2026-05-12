@@ -308,8 +308,8 @@ async fn test_engine_create_with_memtable_opts_with_format(flat_format: bool) {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
-        .insert_option("memtable.type", "partition_tree")
-        .insert_option("memtable.partition_tree.index_max_keys_per_shard", "2")
+        .insert_option("memtable.type", "bulk")
+        .insert_option("memtable.bulk.merge_threshold", "7")
         .build();
     let column_schemas = rows_schema(&request);
     engine
@@ -317,11 +317,16 @@ async fn test_engine_create_with_memtable_opts_with_format(flat_format: bool) {
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    let Some(MemtableOptions::PartitionTree(memtable_opts)) = &region.version().options.memtable
-    else {
-        unreachable!();
-    };
-    assert_eq!(2, memtable_opts.index_max_keys_per_shard);
+    let version = region.version();
+    match version
+        .options
+        .memtable
+        .as_ref()
+        .expect("memtable options should be set")
+    {
+        MemtableOptions::Bulk(config) => assert_eq!(config.merge_threshold, 7),
+        other => panic!("expected bulk memtable, got {other:?}"),
+    }
 
     let rows = Rows {
         schema: column_schemas,

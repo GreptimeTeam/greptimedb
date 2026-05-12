@@ -62,7 +62,7 @@ with(
     'index.inverted_index.ignore_column_ids'='1,2,3',
     'index.inverted_index.segment_row_count'='512',
     'wal_options'='{"wal.provider":"raft_engine"}',
-    'memtable.type' = 'partition_tree',
+    'memtable.type' = 'bulk',
 );
 
 drop table test_mito_options;

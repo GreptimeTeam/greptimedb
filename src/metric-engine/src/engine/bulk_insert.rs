@@ -229,7 +229,7 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
     use datatypes::arrow::record_batch::RecordBatch;
     use mito2::config::MitoConfig;
-    use store_api::metric_engine_consts::MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING;
+    use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{RegionBulkInsertsRequest, RegionPutRequest, RegionRequest};
@@ -290,10 +290,7 @@ mod tests {
         env.create_physical_region(
             physical_region_id,
             &TestEnv::default_table_dir(),
-            vec![(
-                MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING.to_string(),
-                "dense".to_string(),
-            )],
+            vec![(PRIMARY_KEY_ENCODING.to_string(), "dense".to_string())],
         )
         .await;
 

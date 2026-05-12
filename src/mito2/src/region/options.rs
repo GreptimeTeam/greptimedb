@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_stat::get_total_memory_readable;
 use common_time::TimeToLive;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use serde::de::Error as _;
@@ -29,7 +28,9 @@ use serde_json::Value;
 use serde_with::{DisplayFromStr, NoneAsEmptyString, serde_as, with_prefix};
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metric_engine_consts::MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING;
+use store_api::metric_engine_consts::{
+    MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
+};
 use store_api::mito_engine_options::COMPACTION_OVERRIDE;
 use store_api::storage::ColumnId;
 use strum::EnumString;
@@ -42,13 +43,10 @@ const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
 const MEMTABLE_PARTITION_TREE_PREFIX: &str = "memtable.partition_tree.";
 
-// Legacy defaults preserved for backward compatibility of the deprecated
-// `memtable.type='partition_tree'` option. The runtime ignores these and
-// falls back to BulkMemtable; they only feed `PartitionTreeOptions::default`
-// so existing region options round-trip through SHOW CREATE TABLE.
-const PARTITION_TREE_DICTIONARY_SIZE_FACTOR: u64 = 8;
-const PARTITION_TREE_DEFAULT_MAX_KEYS_PER_SHARD: usize = 8192;
-const PARTITION_TREE_DEFAULT_FREEZE_THRESHOLD: usize = 131072;
+/// Legacy memtable type identifier accepted for backward compatibility.
+/// The partition tree memtable has been removed; parsing this value falls
+/// back to the default (bulk) memtable at runtime.
+const LEGACY_PARTITION_TREE_MEMTABLE_TYPE: &str = "partition_tree";
 
 pub(crate) fn parse_wal_options(
     options_map: &HashMap<String, String>,
@@ -132,13 +130,7 @@ impl RegionOptions {
 
     /// Returns the `primary_key_encoding` if it is set, otherwise returns the default [`PrimaryKeyEncoding`].
     pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
-        self.primary_key_encoding.unwrap_or_else(|| {
-            self.memtable
-                .as_ref()
-                .map_or(PrimaryKeyEncoding::default(), |memtable| {
-                    memtable.primary_key_encoding()
-                })
-        })
+        self.primary_key_encoding.unwrap_or_default()
     }
 }
 
@@ -170,7 +162,18 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             "memtable.type",
             &[MEMTABLE_PARTITION_TREE_PREFIX],
         )? {
-            Some(serde_json::from_str(&json).context(JsonOptionsSnafu)?)
+            let is_legacy_partition_tree = options_map
+                .get("memtable.type")
+                .map(|s| s.eq_ignore_ascii_case(LEGACY_PARTITION_TREE_MEMTABLE_TYPE))
+                .unwrap_or(false);
+            if is_legacy_partition_tree {
+                // The partition tree memtable has been removed. Fall back to the
+                // default memtable; the primary key encoding (if any) is still
+                // read separately below from the legacy nested key.
+                None
+            } else {
+                Some(serde_json::from_str(&json).context(JsonOptionsSnafu)?)
+            }
         } else {
             None
         };
@@ -181,7 +184,8 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             .unwrap_or(false);
         let compaction_override = has_compaction_type || compaction_override_flag;
         let primary_key_encoding = options_map
-            .get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING)
+            .get(PRIMARY_KEY_ENCODING)
+            .or_else(|| options_map.get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING))
             .map(|v| match v.to_lowercase().as_str() {
                 "dense" => Ok(PrimaryKeyEncoding::Dense),
                 "sparse" => Ok(PrimaryKeyEncoding::Sparse),
@@ -369,60 +373,9 @@ pub enum MemtableOptions {
     TimeSeries,
     #[serde(with = "prefix_bulk")]
     Bulk(BulkMemtableConfig),
-    #[serde(with = "prefix_partition_tree")]
-    PartitionTree(PartitionTreeOptions),
 }
 
 with_prefix!(prefix_bulk "memtable.bulk.");
-with_prefix!(prefix_partition_tree "memtable.partition_tree.");
-
-impl MemtableOptions {
-    /// Returns the primary key encoding mode.
-    pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
-        match self {
-            MemtableOptions::PartitionTree(opts) => opts.primary_key_encoding,
-            _ => PrimaryKeyEncoding::Dense,
-        }
-    }
-}
-
-/// Partition tree memtable options.
-#[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PartitionTreeOptions {
-    /// Max keys in an index shard.
-    #[serde_as(as = "DisplayFromStr")]
-    pub index_max_keys_per_shard: usize,
-    /// Number of rows to freeze a data part.
-    #[serde_as(as = "DisplayFromStr")]
-    pub data_freeze_threshold: usize,
-    /// Total bytes of dictionary to keep in fork.
-    pub fork_dictionary_bytes: ReadableSize,
-    /// Primary key encoding mode.
-    pub primary_key_encoding: PrimaryKeyEncoding,
-}
-
-impl Default for PartitionTreeOptions {
-    fn default() -> Self {
-        let mut fork_dictionary_bytes = ReadableSize::mb(512);
-        if let Some(total_memory) = get_total_memory_readable() {
-            let adjust_dictionary_bytes = std::cmp::min(
-                total_memory / PARTITION_TREE_DICTIONARY_SIZE_FACTOR,
-                fork_dictionary_bytes,
-            );
-            if adjust_dictionary_bytes.0 > 0 {
-                fork_dictionary_bytes = adjust_dictionary_bytes;
-            }
-        }
-        Self {
-            index_max_keys_per_shard: PARTITION_TREE_DEFAULT_MAX_KEYS_PER_SHARD,
-            data_freeze_threshold: PARTITION_TREE_DEFAULT_FREEZE_THRESHOLD,
-            fork_dictionary_bytes,
-            primary_key_encoding: PrimaryKeyEncoding::Dense,
-        }
-    }
-}
 
 fn deserialize_ignore_column_ids<'de, D>(deserializer: D) -> Result<Vec<ColumnId>, D::Error>
 where
@@ -692,15 +645,53 @@ mod tests {
         };
         assert_eq!(expect, options);
 
+        // Legacy partition_tree memtable falls back to default (None → bulk-equivalent at runtime).
         let map = make_map(&[("memtable.type", "partition_tree")]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
-            memtable: Some(MemtableOptions::PartitionTree(
-                PartitionTreeOptions::default(),
-            )),
+            memtable: None,
             ..Default::default()
         };
         assert_eq!(expect, options);
+
+        // Legacy partition_tree options are tolerated alongside the type tag.
+        let map = make_map(&[
+            ("memtable.type", "partition_tree"),
+            ("memtable.partition_tree.index_max_keys_per_shard", "2048"),
+            ("memtable.partition_tree.fork_dictionary_bytes", "128M"),
+        ]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            memtable: None,
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_primary_key_encoding() {
+        // New top-level key.
+        let map = make_map(&[("primary_key_encoding", "sparse")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert_eq!(options.primary_key_encoding(), PrimaryKeyEncoding::Sparse);
+        assert_eq!(
+            options.primary_key_encoding,
+            Some(PrimaryKeyEncoding::Sparse)
+        );
+
+        // Legacy memtable.type=partition_tree + legacy encoding.
+        let map = make_map(&[
+            ("memtable.type", "partition_tree"),
+            ("memtable.partition_tree.primary_key_encoding", "sparse"),
+        ]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert_eq!(options.memtable, None);
+        assert_eq!(options.primary_key_encoding(), PrimaryKeyEncoding::Sparse);
+
+        // Invalid value rejected.
+        let map = make_map(&[("primary_key_encoding", "bogus")]);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
     #[test]
@@ -765,10 +756,11 @@ mod tests {
                 WAL_OPTIONS_KEY,
                 &serde_json::to_string(&wal_options).unwrap(),
             ),
-            ("memtable.type", "partition_tree"),
-            ("memtable.partition_tree.index_max_keys_per_shard", "2048"),
-            ("memtable.partition_tree.data_freeze_threshold", "2048"),
-            ("memtable.partition_tree.fork_dictionary_bytes", "128M"),
+            ("memtable.type", "bulk"),
+            ("memtable.bulk.merge_threshold", "7"),
+            ("memtable.bulk.encode_row_threshold", "11"),
+            ("memtable.bulk.encode_bytes_threshold", "13"),
+            ("memtable.bulk.max_merge_groups", "17"),
             ("merge_mode", "last_non_null"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
@@ -791,11 +783,11 @@ mod tests {
                     segment_row_count: 512,
                 },
             },
-            memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
-                index_max_keys_per_shard: 2048,
-                data_freeze_threshold: 2048,
-                fork_dictionary_bytes: ReadableSize::mb(128),
-                primary_key_encoding: PrimaryKeyEncoding::Dense,
+            memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig {
+                merge_threshold: 7,
+                encode_row_threshold: 11,
+                encode_bytes_threshold: 13,
+                max_merge_groups: 17,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
@@ -827,12 +819,7 @@ mod tests {
                     segment_row_count: 512,
                 },
             },
-            memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
-                index_max_keys_per_shard: 2048,
-                data_freeze_threshold: 2048,
-                fork_dictionary_bytes: ReadableSize::mb(128),
-                primary_key_encoding: PrimaryKeyEncoding::Dense,
-            })),
+            memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig::default())),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
             primary_key_encoding: None,
@@ -864,10 +851,7 @@ mod tests {
     "index.inverted_index.segment_row_count": "512"
   },
   "memtable": {
-    "memtable.type": "partition_tree",
-    "memtable.partition_tree.index_max_keys_per_shard": "2048",
-    "memtable.partition_tree.data_freeze_threshold": "2048",
-    "memtable.partition_tree.fork_dictionary_bytes": "128MiB"
+    "memtable.type": "bulk"
   },
   "merge_mode": "last_non_null"
 }"#;
@@ -893,12 +877,7 @@ mod tests {
                     segment_row_count: 512,
                 },
             },
-            memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
-                index_max_keys_per_shard: 2048,
-                data_freeze_threshold: 2048,
-                fork_dictionary_bytes: ReadableSize::mb(128),
-                primary_key_encoding: PrimaryKeyEncoding::Dense,
-            })),
+            memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig::default())),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
             primary_key_encoding: None,
