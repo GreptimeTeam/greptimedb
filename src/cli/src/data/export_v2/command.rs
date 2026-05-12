@@ -14,7 +14,7 @@
 
 //! Export V2 CLI commands.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -687,6 +687,7 @@ fn format_chunk_plan(chunks: &[ChunkMeta]) -> String {
 
 #[derive(Debug)]
 struct SnapshotListEntry {
+    path: String,
     manifest: Manifest,
 }
 
@@ -697,21 +698,18 @@ struct SnapshotScanResult {
 }
 
 async fn scan_snapshots(storage: &OpenDalStorage) -> Result<SnapshotScanResult> {
-    let mut snapshot_dirs = storage.list_direct_child_dirs().await?;
-
-    if snapshot_dirs.is_empty() {
-        snapshot_dirs = direct_child_dirs_from_recursive_files(storage).await?;
-    }
-
     let mut result = SnapshotScanResult::default();
-    for dir in snapshot_dirs {
+    for dir in storage.list_direct_child_dirs().await? {
         let manifest_path = format!("{}/{}", dir.trim_matches('/'), MANIFEST_FILE);
         let Some(data) = storage.read_file_if_exists(&manifest_path).await? else {
             continue;
         };
 
         match serde_json::from_slice::<Manifest>(&data) {
-            Ok(manifest) => result.snapshots.push(SnapshotListEntry { manifest }),
+            Ok(manifest) => result.snapshots.push(SnapshotListEntry {
+                path: format!("{}/", dir.trim_matches('/')),
+                manifest,
+            }),
             Err(_) => result
                 .unreadable
                 .push(format!("{}/", dir.trim_matches('/'))),
@@ -723,16 +721,6 @@ async fn scan_snapshots(storage: &OpenDalStorage) -> Result<SnapshotScanResult> 
         .sort_by_key(|entry| std::cmp::Reverse(entry.manifest.created_at));
     result.unreadable.sort();
     Ok(result)
-}
-
-async fn direct_child_dirs_from_recursive_files(storage: &OpenDalStorage) -> Result<Vec<String>> {
-    let mut dirs = BTreeSet::new();
-    for file in storage.list_files_recursive("/").await? {
-        if let Some((dir, _)) = file.trim_matches('/').split_once('/') {
-            dirs.insert(dir.to_string());
-        }
-    }
-    Ok(dirs.into_iter().collect())
 }
 
 fn print_snapshot_list(snapshots: &[SnapshotListEntry], unreadable_count: usize) {
@@ -748,11 +736,12 @@ fn print_snapshot_list(snapshots: &[SnapshotListEntry], unreadable_count: usize)
     }
     println!();
     println!(
-        "  {:<36}  {:<19}  {:<9}  {:<7}  {:<6}  Status",
-        "ID", "Created", "Catalog", "Schemas", "Chunks"
+        "  {:<24}  {:<36}  {:<19}  {:<9}  {:<7}  {:<6}  Status",
+        "Path", "ID", "Created", "Catalog", "Schemas", "Chunks"
     );
     println!(
-        "  {:<36}  {:<19}  {:<9}  {:<7}  {:<6}  {:<10}",
+        "  {:<24}  {:<36}  {:<19}  {:<9}  {:<7}  {:<6}  {:<10}",
+        "-".repeat(24),
         "-".repeat(36),
         "-".repeat(19),
         "-".repeat(9),
@@ -763,7 +752,8 @@ fn print_snapshot_list(snapshots: &[SnapshotListEntry], unreadable_count: usize)
     for entry in snapshots {
         let manifest = &entry.manifest;
         println!(
-            "  {:<36}  {:<19}  {:<9}  {:<7}  {:<6}  {}",
+            "  {:<24}  {:<36}  {:<19}  {:<9}  {:<7}  {:<6}  {}",
+            entry.path,
             manifest.snapshot_id,
             manifest.created_at.format("%Y-%m-%d %H:%M:%S"),
             manifest.catalog,
@@ -1124,6 +1114,8 @@ mod tests {
             chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
         );
         assert_eq!(result.unreadable, vec!["broken/".to_string()]);
+        assert_eq!(result.snapshots[0].path, "newer/");
+        assert_eq!(result.snapshots[1].path, "older/");
     }
 
     #[test]
