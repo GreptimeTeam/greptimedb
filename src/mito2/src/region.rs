@@ -986,7 +986,7 @@ impl ManifestContext {
             if expect_state != RegionLeaderState::Downgrading {
                 if current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading) {
                     info!(
-                        "Region {} is in downgrading leader state, updating manifest. state is {:?}",
+                        "Region {} is in downgrading leader state, updating manifest. Expect state is {:?}",
                         region_id, expect_state
                     );
                 }
@@ -1017,10 +1017,11 @@ impl ManifestContext {
     /// Updates the manifest for compaction.
     ///
     /// Compaction may finish while a direct external region edit is in the transient
-    /// `Editing` state. External direct edits may remove files, but the remove-capable
-    /// sync-region path only runs on followers, where compaction is not scheduled. On
-    /// leaders, compaction can publish under the manifest write lock while still
-    /// rechecking its input files.
+    /// `Editing` state. Direct external edits can remove files both when followers
+    /// apply sync-region metadata and when a writable leader performs a direct edit
+    /// such as `edit_region()`. Allowing compaction to publish in `Editing` is still
+    /// safe because publication happens under the manifest write lock and compaction
+    /// rechecks that its input files are still valid before committing.
     pub(crate) async fn update_manifest_for_compaction(
         &self,
         action_list: RegionMetaActionList,
