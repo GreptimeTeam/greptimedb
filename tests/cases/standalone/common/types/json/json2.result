@@ -1,0 +1,149 @@
+create table json2_table (
+    ts timestamp time index,
+    j  json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat',
+);
+
+Affected Rows: 0
+
+insert into json2_table (ts, j)
+values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
+       (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
+
+Affected Rows: 2
+
+admin flush_table('json2_table');
+
++----------------------------------+
+| ADMIN flush_table('json2_table') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+insert into json2_table (ts, j)
+values (3, '{"a": {"b": 3}, "c": "s3"}');
+
+Affected Rows: 1
+
+insert into json2_table
+values (4, '{"a": {"b": -4}, "d": [{"e": {"g": -0.4}}]}'),
+       (5, '{"a": {}, "c": "s5"}'),
+       (6, '{"c": "s6"}');
+
+Affected Rows: 3
+
+admin flush_table('json2_table');
+
++----------------------------------+
+| ADMIN flush_table('json2_table') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+insert into json2_table
+values (7, '{"a": {"b": "s7"}, "c": [1], "d": [{"e": {"g": -0.7}}]}'),
+       (8, '{"a": {"b": 8}, "c": "s8"}');
+
+Affected Rows: 2
+
+admin flush_table('json2_table');
+
++----------------------------------+
+| ADMIN flush_table('json2_table') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+insert into json2_table
+values (9, '{"a": {"x": true}, "c": "s9", "d": [{"e": {"g": -0.9}}]}'),
+       (10, '{"a": {"b": 10}, "y": false}');
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+explain select j.a.b from json2_table;
+
++---------------+---------------------------------------------------+
+| plan_type     | plan                                              |
++---------------+---------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[   |
+|               | Projection: json_get(json2_table.j, Utf8("a.b"))  |
+|               |   TableScan: json2_table                          |
+|               | ]]                                                |
+| physical_plan | CooperativeExec                                   |
+|               |   MergeScanExec: REDACTED
+|               |                                                   |
++---------------+---------------------------------------------------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+explain select j.a.x::bool from json2_table;
+
++---------------+------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                               |
++---------------+------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                    |
+|               | Projection: json_get(json2_table.j, Utf8("a.x"), Boolean(NULL)) AS arrow_cast(json_get(json2_table.j,Utf8("a.x")),Utf8("Boolean")) |
+|               |   TableScan: json2_table                                                                                                           |
+|               | ]]                                                                                                                                 |
+| physical_plan | CooperativeExec                                                                                                                    |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                    |
++---------------+------------------------------------------------------------------------------------------------------------------------------------+
+
+select j.a.b from json2_table order by ts;
+
++-------------------------------------+
+| json_get(json2_table.j,Utf8("a.b")) |
++-------------------------------------+
+| 1                                   |
+| -2                                  |
+| 3                                   |
+| -4                                  |
+|                                     |
+|                                     |
+| "s7"                                |
+| 8                                   |
+|                                     |
+| 10                                  |
++-------------------------------------+
+
+select j.c, j.y from json2_table order by ts;
+
++-----------------------------------+-----------------------------------+
+| json_get(json2_table.j,Utf8("c")) | json_get(json2_table.j,Utf8("y")) |
++-----------------------------------+-----------------------------------+
+| s1                                |                                   |
+| s2                                |                                   |
+| s3                                |                                   |
+|                                   |                                   |
+| s5                                |                                   |
+| s6                                |                                   |
+| [1]                               |                                   |
+| "s8"                              |                                   |
+| s9                                |                                   |
+|                                   | false                             |
++-----------------------------------+-----------------------------------+
+
+select j.d from json2_table order by ts;
+
++-----------------------------------+
+| json_get(json2_table.j,Utf8("d")) |
++-----------------------------------+
+| [{e: {f: 0.1}}]                   |
+| [{e: {f: 0.2}}]                   |
+|                                   |
+| [{e: {g: -0.4}}]                  |
+|                                   |
+|                                   |
+| [{e: {g: -0.7}}]                  |
+|                                   |
+| [{e: {g: -0.9}}]                  |
+|                                   |
++-----------------------------------+
+
+drop table json2_table;
+
+Affected Rows: 0
+

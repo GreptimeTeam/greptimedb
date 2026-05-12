@@ -31,6 +31,7 @@ pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
 pub mod prefilter;
+pub mod read_columns;
 pub mod reader;
 pub mod row_group;
 pub mod row_selection;
@@ -41,9 +42,17 @@ pub mod writer;
 pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
 
 /// Default batch size to read parquet files.
-pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 1024;
+///
+/// This is a runtime-only scan granularity, so we align it with DataFusion's
+/// default execution batch size to reduce rebatching and concatenation in the
+/// query pipeline.
+pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 8 * 1024;
 /// Default row group size for parquet files.
-pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * DEFAULT_READ_BATCH_SIZE;
+///
+/// Keep the existing persisted/on-disk default stable. It intentionally stays
+/// decoupled from [`DEFAULT_READ_BATCH_SIZE`] so we can tune runtime scan
+/// batching without changing the row group layout of newly written SSTs.
+pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
 
 /// Parquet write options.
 #[derive(Debug, Clone)]
@@ -823,6 +832,7 @@ mod tests {
                     None => None,
                 },
                 num_series: 0,
+                ..Default::default()
             },
             Arc::new(NoopFilePurger),
         );
@@ -895,7 +905,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -960,7 +969,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -1015,7 +1023,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -1279,6 +1286,7 @@ mod tests {
                     None => None,
                 },
                 num_series: 0,
+                ..Default::default()
             },
             Arc::new(NoopFilePurger),
         )
@@ -1549,7 +1557,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .cache(CacheStrategy::EnableAll(cache.clone()));
@@ -1652,7 +1659,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .bloom_filter_index_appliers([None, bloom_filter_applier.clone()])
         .cache(CacheStrategy::EnableAll(cache.clone()));
@@ -1712,7 +1718,6 @@ mod tests {
 
         let builder =
             ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
-                .flat_format(true)
                 .predicate(Some(Predicate::new(vec![col("tag_0").eq(lit("a"))])));
 
         let mut metrics = ReaderMetrics::default();
@@ -1774,7 +1779,6 @@ mod tests {
 
         let builder =
             ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
-                .flat_format(true)
                 .predicate(Some(Predicate::new(vec![col("tag_0").eq(lit("a"))])));
 
         let mut metrics = ReaderMetrics::default();
@@ -1884,7 +1888,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .cache(CacheStrategy::EnableAll(cache.clone()));
@@ -1991,7 +1994,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .bloom_filter_index_appliers([None, bloom_filter_applier.clone()])
         .cache(CacheStrategy::EnableAll(cache.clone()));
@@ -2255,7 +2257,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .fulltext_index_appliers([None, fulltext_applier.clone()])
         .cache(CacheStrategy::EnableAll(cache.clone()));
@@ -2304,7 +2305,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .fulltext_index_appliers([None, fulltext_applier.clone()])
         .cache(CacheStrategy::EnableAll(cache.clone()));

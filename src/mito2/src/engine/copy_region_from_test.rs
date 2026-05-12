@@ -41,7 +41,7 @@ async fn test_engine_copy_region_from_with_format(flat_format: bool, with_index:
     let mut env = TestEnv::with_prefix("copy-region-from").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -71,9 +71,7 @@ async fn test_engine_copy_region_from_with_format(flat_format: bool, with_index:
     engine
         .handle_request(
             source_region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -156,7 +154,7 @@ async fn test_engine_copy_region_failure_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -184,9 +182,7 @@ async fn test_engine_copy_region_failure_with_format(flat_format: bool) {
     engine
         .handle_request(
             source_region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -283,7 +279,7 @@ async fn test_engine_copy_region_invalid_args_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -328,7 +324,7 @@ async fn test_engine_copy_region_unexpected_state_with_format(flat_format: bool)
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;

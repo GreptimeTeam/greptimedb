@@ -29,7 +29,7 @@ use crate::ddl::utils::get_region_wal_options;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::region_keeper::OperatingRegionGuard;
-use crate::rpc::router::{RegionRoute, operating_leader_regions};
+use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DropDatabaseExecutor {
@@ -69,12 +69,12 @@ impl DropDatabaseExecutor {
         if !self.dropping_regions.is_empty() {
             return Ok(());
         }
-        let dropping_regions = operating_leader_regions(&self.physical_region_routes);
+        let dropping_regions = operating_leader_region_roles(&self.physical_region_routes);
         let mut dropping_region_guards = Vec::with_capacity(dropping_regions.len());
-        for (region_id, datanode_id) in dropping_regions {
+        for (region_id, datanode_id, role) in dropping_regions {
             let guard = ddl_ctx
                 .memory_region_keeper
-                .register(datanode_id, region_id)
+                .register_with_role(datanode_id, region_id, role)
                 .context(error::RegionOperatingRaceSnafu {
                     region_id,
                     peer_id: datanode_id,
@@ -96,10 +96,25 @@ impl State for DropDatabaseExecutor {
     async fn next(
         &mut self,
         ddl_ctx: &DdlContext,
-        _ctx: &mut DropDatabaseContext,
+        ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)> {
         self.register_dropping_regions(ddl_ctx)?;
         let executor = DropTableExecutor::new(self.table_name.clone(), self.table_id, true);
+        if ctx.retrying {
+            info!(
+                "Remapping region routes addresses for retrying drop regions for table_id: {}",
+                self.table_id
+            );
+            let storage = ddl_ctx
+                .table_metadata_manager
+                .table_route_manager()
+                .table_route_storage();
+            // The peer addresses may change during retries,
+            // so we always remap the region routes.
+            storage
+                .remap_region_routes(&mut self.physical_region_routes)
+                .await?;
+        }
         // Deletes metadata for table permanently.
         let table_route_value = TableRouteValue::new(
             self.table_id,
@@ -144,6 +159,7 @@ impl State for DropDatabaseExecutor {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use api::region::RegionResponse;
@@ -152,16 +168,21 @@ mod tests {
     use common_error::ext::BoxedError;
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
+    use store_api::region_engine::RegionRole;
+    use store_api::storage::RegionId;
     use table::table_name::TableName;
 
     use crate::ddl::drop_database::cursor::DropDatabaseCursor;
     use crate::ddl::drop_database::executor::DropDatabaseExecutor;
     use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
-    use crate::ddl::test_util::{create_logical_table, create_physical_table};
+    use crate::ddl::test_util::datanode_handler::DatanodeWatcher;
+    use crate::ddl::test_util::{
+        create_logical_table, create_physical_table, put_datanode_address,
+    };
     use crate::error::{self, Error, Result};
     use crate::key::datanode_table::DatanodeTableKey;
     use crate::peer::Peer;
-    use crate::rpc::router::region_distribution;
+    use crate::rpc::router::{LeaderState, Region, RegionRoute, region_distribution};
     use crate::test_util::{MockDatanodeHandler, MockDatanodeManager, new_ddl_context};
 
     #[derive(Clone)]
@@ -206,6 +227,7 @@ mod tests {
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
                 tables: None,
+                retrying: false,
             };
             let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
             assert!(!status.need_persist());
@@ -218,6 +240,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let mut state = DropDatabaseExecutor::new(
             physical_table_id,
@@ -258,6 +281,7 @@ mod tests {
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
                 tables: None,
+                retrying: false,
             };
             let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
             assert!(!status.need_persist());
@@ -270,6 +294,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let mut state = DropDatabaseExecutor::new(
             logical_table_id,
@@ -360,6 +385,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let err = state.next(&ddl_context, &mut ctx).await.unwrap_err();
         assert!(err.is_retry_later());
@@ -389,6 +415,7 @@ mod tests {
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
                 tables: None,
+                retrying: false,
             };
             state.recover(&ddl_context).unwrap();
             assert_eq!(state.dropping_regions.len(), 1);
@@ -397,5 +424,74 @@ mod tests {
             let cursor = state.as_any().downcast_ref::<DropDatabaseCursor>().unwrap();
             assert_eq!(cursor.target, DropTableTarget::Physical);
         }
+    }
+
+    #[tokio::test]
+    async fn test_recover_registers_region_role_from_routes() {
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let ddl_context = new_ddl_context(node_manager);
+        let region_id = RegionId::new(1024, 1);
+        let mut state = DropDatabaseExecutor::new(
+            1024,
+            1024,
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy"),
+            vec![RegionRoute {
+                region: Region::new_test(region_id),
+                leader_peer: Some(Peer::empty(7)),
+                follower_peers: vec![],
+                leader_state: Some(LeaderState::Downgrading),
+                leader_down_since: None,
+                write_route_policy: None,
+            }],
+            DropTableTarget::Physical,
+        );
+
+        state.recover(&ddl_context).unwrap();
+
+        let roles = ddl_context
+            .memory_region_keeper
+            .extract_operating_region_roles(7, &HashSet::from([region_id]));
+        assert_eq!(roles.get(&region_id), Some(&RegionRole::DowngradingLeader));
+    }
+
+    #[tokio::test]
+    async fn test_next_remaps_addresses_when_retrying() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
+        let ddl_context = new_ddl_context(node_manager);
+        let physical_table_id = create_physical_table(&ddl_context, "phy").await;
+        let (_, table_route) = ddl_context
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(physical_table_id)
+            .await
+            .unwrap();
+
+        let mut state = DropDatabaseExecutor::new(
+            physical_table_id,
+            physical_table_id,
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy"),
+            table_route.region_routes,
+            DropTableTarget::Physical,
+        );
+        state.physical_region_routes[0]
+            .leader_peer
+            .as_mut()
+            .unwrap()
+            .addr = "old-addr".to_string();
+        let mut ctx = DropDatabaseContext {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            drop_if_exists: false,
+            tables: None,
+            retrying: true,
+        };
+
+        put_datanode_address(&ddl_context, 0, "new-addr").await;
+
+        state.next(&ddl_context, &mut ctx).await.unwrap();
+
+        let (peer, _) = rx.try_recv().unwrap();
+        assert_eq!(peer.addr, "new-addr");
     }
 }

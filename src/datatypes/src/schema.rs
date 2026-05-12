@@ -14,6 +14,7 @@
 
 mod column_schema;
 pub mod constraint;
+pub mod ext;
 
 use std::collections::HashMap;
 use std::sync::Arc;

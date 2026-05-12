@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
+use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 
 use crate::DatanodeId;
@@ -24,7 +26,7 @@ use crate::DatanodeId;
 pub struct OperatingRegionGuard {
     datanode_id: DatanodeId,
     region_id: RegionId,
-    inner: Arc<RwLock<HashSet<(DatanodeId, RegionId)>>>,
+    inner: Arc<RwLock<HashMap<(DatanodeId, RegionId), RegionRole>>>,
 }
 
 impl Drop for OperatingRegionGuard {
@@ -50,7 +52,7 @@ pub type MemoryRegionKeeperRef = Arc<MemoryRegionKeeper>;
 /// - Tracks the deleting regions after the corresponding metadata is deleted.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryRegionKeeper {
-    inner: Arc<RwLock<HashSet<(DatanodeId, RegionId)>>>,
+    inner: Arc<RwLock<HashMap<(DatanodeId, RegionId), RegionRole>>>,
 }
 
 impl MemoryRegionKeeper {
@@ -59,40 +61,48 @@ impl MemoryRegionKeeper {
     }
 
     /// Returns [OperatingRegionGuard] if Region(`region_id`) on Peer(`datanode_id`) does not exist.
-    pub fn register(
+    pub fn register_with_role(
         &self,
         datanode_id: DatanodeId,
         region_id: RegionId,
+        role: RegionRole,
     ) -> Option<OperatingRegionGuard> {
         let mut inner = self.inner.write().unwrap();
 
-        if inner.insert((datanode_id, region_id)) {
-            Some(OperatingRegionGuard {
-                datanode_id,
-                region_id,
-                inner: self.inner.clone(),
-            })
-        } else {
-            None
+        match inner.entry((datanode_id, region_id)) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(role);
+                Some(OperatingRegionGuard {
+                    datanode_id,
+                    region_id,
+                    inner: self.inner.clone(),
+                })
+            }
         }
     }
 
     /// Returns true if the keeper contains a (`datanoe_id`, `region_id`) tuple.
     pub fn contains(&self, datanode_id: DatanodeId, region_id: RegionId) -> bool {
         let inner = self.inner.read().unwrap();
-        inner.contains(&(datanode_id, region_id))
+        inner.contains_key(&(datanode_id, region_id))
     }
 
-    /// Extracts all operating regions from `region_ids` and returns operating regions.
-    pub fn extract_operating_regions(
+    /// Extracts all operating regions with roles from `region_ids`.
+    pub fn extract_operating_region_roles(
         &self,
         datanode_id: DatanodeId,
-        region_ids: &mut HashSet<RegionId>,
-    ) -> HashSet<RegionId> {
+        region_ids: &HashSet<RegionId>,
+    ) -> HashMap<RegionId, RegionRole> {
         let inner = self.inner.read().unwrap();
         region_ids
-            .extract_if(|region_id| inner.contains(&(datanode_id, *region_id)))
-            .collect::<HashSet<_>>()
+            .iter()
+            .filter_map(|region_id| {
+                inner
+                    .get(&(datanode_id, *region_id))
+                    .map(|role| (*region_id, *role))
+            })
+            .collect()
     }
 
     /// Returns number of element in tracking set.
@@ -115,8 +125,9 @@ impl MemoryRegionKeeper {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
+    use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
     use crate::region_keeper::MemoryRegionKeeper;
@@ -125,20 +136,43 @@ mod tests {
     fn test_opening_region_keeper() {
         let keeper = MemoryRegionKeeper::new();
 
-        let guard = keeper.register(1, RegionId::from_u64(1)).unwrap();
-        assert!(keeper.register(1, RegionId::from_u64(1)).is_none());
-        let guard2 = keeper.register(1, RegionId::from_u64(2)).unwrap();
+        let guard = keeper
+            .register_with_role(1, RegionId::from_u64(1), RegionRole::Leader)
+            .unwrap();
+        assert!(
+            keeper
+                .register_with_role(1, RegionId::from_u64(1), RegionRole::Leader)
+                .is_none()
+        );
+        let guard2 = keeper
+            .register_with_role(1, RegionId::from_u64(2), RegionRole::Follower)
+            .unwrap();
 
-        let mut regions = HashSet::from([
+        let regions = HashSet::from([
             RegionId::from_u64(1),
             RegionId::from_u64(2),
             RegionId::from_u64(3),
         ]);
-        let output = keeper.extract_operating_regions(1, &mut regions);
+        let output = keeper.extract_operating_region_roles(1, &regions);
         assert_eq!(output.len(), 2);
 
-        assert!(output.contains(&RegionId::from_u64(1)));
-        assert!(output.contains(&RegionId::from_u64(2)));
+        assert!(output.contains_key(&RegionId::from_u64(1)));
+        assert!(output.contains_key(&RegionId::from_u64(2)));
+        assert_eq!(keeper.len(), 2);
+
+        let regions = HashSet::from([
+            RegionId::from_u64(1),
+            RegionId::from_u64(2),
+            RegionId::from_u64(3),
+        ]);
+        let output = keeper.extract_operating_region_roles(1, &regions);
+        assert_eq!(
+            output,
+            HashMap::from([
+                (RegionId::from_u64(1), RegionRole::Leader),
+                (RegionId::from_u64(2), RegionRole::Follower),
+            ])
+        );
         assert_eq!(keeper.len(), 2);
 
         drop(guard);

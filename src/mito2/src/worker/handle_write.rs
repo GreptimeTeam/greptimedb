@@ -26,8 +26,8 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionStateSnafu, RejectWriteSnafu,
-    Result,
+    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionNotFoundSnafu, RegionStateSnafu,
+    RejectWriteSnafu, Result,
 };
 use crate::metrics;
 use crate::metrics::{
@@ -193,14 +193,78 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         reject_write_requests(&mut requests, &mut bulk);
     }
 
+    /// Fails a specific region's stalled requests if the region no longer exists.
+    pub(crate) fn fail_region_stalled_requests_as_not_found(&mut self, region_id: &RegionId) {
+        debug!(
+            "Fails stalled requests for region {} as region not found",
+            region_id
+        );
+        let (requests, bulk) = self.stalled_requests.remove(region_id);
+        self.stalling_count
+            .sub((requests.len() + bulk.len()) as i64);
+
+        for req in requests {
+            req.sender.send(
+                RegionNotFoundSnafu {
+                    region_id: req.request.region_id,
+                }
+                .fail(),
+            );
+        }
+        for req in bulk {
+            req.sender.send(
+                RegionNotFoundSnafu {
+                    region_id: req.region_id,
+                }
+                .fail(),
+            );
+        }
+    }
+
     /// Handles a specific region's stalled requests.
-    pub(crate) async fn handle_region_stalled_requests(&mut self, region_id: &RegionId) {
+    ///
+    /// `allow_stall` should be false for backpressure retry paths to avoid stalling the same
+    /// requests again. It should remain true for non-backpressure retries, such as requests stalled
+    /// by alter, staging, and region editing. Global reject backpressure still applies before the
+    /// stall check.
+    pub(crate) async fn handle_region_stalled_requests(
+        &mut self,
+        region_id: &RegionId,
+        allow_stall: bool,
+    ) {
         debug!("Handles stalled requests for region {}", region_id);
         let (mut requests, mut bulk) = self.stalled_requests.remove(region_id);
         self.stalling_count
             .sub((requests.len() + bulk.len()) as i64);
-        self.handle_write_requests(&mut requests, &mut bulk, true)
+        self.handle_write_requests(&mut requests, &mut bulk, allow_stall)
             .await;
+    }
+
+    /// Processes same-batch writes for a region before handling its edit-completion notification.
+    ///
+    /// The worker dispatch loop handles background notifications before the current batch's write
+    /// buffer. Without this step, writes that arrived during edit N could be classified only after
+    /// edit N+1 is started, placing them behind that next edit.
+    pub(crate) async fn handle_buffered_region_write_requests(
+        &mut self,
+        region_id: &RegionId,
+        write_requests: &mut Vec<SenderWriteRequest>,
+        bulk_requests: &mut Vec<SenderBulkRequest>,
+    ) {
+        let mut current_region_write_requests = write_requests
+            .extract_if(.., |r| r.request.region_id == *region_id)
+            .collect::<Vec<_>>();
+
+        let mut current_region_bulk_requests = bulk_requests
+            .extract_if(.., |r| r.region_id == *region_id)
+            .collect::<Vec<_>>();
+
+        self.handle_write_requests(
+            &mut current_region_write_requests,
+            &mut current_region_bulk_requests,
+            true,
+        )
+        .await;
     }
 }
 
@@ -269,10 +333,14 @@ impl<S> RegionWorkerLoop<S> {
 
                         e.insert(region_ctx);
                     }
-                    RegionRoleState::Leader(RegionLeaderState::Altering) => {
+                    RegionRoleState::Leader(RegionLeaderState::Altering)
+                    | RegionRoleState::Leader(RegionLeaderState::Editing) => {
+                        // Editing is transient: queue the write so edit completion can drain it
+                        // before starting the next queued edit.
                         debug!(
-                            "Region {} is altering, add request to pending writes",
-                            region.region_id
+                            "Region {} is {:?}, add request to pending writes",
+                            region.region_id,
+                            region.state()
                         );
                         self.stalling_count.add(1);
                         WRITE_STALL_TOTAL.inc();
@@ -408,10 +476,14 @@ impl<S> RegionWorkerLoop<S> {
 
                         e.insert(region_ctx);
                     }
-                    RegionRoleState::Leader(RegionLeaderState::Altering) => {
+                    RegionRoleState::Leader(RegionLeaderState::Altering)
+                    | RegionRoleState::Leader(RegionLeaderState::Editing) => {
+                        // Editing is transient: queue the bulk write so edit completion can drain
+                        // it before starting the next queued edit.
                         debug!(
-                            "Region {} is altering, add request to pending writes",
-                            region.region_id
+                            "Region {} is {:?}, add request to pending writes",
+                            region.region_id,
+                            region.state()
                         );
                         self.stalling_count.add(1);
                         WRITE_STALL_TOTAL.inc();

@@ -28,6 +28,7 @@ use common_telemetry::tracing_context::TracingContext;
 use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::region_request::RegionFlushReason;
 use store_api::storage::RegionId;
 
 use crate::error::{self, Error, Result};
@@ -315,7 +316,14 @@ impl EnterStagingRegion {
                 );
 
                 Ok(())
-            }
+            },
+            Err(error::Error::MailboxChannelClosed {..})=> error::RetryLaterSnafu {
+                reason: format!(
+                    "Mailbox closed when sending enter staging regions to datanode {:?}, elapsed: {:?}",
+                    peer,
+                    now.elapsed()
+                ),
+            }.fail()?,
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
                     "Mailbox received timeout for enter staging regions on datanode {:?}, elapsed: {:?}",
@@ -411,6 +419,7 @@ impl EnterStagingRegion {
                     peer,
                     operation_timeout,
                     ErrorStrategy::Retry,
+                    Some(RegionFlushReason::Repartition),
                 )
             })
             .collect::<Vec<_>>();

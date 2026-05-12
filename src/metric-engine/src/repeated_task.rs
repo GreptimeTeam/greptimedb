@@ -64,9 +64,7 @@ impl TaskFunction<Error> for FlushMetadataRegionTask {
                 .mito
                 .handle_request(
                     metadata_region_id,
-                    RegionRequest::Flush(RegionFlushRequest {
-                        row_group_size: None,
-                    }),
+                    RegionRequest::Flush(RegionFlushRequest::default()),
                 )
                 .await
             {

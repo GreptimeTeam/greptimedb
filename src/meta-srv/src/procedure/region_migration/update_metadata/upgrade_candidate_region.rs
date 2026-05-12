@@ -231,6 +231,7 @@ mod tests {
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use common_time::util::current_time_millis;
+    use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
     use crate::error::Error;
@@ -467,7 +468,7 @@ mod tests {
         }];
 
         let guard = opening_keeper
-            .register(2, RegionId::new(table_id, 1))
+            .register_with_role(2, RegionId::new(table_id, 1), RegionRole::Follower)
             .unwrap();
         ctx.volatile_ctx.opening_region_guards.push(guard);
 

@@ -14,7 +14,6 @@
 
 pub(crate) mod apply_staging_region;
 pub(crate) mod exit_staging_region;
-pub(crate) mod rollback_staging_region;
 
 use std::any::Any;
 use std::time::Instant;
@@ -34,9 +33,7 @@ use crate::procedure::repartition::group::{Context, State};
 pub enum UpdateMetadata {
     /// Applies the new partition expressions for staging regions.
     ApplyStaging,
-    /// Rolls back the new partition expressions for staging regions.
-    RollbackStaging,
-    /// Exits the staging regions.
+    /// Exits the staging regions after the group finishes its forward path.
     ExitStaging,
 }
 
@@ -63,17 +60,6 @@ impl State for UpdateMetadata {
                 };
                 ctx.update_update_metadata_elapsed(timer.elapsed());
                 Ok((Box::new(EnterStagingRegion), Status::executing(false)))
-            }
-            UpdateMetadata::RollbackStaging => {
-                self.rollback_staging_regions(ctx).await?;
-
-                if let Err(err) = ctx.invalidate_table_cache().await {
-                    warn!(
-                        err;
-                        "Failed to broadcast the invalidate table cache message during the rollback staging regions"
-                    );
-                };
-                Ok((Box::new(RepartitionEnd), Status::executing(false)))
             }
             UpdateMetadata::ExitStaging => {
                 self.exit_staging_regions(ctx).await?;

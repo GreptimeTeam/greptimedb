@@ -42,7 +42,7 @@ use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::rpc::ddl::TruncateTableTask;
-use crate::rpc::router::{RegionRoute, find_leader_regions, find_leaders};
+use crate::rpc::router::{find_leader_regions, find_leaders};
 
 pub struct TruncateTableProcedure {
     context: DdlContext,
@@ -94,12 +94,11 @@ impl TruncateTableProcedure {
     pub(crate) fn new(
         task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        region_routes: Vec<RegionRoute>,
         context: DdlContext,
     ) -> Self {
         Self {
             context,
-            data: TruncateTableData::new(task, table_info_value, region_routes),
+            data: TruncateTableData::new(task, table_info_value),
         }
     }
 
@@ -138,13 +137,18 @@ impl TruncateTableProcedure {
     async fn on_datanode_truncate_regions(&mut self) -> Result<Status> {
         let table_id = self.data.table_id();
 
-        let region_routes = &self.data.region_routes;
-        let leaders = find_leaders(region_routes);
+        let (_, physical_table_route) = self
+            .context
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(table_id)
+            .await?;
+        let leaders = find_leaders(&physical_table_route.region_routes);
         let mut truncate_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
             let requester = self.context.node_manager.datanode(&datanode).await;
-            let regions = find_leader_regions(region_routes, &datanode);
+            let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
 
             for region in regions {
                 let region_id = RegionId::new(table_id, region);
@@ -201,20 +205,17 @@ pub struct TruncateTableData {
     state: TruncateTableState,
     task: TruncateTableTask,
     table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-    region_routes: Vec<RegionRoute>,
 }
 
 impl TruncateTableData {
     pub fn new(
         task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        region_routes: Vec<RegionRoute>,
     ) -> Self {
         Self {
             state: TruncateTableState::Prepare,
             task,
             table_info_value,
-            region_routes,
         }
     }
 

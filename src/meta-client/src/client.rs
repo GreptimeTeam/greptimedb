@@ -26,6 +26,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::{
     MetasrvNodeInfo, ProcedureDetailResponse, ReconcileRequest, ReconcileResponse, Role,
 };
@@ -38,11 +39,13 @@ use common_meta::cluster::{
     ClusterInfo, MetasrvStatus, NodeInfo, NodeInfoKey, NodeStatus, Role as ClusterRole,
 };
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::error::{
     self as meta_error, ExternalSnafu, Result as MetaResult, UnsupportedSnafu,
 };
 use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::peer::{Peer, PeerDiscovery};
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::KeyValue;
@@ -59,6 +62,7 @@ use common_meta::rpc::store::{
 };
 use common_options::plugin_options::PluginOptionsDeserializer;
 use common_telemetry::info;
+use common_time::util::DefaultSystemTimer;
 use config::Client as ConfigClient;
 use futures::TryStreamExt;
 use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
@@ -87,6 +91,8 @@ pub struct MetaClientBuilder {
     role: Role,
     enable_heartbeat: bool,
     enable_store: bool,
+    #[cfg(test)]
+    enable_direct_store_writes: bool,
     enable_procedure: bool,
     enable_access_cluster_info: bool,
     region_follower: Option<RegionFollowerClientRef>,
@@ -139,9 +145,25 @@ impl MetaClientBuilder {
         }
     }
 
+    /// Enables the Store client in read-only mode.
+    ///
+    /// Store write methods fail fast by default. Metadata writes from production
+    /// frontend/datanode/flownode clients should go through metasrv procedures.
     pub fn enable_store(self) -> Self {
         Self {
             enable_store: true,
+            ..self
+        }
+    }
+
+    /// Enables direct Store write RPCs for tests.
+    ///
+    /// Production metadata writes should use metasrv-owned write paths instead.
+    #[cfg(test)]
+    pub(super) fn enable_direct_store_writes_for_test(self) -> Self {
+        Self {
+            enable_store: true,
+            enable_direct_store_writes: true,
             ..self
         }
     }
@@ -212,9 +234,16 @@ impl MetaClientBuilder {
         let config = self
             .enable_heartbeat
             .then(|| ConfigClient::new(self.id, self.role, mgr.clone()));
-        let store = self
-            .enable_store
-            .then(|| StoreClient::new(self.id, self.role, mgr.clone()));
+        let store = self.enable_store.then(|| {
+            #[cfg(test)]
+            {
+                if self.enable_direct_store_writes {
+                    return StoreClient::new_writable(self.id, self.role, mgr.clone());
+                }
+            }
+
+            StoreClient::new(self.id, self.role, mgr.clone())
+        });
         let procedure = self.enable_procedure.then(|| {
             let mgr = self.ddl_channel_manager.unwrap_or(mgr.clone());
             ProcedureClient::new(
@@ -456,6 +485,7 @@ impl ClusterInfo for MetaClient {
                             cpu_usage_millicores: node_info.cpu_usage_millicores,
                             memory_usage_bytes: node_info.memory_usage_bytes,
                             hostname: node_info.hostname,
+                            env_vars: Default::default(),
                         }
                     } else {
                         // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
@@ -471,6 +501,7 @@ impl ClusterInfo for MetaClient {
                             cpu_usage_millicores: 0,
                             memory_usage_bytes: 0,
                             hostname: "".to_string(),
+                            env_vars: Default::default(),
                         }
                     }
                 })
@@ -488,6 +519,7 @@ impl ClusterInfo for MetaClient {
                             cpu_usage_millicores: node_info.cpu_usage_millicores,
                             memory_usage_bytes: node_info.memory_usage_bytes,
                             hostname: node_info.hostname,
+                            env_vars: Default::default(),
                         }
                     } else {
                         // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
@@ -503,6 +535,7 @@ impl ClusterInfo for MetaClient {
                             cpu_usage_millicores: 0,
                             memory_usage_bytes: 0,
                             hostname: "".to_string(),
+                            env_vars: Default::default(),
                         }
                     }
                 }))
@@ -550,6 +583,60 @@ impl ClusterInfo for MetaClient {
         let res = flow_state_manager.get().await.context(GetFlowStatSnafu)?;
 
         Ok(res.map(|r| r.into()))
+    }
+}
+
+// TODO(weny): the discovery using client side timestamp may be inaccurate,
+// maybe we need to use the timestamp from metasrv in the future.
+#[async_trait::async_trait]
+impl PeerDiscovery for MetaClient {
+    async fn active_frontends(&self) -> MetaResult<Vec<Peer>> {
+        let nodes = self
+            .list_nodes(Some(ClusterRole::Frontend))
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        Ok(util::alive_frontends(
+            &DefaultSystemTimer,
+            nodes,
+            // TODO(weny): the heartbeat interval should be received from metasrv
+            // instead of using the default value.
+            default_distributed_time_constants().frontend_heartbeat_interval,
+        ))
+    }
+
+    async fn active_datanodes(
+        &self,
+        filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+    ) -> MetaResult<Vec<Peer>> {
+        let nodes = self
+            .list_nodes(Some(ClusterRole::Datanode))
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        Ok(util::alive_datanodes(
+            &DefaultSystemTimer,
+            nodes,
+            default_distributed_time_constants().datanode_lease,
+            filter,
+        ))
+    }
+
+    async fn active_flownodes(
+        &self,
+        filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+    ) -> MetaResult<Vec<Peer>> {
+        let nodes = self
+            .list_nodes(Some(ClusterRole::Flownode))
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        Ok(util::alive_flownodes(
+            &DefaultSystemTimer,
+            nodes,
+            default_distributed_time_constants().flownode_lease,
+            filter,
+        ))
     }
 }
 
@@ -925,6 +1012,19 @@ mod tests {
         meta_client.start(urls).await.unwrap();
         let res = meta_client.put(PutRequest::default()).await;
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_store_writes_are_read_only_by_default() {
+        let meta_client = MetaClientBuilder::new(0, Role::Datanode)
+            .enable_store()
+            .build();
+
+        let res = meta_client.put(PutRequest::default()).await;
+        assert!(matches!(
+            res.err(),
+            Some(error::Error::ReadOnlyKvBackend { .. })
+        ));
     }
 
     #[tokio::test]

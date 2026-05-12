@@ -276,10 +276,6 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Null(NullType))
     }
 
-    pub(crate) fn is_struct(&self) -> bool {
-        matches!(self, ConcreteDataType::Struct(_))
-    }
-
     /// Try to cast the type as a [`ListType`].
     pub fn as_list(&self) -> Option<&ListType> {
         match self {
@@ -688,7 +684,7 @@ impl ConcreteDataType {
     }
 
     pub fn json_native_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
-        ConcreteDataType::Json(JsonType::new_native((&inner_type).into()))
+        ConcreteDataType::Json(JsonType::new_json2((&inner_type).into()))
     }
 }
 

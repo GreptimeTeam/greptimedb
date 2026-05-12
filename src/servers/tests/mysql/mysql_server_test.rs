@@ -27,7 +27,7 @@ use datatypes::value::Value;
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, SslOpts};
 use servers::error::Result;
-use servers::install_ring_crypto_provider;
+use servers::install_default_crypto_provider;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
@@ -45,7 +45,7 @@ struct MysqlOpts<'a> {
 }
 
 fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
-    let _ = install_ring_crypto_provider();
+    let _ = install_default_crypto_provider();
     let query_handler = create_testing_sql_query_handler(table);
     let io_runtime = RuntimeBuilder::default()
         .worker_threads(4)
@@ -504,6 +504,17 @@ async fn test_query_prepared() -> Result<()> {
         .unwrap();
 
     test_prepare_all_type(column_schemas, columns, &mut connection).await;
+
+    match connection
+        .prep("SELECT `timestamp` FROM t WHERE `timestamp` > NOW() - INTERVAL '1 hour'")
+        .await
+    {
+        Err(mysql_async::Error::Server(e)) => assert_eq!(
+            "ERROR HY000 (1210): (InvalidArguments): Invalid prepare statement: Invalid SQL syntax: sql parser error: INTERVAL requires a unit after the literal value",
+            e.to_string()
+        ),
+        _ => unreachable!(),
+    }
 
     Ok(())
 }

@@ -16,6 +16,7 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_FLOW_TABLE_ID;
 use common_error::ext::BoxedError;
+use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::FlowId;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_info::FlowInfoValue;
@@ -71,6 +72,7 @@ pub const CREATED_TIME: &str = "created_time";
 pub const UPDATED_TIME: &str = "updated_time";
 pub const LAST_EXECUTION_TIME: &str = "last_execution_time";
 pub const SOURCE_TABLE_NAMES: &str = "source_table_names";
+pub const FLOWNODE_ADDRS: &str = "flownode_addrs";
 
 /// The `information_schema.flows` to provides information about flows in databases.
 #[derive(Debug)]
@@ -95,7 +97,8 @@ impl InformationSchemaFlows {
         }
     }
 
-    /// for complex fields(including [`SOURCE_TABLE_IDS`], [`FLOWNODE_IDS`] and [`OPTIONS`]), it will be serialized to json string for now
+    /// for complex fields(including [`SOURCE_TABLE_IDS`], [`FLOWNODE_IDS`], [`OPTIONS`] and
+    /// [`FLOWNODE_ADDRS`]), it will be serialized to json string for now
     /// TODO(discord9): use a better way to store complex fields like json type
     pub(crate) fn schema() -> SchemaRef {
         Arc::new(Schema::new(
@@ -119,6 +122,7 @@ impl InformationSchemaFlows {
                     true,
                 ),
                 (SOURCE_TABLE_NAMES, CDT::string_datatype(), true),
+                (FLOWNODE_ADDRS, CDT::string_datatype(), true),
             ]
             .into_iter()
             .map(|(name, ty, nullable)| ColumnSchema::new(name, ty, nullable))
@@ -165,6 +169,10 @@ impl InformationSchemaFlows {
             expire_after: flow_info.expire_after(),
             eval_interval: flow_info.eval_interval(),
             comment,
+            flow_options: sql::statements::OptionMap::from_filtered_string_map(
+                flow_info.options(),
+                &[FlowType::FLOW_TYPE_KEY],
+            ),
             query,
         };
 
@@ -239,6 +247,7 @@ struct InformationSchemaFlowsBuilder {
     updated_time: TimestampMillisecondVectorBuilder,
     last_execution_time: TimestampMillisecondVectorBuilder,
     source_table_names: StringVectorBuilder,
+    flownode_addr_groups: StringVectorBuilder,
 }
 
 impl InformationSchemaFlowsBuilder {
@@ -269,6 +278,7 @@ impl InformationSchemaFlowsBuilder {
             updated_time: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             last_execution_time: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             source_table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            flownode_addr_groups: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -378,6 +388,21 @@ impl InformationSchemaFlowsBuilder {
                     .get(&flow_id)
                     .map(|v| TimestampMillisecond::new(*v))
             }));
+        let flownode_addrs = self
+            .flow_metadata_manager
+            .flownode_addrs(flow_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(InternalSnafu)?;
+        if flownode_addrs.is_empty() {
+            self.flownode_addr_groups.push(None);
+        } else {
+            let flownode_addrs_json =
+                serde_json::to_string(&flownode_addrs).with_context(|_| JsonSnafu {
+                    input: format!("{:?}", flownode_addrs),
+                })?;
+            self.flownode_addr_groups.push(Some(&flownode_addrs_json));
+        }
 
         let mut source_table_names = vec![];
         let catalog_manager = self
@@ -413,6 +438,7 @@ impl InformationSchemaFlowsBuilder {
             Arc::new(self.updated_time.finish()),
             Arc::new(self.last_execution_time.finish()),
             Arc::new(self.source_table_names.finish()),
+            Arc::new(self.flownode_addr_groups.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }

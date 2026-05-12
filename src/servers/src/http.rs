@@ -129,7 +129,8 @@ const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
-pub static PUBLIC_APIS: [&str; 3] = ["/v1/influxdb/ping", "/v1/influxdb/health", "/v1/health"];
+pub static PUBLIC_API_PREFIX: [&str; 3] =
+    ["/v1/influxdb/ping", "/v1/influxdb/health", "/v1/health"];
 
 #[derive(Default)]
 pub struct HttpServer {
@@ -764,6 +765,7 @@ impl HttpServer {
         };
 
         router = router
+            .route("/", routing::get(handler::index))
             .route(
                 "/health",
                 routing::get(handler::health).post(handler::health),
@@ -1312,7 +1314,7 @@ mod test {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    use arrow_ipc::reader::FileReader;
+    use arrow_ipc::reader::StreamReader;
     use arrow_schema::DataType;
     use axum::handler::Handler;
     use axum::http::StatusCode;
@@ -1352,8 +1354,8 @@ mod test {
 
         async fn do_exec_plan(
             &self,
-            _stmt: Option<Statement>,
             _plan: LogicalPlan,
+            _stmt: Option<Statement>,
             _query_ctx: QueryContextRef,
         ) -> Result<Output> {
             unimplemented!()
@@ -1684,8 +1686,8 @@ mod test {
 
                 HttpResponse::Arrow(resp) => {
                     let output = resp.data;
-                    let mut reader =
-                        FileReader::try_new(Cursor::new(output), None).expect("Arrow reader error");
+                    let mut reader = StreamReader::try_new(Cursor::new(output), None)
+                        .expect("Arrow reader error");
                     let schema = reader.schema();
                     assert_eq!(schema.fields[0].name(), "numbers");
                     assert_eq!(schema.fields[0].data_type(), &DataType::UInt32);

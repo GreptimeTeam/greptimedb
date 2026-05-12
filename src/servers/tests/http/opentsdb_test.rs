@@ -58,8 +58,8 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_exec_plan(
         &self,
-        _stmt: Option<Statement>,
         _plan: LogicalPlan,
+        _stmt: Option<Statement>,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
         unimplemented!()

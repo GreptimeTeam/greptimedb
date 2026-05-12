@@ -13,7 +13,6 @@ async-trait.workspace = true
 bytemuck.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
-common-recordbatch.workspace = true
 common-telemetry.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
@@ -27,6 +26,7 @@ prost.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
+common-recordbatch.workspace = true
 criterion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true

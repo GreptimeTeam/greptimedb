@@ -39,11 +39,27 @@ pub struct Client {
 
 impl Client {
     pub fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
+        Self::new_with_read_only(id, role, channel_manager, true)
+    }
+
+    /// Builds a writable direct Store RPC client for tests.
+    #[cfg(test)]
+    pub(super) fn new_writable(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
+        Self::new_with_read_only(id, role, channel_manager, false)
+    }
+
+    fn new_with_read_only(
+        id: Id,
+        role: Role,
+        channel_manager: ChannelManager,
+        read_only: bool,
+    ) -> Self {
         let inner = Arc::new(RwLock::new(Inner {
             id,
             role,
             channel_manager,
             peers: vec![],
+            read_only,
         }));
 
         Self { inner }
@@ -103,6 +119,7 @@ struct Inner {
     role: Role,
     channel_manager: ChannelManager,
     peers: Vec<String>,
+    read_only: bool,
 }
 
 impl Inner {
@@ -142,6 +159,8 @@ impl Inner {
     }
 
     async fn put(&self, mut req: PutRequest) -> Result<PutResponse> {
+        self.ensure_writable()?;
+
         let mut client = self.random_client()?;
         req.set_header(
             self.id,
@@ -167,6 +186,8 @@ impl Inner {
     }
 
     async fn batch_put(&self, mut req: BatchPutRequest) -> Result<BatchPutResponse> {
+        self.ensure_writable()?;
+
         let mut client = self.random_client()?;
         req.set_header(
             self.id,
@@ -179,6 +200,8 @@ impl Inner {
     }
 
     async fn batch_delete(&self, mut req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        self.ensure_writable()?;
+
         let mut client = self.random_client()?;
         req.set_header(
             self.id,
@@ -194,6 +217,8 @@ impl Inner {
         &self,
         mut req: CompareAndPutRequest,
     ) -> Result<CompareAndPutResponse> {
+        self.ensure_writable()?;
+
         let mut client = self.random_client()?;
         req.set_header(
             self.id,
@@ -209,6 +234,8 @@ impl Inner {
     }
 
     async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        self.ensure_writable()?;
+
         let mut client = self.random_client()?;
         req.set_header(
             self.id,
@@ -229,6 +256,17 @@ impl Inner {
         )?;
 
         self.make_client(peer)
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        if self.read_only {
+            return error::ReadOnlyKvBackendSnafu {
+                name: "MetaClient Store".to_string(),
+            }
+            .fail();
+        }
+
+        Ok(())
     }
 
     fn make_client(&self, addr: impl AsRef<str>) -> Result<StoreClient<Channel>> {
@@ -283,5 +321,27 @@ mod test {
             .await
             .unwrap();
         assert_eq!(1, client.inner.write().await.peers.len());
+    }
+
+    #[tokio::test]
+    async fn test_read_only_store_rejects_writes_before_rpc() {
+        let client = Client::new(0, Role::Frontend, ChannelManager::default());
+
+        fn assert_read_only<T>(result: Result<T>) {
+            assert!(matches!(
+                result,
+                Err(error::Error::ReadOnlyKvBackend { .. })
+            ));
+        }
+
+        assert_read_only(client.put(PutRequest::default()).await);
+        assert_read_only(client.batch_put(BatchPutRequest::default()).await);
+        assert_read_only(client.batch_delete(BatchDeleteRequest::default()).await);
+        assert_read_only(
+            client
+                .compare_and_put(CompareAndPutRequest::default())
+                .await,
+        );
+        assert_read_only(client.delete_range(DeleteRangeRequest::default()).await);
     }
 }

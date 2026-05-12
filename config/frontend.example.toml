@@ -6,6 +6,11 @@ default_timezone = "UTC"
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
+## The user provider for authentication.
+## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
+## @toml2docs:none-default
+#+ user_provider = "static_user_provider:file:/path/to/users"
+
 ## Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
 ## @toml2docs:none-default
@@ -22,14 +27,6 @@ default_column_prefix = "greptime"
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
-
-## The heartbeat options.
-[heartbeat]
-## Interval for sending heartbeat messages to the metasrv.
-interval = "18s"
-
-## Interval for retrying to send heartbeat messages to the metasrv.
-retry_interval = "3s"
 
 ## The HTTP server options.
 [http]
@@ -100,7 +97,7 @@ watch = false
 bind_addr = "127.0.0.1:4010"
 ## The address advertised to the metasrv, and used for connections from outside the host.
 ## If left empty or unset, the server will automatically use the IP address of the first network interface
-## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+## on the host, with the same port number as the one specified in `internal_grpc.bind_addr`.
 server_addr = "127.0.0.1:4010"
 ## The number of server worker threads.
 runtime_size = 8
@@ -214,6 +211,17 @@ enable = true
 enable = true
 ## Whether to store the data from Prometheus remote write in metric engine.
 with_metric_engine = true
+## Interval to flush pending rows batcher.
+## Set to "0s" to disable batching mode in Prometheus Remote Write endpoint
+#+pending_rows_flush_interval = "0s"
+## Max rows per pending batch before triggering a flush.
+#+max_batch_rows = 100000
+## Max number of concurrent batch flushes.
+#+max_concurrent_flushes = 256
+## Capacity of the pending batch worker channel.
+#+worker_channel_capacity = 65526
+## Max inflight write requests before backpressure.
+#+max_inflight_requests = 3000
 
 ## The metasrv client options.
 [meta_client]

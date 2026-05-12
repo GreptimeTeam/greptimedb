@@ -130,7 +130,7 @@ impl GrpcQueryHandler for Instance {
                                 .await
                                 .context(SubstraitDecodeLogicalPlanSnafu)?;
                             let output =
-                                self.do_exec_plan_inner(None, logical_plan, ctx.clone()).await?;
+                                self.do_exec_plan_inner(logical_plan, None, ctx.clone()).await?;
 
                             attach_timer(output, timer)
                         }
@@ -467,7 +467,7 @@ impl Instance {
         let optimized_plan = state.optimize(&analyzed_plan).context(DataFusionSnafu)?;
 
         let output = self
-            .do_exec_plan_inner(None, optimized_plan, ctx.clone())
+            .do_exec_plan_inner(optimized_plan, None, ctx.clone())
             .await?;
 
         Ok(attach_timer(output, timer))

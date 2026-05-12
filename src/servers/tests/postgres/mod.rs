@@ -27,7 +27,7 @@ use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Error, SignatureScheme};
 use rustls_pki_types::{CertificateDer, ServerName};
 use servers::error::Result;
-use servers::install_ring_crypto_provider;
+use servers::install_default_crypto_provider;
 use servers::postgres::PostgresServer;
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
@@ -365,7 +365,7 @@ async fn test_extended_query() -> Result<()> {
 
 async fn start_test_server(server_tls: TlsOption) -> Result<u16> {
     common_telemetry::init_default_ut_logging();
-    let _ = install_ring_crypto_provider();
+    let _ = install_default_crypto_provider();
 
     let table = MemTable::default_numbers_table();
     let mut pg_server = create_postgres_server(table, false, server_tls, None)?;

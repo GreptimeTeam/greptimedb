@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = []
 dashboard = ["dep:rust-embed"]
+enterprise = ["sql/enterprise"]
 mem-prof = ["dep:common-mem-prof"]
 pprof = ["dep:common-pprof"]
 testing = []
@@ -63,6 +64,7 @@ datafusion-expr.workspace = true
 datafusion-pg-catalog.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
+either.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 headers = "0.4"
@@ -84,15 +86,16 @@ notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
-opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", tag = "v0.10.0" }
+# Wait for https://github.com/databendlabs/opensrv/pull/81
+opensrv-mysql = { git = "https://github.com/GreptimeTeam/opensrv", rev = "6c5a451544194b7bb60a8318d155d4f892b49f2c" }
 opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 partition.workspace = true
 pg_interval = { version = "0.5.2", package = "pg_interval_2" }
-pgwire = { version = "0.38.2", default-features = false, features = [
-    "server-api-ring",
+pgwire = { version = "0.38.3", default-features = false, features = [
+    "server-api-aws-lc-rs",
     "pg-ext-types",
 ] }
 pin-project = "1.0"
@@ -107,7 +110,8 @@ rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rust-embed = { version = "6.6", optional = true, features = ["debug-embed"] }
-rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rust_decimal = { workspace = true, features = ["db-postgres"] }
+rustls = { workspace = true, default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
 serde.workspace = true
@@ -129,6 +133,7 @@ tokio-stream = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 tonic.workspace = true
 tonic-reflection = "0.14"
+tonic-web = "0.14"
 tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["full"] }
 tracing.workspace = true
@@ -150,7 +155,7 @@ common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
 mysql_async = { version = "0.35", default-features = false, features = [
-    "default-rustls-ring",
+    "default-rustls",
 ] }
 permutation = "0.4"
 rand.workspace = true
@@ -177,4 +182,8 @@ harness = false
 
 [[bench]]
 name = "loki_labels"
+harness = false
+
+[[bench]]
+name = "flush_batch_physical"
 harness = false

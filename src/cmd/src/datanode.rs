@@ -197,13 +197,17 @@ pub struct StartCommand {
     #[clap(long)]
     node_id: Option<u64>,
     /// The address to bind the gRPC server.
-    #[clap(long, alias = "rpc-addr")]
-    rpc_bind_addr: Option<String>,
+    #[clap(long = "grpc-bind-addr", alias = "rpc-bind-addr", alias = "rpc-addr")]
+    grpc_bind_addr: Option<String>,
     /// The address advertised to the metasrv, and used for connections from outside the host.
     /// If left empty or unset, the server will automatically use the IP address of the first network interface
-    /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
-    #[clap(long, alias = "rpc-hostname")]
-    rpc_server_addr: Option<String>,
+    /// on the host, with the same port number as the one specified in `grpc_bind_addr`.
+    #[clap(
+        long = "grpc-server-addr",
+        alias = "rpc-server-addr",
+        alias = "rpc-hostname"
+    )]
+    grpc_server_addr: Option<String>,
     #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addrs: Option<Vec<String>>,
     #[clap(short, long)]
@@ -256,20 +260,20 @@ impl StartCommand {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        if let Some(addr) = &self.rpc_bind_addr {
+        if let Some(addr) = &self.grpc_bind_addr {
             opts.grpc.bind_addr.clone_from(addr);
         } else if let Some(addr) = &opts.rpc_addr {
             warn!(
-                "Use the deprecated attribute `DatanodeOptions.rpc_addr`, please use `grpc.addr` instead."
+                "Use the deprecated attribute `DatanodeOptions.rpc_addr`, please use `grpc.bind_addr` instead."
             );
             opts.grpc.bind_addr.clone_from(addr);
         }
 
-        if let Some(server_addr) = &self.rpc_server_addr {
+        if let Some(server_addr) = &self.grpc_server_addr {
             opts.grpc.server_addr.clone_from(server_addr);
         } else if let Some(server_addr) = &opts.rpc_hostname {
             warn!(
-                "Use the deprecated attribute `DatanodeOptions.rpc_hostname`, please use `grpc.hostname` instead."
+                "Use the deprecated attribute `DatanodeOptions.rpc_hostname`, please use `grpc.server_addr` instead."
             );
             opts.grpc.server_addr.clone_from(server_addr);
         }
@@ -360,6 +364,7 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use clap::{CommandFactory, Parser};
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use object_store::config::{FileConfig, GcsConfig, ObjectStoreConfig, S3Config};
@@ -402,8 +407,8 @@ mod tests {
             node_id = 42
 
             [grpc]
-            addr = "127.0.0.1:3001"
-            hostname = "127.0.0.1"
+            bind_addr = "127.0.0.1:3001"
+            server_addr = "127.0.0.1"
             runtime_size = 8
 
             [meta_client]
@@ -449,6 +454,7 @@ mod tests {
         let options = cmd.load_options(&Default::default()).unwrap().component;
 
         assert_eq!("127.0.0.1:3001".to_string(), options.grpc.bind_addr);
+        assert_eq!("127.0.0.1".to_string(), options.grpc.server_addr);
         assert_eq!(Some(42), options.node_id);
 
         let DatanodeWalConfig::RaftEngine(raft_engine_config) = options.wal else {
@@ -660,5 +666,56 @@ mod tests {
                 assert_eq!(opts.grpc.server_addr, "10.103.174.219");
             },
         );
+    }
+
+    #[test]
+    fn test_parse_grpc_cli_aliases() {
+        let command = StartCommand::try_parse_from([
+            "datanode",
+            "--grpc-bind-addr",
+            "127.0.0.1:13001",
+            "--grpc-server-addr",
+            "10.0.0.1:13001",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:13001"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.1:13001"));
+
+        let command = StartCommand::try_parse_from([
+            "datanode",
+            "--rpc-bind-addr",
+            "127.0.0.1:23001",
+            "--rpc-server-addr",
+            "10.0.0.2:23001",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:23001"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.2:23001"));
+
+        let command = StartCommand::try_parse_from([
+            "datanode",
+            "--rpc-addr",
+            "127.0.0.1:33001",
+            "--rpc-hostname",
+            "10.0.0.3:33001",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:33001"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.3:33001"));
+    }
+
+    #[test]
+    fn test_help_uses_grpc_option_names() {
+        let mut cmd = StartCommand::command();
+        let mut help = Vec::new();
+        cmd.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("--grpc-bind-addr"));
+        assert!(help.contains("--grpc-server-addr"));
+        assert!(!help.contains("--rpc-bind-addr"));
+        assert!(!help.contains("--rpc-server-addr"));
+        assert!(!help.contains("--rpc-addr"));
+        assert!(!help.contains("--rpc-hostname"));
     }
 }

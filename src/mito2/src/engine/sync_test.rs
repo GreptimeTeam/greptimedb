@@ -80,7 +80,7 @@ async fn test_sync_after_flush_region_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -112,7 +112,7 @@ async fn test_sync_after_flush_region_with_format(flat_format: bool) {
     // Open the region on the follower engine
     let follower_engine = env
         .create_follower_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -189,7 +189,7 @@ async fn test_sync_after_alter_region_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -224,7 +224,7 @@ async fn test_sync_after_alter_region_with_format(flat_format: bool) {
     // Open the region on the follower engine
     let follower_engine = env
         .create_follower_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;

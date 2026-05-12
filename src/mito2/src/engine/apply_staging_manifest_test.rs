@@ -62,7 +62,7 @@ async fn test_apply_staging_manifest_invalid_region_state_with_format(flat_forma
     let mut env = TestEnv::with_prefix("invalid-region-state").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -125,7 +125,7 @@ async fn test_apply_staging_manifest_mismatched_partition_expr_with_format(flat_
     let mut env = TestEnv::with_prefix("mismatched-partition-expr").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -205,7 +205,7 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("success").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -230,9 +230,7 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
         engine
             .handle_request(
                 region_id,
-                RegionRequest::Flush(RegionFlushRequest {
-                    row_group_size: None,
-                }),
+                RegionRequest::Flush(RegionFlushRequest::default()),
             )
             .await
             .unwrap();
@@ -333,7 +331,7 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     let staging_manifest = region.manifest_ctx.staging_manifest().await;
     assert!(staging_manifest.is_none());
     // The staging partition expr should be cleared.
-    assert!(region.staging_partition_info.lock().unwrap().is_none());
+    assert!(region.manifest_ctx.staging_partition_info().is_none());
     // The staging manifest directory should be empty.
     let data_home = env.data_home();
     let region_dir = format!("{}/data/test/1_0000000001", data_home.display());
@@ -406,7 +404,7 @@ async fn test_apply_staging_manifest_invalid_files_to_add_with_format(flat_forma
     let mut env = TestEnv::with_prefix("invalid-files-to-add").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -483,7 +481,7 @@ async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_fo
     let mut env = TestEnv::with_prefix("apply-change-edit-different-columns").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -503,9 +501,7 @@ async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_fo
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -599,7 +595,7 @@ async fn test_apply_staging_manifest_preserves_unflushed_memtable_with_format(fl
     let mut env = TestEnv::with_prefix("apply-preserve-memtable").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -624,9 +620,7 @@ async fn test_apply_staging_manifest_preserves_unflushed_memtable_with_format(fl
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -733,9 +727,7 @@ async fn test_split_repartition_causes_duplicate_data() {
     engine
         .handle_request(
             source_region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -928,9 +920,7 @@ async fn test_merge_repartition_data_integrity() {
     engine
         .handle_request(
             source_region_id_1,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -944,9 +934,7 @@ async fn test_merge_repartition_data_integrity() {
     engine
         .handle_request(
             source_region_id_2,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();

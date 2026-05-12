@@ -22,6 +22,7 @@ use api::v1::{
     column,
 };
 use auth::user_provider_from_option;
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
 use common_catalog::consts::MITO_ENGINE;
 use common_grpc::channel_manager::ClientTlsOption;
@@ -336,7 +337,7 @@ pub async fn test_otel_arrow_auth(store_type: StorageType) {
         let mut request = Request::new(stream);
         request.metadata_mut().insert(
             "authorization",
-            MetadataValue::from_static("Basic Z3JlcHRpbWVfdXNlcjpncmVwdGltZV9wd2Q="), // greptime_user:greptime_pwd base64 encoded
+            MetadataValue::try_from(basic_auth("greptime_user", "greptime_pwd")).unwrap(),
         );
         let response = client.arrow_metrics(request).await;
         assert!(response.is_ok());
@@ -356,7 +357,8 @@ pub async fn test_otel_arrow_auth(store_type: StorageType) {
         let mut request = Request::new(stream);
         request.metadata_mut().insert(
             "authorization",
-            MetadataValue::from_static("Z3JlcHRpbWVfdXNlcjpncmVwdGltZV9wd2Q="), // greptime_user:greptime_pwd base64 encoded
+            MetadataValue::try_from(basic_auth_credentials("greptime_user", "greptime_pwd"))
+                .unwrap(),
         );
         let response = client.arrow_metrics(request).await;
         assert!(response.is_ok());
@@ -372,6 +374,14 @@ pub async fn test_otel_arrow_auth(store_type: StorageType) {
     }
 
     let _ = fe_grpc_server.shutdown().await;
+}
+
+fn basic_auth(username: &str, password: &str) -> String {
+    format!("Basic {}", basic_auth_credentials(username, password))
+}
+
+fn basic_auth_credentials(username: &str, password: &str) -> String {
+    BASE64_STANDARD.encode(format!("{username}:{password}"))
 }
 
 pub async fn test_auto_create_table(store_type: StorageType) {

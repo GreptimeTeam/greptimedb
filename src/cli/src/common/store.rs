@@ -153,17 +153,11 @@ impl StoreConfig {
                 BackendImpl::PostgresStore => {
                     let table_name = &self.meta_table_name;
                     let tls_config = self.tls_config();
-                    let pool = meta_srv::utils::postgres::create_postgres_pool(
+                    Ok(meta_srv::utils::postgres::build_postgres_kv_backend(
                         store_addrs,
                         None,
                         tls_config,
-                    )
-                    .await
-                    .map_err(BoxedError::new)?;
-                    let schema_name = self.meta_schema_name.as_deref();
-                    Ok(common_meta::kv_backend::rds::PgStore::with_pg_pool(
-                        pool,
-                        schema_name,
+                        self.meta_schema_name.as_deref(),
                         table_name,
                         max_txn_ops,
                         self.auto_create_schema,
@@ -175,12 +169,9 @@ impl StoreConfig {
                 BackendImpl::MysqlStore => {
                     let table_name = &self.meta_table_name;
                     let tls_config = self.tls_config();
-                    let pool =
-                        meta_srv::utils::mysql::create_mysql_pool(store_addrs, tls_config.as_ref())
-                            .await
-                            .map_err(BoxedError::new)?;
-                    Ok(common_meta::kv_backend::rds::MySqlStore::with_mysql_pool(
-                        pool,
+                    Ok(meta_srv::utils::mysql::build_mysql_kv_backend(
+                        store_addrs,
+                        tls_config.as_ref(),
                         table_name,
                         max_txn_ops,
                     )

@@ -84,6 +84,9 @@ SELECT
     inet_ntoa(ip_numeric) AS computed_addr
 FROM ip_v4_data;
 
+-- Test IPv4 number to string conversion function without explicit cast
+SELECT ipv4_num_to_string(3232235521);
+
 -- Test IPv4 CIDR functions
 -- SQLNESS SORT_RESULT 3 1
 SELECT

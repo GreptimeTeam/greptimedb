@@ -18,7 +18,7 @@ use common_meta::instruction::{
     FlushErrorStrategy, FlushRegionReply, FlushRegions, FlushStrategy, InstructionReply,
 };
 use common_telemetry::{debug, warn};
-use store_api::region_request::{RegionFlushRequest, RegionRequest};
+use store_api::region_request::{RegionFlushReason, RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::error::{self, RegionNotFoundSnafu, RegionNotReadySnafu, Result, UnexpectedSnafu};
@@ -39,14 +39,17 @@ impl InstructionHandler for FlushRegionsHandler {
         let strategy = flush_regions.strategy;
         let region_ids = flush_regions.region_ids;
         let error_strategy = flush_regions.error_strategy;
+        let reason = flush_regions.reason;
 
         let reply = if matches!(strategy, FlushStrategy::Async) {
             // Asynchronous hint mode: fire-and-forget, no reply expected
-            ctx.handle_flush_hint(region_ids).await;
+            ctx.handle_flush_hint(region_ids, reason).await;
             None
         } else {
             // Synchronous mode: return reply with results
-            let reply = ctx.handle_flush_sync(region_ids, error_strategy).await;
+            let reply = ctx
+                .handle_flush_sync(region_ids, error_strategy, reason)
+                .await;
             Some(InstructionReply::FlushRegions(reply))
         };
 
@@ -62,9 +65,14 @@ impl InstructionHandler for FlushRegionsHandler {
 
 impl HandlerContext {
     /// Performs the actual region flush operation.
-    async fn perform_region_flush(&self, region_id: RegionId) -> Result<()> {
+    async fn perform_region_flush(
+        &self,
+        region_id: RegionId,
+        reason: Option<RegionFlushReason>,
+    ) -> Result<()> {
         let request = RegionRequest::Flush(RegionFlushRequest {
-            row_group_size: None,
+            reason,
+            ..Default::default()
         });
         self.region_server
             .handle_request(region_id, request)
@@ -73,10 +81,14 @@ impl HandlerContext {
     }
 
     /// Handles asynchronous flush hints (fire-and-forget).
-    async fn handle_flush_hint(&self, region_ids: Vec<RegionId>) {
+    async fn handle_flush_hint(
+        &self,
+        region_ids: Vec<RegionId>,
+        reason: Option<RegionFlushReason>,
+    ) {
         let start_time = Instant::now();
         for region_id in &region_ids {
-            let result = self.perform_region_flush(*region_id).await;
+            let result = self.perform_region_flush(*region_id, reason).await;
             match result {
                 Ok(_) => {}
                 Err(error::Error::RegionNotFound { .. }) => {
@@ -102,11 +114,12 @@ impl HandlerContext {
         &self,
         region_ids: Vec<RegionId>,
         error_strategy: FlushErrorStrategy,
+        reason: Option<RegionFlushReason>,
     ) -> FlushRegionReply {
         let mut results = Vec::with_capacity(region_ids.len());
 
         for region_id in region_ids {
-            let result = self.flush_single_region_sync(region_id).await;
+            let result = self.flush_single_region_sync(region_id, reason).await;
 
             match &result {
                 Ok(_) => results.push((region_id, Ok(()))),
@@ -127,7 +140,11 @@ impl HandlerContext {
     }
 
     /// Flushes a single region synchronously with proper error handling.
-    async fn flush_single_region_sync(&self, region_id: RegionId) -> Result<()> {
+    async fn flush_single_region_sync(
+        &self,
+        region_id: RegionId,
+        reason: Option<RegionFlushReason>,
+    ) -> Result<()> {
         // Check if region is leader and writable
         let Some(writable) = self.region_server.is_region_leader(region_id) else {
             return Err(RegionNotFoundSnafu { region_id }.build());
@@ -148,7 +165,8 @@ impl HandlerContext {
                         .handle_request(
                             region_id,
                             RegionRequest::Flush(RegionFlushRequest {
-                                row_group_size: None,
+                                reason,
+                                ..Default::default()
                             }),
                         )
                         .await?;
@@ -184,19 +202,27 @@ mod tests {
     use super::*;
     use crate::tests::{MockRegionEngine, mock_region_server};
 
+    type FlushedRequests = Arc<RwLock<Vec<(RegionId, Option<RegionFlushReason>)>>>;
+
     #[tokio::test]
     async fn test_handle_flush_region_hint() {
-        let flushed_region_ids: Arc<RwLock<Vec<RegionId>>> = Arc::new(RwLock::new(Vec::new()));
+        let flushed_requests: FlushedRequests = Arc::new(RwLock::new(Vec::new()));
 
         let mock_region_server = mock_region_server();
         let region_ids = (0..16).map(|i| RegionId::new(1024, i)).collect::<Vec<_>>();
         for region_id in &region_ids {
-            let flushed_region_ids_ref = flushed_region_ids.clone();
+            let flushed_requests_ref = flushed_requests.clone();
             let (mock_engine, _) =
                 MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, move |region_engine| {
                     region_engine.handle_request_mock_fn =
-                        Some(Box::new(move |region_id, _request| {
-                            flushed_region_ids_ref.write().unwrap().push(region_id);
+                        Some(Box::new(move |region_id, request| {
+                            let RegionRequest::Flush(request) = request else {
+                                panic!("Expected flush request");
+                            };
+                            flushed_requests_ref
+                                .write()
+                                .unwrap()
+                                .push((region_id, request.reason));
                             Ok(0)
                         }))
                 });
@@ -206,36 +232,47 @@ mod tests {
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
         // Async hint mode
-        let flush_instruction = FlushRegions::async_batch(region_ids.clone());
+        let flush_instruction = FlushRegions::async_batch(region_ids.clone())
+            .with_reason(RegionFlushReason::RemoteWalPrune);
         let reply = FlushRegionsHandler
             .handle(&handler_context, flush_instruction)
             .await;
         assert!(reply.is_none()); // Hint mode returns no reply
-        assert_eq!(*flushed_region_ids.read().unwrap(), region_ids);
+        let expected = region_ids
+            .iter()
+            .map(|region_id| (*region_id, Some(RegionFlushReason::RemoteWalPrune)))
+            .collect::<Vec<_>>();
+        assert_eq!(*flushed_requests.read().unwrap(), expected);
 
         // Non-existent regions
-        flushed_region_ids.write().unwrap().clear();
+        flushed_requests.write().unwrap().clear();
         let not_found_region_ids = (0..2).map(|i| RegionId::new(2048, i)).collect::<Vec<_>>();
         let flush_instruction = FlushRegions::async_batch(not_found_region_ids);
         let reply = FlushRegionsHandler
             .handle(&handler_context, flush_instruction)
             .await;
         assert!(reply.is_none());
-        assert!(flushed_region_ids.read().unwrap().is_empty());
+        assert!(flushed_requests.read().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn test_handle_flush_region_sync_single() {
-        let flushed_region_ids: Arc<RwLock<Vec<RegionId>>> = Arc::new(RwLock::new(Vec::new()));
+        let flushed_requests: FlushedRequests = Arc::new(RwLock::new(Vec::new()));
 
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
 
-        let flushed_region_ids_ref = flushed_region_ids.clone();
+        let flushed_requests_ref = flushed_requests.clone();
         let (mock_engine, _) =
             MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, move |region_engine| {
-                region_engine.handle_request_mock_fn = Some(Box::new(move |region_id, _request| {
-                    flushed_region_ids_ref.write().unwrap().push(region_id);
+                region_engine.handle_request_mock_fn = Some(Box::new(move |region_id, request| {
+                    let RegionRequest::Flush(request) = request else {
+                        panic!("Expected flush request");
+                    };
+                    flushed_requests_ref
+                        .write()
+                        .unwrap()
+                        .push((region_id, request.reason));
                     Ok(0)
                 }))
             });
@@ -243,7 +280,8 @@ mod tests {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
-        let flush_instruction = FlushRegions::sync_single(region_id);
+        let flush_instruction =
+            FlushRegions::sync_single(region_id).with_reason(RegionFlushReason::Repartition);
         let reply = FlushRegionsHandler
             .handle(&handler_context, flush_instruction)
             .await;
@@ -252,7 +290,10 @@ mod tests {
         assert_eq!(flush_reply.results.len(), 1);
         assert_eq!(flush_reply.results[0].0, region_id);
         assert!(flush_reply.results[0].1.is_ok());
-        assert_eq!(*flushed_region_ids.read().unwrap(), vec![region_id]);
+        assert_eq!(
+            *flushed_requests.read().unwrap(),
+            vec![(region_id, Some(RegionFlushReason::Repartition))]
+        );
     }
 
     #[tokio::test]
@@ -333,7 +374,7 @@ mod tests {
         let display = format!("{}", flush_regions);
         assert_eq!(
             display,
-            "FlushRegions(region_ids=[4398046511105(1024, 1)], strategy=Sync, error_strategy=FailFast)"
+            "FlushRegions(region_ids=[4398046511105(1024, 1)], strategy=Sync, error_strategy=FailFast, reason=None)"
         );
     }
 }

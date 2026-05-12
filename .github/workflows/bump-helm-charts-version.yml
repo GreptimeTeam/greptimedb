@@ -1,0 +1,29 @@
+name: Bump helm charts version
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to bump (e.g. v1.0.0)
+        required: true
+        type: string
+
+jobs:
+  bump-helm-charts-version:
+    name: Bump helm charts version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump helm charts version
+        env:
+          GITHUB_TOKEN: ${{ secrets.HELM_CHARTS_REPO_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          ./.github/scripts/update-helm-charts-version.sh

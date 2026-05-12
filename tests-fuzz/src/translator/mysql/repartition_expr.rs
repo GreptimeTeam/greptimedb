@@ -29,6 +29,7 @@ impl DslTranslator<RepartitionExpr, String> for RepartitionExprTranslator {
                 table_name,
                 target,
                 into,
+                wait,
             }) => {
                 let target_expr = format_partition_expr_sql(target);
                 let into_exprs = into
@@ -36,23 +37,26 @@ impl DslTranslator<RepartitionExpr, String> for RepartitionExprTranslator {
                     .map(format_partition_expr_sql)
                     .collect::<Vec<_>>()
                     .join(",\n  ");
+                let wait_clause = format_wait_clause(*wait);
                 Ok(format!(
-                    "ALTER TABLE {} SPLIT PARTITION (\n  {}\n) INTO (\n  {}\n);",
-                    table_name, target_expr, into_exprs
+                    "ALTER TABLE {} SPLIT PARTITION (\n  {}\n) INTO (\n  {}\n){};",
+                    table_name, target_expr, into_exprs, wait_clause
                 ))
             }
             RepartitionExpr::Merge(MergePartitionExpr {
                 table_name,
                 targets,
+                wait,
             }) => {
                 let merge_exprs = targets
                     .iter()
                     .map(format_partition_expr_sql)
                     .collect::<Vec<_>>()
                     .join(",\n  ");
+                let wait_clause = format_wait_clause(*wait);
                 Ok(format!(
-                    "ALTER TABLE {} MERGE PARTITION (\n  {}\n);",
-                    table_name, merge_exprs
+                    "ALTER TABLE {} MERGE PARTITION (\n  {}\n){};",
+                    table_name, merge_exprs, wait_clause
                 ))
             }
         }
@@ -61,6 +65,14 @@ impl DslTranslator<RepartitionExpr, String> for RepartitionExprTranslator {
 
 fn format_partition_expr_sql(expr: &PartitionExpr) -> String {
     expr.to_parser_expr().to_string()
+}
+
+fn format_wait_clause(wait: bool) -> String {
+    if wait {
+        String::new()
+    } else {
+        " WITH (\n  WAIT = false\n)".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -83,6 +95,7 @@ mod tests {
                     .gt_eq(Value::Int32(5))
                     .and(col("id").lt(Value::Int32(10))),
             ],
+            wait: true,
         });
         let sql = RepartitionExprTranslator.translate(&expr).unwrap();
         let expected = r#"ALTER TABLE demo SPLIT PARTITION (
@@ -102,11 +115,37 @@ mod tests {
                 col("id").gt_eq(Value::Int32(10)),
                 col("id").gt_eq(Value::Int32(20)),
             ],
+            wait: true,
         });
         let sql = RepartitionExprTranslator.translate(&expr).unwrap();
         let expected = r#"ALTER TABLE demo MERGE PARTITION (
   id >= 10,
   id >= 20
+);"#;
+        assert_eq!(sql, expected);
+    }
+
+    #[test]
+    fn test_translate_split_expr_wait_false() {
+        let expr = RepartitionExpr::Split(SplitPartitionExpr {
+            table_name: "demo".into(),
+            target: col("id").lt(Value::Int32(10)),
+            into: vec![
+                col("id").lt(Value::Int32(5)),
+                col("id")
+                    .gt_eq(Value::Int32(5))
+                    .and(col("id").lt(Value::Int32(10))),
+            ],
+            wait: false,
+        });
+        let sql = RepartitionExprTranslator.translate(&expr).unwrap();
+        let expected = r#"ALTER TABLE demo SPLIT PARTITION (
+  id < 10
+) INTO (
+  id < 5,
+  id >= 5 AND id < 10
+) WITH (
+  WAIT = false
 );"#;
         assert_eq!(sql, expected);
     }

@@ -121,7 +121,10 @@ fn to_persisted_if_leader(
     datanode_id: DatanodeId,
     timestamp_millis: i64,
 ) -> Option<(Row, PersistedRegionStat)> {
-    if matches!(region_stat.role, RegionRole::Leader) {
+    if matches!(
+        region_stat.role,
+        RegionRole::Leader | RegionRole::StagingLeader
+    ) {
         let persisted_region_stat = last_persisted_region_stats.get(&region_stat.id).map(|s| *s);
         Some((
             compute_persist_region_stat(

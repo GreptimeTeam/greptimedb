@@ -184,6 +184,14 @@ impl RemapManifest {
 
                 Self::handle_remap_manifest_reply(remap.region_id, reply, &now, peer)
             }
+            Err(error::Error::MailboxChannelClosed { .. }) => error::RetryLaterSnafu {
+                reason: format!(
+                    "Mailbox closed when sending remap manifests to datanode {:?}, elapsed: {:?}",
+                    peer,
+                    now.elapsed()
+                ),
+            }
+            .fail()?,
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
                     "Mailbox received timeout for remap manifests on datanode {:?}, elapsed: {:?}",

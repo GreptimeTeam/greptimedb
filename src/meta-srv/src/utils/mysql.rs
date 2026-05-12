@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_meta::election::ElectionRef;
+use common_meta::election::rds::mysql::{ElectionMysqlClient, MySqlElection};
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::rds::MySqlStore;
 use common_telemetry::info;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
@@ -82,4 +86,64 @@ pub async fn create_mysql_pool(
         .context(error::CreateMySqlPoolSnafu)?;
 
     Ok(pool)
+}
+
+/// Builds a MySQL-backed metadata [`KvBackendRef`].
+///
+/// * `store_addrs` - MySQL connection URLs; only the first address is used.
+/// * `tls_config` - optional TLS settings for the MySQL connection.
+/// * `table_name` - metadata KV table name.
+/// * `max_txn_ops` - maximum operations allowed in one metadata transaction.
+pub async fn build_mysql_kv_backend(
+    store_addrs: &[String],
+    tls_config: Option<&TlsOption>,
+    table_name: &str,
+    max_txn_ops: usize,
+) -> Result<KvBackendRef> {
+    let pool = create_mysql_pool(store_addrs, tls_config).await?;
+    MySqlStore::with_mysql_pool(pool, table_name, max_txn_ops)
+        .await
+        .context(error::KvBackendSnafu)
+}
+
+/// Builds a MySQL-backed election implementation.
+///
+/// * `store_addrs` - MySQL connection URLs; only the first address is used.
+/// * `tls_config` - optional TLS settings for the MySQL connection.
+/// * `leader_value` - advertised address of this election candidate.
+/// * `store_key_prefix` - prefix for election and candidate keys.
+/// * `candidate_lease_ttl` - TTL for registered candidate metadata.
+/// * `meta_lease_ttl` - TTL for the elected leader metadata.
+/// * `election_table_name` - dedicated table used for election locking and records.
+/// * `innodb_lock_wait_timeout` - session lock wait timeout for election transactions.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_mysql_election(
+    store_addrs: &[String],
+    tls_config: Option<&TlsOption>,
+    leader_value: String,
+    store_key_prefix: String,
+    candidate_lease_ttl: std::time::Duration,
+    meta_lease_ttl: std::time::Duration,
+    election_table_name: &str,
+    innodb_lock_wait_timeout: std::time::Duration,
+) -> Result<ElectionRef> {
+    let pool = create_mysql_pool(store_addrs, tls_config).await?;
+    let election_client = ElectionMysqlClient::new(
+        pool,
+        meta_lease_ttl,
+        meta_lease_ttl,
+        innodb_lock_wait_timeout,
+        meta_lease_ttl,
+        election_table_name,
+    );
+    MySqlElection::with_mysql_client(
+        leader_value,
+        election_client,
+        store_key_prefix,
+        candidate_lease_ttl,
+        meta_lease_ttl,
+        election_table_name,
+    )
+    .await
+    .context(error::KvBackendSnafu)
 }

@@ -201,6 +201,7 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datatypes::arrow::record_batch::RecordBatch;
     use store_api::codec::PrimaryKeyEncoding;
+    use store_api::metadata::ColumnMetadata;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
     use super::*;
@@ -364,11 +365,23 @@ mod tests {
         let modified =
             modify_batch_sparse(batch, table_id, &tag_columns, &non_tag_indices).unwrap();
 
-        let name_to_column_id: HashMap<String, ColumnId> = [
-            ("greptime_timestamp".to_string(), 0),
-            ("greptime_value".to_string(), 1),
-            ("namespace".to_string(), 2),
-            ("host".to_string(), 3),
+        let make_info = |name: &str, column_id: ColumnId| ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                name.to_string(),
+                datatypes::prelude::ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id,
+        };
+        let name_to_column_id: HashMap<String, ColumnMetadata> = [
+            (
+                "greptime_timestamp".to_string(),
+                make_info("greptime_timestamp", 0),
+            ),
+            ("greptime_value".to_string(), make_info("greptime_value", 1)),
+            ("namespace".to_string(), make_info("namespace", 2)),
+            ("host".to_string(), make_info("host", 3)),
         ]
         .into_iter()
         .collect();

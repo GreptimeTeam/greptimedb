@@ -168,6 +168,22 @@ SELECT number FROM out_num_cnt_show;
 
 DROP FLOW filter_numbers_show;
 
+CREATE FLOW filter_numbers_show
+SINK TO out_num_cnt_show
+WITH (defer_on_missing_source = true)
+AS SELECT number AS n1 FROM numbers_input_show where number > 10;
+
+SHOW CREATE FLOW filter_numbers_show;
+
+SELECT flow_definition FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
+
+CREATE FLOW invalid_flow_option_show
+SINK TO out_num_cnt_show
+WITH (access_key_id = [true])
+AS SELECT number AS n1 FROM numbers_input_show where number > 10;
+
+DROP FLOW filter_numbers_show;
+
 drop table out_num_cnt_show;
 
 drop table numbers_input_show;

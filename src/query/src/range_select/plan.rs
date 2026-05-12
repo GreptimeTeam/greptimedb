@@ -836,6 +836,7 @@ impl ExecutionPlan for RangeSelectExec {
         context: Arc<TaskContext>,
     ) -> DfResult<DfSendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+        let batch_size = context.session_config().batch_size();
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
         let time_index = schema
@@ -852,6 +853,7 @@ impl ExecutionPlan for RangeSelectExec {
                 .collect(),
         )?;
         Ok(Box::pin(RangeSelectStream {
+            batch_size,
             schema: self.schema.clone(),
             range_exec: self.range_exec.clone(),
             input,
@@ -868,6 +870,8 @@ impl ExecutionPlan for RangeSelectExec {
             metric: baseline_metric,
             schema_project: self.schema_project.clone(),
             schema_before_project: self.schema_before_project.clone(),
+            output_batch: None,
+            output_batch_offset: 0,
         }))
     }
 
@@ -881,6 +885,7 @@ impl ExecutionPlan for RangeSelectExec {
 }
 
 struct RangeSelectStream {
+    batch_size: usize,
     /// the schema of output column
     schema: SchemaRef,
     range_exec: Vec<RangeFnExec>,
@@ -907,6 +912,8 @@ struct RangeSelectStream {
     metric: BaselineMetrics,
     schema_project: Option<Vec<usize>>,
     schema_before_project: SchemaRef,
+    output_batch: Option<RecordBatch>,
+    output_batch_offset: usize,
 }
 
 #[derive(Debug)]
@@ -1149,6 +1156,36 @@ impl RangeSelectStream {
         };
         Ok(project_output)
     }
+
+    fn next_output_batch(&mut self) -> DfResult<Option<RecordBatch>> {
+        if self.output_batch.is_none() {
+            self.output_batch = Some(self.generate_output()?);
+            self.output_batch_offset = 0;
+        }
+
+        let num_rows = self.output_batch.as_ref().unwrap().num_rows();
+        if num_rows == 0 {
+            self.output_batch = None;
+            self.output_batch_offset = 0;
+            return Ok(None);
+        }
+
+        if self.output_batch_offset == 0 && num_rows <= self.batch_size {
+            return Ok(self.output_batch.take());
+        }
+
+        let offset = self.output_batch_offset;
+        let len = (num_rows - offset).min(self.batch_size);
+        let batch = self.output_batch.as_ref().unwrap().slice(offset, len);
+        self.output_batch_offset += len;
+
+        if self.output_batch_offset >= num_rows {
+            self.output_batch = None;
+            self.output_batch_offset = 0;
+        }
+
+        Ok(Some(batch))
+    }
 }
 
 enum ExecutionState {
@@ -1191,12 +1228,18 @@ impl Stream for RangeSelectStream {
                     }
                 }
                 ExecutionState::ProducingOutput => {
-                    let result = self.generate_output();
+                    let result = self.next_output_batch();
                     return match result {
                         // made output
-                        Ok(batch) => {
-                            self.exec_state = ExecutionState::Done;
+                        Ok(Some(batch)) => {
+                            if self.output_batch.is_none() {
+                                self.exec_state = ExecutionState::Done;
+                            }
                             Poll::Ready(Some(Ok(batch)))
+                        }
+                        Ok(None) => {
+                            self.exec_state = ExecutionState::Done;
+                            Poll::Ready(None)
                         }
                         // error making output
                         Err(error) => Poll::Ready(Some(Err(error))),
@@ -1251,7 +1294,7 @@ mod test {
     use datafusion::prelude::SessionContext;
     use datafusion_physical_expr::PhysicalSortExpr;
     use datafusion_physical_expr::expressions::Column;
-    use datatypes::arrow::array::TimestampMillisecondArray;
+    use datatypes::arrow::array::{Float64Array, Int64Array, TimestampMillisecondArray};
     use datatypes::arrow_array::StringArray;
 
     use super::*;
@@ -1313,15 +1356,49 @@ mod test {
         ))
     }
 
-    async fn do_range_select_test(
+    fn prepare_empty_test_data(is_float: bool) -> DataSourceExec {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new(
+                "value",
+                if is_float {
+                    DataType::Float64
+                } else {
+                    DataType::Int64
+                },
+                true,
+            ),
+            Field::new("host", DataType::Utf8, true),
+        ]));
+        let timestamp_column: Arc<dyn Array> =
+            Arc::new(TimestampMillisecondArray::from(Vec::<i64>::new())) as _;
+        let value_column: Arc<dyn Array> = if is_float {
+            Arc::new(Float64Array::from(Vec::<Option<f64>>::new())) as _
+        } else {
+            Arc::new(Int64Array::from(Vec::<Option<i64>>::new())) as _
+        };
+        let host_column: Arc<dyn Array> =
+            Arc::new(StringArray::from(Vec::<Option<&str>>::new())) as _;
+        let data = RecordBatch::try_new(
+            schema.clone(),
+            vec![timestamp_column, value_column, host_column],
+        )
+        .unwrap();
+
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![data]], schema, None).unwrap(),
+        ))
+    }
+
+    async fn collect_range_select_test(
         range1: Millisecond,
         range2: Millisecond,
         align: Millisecond,
         fill: Option<Fill>,
         is_float: bool,
         is_gap: bool,
-        expected: String,
-    ) {
+        batch_size: usize,
+    ) -> Vec<RecordBatch> {
         let data_type = if is_float {
             DataType::Float64
         } else {
@@ -1412,11 +1489,25 @@ mod test {
             .into(),
             range_select_exec,
         );
-        let session_context = SessionContext::default();
+        let session_context = SessionContext::new_with_config(
+            datafusion::execution::config::SessionConfig::new().with_batch_size(batch_size),
+        );
+        datafusion::physical_plan::collect(Arc::new(sort_exec), session_context.task_ctx())
+            .await
+            .unwrap()
+    }
+
+    async fn do_range_select_test(
+        range1: Millisecond,
+        range2: Millisecond,
+        align: Millisecond,
+        fill: Option<Fill>,
+        is_float: bool,
+        is_gap: bool,
+        expected: String,
+    ) {
         let result =
-            datafusion::physical_plan::collect(Arc::new(sort_exec), session_context.task_ctx())
-                .await
-                .unwrap();
+            collect_range_select_test(range1, range2, align, fill, is_float, is_gap, 8192).await;
 
         let result_literal = arrow::util::pretty::pretty_format_batches(&result)
             .unwrap()
@@ -1698,6 +1789,88 @@ mod test {
             expected,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn range_select_respects_session_batch_size() {
+        let result =
+            collect_range_select_test(10_000, 5_000, 5_000, Some(Fill::Null), true, false, 3).await;
+
+        let row_counts = result
+            .iter()
+            .map(|batch| batch.num_rows())
+            .collect::<Vec<_>>();
+        assert_eq!(vec![3, 3, 3, 3], row_counts);
+    }
+
+    #[tokio::test]
+    async fn range_select_skips_empty_output_batch() {
+        let memory_exec = Arc::new(prepare_empty_test_data(true));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("MIN(value)", DataType::Float64, true),
+            Field::new("MAX(value)", DataType::Float64, true),
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new("host", DataType::Utf8, true),
+        ]));
+        let cache = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        let input_schema = memory_exec.schema().clone();
+        let range_select_exec = Arc::new(RangeSelectExec {
+            input: memory_exec,
+            range_exec: vec![
+                RangeFnExec {
+                    expr: Arc::new(
+                        AggregateExprBuilder::new(
+                            min_max::min_udaf(),
+                            vec![Arc::new(Column::new("value", 1))],
+                        )
+                        .schema(input_schema.clone())
+                        .alias("MIN(value)")
+                        .build()
+                        .unwrap(),
+                    ),
+                    range: 10_000,
+                    fill: Some(Fill::Null),
+                    need_cast: None,
+                },
+                RangeFnExec {
+                    expr: Arc::new(
+                        AggregateExprBuilder::new(
+                            min_max::max_udaf(),
+                            vec![Arc::new(Column::new("value", 1))],
+                        )
+                        .schema(input_schema)
+                        .alias("MAX(value)")
+                        .build()
+                        .unwrap(),
+                    ),
+                    range: 5_000,
+                    fill: Some(Fill::Null),
+                    need_cast: None,
+                },
+            ],
+            align: 5_000,
+            align_to: 0,
+            by: vec![Arc::new(Column::new("host", 2))],
+            time_index: TIME_INDEX_COLUMN.to_string(),
+            schema: schema.clone(),
+            schema_before_project: schema.clone(),
+            schema_project: None,
+            by_schema: Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)])),
+            metric: ExecutionPlanMetricsSet::new(),
+            cache,
+        });
+        let session_context = SessionContext::new();
+        let result =
+            datafusion::physical_plan::collect(range_select_exec, session_context.task_ctx())
+                .await
+                .unwrap();
+
+        assert!(result.is_empty());
     }
 
     #[test]

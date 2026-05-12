@@ -332,7 +332,14 @@ impl ApplyStagingManifest {
                 );
 
                 Ok(())
-            }
+            },
+            Err(error::Error::MailboxChannelClosed {..})=> error::RetryLaterSnafu {
+                reason: format!(
+                    "Mailbox closed when sending apply staging manifests to datanode {:?}, elapsed: {:?}",
+                    peer,
+                    now.elapsed()
+                ),
+            }.fail()?,
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
                     "Mailbox received timeout for apply staging manifests on datanode {:?}, elapsed: {:?}",

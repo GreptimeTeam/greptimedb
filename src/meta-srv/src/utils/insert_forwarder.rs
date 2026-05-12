@@ -15,74 +15,28 @@
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
-use client::error::{ExternalSnafu, Result as ClientResult};
+use client::error::Result as ClientResult;
 use client::inserter::{Context, InsertOptions, Inserter};
-use client::{Client, Database};
-use common_error::ext::BoxedError;
-use common_meta::peer::PeerDiscoveryRef;
-use common_telemetry::{debug, warn};
-use snafu::{ResultExt, ensure};
-use tokio::sync::RwLock;
 
-use crate::error::{ListActiveFrontendsSnafu, NoAvailableFrontendSnafu};
+use crate::utils::database::{DatabaseContext, DatabaseOperatorRef};
 
 pub type InsertForwarderRef = Arc<InsertForwarder>;
 
 /// [`InsertForwarder`] is the inserter for the metasrv.
 /// It forwards insert requests to available frontend instances.
 pub struct InsertForwarder {
-    peer_discovery: PeerDiscoveryRef,
-    client: RwLock<Option<Client>>,
+    database_operator: DatabaseOperatorRef,
     options: Option<InsertOptions>,
 }
 
 impl InsertForwarder {
-    /// Creates a new InsertForwarder with the given peer lookup service.
-    pub fn new(peer_discovery: PeerDiscoveryRef, options: Option<InsertOptions>) -> Self {
+    /// Creates a new [`InsertForwarder`] with the given shared database operator
+    /// and optional insert options.
+    pub fn new(database_operator: DatabaseOperatorRef, options: Option<InsertOptions>) -> Self {
         Self {
-            peer_discovery,
-            client: RwLock::new(None),
+            database_operator,
             options,
         }
-    }
-
-    /// Builds a new client.
-    async fn build_client(&self) -> crate::error::Result<Client> {
-        let frontends = self
-            .peer_discovery
-            .active_frontends()
-            .await
-            .context(ListActiveFrontendsSnafu)?;
-
-        ensure!(!frontends.is_empty(), NoAvailableFrontendSnafu);
-
-        let urls = frontends
-            .into_iter()
-            .map(|peer| peer.addr)
-            .collect::<Vec<_>>();
-
-        debug!("Available frontend addresses: {:?}", urls);
-
-        Ok(Client::with_urls(urls))
-    }
-
-    /// Initializes the client if it hasn't been initialized yet, or returns the cached client.
-    async fn maybe_init_client(&self) -> Result<Client, BoxedError> {
-        let mut guard = self.client.write().await;
-        if guard.is_none() {
-            let client = self.build_client().await.map_err(BoxedError::new)?;
-            *guard = Some(client);
-        }
-
-        // Safety: checked above that the client is Some.
-        Ok(guard.as_ref().unwrap().clone())
-    }
-
-    /// Resets the cached client, forcing a rebuild on the next use.
-    async fn reset_client(&self) {
-        warn!("Resetting the client");
-        let mut guard = self.client.write().await;
-        guard.take();
     }
 }
 
@@ -93,26 +47,19 @@ impl Inserter for InsertForwarder {
         context: &Context<'_>,
         requests: RowInsertRequests,
     ) -> ClientResult<()> {
-        let client = self.maybe_init_client().await.context(ExternalSnafu)?;
-        let database = Database::new(context.catalog, context.schema, client);
+        let ctx = DatabaseContext::new(context.catalog, context.schema);
         let hints = self.options.as_ref().map_or(vec![], |o| o.to_hints());
 
-        if let Err(e) = database
-            .row_inserts_with_hints(
+        self.database_operator
+            .insert(
+                &ctx,
                 requests,
                 &hints
                     .iter()
                     .map(|(k, v)| (*k, v.as_str()))
                     .collect::<Vec<_>>(),
             )
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
-        {
-            // Resets the client so it will be rebuilt next time.
-            self.reset_client().await;
-            return Err(e);
-        };
+            .await?;
 
         Ok(())
     }

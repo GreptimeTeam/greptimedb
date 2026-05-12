@@ -24,6 +24,21 @@ SELECT ts, val, __tsid, host, job FROM phy;
 
 DROP TABLE phy;
 
+CREATE TABLE phy_default (ts timestamp time index, val double default 42) engine=metric with ("physical_metric_table" = "");
+
+CREATE TABLE t_default (ts timestamp time index, val double default 42, host string primary key) engine = metric with ("on_physical_table" = "phy_default");
+
+INSERT INTO t_default (host, ts) VALUES ('host1', 0), ('host2', 1);
+
+SELECT host, ts, val FROM t_default ORDER BY host;
+
+-- SQLNESS REPLACE (region\s\d+\(\d+\,\s\d+\)) region
+INSERT INTO t_default (host, val) VALUES ('host3', 3);
+
+DROP TABLE t_default;
+
+DROP TABLE phy_default;
+
 CREATE TABLE phy (
     ts timestamp time index,
     val double

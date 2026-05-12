@@ -122,7 +122,7 @@ impl Vector for StructVector {
             .map(|i| {
                 let field_array = &self.array.column(i);
 
-                if field_array.is_null(i) {
+                if field_array.is_null(index) {
                     Value::Null
                 } else {
                     let scalar_value = ScalarValue::try_from_array(field_array, index).unwrap();
@@ -322,26 +322,6 @@ impl StructVectorBuilder {
             builder.push_null();
         }
         self.null_buffer.append_null();
-    }
-
-    pub(crate) fn struct_type(&self) -> &StructType {
-        &self.fields
-    }
-
-    pub(crate) fn value_builders(&self) -> &[Box<dyn MutableVector>] {
-        &self.value_builders
-    }
-
-    pub(crate) fn mut_value_builders(&mut self) -> &mut [Box<dyn MutableVector>] {
-        &mut self.value_builders
-    }
-
-    pub(crate) fn null_buffer(&self) -> &NullBufferBuilder {
-        &self.null_buffer
-    }
-
-    pub(crate) fn mut_null_buffer(&mut self) -> &mut NullBufferBuilder {
-        &mut self.null_buffer
     }
 }
 

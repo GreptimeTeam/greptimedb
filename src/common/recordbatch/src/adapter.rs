@@ -446,6 +446,27 @@ pub struct RecordBatchMetrics {
     // Detailed per-plan metrics
     /// An ordered list of plan metrics, from top to bottom in post-order.
     pub plan_metrics: Vec<PlanMetrics>,
+    /// Per-region watermark for incremental-read checkpoint advancement.
+    ///
+    /// The watermark is the latest sequence (`seq`) this query round safely read
+    /// for each participating region. Flow uses it to decide where the next
+    /// incremental round can resume.
+    ///
+    /// - `Some(seq)`: the query proved it safely read up to `seq`; downstream
+    ///   may advance the checkpoint to this value.
+    /// - `None`: the region participated but the query could not prove a safe
+    ///   read upper-bound, so the checkpoint must not advance for this region.
+    ///
+    /// Omitted when empty for backward compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub region_watermarks: Vec<RegionWatermarkEntry>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RegionWatermarkEntry {
+    pub region_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<u64>,
 }
 
 /// Determines if a metric name represents a time measurement that should be formatted.
@@ -706,6 +727,7 @@ mod test {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::Int32Vector;
+    use serde_json::json;
     use snafu::IntoError;
 
     use super::*;
@@ -878,5 +900,54 @@ mod test {
                 assert!(binary_array_json.is_null(i));
             }
         }
+    }
+
+    #[test]
+    fn test_recordbatch_metrics_deserializes_without_region_watermarks() {
+        let metrics: RecordBatchMetrics = serde_json::from_value(json!({
+            "elapsed_compute": 12,
+            "memory_usage": 34,
+            "plan_metrics": []
+        }))
+        .unwrap();
+
+        assert!(metrics.region_watermarks.is_empty());
+        assert_eq!(metrics.elapsed_compute, 12);
+        assert_eq!(metrics.memory_usage, 34);
+    }
+
+    #[test]
+    fn test_recordbatch_metrics_region_watermarks_serde_roundtrip() {
+        let metrics = RecordBatchMetrics {
+            region_watermarks: vec![
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    watermark: Some(100),
+                },
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    watermark: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&metrics).unwrap();
+        assert_eq!(
+            value.get("region_watermarks").unwrap(),
+            &json!([
+                { "region_id": 1, "watermark": 100 },
+                { "region_id": 2 }
+            ])
+        );
+
+        let decoded: RecordBatchMetrics = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.region_watermarks, metrics.region_watermarks);
+    }
+
+    #[test]
+    fn test_recordbatch_metrics_skips_empty_region_watermarks_on_serialize() {
+        let value = serde_json::to_value(RecordBatchMetrics::default()).unwrap();
+        assert!(value.get("region_watermarks").is_none());
     }
 }

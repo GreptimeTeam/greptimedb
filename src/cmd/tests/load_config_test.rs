@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
 use common_base::memory_limit::MemoryLimit;
-use common_config::{Configurable, DEFAULT_DATA_HOME};
+use common_config::{Configurable, DEFAULT_DATA_HOME, ENV_VAR_SEP};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
 use common_wal::config::DatanodeWalConfig;
@@ -310,4 +310,52 @@ fn test_load_standalone_example_config() {
         ..Default::default()
     };
     similar_asserts::assert_eq!(options, expected);
+}
+
+#[test]
+fn test_load_standalone_user_provider_from_config() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    let user_provider = "static_user_provider:file:/tmp/greptimedb-users";
+    std::fs::write(
+        config.path(),
+        format!("user_provider = \"{user_provider}\"\n"),
+    )
+    .unwrap();
+
+    let options =
+        GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+
+    assert_eq!(
+        options.component.user_provider.as_deref(),
+        Some(user_provider)
+    );
+
+    let frontend_options = options.component.frontend_options();
+    assert_eq!(
+        frontend_options.user_provider.as_deref(),
+        Some(user_provider)
+    );
+}
+
+#[test]
+fn test_load_heartbeat_env_vars_from_env() {
+    let env_prefix = "HEARTBEAT_ENV_VARS_UT";
+    let env_key = [env_prefix, "HEARTBEAT_ENV_VARS"].join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("AZ,REGION"), || {
+        let expected = vec!["AZ".to_string(), "REGION".to_string()];
+
+        let datanode =
+            GreptimeOptions::<DatanodeOptions>::load_layered_options(None, env_prefix).unwrap();
+        similar_asserts::assert_eq!(datanode.component.heartbeat_env_vars, expected);
+
+        let frontend =
+            GreptimeOptions::<FrontendOptions>::load_layered_options(None, env_prefix).unwrap();
+        similar_asserts::assert_eq!(frontend.component.heartbeat_env_vars, expected);
+
+        let standalone =
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(None, env_prefix).unwrap();
+        similar_asserts::assert_eq!(standalone.component.heartbeat_env_vars, expected);
+    });
 }

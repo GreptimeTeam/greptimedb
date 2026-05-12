@@ -36,7 +36,7 @@ async fn test_engine_create_new_region_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("new-region").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -61,7 +61,7 @@ async fn test_engine_create_existing_region_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("create-existing").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -91,7 +91,7 @@ async fn test_engine_create_close_create_region_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("create-close-create").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -131,7 +131,7 @@ async fn test_engine_create_with_different_id_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -160,7 +160,7 @@ async fn test_engine_create_with_different_schema_with_format(flat_format: bool)
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -190,7 +190,7 @@ async fn test_engine_create_with_different_primary_key_with_format(flat_format: 
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -220,7 +220,7 @@ async fn test_engine_create_with_options_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -253,7 +253,7 @@ async fn test_engine_create_with_custom_store_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with_multiple_object_stores(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -301,7 +301,7 @@ async fn test_engine_create_with_memtable_opts_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -353,7 +353,7 @@ async fn create_with_partition_expr_persists_manifest_with_format(flat_format: b
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -401,7 +401,7 @@ async fn test_engine_create_with_format_one_case(create_format: &str, default_fl
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: default_flat_format,
+            default_flat_format,
             ..Default::default()
         })
         .await;

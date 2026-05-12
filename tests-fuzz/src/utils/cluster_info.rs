@@ -77,3 +77,42 @@ pub async fn wait_for_all_datanode_online(greptime: MySqlPool, timeout: Duration
     )
     .await
 }
+
+pub async fn wait_for_all_datanode_offline(greptime: MySqlPool, timeout: Duration) {
+    wait_condition_fn(
+        timeout,
+        || {
+            let greptime = greptime.clone();
+            Box::pin(async move {
+                let nodes = fetch_nodes(&greptime)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .flat_map(|node| {
+                        if node.peer_type == PEER_TYPE_DATANODE {
+                            Some(node)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                info!("Waits for datanode offline: {nodes:?}");
+                nodes
+            })
+        },
+        |nodes| {
+            nodes
+                .into_iter()
+                .map(|node| {
+                    info!(
+                        "Waits for datanode {} offline, active_time: {:?}",
+                        node.peer_id, node.active_time
+                    );
+                    parse_duration(&node.active_time.unwrap()).unwrap()
+                })
+                .all(|duration| duration >= Duration::from_secs(3))
+        },
+        Duration::from_secs(2),
+    )
+    .await
+}

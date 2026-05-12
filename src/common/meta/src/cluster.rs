@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
 
-use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest};
+use api::v1::meta::{DatanodeWorkloads, FlownodeWorkloads, HeartbeatRequest};
 use common_error::ext::ErrorExt;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -134,6 +135,9 @@ pub struct NodeInfo {
     // The node build hostname
     #[serde(default)]
     pub hostname: String,
+    /// Environment variables reported by the node.
+    #[serde(default)]
+    pub env_vars: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize, PartialOrd, Ord)]
@@ -187,7 +191,11 @@ pub struct FrontendStatus {}
 
 /// The status of a flownode.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FlownodeStatus {}
+pub struct FlownodeStatus {
+    /// The workloads of the flownode.
+    #[serde(default)]
+    pub workloads: FlownodeWorkloads,
+}
 
 /// The status of a metasrv.
 #[derive(Debug, Serialize, Deserialize)]
@@ -309,7 +317,7 @@ mod tests {
 
     use super::*;
     use crate::cluster::Role::{Datanode, Frontend};
-    use crate::cluster::{DatanodeStatus, NodeInfo, NodeInfoKey, NodeStatus};
+    use crate::cluster::{DatanodeStatus, FlownodeStatus, NodeInfo, NodeInfoKey, NodeStatus};
     use crate::peer::Peer;
 
     #[test]
@@ -351,6 +359,7 @@ mod tests {
             cpu_usage_millicores: 0,
             memory_usage_bytes: 0,
             hostname: "test_hostname".to_string(),
+            env_vars: Default::default(),
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();
@@ -403,5 +412,117 @@ mod tests {
         let long_addr = "very.long.domain.name.example.com:9999";
         let id4 = calculate_node_id(long_addr);
         assert!(id4 > 0);
+    }
+
+    #[test]
+    fn test_flownode_status_backward_compatible_without_workloads() {
+        let raw = r#"{
+            "peer":{"id":1,"addr":"127.0.0.1"},
+            "last_activity_ts":123,
+            "status":{"Flownode":{}},
+            "version":"",
+            "git_commit":"",
+            "start_time_ms":1,
+            "total_cpu_millicores":0,
+            "total_memory_bytes":0,
+            "cpu_usage_millicores":0,
+            "memory_usage_bytes":0,
+            "hostname":""
+        }"#;
+
+        let node_info: NodeInfo = raw.parse().unwrap();
+        assert_matches!(
+            node_info.status,
+            NodeStatus::Flownode(FlownodeStatus { workloads }) if workloads.types.is_empty()
+        );
+    }
+
+    #[test]
+    fn test_flownode_status_round_trip_with_workloads() {
+        let node_info = NodeInfo {
+            peer: Peer {
+                id: 1,
+                addr: "127.0.0.1".to_string(),
+            },
+            last_activity_ts: 123,
+            status: NodeStatus::Flownode(FlownodeStatus {
+                workloads: FlownodeWorkloads { types: vec![7] },
+            }),
+            version: "".to_string(),
+            git_commit: "".to_string(),
+            start_time_ms: 1,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            hostname: "test_hostname".to_string(),
+            env_vars: Default::default(),
+        };
+
+        let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();
+        let new_node_info: NodeInfo = node_info_bytes.try_into().unwrap();
+
+        assert_matches!(
+            new_node_info,
+            NodeInfo {
+                status: NodeStatus::Flownode(FlownodeStatus { workloads }),
+                ..
+            } if workloads.types == vec![7]
+        );
+    }
+
+    #[test]
+    fn test_node_info_backward_compatible_without_env_vars() {
+        // Simulate a NodeInfo serialized before env_vars was added
+        let raw = r#"{
+            "peer":{"id":1,"addr":"127.0.0.1"},
+            "last_activity_ts":123,
+            "status":{"Datanode":{"rcus":0,"wcus":0,"leader_regions":0,"follower_regions":0,"workloads":{"types":[0]}}},
+            "version":"",
+            "git_commit":"",
+            "start_time_ms":1,
+            "total_cpu_millicores":0,
+            "total_memory_bytes":0,
+            "cpu_usage_millicores":0,
+            "memory_usage_bytes":0,
+            "hostname":"test"
+        }"#;
+
+        let node_info: NodeInfo = raw.parse().unwrap();
+        assert!(node_info.env_vars.is_empty());
+    }
+
+    #[test]
+    fn test_node_info_with_env_vars_round_trip() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert("AZ".to_string(), "us-east-1a".to_string());
+
+        let node_info = NodeInfo {
+            peer: Peer {
+                id: 1,
+                addr: "127.0.0.1".to_string(),
+            },
+            last_activity_ts: 123,
+            status: NodeStatus::Datanode(DatanodeStatus {
+                rcus: 0,
+                wcus: 0,
+                leader_regions: 0,
+                follower_regions: 0,
+                workloads: DatanodeWorkloads { types: vec![] },
+            }),
+            version: "".to_string(),
+            git_commit: "".to_string(),
+            start_time_ms: 1,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            hostname: "test".to_string(),
+            env_vars,
+        };
+
+        let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();
+        let new_node_info: NodeInfo = node_info_bytes.try_into().unwrap();
+        assert_eq!(new_node_info.env_vars.get("AZ").unwrap(), "us-east-1a");
     }
 }

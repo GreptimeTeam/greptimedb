@@ -30,7 +30,7 @@ pub enum Error {
 
     #[snafu(display("Failed to list nodes from metasrv"))]
     Meta {
-        source: Box<meta_client::error::Error>,
+        source: Box<common_meta::error::Error>,
         #[snafu(implicit)]
         location: Location,
     },

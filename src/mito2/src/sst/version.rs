@@ -78,7 +78,9 @@ impl SstVersion {
                         *f = FileHandle::new(file.clone(), file_purger.clone());
                     }
                 })
-                .or_insert_with(|| FileHandle::new(file.clone(), file_purger.clone()));
+                .or_insert_with(|| {
+                    FileHandle::new(file.clone(), file_purger.clone())
+                });
         }
     }
 
