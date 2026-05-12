@@ -17,6 +17,8 @@
 //! This module provides a unified interface for reading and writing snapshot data
 //! to various storage backends (S3, OSS, GCS, Azure Blob, local filesystem).
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use object_store::services::{Azblob, Fs, Gcs, Oss, S3};
@@ -382,6 +384,17 @@ impl OpenDalStorage {
         Ok(data.to_vec())
     }
 
+    /// Reads a file as bytes if it exists.
+    pub(crate) async fn read_file_if_exists(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        match self.object_store.read(path).await {
+            Ok(data) => Ok(Some(data.to_vec())),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context(StorageOperationSnafu {
+                operation: format!("read {}", path),
+            }),
+        }
+    }
+
     /// Writes bytes to a file.
     async fn write_file(&self, path: &str, data: Vec<u8>) -> Result<()> {
         self.object_store
@@ -402,6 +415,37 @@ impl OpenDalStorage {
                 operation: format!("check exists {}", path),
             }),
         }
+    }
+
+    /// Lists direct child directory names under the storage root.
+    pub(crate) async fn list_direct_child_dirs(&self) -> Result<Vec<String>> {
+        let mut lister = match self.object_store.lister_with("/").recursive(false).await {
+            Ok(lister) => lister,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).context(StorageOperationSnafu {
+                    operation: "list /",
+                });
+            }
+        };
+
+        let mut dirs = BTreeSet::new();
+        while let Some(entry) = lister.try_next().await.context(StorageOperationSnafu {
+            operation: "list /",
+        })? {
+            let path = entry.path().trim_matches('/');
+            if path.is_empty() {
+                continue;
+            }
+
+            if entry.metadata().is_dir()
+                && let Some(name) = path.split('/').next()
+            {
+                dirs.insert(name.to_string());
+            }
+        }
+
+        Ok(dirs.into_iter().collect())
     }
 
     #[cfg(test)]
