@@ -490,6 +490,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_| TableScan: test_nano_|
 |_| ]]_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
@@ -544,6 +545,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_| TableScan: test_nano_|
 |_| ]]_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
@@ -598,6 +600,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_| TableScan: test_nano_|
 |_| ]]_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|

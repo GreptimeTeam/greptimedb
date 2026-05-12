@@ -294,6 +294,8 @@ enum NormalizationKind {
 }
 
 impl NormalizationTarget {
+    /// Normalizes constants for rewrites that can preserve the original predicate with a direct
+    /// literal cast. Timestamp precision-changing casts are handled by timestamp-specific helpers.
     fn normalize_constants(&self, constants: &[ScalarValue]) -> Option<Vec<ScalarValue>> {
         constants
             .iter()
@@ -308,6 +310,7 @@ impl NormalizationTarget {
         }
     }
 
+    /// Rewrites predicates over timestamp downcasts into source-side half-open bounds.
     fn normalize_timestamp_binary(&self, op: Operator, constant: &ScalarValue) -> Option<Expr> {
         let NormalizationKind::TimestampDowncast {
             source_unit,
@@ -353,6 +356,8 @@ impl NormalizationTarget {
         })
     }
 
+    /// Rewrites `BETWEEN` over timestamp downcasts into an inclusive lower bound and exclusive
+    /// upper bound over the source timestamp unit.
     fn normalize_timestamp_between(&self, low: &ScalarValue, high: &ScalarValue) -> Option<Expr> {
         let NormalizationKind::TimestampDowncast {
             source_unit,
@@ -421,6 +426,9 @@ fn classify_normalization_kind(
     source_type: &DataType,
     target_type: &DataType,
 ) -> Option<NormalizationKind> {
+    // Timestamp casts that change precision need boundary-aware rewrites. A finer target literal
+    // may not map exactly back to the coarser source unit, so the generic lossless path is only
+    // safe for timestamp casts that keep the same unit.
     if is_lossless_cast(source_type, target_type) {
         return Some(NormalizationKind::Lossless);
     }
@@ -457,7 +465,7 @@ fn is_lossless_cast(source_type: &DataType, target_type: &DataType) -> bool {
         (
             DataType::Timestamp(source_unit, source_tz),
             DataType::Timestamp(target_unit, target_tz),
-        ) => source_tz == target_tz && time_unit_rank(*source_unit) <= time_unit_rank(*target_unit),
+        ) => source_tz == target_tz && source_unit == target_unit,
         _ => false,
     }
 }
@@ -480,6 +488,7 @@ fn extract_constant_scalars(exprs: &[Expr]) -> Result<Option<Vec<ScalarValue>>> 
     Ok(Some(values))
 }
 
+/// Extracts a literal scalar from an expression, folding constant `CAST` and `TRY_CAST` nodes.
 fn extract_constant_scalar(expr: &Expr) -> Result<Option<ScalarValue>> {
     if let Some(value) = expr.as_literal() {
         return Ok(Some(value.clone()));
@@ -499,6 +508,7 @@ fn extract_constant_scalar(expr: &Expr) -> Result<Option<ScalarValue>> {
     }
 }
 
+/// Casts a literal only when DataFusion can prove the cast preserves the value.
 fn cast_literal_losslessly(value: &ScalarValue, target_type: &DataType) -> Option<ScalarValue> {
     try_cast_literal_to_type(value, target_type)
 }
@@ -509,6 +519,7 @@ enum CastInputKind {
     TryCast,
 }
 
+/// Returns the input expression and target type for `CAST` and `TRY_CAST` expressions.
 fn extract_cast_input(expr: &Expr) -> Option<(CastInputKind, &Expr, &DataType)> {
     match expr {
         Expr::Cast(Cast { expr, data_type }) => {
@@ -539,6 +550,7 @@ fn time_unit_scale(unit: ArrowTimeUnit) -> i64 {
     }
 }
 
+/// Returns the number of source-unit ticks in one target-unit tick for finer-to-coarser casts.
 fn finer_to_coarser_ratio(source_unit: ArrowTimeUnit, target_unit: ArrowTimeUnit) -> Option<i64> {
     let source_scale = time_unit_scale(source_unit);
     let target_scale = time_unit_scale(target_unit);
@@ -955,6 +967,23 @@ mod tests {
                 Some(Timestamp::new_nanosecond(-299_999_000_000)),
                 Some(Timestamp::new_nanosecond(10_000_000_000)),
             ),
+        );
+    }
+
+    #[test]
+    fn test_keep_timestamp_upcast_filter_unchanged() {
+        assert_filter_plan(
+            vec![Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            )],
+            cast(
+                col("ts"),
+                DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+            )
+            .gt_eq(lit(ScalarValue::TimestampNanosecond(Some(1), None))),
+            "Filter: CAST(t.ts AS Timestamp(ns)) >= TimestampNanosecond(1, None)\n  TableScan: t",
         );
     }
 
