@@ -14097,6 +14097,7 @@ dependencies = [
  "common-grpc",
  "common-memory-manager",
  "common-meta",
+ "common-options",
  "common-procedure",
  "common-procedure-test",
  "common-query",
