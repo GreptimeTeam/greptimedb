@@ -375,7 +375,7 @@ pub(crate) fn build_reader_filter_plan(
 
     let cache_key_parts = prefilter_physical_filters
         .iter()
-        .all(|filter| filter.is_stable())
+        .all(|filter| filter.is_immutable())
         .then(|| {
             build_prefilter_key_parts(predicate, expected_metadata, pre_filter_mode, read_format)
         });

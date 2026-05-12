@@ -1902,7 +1902,7 @@ pub(crate) struct PhysicalFilterContext {
     /// Schema containing only the referenced column.
     schema: SchemaRef,
     /// Whether the original logical expression is immutable across queries.
-    stable: bool,
+    immutable: bool,
 }
 
 impl PhysicalFilterContext {
@@ -1943,7 +1943,7 @@ impl PhysicalFilterContext {
                 error!(e; "Unable to build physical filter for {expr}, schema: {schema:?}");
             })
             .ok()?;
-        let stable = expr_is_immutable(expr);
+        let immutable = expr_is_immutable(expr);
 
         Some(Self {
             filter: physical_expr,
@@ -1951,7 +1951,7 @@ impl PhysicalFilterContext {
             column_name,
             semantic_type: column_metadata.semantic_type,
             schema,
-            stable,
+            immutable,
         })
     }
 
@@ -2003,21 +2003,25 @@ impl PhysicalFilterContext {
     }
 
     /// Returns true if the original logical expression is immutable across queries.
-    pub(crate) fn is_stable(&self) -> bool {
-        self.stable
+    pub(crate) fn is_immutable(&self) -> bool {
+        self.immutable
     }
 }
 
 fn expr_is_immutable(expr: &Expr) -> bool {
     let mut is_immutable = true;
-    let _ = expr.apply(|expr| {
-        if let Expr::ScalarFunction(function) = expr
-            && function.func.signature().volatility != Volatility::Immutable
+    let _ = expr.apply(|expr| match expr {
+        Expr::ScalarFunction(function)
+            if function.func.signature().volatility != Volatility::Immutable =>
         {
             is_immutable = false;
-            return Ok(TreeNodeRecursion::Stop);
+            Ok(TreeNodeRecursion::Stop)
         }
-        Ok(TreeNodeRecursion::Continue)
+        Expr::ScalarVariable(_, _) => {
+            is_immutable = false;
+            Ok(TreeNodeRecursion::Stop)
+        }
+        _ => Ok(TreeNodeRecursion::Continue),
     });
     is_immutable
 }
@@ -2360,6 +2364,12 @@ mod tests {
             "volatile_udf",
             Volatility::Volatile
         )));
+
+        let scalar_variable = Expr::ScalarVariable(
+            Arc::new(Field::new("@@version", DataType::Utf8, false)),
+            vec!["@@version".to_string()],
+        );
+        assert!(!expr_is_immutable(&scalar_variable));
     }
 
     fn expected_metadata_with_reused_tag_name(
