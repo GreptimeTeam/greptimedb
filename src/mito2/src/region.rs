@@ -1017,8 +1017,10 @@ impl ManifestContext {
     /// Updates the manifest for compaction.
     ///
     /// Compaction may finish while a direct external region edit is in the transient
-    /// `Editing` state. External edits are add-only, so it is safe for compaction to
-    /// publish under the manifest write lock while still rechecking its input files.
+    /// `Editing` state. External direct edits may remove files, but the remove-capable
+    /// sync-region path only runs on followers, where compaction is not scheduled. On
+    /// leaders, compaction can publish under the manifest write lock while still
+    /// rechecking its input files.
     pub(crate) async fn update_manifest_for_compaction(
         &self,
         action_list: RegionMetaActionList,

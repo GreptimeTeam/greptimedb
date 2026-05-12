@@ -46,44 +46,6 @@ async fn test_edit_region_schedule_compaction() {
     test_edit_region_schedule_compaction_with_format(true).await;
 }
 
-#[tokio::test]
-async fn test_edit_region_rejects_removing_files() {
-    let mut env = TestEnv::new().await;
-    let engine = env.create_engine(Default::default()).await;
-
-    let region_id = RegionId::new(1, 1);
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Create(CreateRequestBuilder::new().build()),
-        )
-        .await
-        .unwrap();
-
-    let err = engine
-        .edit_region(
-            region_id,
-            RegionEdit {
-                files_to_add: vec![],
-                files_to_remove: vec![FileMeta {
-                    region_id,
-                    file_id: FileId::random(),
-                    level: 0,
-                    ..Default::default()
-                }],
-                timestamp_ms: None,
-                compaction_time_window: None,
-                flushed_entry_id: None,
-                flushed_sequence: None,
-                committed_sequence: None,
-            },
-        )
-        .await
-        .unwrap_err();
-
-    assert_eq!(StatusCode::InvalidArguments, err.status_code());
-}
-
 async fn test_edit_region_schedule_compaction_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
 
