@@ -544,6 +544,7 @@ impl FrontendInvoker {
         layered_cache_registry: LayeredCacheRegistryRef,
         procedure_executor: ProcedureExecutorRef,
         node_manager: NodeManagerRef,
+        origin_frontend_addr: String,
     ) -> Result<FrontendInvoker, Error> {
         let table_route_cache: TableRouteCacheRef =
             layered_cache_registry.get().context(CacheRequiredSnafu {
@@ -589,6 +590,7 @@ impl FrontendInvoker {
             inserter.clone(),
             partition_manager,
             None,
+            origin_frontend_addr,
         ));
 
         let invoker = FrontendInvoker::new(inserter, deleter, statement_executor);

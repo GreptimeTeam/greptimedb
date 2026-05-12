@@ -118,7 +118,7 @@ pub struct StatementExecutor {
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
-    origin_frontend_addr: Option<String>,
+    origin_frontend_addr: String,
     #[cfg(feature = "enterprise")]
     trigger_querier: Option<TriggerQuerierRef>,
 }
@@ -154,6 +154,7 @@ impl StatementExecutor {
         inserter: InserterRef,
         partition_manager: PartitionRuleManagerRef,
         process_manager: Option<ProcessManagerRef>,
+        origin_frontend_addr: String,
     ) -> Self {
         Self {
             catalog_manager,
@@ -166,15 +167,10 @@ impl StatementExecutor {
             cache_invalidator,
             inserter,
             process_manager,
-            origin_frontend_addr: None,
+            origin_frontend_addr,
             #[cfg(feature = "enterprise")]
             trigger_querier: None,
         }
-    }
-
-    pub fn with_origin_frontend_addr(mut self, addr: String) -> Self {
-        self.origin_frontend_addr = Some(addr);
-        self
     }
 
     #[cfg(feature = "enterprise")]

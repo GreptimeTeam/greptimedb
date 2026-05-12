@@ -36,17 +36,13 @@ pub fn to_meta_query_context(
 
 pub fn to_meta_query_context_with_origin_frontend(
     query_context: QueryContextRef,
-    origin_frontend_addr: Option<&str>,
+    origin_frontend_addr: &str,
 ) -> common_meta::rpc::ddl::QueryContext {
     let mut meta_query_context = to_meta_query_context(query_context);
-    if let Some(origin_frontend_addr) = origin_frontend_addr
-        && !origin_frontend_addr.is_empty()
-    {
-        meta_query_context.extensions.insert(
-            common_meta::rpc::ddl::ORIGIN_FRONTEND_ADDR_EXTENSION_KEY.to_string(),
-            origin_frontend_addr.to_string(),
-        );
-    }
+    meta_query_context.extensions.insert(
+        common_meta::rpc::ddl::ORIGIN_FRONTEND_ADDR_EXTENSION_KEY.to_string(),
+        origin_frontend_addr.to_string(),
+    );
     meta_query_context
 }
 
@@ -116,8 +112,7 @@ mod tests {
                 .build(),
         );
 
-        let meta_ctx =
-            to_meta_query_context_with_origin_frontend(session_ctx, Some("127.0.0.1:4000"));
+        let meta_ctx = to_meta_query_context_with_origin_frontend(session_ctx, "127.0.0.1:4000");
 
         assert_eq!(
             meta_ctx

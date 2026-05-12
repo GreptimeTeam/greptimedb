@@ -1824,10 +1824,7 @@ impl StatementExecutor {
             .collect::<Result<Vec<_>>>()?;
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_origin_frontend(
-                query_context,
-                self.origin_frontend_addr.as_deref(),
-            ),
+            to_meta_query_context_with_origin_frontend(query_context, &self.origin_frontend_addr),
             DdlTask::new_create_table(create_table, partitions, table_info),
         );
 
@@ -1843,10 +1840,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_origin_frontend(
-                query_context,
-                self.origin_frontend_addr.as_deref(),
-            ),
+            to_meta_query_context_with_origin_frontend(query_context, &self.origin_frontend_addr),
             DdlTask::new_create_logical_tables(tables_data),
         );
 

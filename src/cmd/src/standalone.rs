@@ -57,6 +57,7 @@ use flow::{
     GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
+use frontend::heartbeat::frontend_peer_addr;
 use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
@@ -596,6 +597,7 @@ impl StartCommand {
             layered_cache_registry.clone(),
             procedure_executor,
             node_manager.clone(),
+            frontend_peer_addr(&fe_opts),
         )
         .await
         .context(StartFlownodeSnafu)?;

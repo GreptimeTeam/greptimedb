@@ -233,8 +233,8 @@ impl FrontendBuilder {
             inserter.clone(),
             partition_manager,
             Some(process_manager.clone()),
-        )
-        .with_origin_frontend_addr(frontend_peer_addr(&self.options));
+            frontend_peer_addr(&self.options),
+        );
 
         let statement_executor =
             if let Some(configurator) = plugins.get::<StatementExecutorConfiguratorRef>() {

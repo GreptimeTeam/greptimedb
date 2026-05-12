@@ -267,7 +267,7 @@ impl HeartbeatTask {
     }
 }
 
-pub(crate) fn frontend_peer_addr(opts: &FrontendOptions) -> String {
+pub fn frontend_peer_addr(opts: &FrontendOptions) -> String {
     // if internal grpc is configured, use its address as the peer address
     // otherwise use the public grpc address, because peer address only promises to be reachable
     // by other components, it doesn't matter whether it's internal or external
