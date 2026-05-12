@@ -519,7 +519,13 @@ pub fn create_heartbeat_task(
         Arc::new(stat)
     };
 
-    HeartbeatTask::new(options, meta_client, executor, stat)
+    HeartbeatTask::new(
+        instance.frontend_peer_addr().to_string(),
+        options,
+        meta_client,
+        executor,
+        stat,
+    )
 }
 
 #[cfg(test)]
