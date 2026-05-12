@@ -15,24 +15,29 @@
 //! Import V2 CLI command.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
 use common_error::ext::BoxedError;
 use common_telemetry::info;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::data::{build_copy_source, execute_copy_database_from};
 use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, DataFormat, MANIFEST_VERSION};
+use crate::data::import_v2::coordinator::{
+    ImportResumeConfig, ImportTaskExecutor, build_import_tasks, chunk_has_schema_files,
+    import_with_resume_session, prepare_import_resume,
+};
 use crate::data::import_v2::error::{
-    ChunkImportFailedSnafu, EmptyChunkManifestSnafu, IncompleteSnapshotSnafu,
-    ManifestVersionMismatchSnafu, MissingChunkDataSnafu, Result, SchemaNotInSnapshotSnafu,
-    SnapshotStorageSnafu,
+    ChunkImportFailedSnafu, EmptyChunkManifestSnafu, ImportStatePathUnavailableSnafu,
+    IncompleteSnapshotSnafu, ManifestVersionMismatchSnafu, MissingChunkDataSnafu, Result,
+    SchemaNotInSnapshotSnafu, SnapshotStorageSnafu,
 };
 use crate::data::import_v2::executor::{DdlExecutor, DdlStatement};
+use crate::data::import_v2::state::{ImportTaskKey, default_state_path};
 use crate::data::path::{data_dir_for_schema_chunk, ddl_path_for_schema};
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
@@ -185,13 +190,12 @@ impl Import {
 
         info!("Generated {} DDL statements", ddl_statements.len());
 
-        let data_prefixes = if !manifest.schema_only && !manifest.chunks.is_empty() {
-            Some(
-                validate_data_snapshot(self.storage.as_ref(), &manifest.chunks, &schemas_to_import)
-                    .await?,
-            )
+        let data_tasks = if !manifest.schema_only && !manifest.chunks.is_empty() {
+            validate_data_snapshot(self.storage.as_ref(), &manifest.chunks, &schemas_to_import)
+                .await?;
+            build_import_tasks(&manifest.chunks, &schemas_to_import)
         } else {
-            None
+            Vec::new()
         };
 
         // 4. Dry-run mode: print DDL and exit
@@ -212,24 +216,67 @@ impl Import {
             return Ok(());
         }
 
-        // 5. Execute DDL
-        let executor = DdlExecutor::new(&self.database_client);
-        executor.execute_strict(&ddl_statements).await?;
-
-        if !manifest.schema_only && !manifest.chunks.is_empty() {
-            self.import_data(
-                &manifest.chunks,
+        let mut resume_session = if !data_tasks.is_empty() {
+            let state_path = default_state_path(
+                &manifest.snapshot_id.to_string(),
+                self.database_client.addr(),
+                &self.catalog,
                 &schemas_to_import,
-                manifest.format,
-                data_prefixes.expect("validated full snapshot must provide data prefixes"),
             )
-            .await?;
+            .context(ImportStatePathUnavailableSnafu {
+                snapshot_id: manifest.snapshot_id.to_string(),
+            })?;
+            Some(
+                prepare_import_resume(ImportResumeConfig {
+                    snapshot_id: manifest.snapshot_id.to_string(),
+                    target_addr: self.database_client.addr().to_string(),
+                    catalog: self.catalog.clone(),
+                    schemas: schemas_to_import.clone(),
+                    state_path,
+                    tasks: data_tasks,
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        let skip_ddl = resume_session
+            .as_ref()
+            .map(|session| session.should_skip_ddl())
+            .unwrap_or(false);
+
+        // 5. Execute DDL unless a previous run already completed it.
+        let ddl_executed = if skip_ddl {
+            info!(
+                "Existing import state has DDL marked completed; skipping DDL execution and resuming data import"
+            );
+            false
+        } else {
+            let executor = DdlExecutor::new(&self.database_client);
+            executor.execute_strict(&ddl_statements).await?;
+            if let Some(session) = resume_session.as_mut() {
+                session.mark_ddl_completed().await?;
+            }
+            true
+        };
+
+        if let Some(resume_session) = resume_session {
+            let executor = CopyDatabaseImportTaskExecutor {
+                import: self,
+                format: manifest.format,
+            };
+            import_with_resume_session(resume_session, &executor).await?;
         }
 
-        info!(
-            "Import completed: {} DDL statements executed",
-            ddl_statements.len()
-        );
+        if ddl_executed {
+            info!(
+                "Import completed: {} DDL statements executed",
+                ddl_statements.len()
+            );
+        } else {
+            info!("Import completed: DDL execution skipped");
+        }
 
         Ok(())
     }
@@ -252,79 +299,39 @@ impl Import {
 
         Ok(statements)
     }
+}
 
-    async fn import_data(
-        &self,
-        chunks: &[ChunkMeta],
-        schemas: &[String],
-        format: DataFormat,
-        actual_prefixes: HashSet<String>,
-    ) -> Result<()> {
-        let import_start = Instant::now();
-        let total_chunks = chunks
-            .iter()
-            .filter(|chunk| chunk.status == ChunkStatus::Completed)
-            .count();
-        info!(
-            "Importing data: {} chunks, {} schemas",
-            total_chunks,
-            schemas.len()
-        );
+struct CopyDatabaseImportTaskExecutor<'a> {
+    import: &'a Import,
+    format: DataFormat,
+}
 
-        for (idx, chunk) in chunks.iter().enumerate() {
-            if chunk.status == ChunkStatus::Skipped {
-                info!(
-                    "[{}/{}] Chunk {}: skipped (no data)",
-                    idx + 1,
-                    chunks.len(),
-                    chunk.id
-                );
-                continue;
-            }
+#[async_trait]
+impl ImportTaskExecutor for CopyDatabaseImportTaskExecutor<'_> {
+    async fn import_task(&self, task: &ImportTaskKey) -> Result<()> {
+        let source = build_copy_source(
+            &self.import.snapshot_uri,
+            &self.import.storage_config,
+            &task.schema,
+            task.chunk_id,
+        )
+        .context(ChunkImportFailedSnafu {
+            chunk_id: task.chunk_id,
+            schema: task.schema.clone(),
+        })?;
 
-            info!(
-                "[{}/{}] Chunk {} ({:?} ~ {:?})",
-                idx + 1,
-                chunks.len(),
-                chunk.id,
-                chunk.time_range.start,
-                chunk.time_range.end
-            );
-
-            for schema in schemas {
-                if !validate_chunk_schema_files(chunk, schema, &actual_prefixes)? {
-                    info!("  {}: no data, skipped", schema);
-                    continue;
-                }
-
-                info!("  {}: importing...", schema);
-                let copy_start = Instant::now();
-                let source =
-                    build_copy_source(&self.snapshot_uri, &self.storage_config, schema, chunk.id)
-                        .context(ChunkImportFailedSnafu {
-                        chunk_id: chunk.id,
-                        schema: schema.clone(),
-                    })?;
-
-                execute_copy_database_from(
-                    &self.database_client,
-                    &self.catalog,
-                    schema,
-                    &source,
-                    format,
-                )
-                .await
-                .context(ChunkImportFailedSnafu {
-                    chunk_id: chunk.id,
-                    schema: schema.clone(),
-                })?;
-
-                info!("  {}: done in {:?}", schema, copy_start.elapsed());
-            }
-        }
-
-        info!("Data import finished in {:?}", import_start.elapsed());
-        Ok(())
+        execute_copy_database_from(
+            &self.import.database_client,
+            &self.import.catalog,
+            &task.schema,
+            &source,
+            self.format,
+        )
+        .await
+        .context(ChunkImportFailedSnafu {
+            chunk_id: task.chunk_id,
+            schema: task.schema.clone(),
+        })
     }
 }
 
@@ -511,14 +518,6 @@ fn validate_chunk_statuses(chunks: &[ChunkMeta]) -> Result<()> {
     Ok(())
 }
 
-fn chunk_has_schema_files(chunk: &ChunkMeta, schema: &str) -> bool {
-    let prefix = data_dir_for_schema_chunk(schema, chunk.id);
-    chunk.files.iter().any(|path| {
-        let normalized = path.trim_start_matches('/');
-        normalized.starts_with(&prefix)
-    })
-}
-
 fn format_data_import_plan(chunks: &[ChunkMeta], schemas: &[String]) -> Vec<String> {
     let mut lines = vec!["-- Data import plan:".to_string()];
     for chunk in chunks {
@@ -536,7 +535,7 @@ async fn validate_data_snapshot(
     storage: &dyn SnapshotStorage,
     chunks: &[ChunkMeta],
     schemas: &[String],
-) -> Result<HashSet<String>> {
+) -> Result<()> {
     validate_chunk_statuses(chunks)?;
     let actual_prefixes = collect_chunk_data_prefixes(storage).await?;
 
@@ -552,7 +551,7 @@ async fn validate_data_snapshot(
         }
     }
 
-    Ok(actual_prefixes)
+    Ok(())
 }
 
 async fn collect_chunk_data_prefixes(storage: &dyn SnapshotStorage) -> Result<HashSet<String>> {

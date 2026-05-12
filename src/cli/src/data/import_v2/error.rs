@@ -129,9 +129,55 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Import state references unknown chunk {}", chunk_id))]
-    ImportStateUnknownChunk {
+    #[snafu(display(
+        "Failed to determine import state path for snapshot '{}'. Set HOME, USERPROFILE, or run from a valid current directory.",
+        snapshot_id
+    ))]
+    ImportStatePathUnavailable {
+        snapshot_id: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Import state at '{}' does not match current import: {}. Either rerun with matching import arguments, or delete the state file to start over (DDL will be re-executed).",
+        path,
+        reason
+    ))]
+    ImportStateMismatch {
+        path: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(test)]
+    #[snafu(display("Test task failed: {}", message))]
+    TestTaskFailed {
+        message: String,
+        retryable: bool,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Import state references unknown task: chunk {}, schema '{}'",
+        chunk_id,
+        schema
+    ))]
+    ImportStateUnknownTask {
         chunk_id: u32,
+        schema: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Import state at '{}' is not ready for data import: DDL has not been marked completed",
+        path
+    ))]
+    ImportStateDdlIncomplete {
+        path: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -148,7 +194,18 @@ impl ErrorExt for Error {
             | Error::IncompleteSnapshot { .. }
             | Error::EmptyChunkManifest { .. }
             | Error::MissingChunkData { .. } => StatusCode::InvalidArguments,
-            Error::ImportStateUnknownChunk { .. } => StatusCode::Unexpected,
+            Error::ImportStatePathUnavailable { .. }
+            | Error::ImportStateUnknownTask { .. }
+            | Error::ImportStateDdlIncomplete { .. } => StatusCode::Unexpected,
+            Error::ImportStateMismatch { .. } => StatusCode::InvalidArguments,
+            #[cfg(test)]
+            Error::TestTaskFailed { retryable, .. } => {
+                if *retryable {
+                    StatusCode::StorageUnavailable
+                } else {
+                    StatusCode::InvalidArguments
+                }
+            }
             Error::Database { error, .. } => error.status_code(),
             Error::SnapshotStorage { error, .. } | Error::ChunkImportFailed { error, .. } => {
                 error.status_code()

@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -24,8 +22,8 @@ use snafu::{IntoError, OptionExt, ResultExt};
 use tokio::io::AsyncWriteExt;
 
 use crate::data::import_v2::error::{
-    ImportStateIoSnafu, ImportStateLockedSnafu, ImportStateParseSnafu,
-    ImportStateUnknownChunkSnafu, Result,
+    ImportStateIoSnafu, ImportStateLockedSnafu, ImportStateParseSnafu, ImportStateUnknownTaskSnafu,
+    Result,
 };
 use crate::data::path::encode_path_segment;
 
@@ -33,9 +31,9 @@ const IMPORT_STATE_ROOT: &str = ".greptime";
 const IMPORT_STATE_DIR: &str = "import_state";
 static IMPORT_STATE_TMP_ID: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ImportChunkStatus {
+pub(crate) enum ImportTaskStatus {
     Pending,
     InProgress,
     Completed,
@@ -43,9 +41,25 @@ pub(crate) enum ImportChunkStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ImportChunkState {
-    pub(crate) id: u32,
-    pub(crate) status: ImportChunkStatus,
+pub(crate) struct ImportTaskKey {
+    pub(crate) chunk_id: u32,
+    pub(crate) schema: String,
+}
+
+impl ImportTaskKey {
+    pub(crate) fn new(chunk_id: u32, schema: impl Into<String>) -> Self {
+        Self {
+            chunk_id,
+            schema: schema.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ImportTaskState {
+    pub(crate) chunk_id: u32,
+    pub(crate) schema: String,
+    pub(crate) status: ImportTaskStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
 }
@@ -54,55 +68,77 @@ pub(crate) struct ImportChunkState {
 pub(crate) struct ImportState {
     pub(crate) snapshot_id: String,
     pub(crate) target_addr: String,
+    pub(crate) catalog: String,
+    pub(crate) schemas: Vec<String>,
+    #[serde(default)]
+    pub(crate) ddl_completed: bool,
     pub(crate) updated_at: DateTime<Utc>,
-    // Chunk counts are expected to stay below ~1000, so linear scans are acceptable here.
-    pub(crate) chunks: Vec<ImportChunkState>,
+    // Tasks are (chunk-schema) tuples and can reach the tens of thousands;
+    // linear scans here are accepted because per-task work is dominated by
+    // network I/O and an fsync, but if the bound grows further this should be
+    // backed by a HashMap<(chunk_id, schema), index> rebuilt after load.
+    pub(crate) tasks: Vec<ImportTaskState>,
 }
 
 impl ImportState {
     pub(crate) fn new<I>(
         snapshot_id: impl Into<String>,
         target_addr: impl Into<String>,
-        chunk_ids: I,
+        catalog: impl Into<String>,
+        schemas: &[String],
+        tasks: I,
     ) -> Self
     where
-        I: IntoIterator<Item = u32>,
+        I: IntoIterator<Item = ImportTaskKey>,
     {
         Self {
             snapshot_id: snapshot_id.into(),
             target_addr: target_addr.into(),
+            catalog: catalog.into(),
+            schemas: canonical_schema_selection(schemas),
+            ddl_completed: false,
             updated_at: Utc::now(),
-            chunks: chunk_ids
+            tasks: tasks
                 .into_iter()
-                .map(|id| ImportChunkState {
-                    id,
-                    status: ImportChunkStatus::Pending,
+                .map(|task| ImportTaskState {
+                    chunk_id: task.chunk_id,
+                    schema: task.schema,
+                    status: ImportTaskStatus::Pending,
                     error: None,
                 })
                 .collect(),
         }
     }
 
-    pub(crate) fn chunk_status(&self, chunk_id: u32) -> Option<ImportChunkStatus> {
-        self.chunks
-            .iter()
-            .find(|chunk| chunk.id == chunk_id)
-            .map(|chunk| chunk.status.clone())
+    pub(crate) fn mark_ddl_completed(&mut self) {
+        self.ddl_completed = true;
+        self.updated_at = Utc::now();
     }
 
-    pub(crate) fn set_chunk_status(
+    pub(crate) fn task_status(&self, chunk_id: u32, schema: &str) -> Option<ImportTaskStatus> {
+        self.tasks
+            .iter()
+            .find(|task| task.chunk_id == chunk_id && task.schema == schema)
+            .map(|task| task.status)
+    }
+
+    pub(crate) fn set_task_status(
         &mut self,
         chunk_id: u32,
-        status: ImportChunkStatus,
+        schema: &str,
+        status: ImportTaskStatus,
         error: Option<String>,
     ) -> Result<()> {
-        let chunk = self
-            .chunks
+        let task = self
+            .tasks
             .iter_mut()
-            .find(|chunk| chunk.id == chunk_id)
-            .context(ImportStateUnknownChunkSnafu { chunk_id })?;
-        chunk.status = status;
-        chunk.error = error;
+            .find(|task| task.chunk_id == chunk_id && task.schema == schema)
+            .context(ImportStateUnknownTaskSnafu {
+                chunk_id,
+                schema: schema.to_string(),
+            })?;
+        task.status = status;
+        task.error = error;
         self.updated_at = Utc::now();
         Ok(())
     }
@@ -119,15 +155,27 @@ impl Drop for ImportStateLockGuard {
     }
 }
 
-pub(crate) fn default_state_path(snapshot_id: &str, target_addr: &str) -> Option<PathBuf> {
+pub(crate) fn default_state_path(
+    snapshot_id: &str,
+    target_addr: &str,
+    catalog: &str,
+    schemas: &[String],
+) -> Option<PathBuf> {
     let home = default_home_dir_with(|key| std::env::var_os(key));
     let cwd = std::env::current_dir().ok();
-    default_state_path_with(home.as_deref(), cwd.as_deref(), snapshot_id, target_addr)
+    default_state_path_with(
+        home.as_deref(),
+        cwd.as_deref(),
+        snapshot_id,
+        target_addr,
+        catalog,
+        schemas,
+    )
 }
 
 fn default_home_dir_with<F>(get: F) -> Option<PathBuf>
 where
-    F: for<'a> Fn(&'a str) -> Option<std::ffi::OsString>,
+    F: Fn(&str) -> Option<std::ffi::OsString>,
 {
     get("HOME")
         .or_else(|| get("USERPROFILE"))
@@ -144,8 +192,10 @@ fn default_state_path_with(
     cwd: Option<&Path>,
     snapshot_id: &str,
     target_addr: &str,
+    catalog: &str,
+    schemas: &[String],
 ) -> Option<PathBuf> {
-    let file_name = import_state_file_name(snapshot_id, target_addr);
+    let file_name = import_state_file_name(snapshot_id, target_addr, catalog, schemas);
     match (home, cwd) {
         (Some(home), _) => Some(
             home.join(IMPORT_STATE_ROOT)
@@ -157,12 +207,56 @@ fn default_state_path_with(
     }
 }
 
-fn import_state_file_name(snapshot_id: &str, target_addr: &str) -> String {
+fn import_state_file_name(
+    snapshot_id: &str,
+    target_addr: &str,
+    catalog: &str,
+    schemas: &[String],
+) -> String {
     format!(
-        ".import_state_{}_{}.json",
+        ".import_state_{}_{}_{}.json",
         encode_path_segment(snapshot_id),
-        encode_path_segment(target_addr)
+        encode_path_segment(target_addr),
+        import_identity_hash(catalog, schemas)
     )
+}
+
+pub(crate) fn canonical_schema_selection(schemas: &[String]) -> Vec<String> {
+    let mut canonicalized = schemas
+        .iter()
+        .map(|schema| schema.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    canonicalized.sort();
+    canonicalized.dedup();
+    canonicalized
+}
+
+/// FNV-1a over `(catalog, schemas)`. The output is part of the persisted state
+/// filename, so we cannot use `std::collections::hash_map::DefaultHasher` -
+/// Rust does not guarantee its algorithm across releases, which would make a
+/// state file written by one toolchain undiscoverable by another.
+fn import_identity_hash(catalog: &str, schemas: &[String]) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    fn hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
+    let mut hash = FNV_OFFSET;
+    hash = hash_bytes(hash, catalog.as_bytes());
+    // 0xff cannot appear in valid UTF-8, so it works as an unambiguous
+    // field separator between adjacent identifiers.
+    hash = hash_bytes(hash, &[0xff]);
+    for schema in canonical_schema_selection(schemas) {
+        hash = hash_bytes(hash, schema.as_bytes());
+        hash = hash_bytes(hash, &[0xff]);
+    }
+    format!("{hash:016x}")
 }
 
 pub(crate) async fn load_import_state(path: &Path) -> Result<Option<ImportState>> {
@@ -268,10 +362,10 @@ fn import_state_lock_path(path: &Path) -> PathBuf {
 }
 
 fn normalize_import_state_for_resume(state: &mut ImportState) {
-    for chunk in &mut state.chunks {
-        if chunk.status == ImportChunkStatus::InProgress {
-            chunk.status = ImportChunkStatus::Pending;
-            chunk.error = None;
+    for task in &mut state.tasks {
+        if task.status == ImportTaskStatus::InProgress {
+            task.status = ImportTaskStatus::Pending;
+            task.error = None;
         }
     }
 }
@@ -324,42 +418,82 @@ mod tests {
     const CHILD_LOCK_TEST: &str =
         "data::import_v2::state::tests::test_try_acquire_import_state_lock_child_process";
 
-    #[test]
-    fn test_import_state_new_initializes_pending_chunks() {
-        let state = ImportState::new("snapshot-1", "127.0.0.1:4000", [1, 2]);
+    fn schemas() -> Vec<String> {
+        vec!["public".to_string(), "analytics".to_string()]
+    }
 
-        assert_eq!(state.snapshot_id, "snapshot-1");
-        assert_eq!(state.target_addr, "127.0.0.1:4000");
-        assert_eq!(state.chunks.len(), 2);
-        assert_eq!(state.chunks[0].status, ImportChunkStatus::Pending);
-        assert_eq!(state.chunks[1].status, ImportChunkStatus::Pending);
+    fn tasks() -> Vec<ImportTaskKey> {
+        vec![
+            ImportTaskKey::new(1, "public"),
+            ImportTaskKey::new(2, "analytics"),
+        ]
     }
 
     #[test]
-    fn test_set_chunk_status_updates_timestamp_and_error() {
-        let mut state = ImportState::new("snapshot-1", "127.0.0.1:4000", [1]);
+    fn test_import_state_new_initializes_pending_tasks() {
+        let state = ImportState::new(
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &schemas(),
+            tasks(),
+        );
+
+        assert_eq!(state.snapshot_id, "snapshot-1");
+        assert_eq!(state.target_addr, "127.0.0.1:4000");
+        assert_eq!(state.catalog, "greptime");
+        assert_eq!(state.schemas, vec!["analytics", "public"]);
+        assert_eq!(state.tasks.len(), 2);
+        assert_eq!(state.tasks[0].status, ImportTaskStatus::Pending);
+        assert_eq!(state.tasks[1].status, ImportTaskStatus::Pending);
+    }
+
+    #[test]
+    fn test_set_task_status_updates_timestamp_and_error() {
+        let mut state = ImportState::new(
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &schemas(),
+            tasks(),
+        );
         let before = state.updated_at;
         state.updated_at = Utc::now() - chrono::Duration::seconds(10);
 
         state
-            .set_chunk_status(1, ImportChunkStatus::Failed, Some("timeout".to_string()))
+            .set_task_status(
+                1,
+                "public",
+                ImportTaskStatus::Failed,
+                Some("timeout".to_string()),
+            )
             .unwrap();
-        assert_eq!(state.chunk_status(1), Some(ImportChunkStatus::Failed));
-        assert_eq!(state.chunks[0].error.as_deref(), Some("timeout"));
+        assert_eq!(
+            state.task_status(1, "public"),
+            Some(ImportTaskStatus::Failed)
+        );
+        assert_eq!(state.tasks[0].error.as_deref(), Some("timeout"));
         assert!(state.updated_at > before);
     }
 
     #[test]
-    fn test_set_chunk_status_rejects_unknown_chunk_id() {
-        let mut state = ImportState::new("snapshot-1", "127.0.0.1:4000", [1]);
+    fn test_set_task_status_rejects_unknown_task() {
+        let mut state = ImportState::new(
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &schemas(),
+            tasks(),
+        );
 
         let error = state
-            .set_chunk_status(99, ImportChunkStatus::Completed, None)
+            .set_task_status(99, "public", ImportTaskStatus::Completed, None)
             .unwrap_err();
 
         assert!(matches!(
             error,
-            crate::data::import_v2::error::Error::ImportStateUnknownChunk { chunk_id, .. } if chunk_id == 99
+            crate::data::import_v2::error::Error::ImportStateUnknownTask { chunk_id, schema, .. }
+                if chunk_id == 99 && schema == "public"
         ));
     }
 
@@ -367,9 +501,15 @@ mod tests {
     async fn test_save_and_load_import_state_round_trip() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("import_state.json");
-        let mut state = ImportState::new("snapshot-1", "127.0.0.1:4000", [1, 2]);
+        let mut state = ImportState::new(
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &schemas(),
+            tasks(),
+        );
         state
-            .set_chunk_status(2, ImportChunkStatus::Completed, None)
+            .set_task_status(2, "analytics", ImportTaskStatus::Completed, None)
             .unwrap();
 
         save_import_state(&path, &state).await.unwrap();
@@ -377,53 +517,78 @@ mod tests {
 
         assert_eq!(loaded.snapshot_id, state.snapshot_id);
         assert_eq!(loaded.target_addr, state.target_addr);
-        assert_eq!(loaded.chunks, state.chunks);
+        assert_eq!(loaded.catalog, state.catalog);
+        assert_eq!(loaded.schemas, state.schemas);
+        assert_eq!(loaded.tasks, state.tasks);
     }
 
     #[tokio::test]
     async fn test_save_import_state_overwrites_existing_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("import_state.json");
-        let mut state = ImportState::new("snapshot-1", "127.0.0.1:4000", [1]);
+        let mut state = ImportState::new(
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &schemas(),
+            tasks(),
+        );
         save_import_state(&path, &state).await.unwrap();
 
         state
-            .set_chunk_status(1, ImportChunkStatus::Completed, None)
+            .set_task_status(1, "public", ImportTaskStatus::Completed, None)
             .unwrap();
         save_import_state(&path, &state).await.unwrap();
 
         let loaded = load_import_state(&path).await.unwrap().unwrap();
-        assert_eq!(loaded.chunk_status(1), Some(ImportChunkStatus::Completed));
+        assert_eq!(
+            loaded.task_status(1, "public"),
+            Some(ImportTaskStatus::Completed)
+        );
     }
 
     #[test]
     fn test_load_import_state_resets_in_progress_to_pending() {
-        let mut state = ImportState::new("snapshot-1", "127.0.0.1:4000", [1, 2]);
+        let mut state = ImportState::new(
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &schemas(),
+            tasks(),
+        );
         state
-            .set_chunk_status(
+            .set_task_status(
                 2,
-                ImportChunkStatus::InProgress,
+                "analytics",
+                ImportTaskStatus::InProgress,
                 Some("running".to_string()),
             )
             .unwrap();
 
         normalize_import_state_for_resume(&mut state);
 
-        assert_eq!(state.chunk_status(1), Some(ImportChunkStatus::Pending));
-        assert_eq!(state.chunk_status(2), Some(ImportChunkStatus::Pending));
-        assert_eq!(state.chunks[1].error, None);
+        assert_eq!(
+            state.task_status(1, "public"),
+            Some(ImportTaskStatus::Pending)
+        );
+        assert_eq!(
+            state.task_status(2, "analytics"),
+            Some(ImportTaskStatus::Pending)
+        );
+        assert_eq!(state.tasks[1].error, None);
     }
 
     #[test]
     fn test_unique_tmp_path_generates_distinct_paths() {
-        let path = Path::new("/tmp/import_state.json");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("import_state.json");
 
-        let first = unique_tmp_path(path);
-        let second = unique_tmp_path(path);
+        let first = unique_tmp_path(&path);
+        let second = unique_tmp_path(&path);
 
         assert_ne!(first, second);
-        assert!(first.starts_with("/tmp"));
-        assert!(second.starts_with("/tmp"));
+        assert!(first.starts_with(dir.path()));
+        assert!(second.starts_with(dir.path()));
         assert!(
             first
                 .file_name()
@@ -507,42 +672,102 @@ mod tests {
             Some(cwd.path()),
             "../snapshot",
             "127.0.0.1:4000",
+            "greptime",
+            &schemas(),
         )
         .unwrap();
 
         assert_eq!(
-            path,
-            home.path()
-                .join(IMPORT_STATE_ROOT)
-                .join(IMPORT_STATE_DIR)
-                .join(".import_state_%2E%2E%2Fsnapshot_127%2E0%2E0%2E1%3A4000.json")
+            path.parent().unwrap(),
+            home.path().join(IMPORT_STATE_ROOT).join(IMPORT_STATE_DIR)
         );
+        let file_name = path.file_name().unwrap().to_string_lossy();
+        assert!(file_name.starts_with(".import_state_%2E%2E%2Fsnapshot_127%2E0%2E0%2E1%3A4000_"));
+        assert!(file_name.ends_with(".json"));
     }
 
     #[test]
     fn test_default_state_path_falls_back_to_cwd_when_home_missing() {
         let cwd = tempdir().unwrap();
 
-        let path =
-            default_state_path_with(None, Some(cwd.path()), "snapshot-1", "target-a").unwrap();
+        let path = default_state_path_with(
+            None,
+            Some(cwd.path()),
+            "snapshot-1",
+            "target-a",
+            "greptime",
+            &schemas(),
+        )
+        .unwrap();
 
-        assert_eq!(
-            path,
-            cwd.path().join(".import_state_snapshot-1_target-a.json")
-        );
+        assert_eq!(path.parent().unwrap(), cwd.path());
+        let file_name = path.file_name().unwrap().to_string_lossy();
+        assert!(file_name.starts_with(".import_state_snapshot-1_target-a_"));
+        assert!(file_name.ends_with(".json"));
     }
 
     #[test]
     fn test_default_state_path_isolated_by_target_addr() {
         let cwd = tempdir().unwrap();
 
-        let first = default_state_path_with(None, Some(cwd.path()), "snapshot-1", "127.0.0.1:4000")
-            .unwrap();
-        let second =
-            default_state_path_with(None, Some(cwd.path()), "snapshot-1", "127.0.0.1:4001")
-                .unwrap();
+        let first = default_state_path_with(
+            None,
+            Some(cwd.path()),
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &schemas(),
+        )
+        .unwrap();
+        let second = default_state_path_with(
+            None,
+            Some(cwd.path()),
+            "snapshot-1",
+            "127.0.0.1:4001",
+            "greptime",
+            &schemas(),
+        )
+        .unwrap();
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_default_state_path_isolated_by_catalog_and_schemas() {
+        let cwd = tempdir().unwrap();
+        let public_only = vec!["public".to_string()];
+        let analytics_only = vec!["analytics".to_string()];
+
+        let first = default_state_path_with(
+            None,
+            Some(cwd.path()),
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &public_only,
+        )
+        .unwrap();
+        let second = default_state_path_with(
+            None,
+            Some(cwd.path()),
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "other",
+            &public_only,
+        )
+        .unwrap();
+        let third = default_state_path_with(
+            None,
+            Some(cwd.path()),
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &analytics_only,
+        )
+        .unwrap();
+
+        assert_ne!(first, second);
+        assert_ne!(first, third);
     }
 
     #[test]
