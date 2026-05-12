@@ -351,193 +351,58 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_is_time_index_expr_tracks_aliases_through_projection() {
+    fn test_is_time_index_expr_tracks_projection_wrappers() {
         let scan = new_region_scan();
-        let projection = Arc::new(
-            ProjectionExec::try_new(
-                vec![(
-                    Arc::new(PhysicalColumn::new("ts", 1)) as Arc<dyn PhysicalExpr>,
-                    "alias_ts".to_string(),
-                )],
-                scan,
-            )
-            .unwrap(),
-        ) as Arc<dyn ExecutionPlan>;
-        let expr = Arc::new(PhysicalColumn::new("alias_ts", 0)) as Arc<dyn PhysicalExpr>;
-
-        assert!(is_time_index_expr(&projection, &expr).unwrap());
-    }
-
-    #[test]
-    fn test_is_time_index_expr_tracks_multi_level_aliases() {
-        let scan = new_region_scan();
-        let first_projection = Arc::new(
-            ProjectionExec::try_new(
-                vec![(
-                    Arc::new(PhysicalColumn::new("ts", 1)) as Arc<dyn PhysicalExpr>,
-                    "alias_1".to_string(),
-                )],
-                scan,
-            )
-            .unwrap(),
-        ) as Arc<dyn ExecutionPlan>;
-        let second_projection = Arc::new(
-            ProjectionExec::try_new(
-                vec![(
-                    Arc::new(PhysicalColumn::new("alias_1", 0)) as Arc<dyn PhysicalExpr>,
-                    "alias_2".to_string(),
-                )],
-                first_projection,
-            )
-            .unwrap(),
-        ) as Arc<dyn ExecutionPlan>;
-        let expr = Arc::new(PhysicalColumn::new("alias_2", 0)) as Arc<dyn PhysicalExpr>;
-
-        assert!(is_time_index_expr(&second_projection, &expr).unwrap());
-    }
-
-    #[test]
-    fn test_is_time_index_expr_tracks_wrapped_aliases_through_projection() {
-        let scan = new_region_scan();
-        let config = Arc::new(ConfigOptions::default());
-        let return_field = Arc::new(Field::new(
-            "ts",
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ));
-        let projection = Arc::new(
-            ProjectionExec::try_new(
-                vec![(
-                    Arc::new(ScalarFunctionExpr::new(
-                        "to_timestamp_millis",
-                        to_timestamp_millis(config.as_ref()),
-                        vec![Arc::new(PhysicalColumn::new("ts", 1))],
-                        return_field,
-                        config,
-                    )) as Arc<dyn PhysicalExpr>,
-                    "ts".to_string(),
-                )],
-                scan,
-            )
-            .unwrap(),
-        ) as Arc<dyn ExecutionPlan>;
-        let expr = Arc::new(PhysicalColumn::new("ts", 0)) as Arc<dyn PhysicalExpr>;
-
-        assert!(is_time_index_expr(&projection, &expr).unwrap());
-    }
-
-    #[test]
-    fn test_is_time_index_expr_tracks_cast_aliases_through_projection() {
-        let scan = new_region_scan();
-        let projection = Arc::new(
-            ProjectionExec::try_new(
-                vec![(
+        let testcases = [
+            (
+                project(scan.clone(), col("ts", 1), "alias_ts"),
+                col("alias_ts", 0),
+                true,
+            ),
+            (
+                project(
+                    scan.clone(),
                     Arc::new(CastExpr::new(
-                        Arc::new(PhysicalColumn::new("ts", 1)),
+                        col("ts", 1),
                         DataType::Timestamp(TimeUnit::Millisecond, None),
                         None,
-                    )) as Arc<dyn PhysicalExpr>,
-                    "ts_ms".to_string(),
-                )],
-                scan,
-            )
-            .unwrap(),
-        ) as Arc<dyn ExecutionPlan>;
-        let expr = Arc::new(PhysicalColumn::new("ts_ms", 0)) as Arc<dyn PhysicalExpr>;
+                    )),
+                    "ts_ms",
+                ),
+                col("ts_ms", 0),
+                true,
+            ),
+            (
+                project(
+                    scan.clone(),
+                    scalar_func("to_timestamp_millis", col("ts", 1)),
+                    "ts",
+                ),
+                col("ts", 0),
+                true,
+            ),
+            (
+                project(scan.clone(), scalar_func("date_trunc", col("ts", 1)), "ts"),
+                col("ts", 0),
+                false,
+            ),
+        ];
 
-        assert!(is_time_index_expr(&projection, &expr).unwrap());
+        for (plan, expr, expected) in testcases {
+            assert_eq!(expected, is_time_index_expr(&plan, &expr).unwrap());
+        }
     }
 
     #[test]
-    fn test_is_time_index_expr_rejects_unsupported_wrappers() {
-        let scan = new_region_scan();
-        let config = Arc::new(ConfigOptions::default());
-        let return_field = Arc::new(Field::new(
-            "ts",
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ));
-        let projection = Arc::new(
-            ProjectionExec::try_new(
-                vec![(
-                    Arc::new(ScalarFunctionExpr::new(
-                        "date_trunc",
-                        to_timestamp_millis(config.as_ref()),
-                        vec![Arc::new(PhysicalColumn::new("ts", 1))],
-                        return_field,
-                        config,
-                    )) as Arc<dyn PhysicalExpr>,
-                    "ts".to_string(),
-                )],
-                scan,
-            )
-            .unwrap(),
-        ) as Arc<dyn ExecutionPlan>;
-        let expr = Arc::new(PhysicalColumn::new("ts", 0)) as Arc<dyn PhysicalExpr>;
+    fn test_is_time_index_expr_tracks_through_multi_level_alias_and_filter_projection() {
+        let first_projection = project(new_region_scan(), col("ts", 1), "alias_1");
+        let second_projection = project(first_projection, col("alias_1", 0), "alias_2");
+        assert!(is_time_index_expr(&second_projection, &col("alias_2", 0)).unwrap());
 
-        assert!(!is_time_index_expr(&projection, &expr).unwrap());
-    }
-
-    #[test]
-    fn test_is_supported_time_index_wrapper_ignores_function_name_case() {
-        let config = Arc::new(ConfigOptions::default());
-        let return_field = Arc::new(Field::new(
-            "ts",
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ));
-        let expr = ScalarFunctionExpr::new(
-            "To_Timestamp_Millis",
-            to_timestamp_millis(config.as_ref()),
-            vec![Arc::new(PhysicalColumn::new("ts", 1))],
-            return_field,
-            config,
-        );
-
-        assert!(is_supported_time_index_wrapper(&expr));
-    }
-
-    #[test]
-    fn test_is_time_index_expr_rejects_non_timestamp_casts() {
-        let scan = new_region_scan();
-        let cast_expr = Arc::new(CastExpr::new(
-            Arc::new(PhysicalColumn::new("ts", 1)),
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            None,
-        )) as Arc<dyn PhysicalExpr>;
-        assert!(is_time_index_expr(&scan, &cast_expr).unwrap());
-
-        let non_timestamp_cast = Arc::new(CastExpr::new(
-            Arc::new(PhysicalColumn::new("ts", 1)),
-            DataType::Int64,
-            None,
-        )) as Arc<dyn PhysicalExpr>;
-        assert!(!is_time_index_expr(&scan, &non_timestamp_cast).unwrap());
-    }
-
-    #[test]
-    fn test_is_time_index_expr_tracks_time_index_through_filter() {
-        let scan = new_region_scan();
-        let filter = Arc::new(
-            FilterExec::try_new(
-                Arc::new(Literal::new(ScalarValue::Boolean(Some(true)))),
-                scan,
-            )
-            .unwrap(),
-        ) as Arc<dyn ExecutionPlan>;
-        let expr = Arc::new(PhysicalColumn::new("ts", 1)) as Arc<dyn PhysicalExpr>;
-
-        assert!(is_time_index_expr(&filter, &expr).unwrap());
-    }
-
-    #[test]
-    fn test_is_time_index_expr_tracks_time_index_through_passthrough_wrapper_and_filter_projection()
-    {
-        let scan = new_region_scan();
         let projected_filter = Arc::new(
             FilterExecBuilder::new(
                 Arc::new(Literal::new(ScalarValue::Boolean(Some(true)))),
-                scan,
+                new_region_scan(),
             )
             .apply_projection(Some(vec![1]))
             .unwrap()
@@ -546,54 +411,56 @@ mod test {
         ) as Arc<dyn ExecutionPlan>;
         let cooperative =
             Arc::new(CooperativeExec::new(projected_filter)) as Arc<dyn ExecutionPlan>;
-        let expr = Arc::new(PhysicalColumn::new("ts", 0)) as Arc<dyn PhysicalExpr>;
-
-        assert!(is_time_index_expr(&cooperative, &expr).unwrap());
+        assert!(is_time_index_expr(&cooperative, &col("ts", 0)).unwrap());
     }
 
     #[test]
-    fn test_schema_preserving_child_rejects_schema_changing_projection() {
+    fn test_is_time_index_expr_rejects_non_timestamp_cast_and_ignores_wrapper_case() {
         let scan = new_region_scan();
-        let projection = ProjectionExec::try_new(
-            vec![(
-                Arc::new(PhysicalColumn::new("ts", 1)) as Arc<dyn PhysicalExpr>,
-                "ts".to_string(),
-            )],
-            scan,
-        )
-        .unwrap();
+        let cast_expr = Arc::new(CastExpr::new(
+            col("ts", 1),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+        assert!(is_time_index_expr(&scan, &cast_expr).unwrap());
 
+        let non_timestamp_cast =
+            Arc::new(CastExpr::new(col("ts", 1), DataType::Int64, None)) as Arc<dyn PhysicalExpr>;
+        assert!(!is_time_index_expr(&scan, &non_timestamp_cast).unwrap());
+
+        assert!(is_supported_time_index_wrapper(
+            scalar_func("To_Timestamp_Millis", col("ts", 1))
+                .as_any()
+                .downcast_ref::<ScalarFunctionExpr>()
+                .unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_passthrough_schema_contract() {
+        let scan = new_region_scan();
+        let projection =
+            ProjectionExec::try_new(vec![(col("ts", 1), "ts".to_string())], scan.clone()).unwrap();
         assert!(schema_preserving_child(&projection).is_none());
-    }
 
-    #[test]
-    fn test_cooperative_exec_satisfies_passthrough_schema_contract() {
-        let child = new_region_scan();
-        let plan = Arc::new(CooperativeExec::new(child.clone())) as Arc<dyn ExecutionPlan>;
-
-        assert_passthrough_schema_contract(plan, child);
-    }
-
-    #[test]
-    fn test_repartition_exec_satisfies_passthrough_schema_contract() {
-        let child = new_region_scan();
-        let plan = Arc::new(
-            RepartitionExec::try_new(
-                child.clone(),
-                datafusion_physical_expr::Partitioning::RoundRobinBatch(2),
-            )
-            .unwrap(),
-        ) as Arc<dyn ExecutionPlan>;
-
-        assert_passthrough_schema_contract(plan, child);
-    }
-
-    #[test]
-    fn test_coalesce_partitions_exec_satisfies_passthrough_schema_contract() {
-        let child = new_region_scan();
-        let plan = Arc::new(CoalescePartitionsExec::new(child.clone())) as Arc<dyn ExecutionPlan>;
-
-        assert_passthrough_schema_contract(plan, child);
+        assert_passthrough_schema_contract(
+            Arc::new(CooperativeExec::new(scan.clone())),
+            scan.clone(),
+        );
+        assert_passthrough_schema_contract(
+            Arc::new(CoalescePartitionsExec::new(scan.clone())),
+            scan.clone(),
+        );
+        assert_passthrough_schema_contract(
+            Arc::new(
+                RepartitionExec::try_new(
+                    scan.clone(),
+                    datafusion_physical_expr::Partitioning::RoundRobinBatch(2),
+                )
+                .unwrap(),
+            ),
+            scan,
+        );
     }
 
     fn assert_passthrough_schema_contract(
@@ -604,6 +471,33 @@ mod test {
 
         let passthrough = passthrough_child(plan.as_ref()).expect("wrapper should preserve schema");
         assert_eq!(passthrough.schema().as_ref(), child.schema().as_ref());
+    }
+
+    fn project(
+        input: Arc<dyn ExecutionPlan>,
+        expr: Arc<dyn PhysicalExpr>,
+        alias: &str,
+    ) -> Arc<dyn ExecutionPlan> {
+        Arc::new(ProjectionExec::try_new(vec![(expr, alias.to_string())], input).unwrap())
+    }
+
+    fn col(name: &str, index: usize) -> Arc<dyn PhysicalExpr> {
+        Arc::new(PhysicalColumn::new(name, index))
+    }
+
+    fn scalar_func(name: &str, arg: Arc<dyn PhysicalExpr>) -> Arc<dyn PhysicalExpr> {
+        let config = Arc::new(ConfigOptions::default());
+        Arc::new(ScalarFunctionExpr::new(
+            name,
+            to_timestamp_millis(config.as_ref()),
+            vec![arg],
+            Arc::new(Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            )),
+            config,
+        ))
     }
 
     fn new_region_scan() -> Arc<dyn ExecutionPlan> {
