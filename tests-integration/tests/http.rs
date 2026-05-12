@@ -37,6 +37,7 @@ use common_frontend::slow_query_event::{
     SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
 };
 use common_memory_manager::OnExhaustedPolicy;
+use common_options::plugin_options::StandaloneFlag;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use log_query::{Context, Limit, LogQuery, TimeFilter};
@@ -283,6 +284,7 @@ pub async fn test_http_auth_from_standalone_user_provider_config() {
     let fe_opts = options.component.frontend_options();
 
     let mut plugins = Plugins::new();
+    plugins.insert(StandaloneFlag);
     plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
         .await
         .unwrap();
