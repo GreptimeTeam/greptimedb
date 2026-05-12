@@ -485,10 +485,15 @@ impl RangePlanRewriter {
         }
     }
 
-    /// this function use to find the time_index column and row columns from input schema,
-    /// return `(time_index, [row_columns])` to the rewriter.
-    /// If the user does not explicitly use the `by` keyword to indicate time series,
-    /// `[row_columns]` will be use as default time series
+    /// Finds the time index column and default row-key grouping from the input schema.
+    ///
+    /// Returns `(time_index, [row_columns])` to the rewriter. If the user omits `BY`,
+    /// `[row_columns]` is used as the default time-series grouping.
+    ///
+    /// For derived inputs such as subqueries, joins, or set operations, the source table
+    /// qualifier may no longer resolve back to a table provider. In that case we can still
+    /// recover the time index from column metadata, but we cannot safely reconstruct the
+    /// original row-key columns, so omitted `BY` must be rejected by the caller.
     async fn get_index_by(
         &mut self,
         schema: &Arc<DFSchema>,
@@ -520,9 +525,9 @@ impl RangePlanRewriter {
                 {
                     Ok(table_source) => table_source,
                     Err(error) => {
-                        // TableNotExist may infer this table is a derived table (like from JOIN or set op),
-                        // in this case we can still continue with time index column identified from column
-                        // metadata.
+                        // `TableNotExist` here usually means the qualifier now refers to a derived
+                        // input instead of a base table. We can still salvage the time index from
+                        // field metadata, but only when such metadata is present.
                         if matches!(&error, catalog::error::Error::TableNotExist { .. })
                             && metadata_time_index_expr.is_some()
                         {
@@ -572,6 +577,10 @@ impl RangePlanRewriter {
         if matches!(time_index_expr, Expr::Wildcard { .. })
             && let Some(expr) = metadata_time_index_expr
         {
+            common_telemetry::debug!(
+                "Range query falling back to time-index metadata for derived input schema: {}",
+                schema
+            );
             ensure!(
                 !need_default_by,
                 RangeQuerySnafu {
