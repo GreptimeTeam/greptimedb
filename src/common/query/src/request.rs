@@ -153,15 +153,15 @@ fn validate_decoded_payload_expr(
     input_schema: &Schema,
 ) -> DataFusionResult<()> {
     expr.apply(|node| {
-        if let Some(column) = node.as_any().downcast_ref::<Column>() {
-            if input_schema.fields().get(column.index()).is_none() {
-                return Err(DataFusionError::Plan(format!(
-                    "Decoded Column '{}' references out-of-bounds index {} for input schema of size {}",
-                    column.name(),
-                    column.index(),
-                    input_schema.fields().len()
-                )));
-            }
+        if let Some(column) = node.as_any().downcast_ref::<Column>()
+            && input_schema.fields().get(column.index()).is_none()
+        {
+            return Err(DataFusionError::Plan(format!(
+                "Decoded Column '{}' references out-of-bounds index {} for input schema of size {}",
+                column.name(),
+                column.index(),
+                input_schema.fields().len()
+            )));
         }
 
         Ok(TreeNodeRecursion::Continue)
