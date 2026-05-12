@@ -181,22 +181,28 @@ async fn alive_node_infos(
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<NodeInfo>> {
     let active_filter = build_active_filter(active_duration);
-    let condition = condition.unwrap_or(|_| true);
     let node_infos = lister.node_infos(node_info_type).await?;
     let now = timer.current_time_millis();
     Ok(node_infos
         .into_iter()
         .filter_map(|(_, node_info)| {
-            let workloads = match &node_info.status {
-                NodeStatus::Datanode(status) => NodeWorkloads::Datanode(status.workloads.clone()),
-                NodeStatus::Flownode(status) => NodeWorkloads::Flownode(status.workloads.clone()),
-                _ => return None,
-            };
+            if !active_filter(now, &node_info) {
+                return None;
+            }
 
-            if active_filter(now, &node_info) && condition(&workloads) {
-                Some(node_info)
-            } else {
-                None
+            match (&node_info.status, condition) {
+                (NodeStatus::Datanode(status), Some(condition)) => {
+                    let workloads = NodeWorkloads::Datanode(status.workloads.clone());
+                    condition(&workloads).then_some(node_info)
+                }
+                (NodeStatus::Flownode(status), Some(condition)) => {
+                    let workloads = NodeWorkloads::Flownode(status.workloads.clone());
+                    condition(&workloads).then_some(node_info)
+                }
+                (NodeStatus::Datanode(_), None) | (NodeStatus::Flownode(_), None) => {
+                    Some(node_info)
+                }
+                _ => None,
             }
         })
         .collect::<Vec<_>>())
