@@ -163,6 +163,7 @@ impl InvertedIndexApplier {
         expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
     ) -> Result<Self> {
         let default_plan = Self::build_apply_plan(&predicates)?;
+        INDEX_APPLY_MEMORY_USAGE.add(default_plan.index_applier.memory_usage() as i64);
 
         Ok(Self {
             table_dir,
@@ -407,6 +408,12 @@ impl InvertedIndexApplier {
             predicate_key,
             index_applier: Arc::new(index_applier),
         })
+    }
+}
+
+impl Drop for InvertedIndexApplier {
+    fn drop(&mut self) {
+        INDEX_APPLY_MEMORY_USAGE.sub(self.index_applier.memory_usage() as i64);
     }
 }
 
