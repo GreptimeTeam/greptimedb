@@ -516,7 +516,8 @@ impl Env {
 
     /// Build the DB with `cargo build --bin greptime`
     fn build_db(&self) {
-        if self.bins_dir.lock().unwrap().is_some() {
+        let mut bins_dir = self.bins_dir.lock().unwrap();
+        if bins_dir.is_some() {
             return;
         }
 
@@ -541,11 +542,7 @@ impl Env {
             panic!();
         }
 
-        let _ = self
-            .bins_dir
-            .lock()
-            .unwrap()
-            .insert(util::get_binary_dir("debug"));
+        bins_dir.replace(util::get_binary_dir("debug"));
     }
 
     pub(crate) fn extra_args(&self) -> &Vec<String> {
