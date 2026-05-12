@@ -60,8 +60,8 @@ SELECT min(val) RANGE '5s' FILL PREV FROM host;
 
 Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: ALIGN argument cannot be omitted in the range select query
 
-SELECT ts, host, min(val) RANGE '5s'
-FROM (SELECT ts, host, val FROM host)
+SELECT tmp.ts, tmp.host, min(tmp.val) RANGE '5s'
+FROM (SELECT ts, host, val FROM host) AS tmp
 ALIGN '5s';
 
 Error: 2000(InvalidSyntax), Range Query: Cannot infer default BY columns from derived range query input
@@ -117,3 +117,4 @@ Error: 3000(PlanQuery), Error during planning: Illegal argument `IntervalMonthDa
 DROP TABLE host;
 
 Affected Rows: 0
+

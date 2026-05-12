@@ -42,8 +42,8 @@ SELECT min(val) RANGE '5s' FROM host;
 
 SELECT min(val) RANGE '5s' FILL PREV FROM host;
 
-SELECT ts, host, min(val) RANGE '5s'
-FROM (SELECT ts, host, val FROM host)
+SELECT tmp.ts, tmp.host, min(tmp.val) RANGE '5s'
+FROM (SELECT ts, host, val FROM host) AS tmp
 ALIGN '5s';
 
 -- 2.3 type mismatch
