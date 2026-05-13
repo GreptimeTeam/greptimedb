@@ -257,6 +257,7 @@ impl FlightCraft for GreptimeRequestHandler {
 pub struct PutRecordBatchRequest {
     pub table_name: TableName,
     pub request_id: i64,
+    pub timestamp_range: Option<(i64, i64)>,
     pub record_batch: DfRecordBatch,
     pub schema_bytes: Bytes,
     pub flight_data: FlightData,
@@ -268,6 +269,7 @@ impl PutRecordBatchRequest {
         table_name: TableName,
         record_batch: DfRecordBatch,
         request_id: i64,
+        timestamp_range: Option<(i64, i64)>,
         schema_bytes: Bytes,
         flight_data: FlightData,
         limiter: Option<&ServerMemoryLimiter>,
@@ -292,6 +294,7 @@ impl PutRecordBatchRequest {
         Ok(Self {
             table_name,
             request_id,
+            timestamp_range,
             record_batch,
             schema_bytes,
             flight_data,
@@ -457,13 +460,17 @@ impl Stream for PutRecordBatchRequestStream {
                             decoder,
                         } => {
                             // Extract request_id and body_size from FlightData before decoding
-                            let request_id = if !flight_data.app_metadata.is_empty() {
+                            let metadata = if !flight_data.app_metadata.is_empty() {
                                 serde_json::from_slice::<DoPutMetadata>(&flight_data.app_metadata)
-                                    .map(|meta| meta.request_id())
-                                    .unwrap_or_default()
+                                    .ok()
                             } else {
-                                0
+                                None
                             };
+                            let request_id = metadata
+                                .as_ref()
+                                .map(|meta| meta.request_id())
+                                .unwrap_or_default();
+                            let timestamp_range = metadata.and_then(|meta| meta.timestamp_range());
 
                             // Decode FlightData to RecordBatch
                             match decoder.try_decode(&flight_data) {
@@ -475,6 +482,7 @@ impl Stream for PutRecordBatchRequestStream {
                                             table_name,
                                             record_batch,
                                             request_id,
+                                            timestamp_range,
                                             schema_bytes,
                                             flight_data,
                                             limiter.as_ref(),
