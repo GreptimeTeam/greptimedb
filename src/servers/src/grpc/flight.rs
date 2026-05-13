@@ -459,7 +459,7 @@ impl Stream for PutRecordBatchRequestStream {
                             schema_bytes,
                             decoder,
                         } => {
-                            // Extract request_id and body_size from FlightData before decoding
+                            // Extract request_id and time range from FlightData before decoding
                             let metadata = if !flight_data.app_metadata.is_empty() {
                                 serde_json::from_slice::<DoPutMetadata>(&flight_data.app_metadata)
                                     .ok()

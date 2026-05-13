@@ -57,7 +57,9 @@ impl DoPutMetadata {
     }
 
     pub fn timestamp_range(&self) -> Option<(i64, i64)> {
-        self.min_timestamp.zip(self.max_timestamp)
+        self.min_timestamp
+            .zip(self.max_timestamp)
+            .filter(|(min, max)| max >= min)
     }
 }
 
