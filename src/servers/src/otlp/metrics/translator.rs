@@ -382,6 +382,102 @@ mod tests {
     }
 
     #[test]
+    fn test_translate_metric_name_prometheus_style_units_for_all_strategies() {
+        let cases = [
+            (
+                Metric {
+                    name: "duration.latency".to_string(),
+                    unit: "ms".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Gauge,
+                [
+                    (
+                        UnderscoreEscapingWithSuffixes,
+                        "duration_latency_milliseconds",
+                    ),
+                    (UnderscoreEscapingWithoutSuffixes, "duration_latency"),
+                    (NoUtf8EscapingWithSuffixes, "duration.latency_milliseconds"),
+                    (NoTranslation, "duration.latency"),
+                ],
+            ),
+            (
+                Metric {
+                    name: "disk.io".to_string(),
+                    unit: "By".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                [
+                    (UnderscoreEscapingWithSuffixes, "disk_io_bytes_total"),
+                    (UnderscoreEscapingWithoutSuffixes, "disk_io"),
+                    (NoUtf8EscapingWithSuffixes, "disk.io_bytes_total"),
+                    (NoTranslation, "disk.io"),
+                ],
+            ),
+            (
+                Metric {
+                    name: "cpu.utilization".to_string(),
+                    unit: "%".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Gauge,
+                [
+                    (UnderscoreEscapingWithSuffixes, "cpu_utilization_percent"),
+                    (UnderscoreEscapingWithoutSuffixes, "cpu_utilization"),
+                    (NoUtf8EscapingWithSuffixes, "cpu.utilization_percent"),
+                    (NoTranslation, "cpu.utilization"),
+                ],
+            ),
+            (
+                Metric {
+                    name: "request.rate".to_string(),
+                    unit: "1/s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                [
+                    (
+                        UnderscoreEscapingWithSuffixes,
+                        "request_rate_per_second_total",
+                    ),
+                    (UnderscoreEscapingWithoutSuffixes, "request_rate"),
+                    (NoUtf8EscapingWithSuffixes, "request.rate_per_second_total"),
+                    (NoTranslation, "request.rate"),
+                ],
+            ),
+            (
+                Metric {
+                    name: "queue.depth".to_string(),
+                    unit: "{items}".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Gauge,
+                [
+                    (UnderscoreEscapingWithSuffixes, "queue_depth"),
+                    (UnderscoreEscapingWithoutSuffixes, "queue_depth"),
+                    (NoUtf8EscapingWithSuffixes, "queue.depth"),
+                    (NoTranslation, "queue.depth"),
+                ],
+            ),
+        ];
+
+        for (metric, metric_type, expectations) in cases {
+            for (strategy, expected) in expectations {
+                assert_eq!(
+                    translate_metric_name(&metric, &metric_type, strategy),
+                    expected,
+                    "metric: {}, unit: {}, type: {:?}, strategy: {:?}",
+                    metric.name,
+                    metric.unit,
+                    metric_type,
+                    strategy
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_translate_label_name_strategies() {
         assert_eq!(
             translate_label_name("service.name", UnderscoreEscapingWithSuffixes),

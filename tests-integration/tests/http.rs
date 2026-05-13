@@ -144,6 +144,7 @@ macro_rules! http_tests {
                 test_pipeline_index_options,
 
                 test_otlp_metrics_new,
+                test_otlp_metric_translation_strategies,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
                 test_otlp_logs,
@@ -5216,6 +5217,77 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_metric_translation_strategies")
+            .await;
+
+    let content = r#"
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"otlp-strategy-test"}}]},"scopeMetrics":[{"scope":{"name":"test.scope","version":"1.0.0","attributes":[]},"metrics":[{"name":"otel.strategy.metric_total","description":"strategy test metric","unit":"s","sum":{"dataPoints":[{"attributes":[{"key":"service.instance.id","value":{"stringValue":"instance-a"}}],"startTimeUnixNano":"1000000","timeUnixNano":"2000000","asDouble":42.0}],"aggregationTemporality":2,"isMonotonic":true}}]}]}]}
+    "#;
+
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let body = req.encode_to_vec();
+    let client = TestClient::new(app).await;
+
+    for strategy in [
+        "UnderscoreEscapingWithSuffixes",
+        "UnderscoreEscapingWithoutSuffixes",
+        "NoUTF8EscapingWithSuffixes",
+        "NoTranslation",
+    ] {
+        let res = send_req(
+            &client,
+            vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-otlp-metric-translation-strategy"),
+                    HeaderValue::from_static(strategy),
+                ),
+            ],
+            "/v1/otlp/v1/metrics",
+            body.clone(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status(), "strategy: {strategy}");
+    }
+
+    let expected = "[[\"otel.strategy.metric_seconds_total\"],[\"otel.strategy.metric_total\"],[\"otel_strategy_metric_seconds_total\"],[\"otel_strategy_metric_total\"]]";
+    validate_data(
+        "otlp_metric_translation_strategy_tables",
+        &client,
+        "select table_name from information_schema.tables where table_schema = 'public' and table_name in ('otel_strategy_metric_seconds_total', 'otel_strategy_metric_total', 'otel.strategy.metric_seconds_total', 'otel.strategy.metric_total') order by table_name;",
+        expected,
+    )
+    .await;
+
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-translation-strategy"),
+                HeaderValue::from_static("no_translation"),
+            ),
+        ],
+        "/v1/otlp/v1/metrics",
+        body,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
 
     guard.remove_all().await;
 }
