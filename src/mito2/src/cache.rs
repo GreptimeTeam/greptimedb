@@ -270,10 +270,10 @@ impl PrefilterKeyParts {
     ) -> Self {
         let parts_mem_usage = mem::size_of::<Self>()
             + mem::size_of::<Vec<String>>()
-            + exprs.len() * mem::size_of::<String>()
-            + exprs.iter().map(|s| s.len()).sum::<usize>()
+            + exprs.capacity() * mem::size_of::<String>()
+            + exprs.iter().map(|s| s.capacity()).sum::<usize>()
             + mem::size_of::<Vec<usize>>()
-            + projected_columns.len() * mem::size_of::<usize>();
+            + projected_columns.capacity() * mem::size_of::<usize>();
 
         Self {
             exprs,
