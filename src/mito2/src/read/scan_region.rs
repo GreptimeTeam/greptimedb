@@ -1367,16 +1367,19 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
             _ => false,
         };
 
+        // TODO(yingwen): The split between `time_filters` and `filters` is currently inert
+        // because `build_range_cache_key()` always keeps both in the cache key. We used to
+        // strip `time_filters` when the query's `TimestampRange` covered the partition's
+        // `FileTimeRange`, but `extract_time_range_from_expr` is not precise enough to prove
+        // a time predicate is implied by that range (it can return a wider range than the
+        // predicate, and it does not analyze AND/OR shapes), which let the cache reuse rows
+        // that should have been filtered. Once we have an accurate per-predicate cover check
+        // we can revive the optimization; until then both buckets land in the fingerprint.
         if is_time_only
             && extract_time_range_from_expr(&time_index_name, ts_col_unit, expr).is_some()
         {
-            // Range-reducible time predicates can be safely dropped from the
-            // cache key when the query time range covers the partition range.
             time_filters.push(expr.to_string());
         } else {
-            // Non-time filters and non-range time predicates (those that
-            // extract_time_range_from_expr cannot convert to a TimestampRange)
-            // always stay in the cache key.
             filters.push(expr.to_string());
         }
     }

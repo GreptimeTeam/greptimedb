@@ -19,6 +19,8 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_common::ScalarValue;
+use datafusion_expr::{col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use futures::TryStreamExt;
@@ -794,4 +796,95 @@ async fn test_series_scan_flat_small_permits() {
             "mismatch with num_partitions={num_partitions}"
         );
     }
+}
+
+// Regression test: `ts = a OR ts = b` extracts to a `TimestampRange` that
+// `GenericRange::or` widens into `[min(a, b), max(a, b) + 1)`. Two such
+// predicates with different `a` values can both extract to ranges that cover
+// the same partition while selecting different (or no) rows. The previous
+// cover check would strip both predicates from the cache key, letting the
+// second scan return the first scan's cached row.
+#[tokio::test]
+async fn test_range_cache_separates_or_equality_time_filters() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Partition rows ts=5..10 (5000ms..9000ms), flushed to SST.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(5, 10),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let ts_lit = |ms: i64| lit(ScalarValue::TimestampMillisecond(Some(ms), None));
+    let tag_filter = || col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("0".to_string()))));
+
+    // First scan: (ts = 5000) OR (ts = 100000) -- extracts to `[5000, 100001)`,
+    // which covers the partition `[5000, 9000]`. Selects ts=5.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                filters: vec![
+                    tag_filter(),
+                    col("ts").eq(ts_lit(5000)).or(col("ts").eq(ts_lit(100000))),
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected_first = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 5     | 5.0     | 1970-01-01T00:00:05 |
++-------+---------+---------------------+";
+    assert_eq!(expected_first, batches.pretty_print().unwrap());
+
+    // Second scan: (ts = 3000) OR (ts = 100000) -- extracts to `[3000, 100001)`,
+    // which also covers the partition. Selects nothing. With the buggy cover
+    // check both scans built the same cache key (tag filter only), so this scan
+    // would replay the first scan's cached row and incorrectly return ts=5.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                filters: vec![
+                    tag_filter(),
+                    col("ts").eq(ts_lit(3000)).or(col("ts").eq(ts_lit(100000))),
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        0,
+        row_count,
+        "expected empty result, got: {}",
+        batches.pretty_print().unwrap()
+    );
 }
