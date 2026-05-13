@@ -17,6 +17,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
@@ -28,7 +29,10 @@ use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
+use datatypes::value::Value;
+use futures::Stream;
 use futures::future::join_all;
+use parquet::file::metadata::RowGroupMetaData;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
@@ -423,6 +427,111 @@ pub struct QueryScanContext {
     /// Whether the query is EXPLAIN ANALYZE VERBOSE.
     pub explain_verbose: bool,
 }
+
+/// Aggregate-stats requirement forwarded to scanner prepare / scan paths.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SupportedStatAggr {
+    CountRows,
+    CountNonNull { column_name: String },
+    MinValue { column_name: String },
+    MaxValue { column_name: String },
+}
+
+/// Reason why a file remains on the row-scan fallback path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatsAwareFallbackReason {
+    /// Runtime stats are missing or cannot satisfy all optimizer-approved requirements.
+    MissingOrUnusableRuntimeStats,
+}
+
+/// Shared per-file runtime aggregate-stats decision.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatsAwareFileDecision {
+    /// Runtime stats fully satisfy the requirement set.
+    StatsHit { file_id: String, values: Vec<Value> },
+    /// The file must stay on the normal row-scan path.
+    ScanFallback {
+        file_id: String,
+        reason: StatsAwareFallbackReason,
+    },
+}
+
+/// Display-friendly summary derived from shared stats-aware file decisions.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StatsAwareFileDecisionSnapshot {
+    files_total: usize,
+    stats_hit_file_ids: Vec<String>,
+    fallback_file_ids: Vec<String>,
+}
+
+impl StatsAwareFileDecisionSnapshot {
+    pub fn new(
+        files_total: usize,
+        stats_hit_file_ids: Vec<String>,
+        fallback_file_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            files_total,
+            stats_hit_file_ids,
+            fallback_file_ids,
+        }
+    }
+
+    pub fn files_total(&self) -> usize {
+        self.files_total
+    }
+
+    pub fn stats_hit_file_ids(&self) -> &[String] {
+        &self.stats_hit_file_ids
+    }
+
+    pub fn fallback_file_ids(&self) -> &[String] {
+        &self.fallback_file_ids
+    }
+}
+
+impl StatsAwareFileDecision {
+    pub fn stats_hit(file_id: String, values: Vec<Value>) -> Self {
+        Self::StatsHit { file_id, values }
+    }
+
+    pub fn scan_fallback(file_id: String, reason: StatsAwareFallbackReason) -> Self {
+        Self::ScanFallback { file_id, reason }
+    }
+
+    pub fn file_id(&self) -> &str {
+        match self {
+            Self::StatsHit { file_id, .. } | Self::ScanFallback { file_id, .. } => file_id,
+        }
+    }
+
+    pub fn is_stats_hit(&self) -> bool {
+        matches!(self, Self::StatsHit { .. })
+    }
+}
+
+/// File-level stats carried in stats scan streams.
+#[derive(Debug, Clone)]
+pub struct FileStatsItem {
+    /// Region-engine specific file identifier for observability.
+    pub file_id: String,
+    /// Exact row count from parquet metadata.
+    pub num_rows: Option<u64>,
+    /// Greptime file metadata, not parquet-native metadata.
+    pub file_partition_expr: Option<String>,
+    /// Nested parquet row-group metadata for future finer-grained use.
+    pub row_groups: Vec<RowGroupStatsItem>,
+}
+
+/// Row-group stats nested inside one [`FileStatsItem`].
+#[derive(Debug, Clone)]
+pub struct RowGroupStatsItem {
+    pub row_group_index: usize,
+    pub metadata: Arc<RowGroupMetaData>,
+}
+
+pub type SendableFileStatsStream =
+    Pin<Box<dyn Stream<Item = Result<FileStatsItem, BoxedError>> + Send>>;
 
 /// A scanner that provides a way to scan the region concurrently.
 ///

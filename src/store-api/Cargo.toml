@@ -29,6 +29,7 @@ humantime.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
 num_enum = "0.7"
+parquet.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 serde.workspace = true

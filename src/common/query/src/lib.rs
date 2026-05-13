@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod aggr_stats;
 pub mod columnar_value;
 pub mod error;
 pub mod logical_plan;
