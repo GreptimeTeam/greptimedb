@@ -26,11 +26,11 @@ use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::prelude::SessionContext;
-use datafusion_orc::OrcSource;
 use futures::StreamExt;
 use object_store::ObjectStore;
 
 use super::FORMAT_TYPE;
+use crate::file_format::orc::OrcSource;
 use crate::file_format::parquet::DefaultParquetFileReaderFactory;
 use crate::file_format::{FileFormat, Format, OrcFormat};
 use crate::test_util::{basic_schema_with_time_format, scan_config, test_basic_schema, test_store};

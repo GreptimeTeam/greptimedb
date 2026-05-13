@@ -176,11 +176,14 @@ impl AsyncFileReader for LazyParquetFileReader {
                 .map_err(|e| ParquetError::External(Box::new(e)))?;
 
             let metadata_opts = options.map(|o| o.metadata_options().clone());
+            let column_index_policy =
+                options.map_or(PageIndexPolicy::Skip, |o| o.column_index_policy());
+            let offset_index_policy =
+                options.map_or(PageIndexPolicy::Skip, |o| o.offset_index_policy());
             let metadata_reader = ParquetMetaDataReader::new()
                 .with_metadata_options(metadata_opts)
-                .with_page_index_policy(PageIndexPolicy::from(
-                    options.is_some_and(|o| o.page_index()),
-                ))
+                .with_column_index_policy(column_index_policy)
+                .with_offset_index_policy(offset_index_policy)
                 .with_prefetch_hint(self.metadata_size_hint);
 
             let metadata = metadata_reader
