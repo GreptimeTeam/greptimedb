@@ -857,7 +857,7 @@ mod test {
         )
         .to_execution_plan(exec_input);
 
-        assert!(format!("{exec:?}").contains("reuse_all_non_sample_columns: true"));
+        assert!(format!("{exec:?}").contains("reuse_tsid_column: true"));
     }
 
     #[tokio::test]

@@ -4851,7 +4851,7 @@ mod test {
         let exec = manipulate.to_execution_plan(Arc::new(DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[], Arc::new(ArrowSchema::empty()), None).unwrap(),
         ))));
-        assert!(format!("{exec:?}").contains("reuse_all_non_sample_columns: true"));
+        assert!(format!("{exec:?}").contains("reuse_tsid_column: true"));
     }
 
     #[tokio::test]
