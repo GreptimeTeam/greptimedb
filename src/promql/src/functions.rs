@@ -31,9 +31,13 @@ pub use aggr_over_time::{
     PresentOverTime, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 pub use changes::Changes;
-use datafusion::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray};
+use datafusion::arrow::array::{
+    ArrayRef, DictionaryArray, Float64Array, TimestampMillisecondArray,
+};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
+use datatypes::arrow::array::Array;
+use datatypes::arrow::datatypes::Int64Type;
 pub use deriv::Deriv;
 pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub use extrapolate_rate::{Delta, Increase, Rate};
@@ -44,6 +48,8 @@ pub use quantile_aggr::{QUANTILE_NAME, quantile_udaf};
 pub use resets::Resets;
 pub use round::Round;
 
+use crate::range_array::RangeArray;
+
 /// Extracts an array from a `ColumnarValue`.
 ///
 /// If the `ColumnarValue` is a scalar, it converts it to an array of size 1.
@@ -52,6 +58,24 @@ pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, 
         ColumnarValue::Array(array) => Ok(array.clone()),
         ColumnarValue::Scalar(scalar) => Ok(scalar.to_array_of_size(1)?),
     }
+}
+
+/// Extracts a validated [RangeArray] from a [ColumnarValue].
+pub(crate) fn extract_range_array(
+    columnar_value: &ColumnarValue,
+) -> Result<RangeArray, DataFusionError> {
+    let array = extract_array(columnar_value)?;
+    let dict = array
+        .as_any()
+        .downcast_ref::<DictionaryArray<Int64Type>>()
+        .ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "expected DictionaryArray<Int64>, found {}",
+                array.data_type()
+            ))
+        })?
+        .clone();
+    RangeArray::try_new(dict).map_err(DataFusionError::from)
 }
 
 /// compensation(Kahan) summation algorithm - a technique for reducing the numerical error
@@ -78,6 +102,29 @@ pub(crate) fn linear_regression(
     values: &Float64Array,
     intercept_time: i64,
 ) -> (Option<f64>, Option<f64>) {
+    linear_regression_slice(times.values(), values, 0, values.len(), intercept_time)
+}
+
+pub(crate) fn linear_regression_slice(
+    times: &[i64],
+    values: &Float64Array,
+    offset: usize,
+    len: usize,
+    intercept_time: i64,
+) -> (Option<f64>, Option<f64>) {
+    linear_regression_slices(times, offset, values, offset, len, intercept_time)
+}
+
+pub(crate) fn linear_regression_slices(
+    times: &[i64],
+    time_offset: usize,
+    values: &Float64Array,
+    value_offset: usize,
+    len: usize,
+    intercept_time: i64,
+) -> (Option<f64>, Option<f64>) {
+    let raw_values = values.values();
+    let has_nulls = values.null_count() > 0;
     let mut count: f64 = 0.0;
     let mut sum_x: f64 = 0.0;
     let mut sum_y: f64 = 0.0;
@@ -89,15 +136,18 @@ pub(crate) fn linear_regression(
     let mut comp_x2: f64 = 0.0;
 
     let mut const_y = true;
-    let init_y: f64 = values.value(0);
+    let mut init_y = None;
 
-    for (i, value) in values.iter().enumerate() {
-        let time = times.value(i) as f64;
-        if value.is_none() {
+    for i in 0..len {
+        let time_idx = time_offset + i;
+        let value_idx = value_offset + i;
+        if has_nulls && values.is_null(value_idx) {
             continue;
         }
-        let value = value.unwrap();
-        if const_y && i > 0 && value != init_y {
+        let value = raw_values[value_idx];
+        let time = times[time_idx] as f64;
+        let initial = init_y.get_or_insert(value);
+        if const_y && count > 0.0 && value != *initial {
             const_y = false;
         }
         count += 1.0;
@@ -113,6 +163,7 @@ pub(crate) fn linear_regression(
     }
 
     if const_y {
+        let init_y = init_y.unwrap();
         if !init_y.is_finite() {
             return (None, None);
         }
@@ -135,7 +186,14 @@ pub(crate) fn linear_regression(
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
+    use datafusion::physical_plan::ColumnarValue;
+    use datatypes::arrow::array::Int64Array;
+    use datatypes::arrow::datatypes::Int64Type;
+
     use super::*;
+    use crate::range_array::RangeArray;
 
     #[test]
     fn calculate_linear_regression_none() {
@@ -252,5 +310,27 @@ mod test {
             (sum, c) = compensated_sum_inc(v, sum, c);
         }
         assert_eq!(sum + c, 2.0)
+    }
+
+    #[test]
+    fn extract_range_array_rejects_external_dictionary_with_null_keys() {
+        let keys = Int64Array::from_iter([Some(0), None]);
+        let values = Arc::new(Float64Array::from_iter([1.0, 2.0]));
+        let dict = DictionaryArray::<Int64Type>::try_new(keys, values).unwrap();
+
+        let err = extract_range_array(&ColumnarValue::Array(Arc::new(dict))).unwrap_err();
+        assert!(err.to_string().contains("Empty range is not expected"));
+    }
+
+    #[test]
+    fn extract_range_array_accepts_internal_packed_ranges() {
+        let values = Arc::new(Float64Array::from_iter([1.0, 2.0, 3.0]));
+        let range_array = RangeArray::from_ranges(values, [(0, 2), (1, 2)]).unwrap();
+
+        let extracted =
+            extract_range_array(&ColumnarValue::Array(Arc::new(range_array.into_dict()))).unwrap();
+
+        assert_eq!(extracted.get_offset_length(0), Some((0, 2)));
+        assert_eq!(extracted.get_offset_length(1), Some((1, 2)));
     }
 }

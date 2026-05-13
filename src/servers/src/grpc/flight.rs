@@ -25,10 +25,12 @@ use arrow_flight::{
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaResult, Ticket,
 };
 use async_trait::async_trait;
-use bytes;
-use bytes::Bytes;
+use bytes::{self, Bytes};
+use common_error::ext::ErrorExt;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
-use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
+use common_grpc::flight::{
+    FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightEncoder, FlightMessage,
+};
 use common_memory_manager::MemoryGuard;
 use common_query::{Output, OutputData};
 use common_recordbatch::DfRecordBatch;
@@ -39,7 +41,9 @@ use datatypes::arrow::datatypes::SchemaRef;
 use futures::{Stream, future, ready};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
-use session::context::{QueryContext, QueryContextRef};
+use query::metrics::terminal_recordbatch_metrics_from_plan_if_requested;
+use query::options::FlowQueryExtensions;
+use session::context::{Channel, QueryContextRef};
 use snafu::{IntoError, ResultExt, ensure};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
@@ -48,7 +52,9 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::error::{InvalidParameterSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
-use crate::grpc::greptime_handler::{GreptimeRequestHandler, get_request_type};
+use crate::grpc::greptime_handler::{
+    GreptimeRequestHandler, create_query_context, get_request_type,
+};
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
 use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::request_memory_metrics::RequestMemoryMetrics;
@@ -187,11 +193,22 @@ impl FlightCraft for GreptimeRequestHandler {
         &self,
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
-        let hints = hint_headers::extract_hints(request.metadata());
+        let mut hints = hint_headers::extract_hints(request.metadata());
+        hints.extend(extract_flow_extensions(request.metadata())?);
 
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
+        let query_ctx =
+            create_query_context(Channel::Grpc, request.header.as_ref(), hints.clone())?;
+        // Validate flow hint syntax at the transport boundary before dispatching the request.
+        // This does not authorize or execute anything; `handle_request()` below still performs
+        // the normal frontend handling and auth checks before query execution.
+        let flow_extensions = FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
+            .map_err(|e| Status::invalid_argument(e.output_msg()))?;
+        let should_emit_terminal_metrics = flow_extensions
+            .as_ref()
+            .is_some_and(|extensions| extensions.should_collect_region_watermark());
 
         // The Grpc protocol pass query by Flight. It needs to be wrapped under a span, in order to record stream
         let span = info_span!(
@@ -206,7 +223,8 @@ impl FlightCraft for GreptimeRequestHandler {
                 output,
                 TracingContext::from_current_span(),
                 flight_compression,
-                QueryContext::arc(),
+                query_ctx,
+                should_emit_terminal_metrics,
             );
             Ok(Response::new(stream))
         }
@@ -513,11 +531,32 @@ impl Stream for PutRecordBatchRequestStream {
     }
 }
 
+fn extract_flow_extensions(
+    metadata: &tonic::metadata::MetadataMap,
+) -> TonicResult<Vec<(String, String)>> {
+    let Some(value) = metadata.get(FLOW_EXTENSIONS_METADATA_KEY) else {
+        return Ok(vec![]);
+    };
+
+    let value = value.to_str().map_err(|e| {
+        Status::invalid_argument(format!(
+            "Invalid {FLOW_EXTENSIONS_METADATA_KEY} metadata value: {e}"
+        ))
+    })?;
+
+    serde_json::from_str::<Vec<(String, String)>>(value).map_err(|e| {
+        Status::invalid_argument(format!(
+            "Invalid {FLOW_EXTENSIONS_METADATA_KEY} metadata JSON: {e}"
+        ))
+    })
+}
+
 fn to_flight_data_stream(
     output: Output,
     tracing_context: TracingContext,
     flight_compression: FlightCompression,
     query_ctx: QueryContextRef,
+    should_emit_terminal_metrics: bool,
 ) -> TonicStream<FlightData> {
     match output.data {
         OutputData::Stream(stream) => {
@@ -539,13 +578,70 @@ fn to_flight_data_stream(
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {
-            let stream = tokio_stream::iter(
-                FlightEncoder::default()
-                    .encode(FlightMessage::AffectedRows(rows))
-                    .into_iter()
-                    .map(Ok),
-            );
+            let terminal_metrics = match terminal_recordbatch_metrics_from_plan_if_requested(
+                output.meta.plan,
+                should_emit_terminal_metrics,
+            ) {
+                Some(metrics) => match serde_json::to_string(&metrics) {
+                    Ok(metrics) => Some(metrics),
+                    Err(e) => {
+                        let stream = tokio_stream::once(Err(Status::internal(format!(
+                            "Failed to serialize terminal metrics: {e}"
+                        ))));
+                        return Box::pin(stream) as _;
+                    }
+                },
+                None => None,
+            };
+            let affected_rows = FlightEncoder::default().encode(FlightMessage::AffectedRows {
+                rows,
+                metrics: terminal_metrics,
+            });
+            let stream = tokio_stream::iter(affected_rows.into_iter().map(Ok));
             Box::pin(stream) as _
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tonic::metadata::{AsciiMetadataValue, MetadataMap};
+
+    use super::*;
+
+    #[test]
+    fn test_extract_flow_extensions_preserves_comma_bearing_values() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            FLOW_EXTENSIONS_METADATA_KEY,
+            AsciiMetadataValue::try_from(
+                r#"[["flow.return_region_seq","true"],["flow.incremental_after_seqs","{\"1\":10,\"2\":20}"]]"#,
+            )
+            .unwrap(),
+        );
+
+        let extensions = extract_flow_extensions(&metadata).unwrap();
+        assert_eq!(
+            extensions,
+            vec![
+                ("flow.return_region_seq".to_string(), "true".to_string()),
+                (
+                    "flow.incremental_after_seqs".to_string(),
+                    r#"{"1":10,"2":20}"#.to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extract_flow_extensions_rejects_invalid_json() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            FLOW_EXTENSIONS_METADATA_KEY,
+            AsciiMetadataValue::try_from("not-json").unwrap(),
+        );
+
+        let err = extract_flow_extensions(&metadata).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }

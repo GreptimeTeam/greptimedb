@@ -12,14 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
-#![feature(if_let_guard)]
-#![feature(box_patterns)]
 
 use datafusion_expr::LogicalPlan;
-use datatypes::schema::Schema;
 use sql::statements::statement::Statement;
 // Re-export for use in add_service! macro
 #[doc(hidden)]
@@ -41,9 +37,11 @@ pub mod mysql;
 pub mod opentsdb;
 pub mod otel_arrow;
 pub mod otlp;
+pub mod pending_rows_batcher;
 mod pipeline;
 pub mod postgres;
 pub mod prom_remote_write;
+pub(crate) mod prom_row_builder;
 pub mod prom_store;
 pub mod prometheus;
 pub mod prometheus_handler;
@@ -55,23 +53,28 @@ mod row_writer;
 pub mod server;
 pub mod tls;
 
-/// Cached SQL and logical plan for database interfaces
+/// Cached sql plan or statement for database interfaces
 #[derive(Clone, Debug)]
-pub struct SqlPlan {
-    query: String,
-    // Store the parsed statement to determine if it is a query and whether to track it.
-    statement: Option<Statement>,
-    plan: Option<LogicalPlan>,
-    schema: Option<Schema>,
+pub enum SqlPlan {
+    /// Empty Query
+    Empty,
+    /// Hardcoded SQL shortcuts
+    Shortcut(String),
+    /// Datafusion parsed execution plan with the original statement
+    Plan(LogicalPlan, Statement),
+    /// Parsed statement when execution is not managed by datafusion
+    /// eg. CREATE TABLE
+    /// The String is the original query string to avoid AST round-trip issues
+    Statement(Statement, String),
 }
 
-/// Install the ring crypto provider for rustls process-wide. see:
+/// Install the default crypto provider for rustls process-wide. see:
 ///
 ///  https://docs.rs/rustls/latest/rustls/crypto/struct.CryptoProvider.html#using-the-per-process-default-cryptoprovider
 ///
 /// for more information.
-pub fn install_ring_crypto_provider() -> Result<(), String> {
-    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+pub fn install_default_crypto_provider() -> Result<(), String> {
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
         .map_err(|ret| {
             format!(
                 "CryptoProvider already installed as: {:?}, but providing {:?}",

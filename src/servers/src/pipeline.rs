@@ -28,7 +28,7 @@ use session::context::{Channel, QueryContextRef};
 use snafu::ResultExt;
 use vrl::value::Value as VrlValue;
 
-use crate::error::{CatalogSnafu, PipelineSnafu, Result};
+use crate::error::{PipelineSnafu, Result};
 use crate::http::event::PipelineIngestRequest;
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
@@ -89,10 +89,7 @@ async fn run_identity_pipeline(
     let table = if pipeline_ctx.channel == Channel::Prometheus {
         None
     } else {
-        handler
-            .get_table(&table_name, query_ctx)
-            .await
-            .context(CatalogSnafu)?
+        handler.get_table(&table_name, query_ctx).await?
     };
     identity_pipeline(data_array, table, pipeline_ctx)
         .map(|opt_map| ContextReq::from_opt_map(opt_map, table_name))
@@ -141,10 +138,7 @@ async fn run_custom_pipeline(
         }
     };
 
-    let table = handler
-        .get_table(&table_name, query_ctx)
-        .await
-        .context(CatalogSnafu)?;
+    let table = handler.get_table(&table_name, query_ctx).await?;
     schema_info.set_table(table);
 
     for pipeline_map in pipeline_maps {

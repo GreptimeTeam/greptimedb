@@ -36,6 +36,7 @@ pub fn set_panic_hook() {
     panic::set_hook(Box::new(move |panic| {
         let backtrace = Backtrace::new();
         let backtrace = format!("{backtrace:?}");
+        let build_info = common_version::build_info();
         if let Some(location) = panic.location() {
             tracing::error!(
                 message = %panic,
@@ -43,9 +44,18 @@ pub fn set_panic_hook() {
                 panic.file = location.file(),
                 panic.line = location.line(),
                 panic.column = location.column(),
+                branch = %build_info.branch,
+                version = %build_info.version,
+                commit = %build_info.commit,
             );
         } else {
-            tracing::error!(message = %panic, backtrace = %backtrace);
+            tracing::error!(
+                message = %panic,
+                backtrace = %backtrace,
+                branch = %build_info.branch,
+                version = %build_info.version,
+                commit = %build_info.commit,
+            );
         }
         PANIC_COUNTER.inc();
         default_hook(panic);

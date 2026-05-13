@@ -18,20 +18,22 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
-use common_base::AffectedRows;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
+use futures_util::TryFutureExt;
 use query::options::QueryOptions;
-use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::parser::{PromQuery, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
-use servers::error::{NotSupportedSnafu, Result};
+use servers::error::{ExecuteQuerySnafu, NotSupportedSnafu, Result};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::QueryContextRef;
-use snafu::ensure;
+use snafu::{ResultExt, ensure};
+use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use table::TableRef;
 
@@ -53,21 +55,35 @@ impl DummyInstance {
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let stmt = QueryLanguageParser::parse_sql(query, &query_ctx).unwrap();
-        let plan = self
-            .query_engine
-            .planner()
-            .plan(&stmt, query_ctx.clone())
-            .await
-            .unwrap();
-        let output = self.query_engine.execute(plan, query_ctx).await.unwrap();
-        vec![Ok(output)]
+        let mut results = vec![];
+
+        let statements = ParserContext::create_with_dialect(
+            query,
+            query_ctx.sql_dialect(),
+            ParseOptions::default(),
+        )
+        .map(|x| x.into_iter().map(QueryStatement::Sql).collect::<Vec<_>>())
+        .unwrap();
+
+        for statement in &statements {
+            let result = self
+                .query_engine
+                .planner()
+                .plan(statement, query_ctx.clone())
+                .and_then(|plan| self.query_engine.execute(plan, query_ctx.clone()))
+                .await
+                .map_err(BoxedError::new)
+                .context(ExecuteQuerySnafu);
+            results.push(result);
+        }
+
+        results
     }
 
     async fn do_exec_plan(
         &self,
-        _stmt: Option<Statement>,
         plan: LogicalPlan,
+        _stmt: Option<Statement>,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         Ok(self.query_engine.execute(plan, query_ctx).await.unwrap())
@@ -147,15 +163,6 @@ impl GrpcQueryHandler for DummyInstance {
             Request::Ddl(_) => unimplemented!(),
         };
         Ok(output)
-    }
-
-    async fn put_record_batch(
-        &self,
-        _request: servers::grpc::flight::PutRecordBatchRequest,
-        _table_ref: &mut Option<TableRef>,
-        _ctx: QueryContextRef,
-    ) -> Result<AffectedRows> {
-        unimplemented!()
     }
 
     fn handle_put_record_batch_stream(

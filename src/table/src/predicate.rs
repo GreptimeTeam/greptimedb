@@ -120,11 +120,11 @@ impl Predicate {
             .context(error::DatafusionSnafu)
     }
 
-    /// Builds physical exprs according to provided schema.
-    pub fn to_physical_exprs(
-        &self,
+    /// Builds a single physical expr according to provided schema.
+    pub fn to_physical_expr(
+        expr: &Expr,
         schema: &arrow::datatypes::SchemaRef,
-    ) -> error::Result<Vec<Arc<dyn PhysicalExpr>>> {
+    ) -> error::Result<Arc<dyn PhysicalExpr>> {
         let df_schema = schema
             .clone()
             .to_dfschema_ref()
@@ -135,12 +135,21 @@ impl Predicate {
         // registering variables.
         let execution_props = &ExecutionProps::new();
 
+        create_physical_expr(expr, df_schema.as_ref(), execution_props)
+            .context(error::DatafusionSnafu)
+    }
+
+    /// Builds physical exprs according to provided schema.
+    pub fn to_physical_exprs(
+        &self,
+        schema: &arrow::datatypes::SchemaRef,
+    ) -> error::Result<Vec<Arc<dyn PhysicalExpr>>> {
         let dyn_filters = self.dyn_filter_phy_exprs()?;
 
         Ok(self
             .exprs
             .iter()
-            .filter_map(|expr| create_physical_expr(expr, df_schema.as_ref(), execution_props).ok())
+            .filter_map(|expr| Self::to_physical_expr(expr, schema).ok())
             .chain(dyn_filters)
             .collect::<Vec<_>>())
     }
@@ -203,7 +212,7 @@ pub fn build_time_range_predicate(
 
 /// Extract time range filter from `WHERE`/`IN (...)`/`BETWEEN` clauses.
 /// Return None if no time range can be found in expr.
-fn extract_time_range_from_expr(
+pub fn extract_time_range_from_expr(
     ts_col_name: &str,
     ts_col_unit: TimeUnit,
     expr: &Expr,
@@ -730,5 +739,8 @@ mod tests {
 
         let predicates = predicate.to_physical_exprs(&schema).unwrap();
         assert!(!predicates.is_empty());
+
+        let physical_expr = Predicate::to_physical_expr(&col("host").eq(lit("host_a")), &schema);
+        assert!(physical_expr.is_ok());
     }
 }

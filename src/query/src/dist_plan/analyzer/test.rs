@@ -126,7 +126,7 @@ impl TestDataSource {
 
 impl DataSource for TestDataSource {
     fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
-        let projected_schema = match &request.projection {
+        let projected_schema = match request.projection_indices() {
             Some(projection) => Arc::new(self.schema.try_project(projection).unwrap()),
             None => self.schema.clone(),
         };

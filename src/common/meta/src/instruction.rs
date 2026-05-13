@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use store_api::region_engine::SyncRegionFromRequest;
+use store_api::region_request::RegionFlushReason;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
@@ -338,14 +339,17 @@ pub struct FlushRegions {
     /// Error handling strategy for batch operations (only applies when multiple regions and sync strategy).
     #[serde(default)]
     pub error_strategy: FlushErrorStrategy,
+    /// The source that triggered this flush.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RegionFlushReason>,
 }
 
 impl Display for FlushRegions {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "FlushRegions(region_ids={:?}, strategy={:?}, error_strategy={:?})",
-            self.region_ids, self.strategy, self.error_strategy
+            "FlushRegions(region_ids={:?}, strategy={:?}, error_strategy={:?}, reason={:?})",
+            self.region_ids, self.strategy, self.error_strategy, self.reason
         )
     }
 }
@@ -357,6 +361,7 @@ impl FlushRegions {
             region_ids: vec![region_id],
             strategy: FlushStrategy::Sync,
             error_strategy: FlushErrorStrategy::FailFast,
+            reason: None,
         }
     }
 
@@ -366,6 +371,7 @@ impl FlushRegions {
             region_ids,
             strategy: FlushStrategy::Async,
             error_strategy: FlushErrorStrategy::TryAll,
+            reason: None,
         }
     }
 
@@ -375,7 +381,13 @@ impl FlushRegions {
             region_ids,
             strategy: FlushStrategy::Sync,
             error_strategy,
+            reason: None,
         }
+    }
+
+    pub fn with_reason(mut self, reason: RegionFlushReason) -> Self {
+        self.reason = Some(reason);
+        self
     }
 
     /// Check if this is a single region flush.
@@ -1363,6 +1375,7 @@ mod tests {
         assert!(!single_sync.is_hint());
         assert!(single_sync.is_sync());
         assert_eq!(single_sync.error_strategy, FlushErrorStrategy::FailFast);
+        assert_eq!(single_sync.reason, None);
         assert!(single_sync.is_single_region());
         assert_eq!(single_sync.single_region_id(), Some(region_id));
 
@@ -1374,6 +1387,7 @@ mod tests {
         assert!(batch_async.is_hint());
         assert!(!batch_async.is_sync());
         assert_eq!(batch_async.error_strategy, FlushErrorStrategy::TryAll);
+        assert_eq!(batch_async.reason, None);
         assert!(!batch_async.is_single_region());
         assert_eq!(batch_async.single_region_id(), None);
 
@@ -1384,6 +1398,10 @@ mod tests {
         assert!(!batch_sync.is_hint());
         assert!(batch_sync.is_sync());
         assert_eq!(batch_sync.error_strategy, FlushErrorStrategy::FailFast);
+        assert_eq!(batch_sync.reason, None);
+
+        let with_reason = batch_sync.with_reason(RegionFlushReason::RemoteWalPrune);
+        assert_eq!(with_reason.reason, Some(RegionFlushReason::RemoteWalPrune));
     }
 
     #[test]
@@ -1401,6 +1419,7 @@ mod tests {
             region_ids: vec![region_id],
             strategy: FlushStrategy::Async,
             error_strategy: FlushErrorStrategy::TryAll,
+            reason: None,
         };
         assert_eq!(flush_regions.region_ids, vec![region_id]);
         assert_eq!(flush_regions.strategy, FlushStrategy::Async);
@@ -1450,6 +1469,7 @@ mod tests {
         let instruction = Instruction::FlushRegions(flush_regions.clone());
 
         let serialized = serde_json::to_string(&instruction).unwrap();
+        assert!(!serialized.contains("reason"));
         let deserialized: Instruction = serde_json::from_str(&serialized).unwrap();
 
         match deserialized {
@@ -1457,6 +1477,32 @@ mod tests {
                 assert_eq!(fr.region_ids, vec![region_id]);
                 assert_eq!(fr.strategy, FlushStrategy::Sync);
                 assert_eq!(fr.error_strategy, FlushErrorStrategy::FailFast);
+                assert_eq!(fr.reason, None);
+            }
+            _ => panic!("Expected FlushRegions instruction"),
+        }
+
+        let legacy = r#"{"FlushRegions":{"region_ids":[4398046511105],"strategy":"Sync","error_strategy":"FailFast"}}"#;
+        let deserialized: Instruction = serde_json::from_str(legacy).unwrap();
+        match deserialized {
+            Instruction::FlushRegions(fr) => {
+                assert_eq!(fr.region_ids, vec![region_id]);
+                assert_eq!(fr.strategy, FlushStrategy::Sync);
+                assert_eq!(fr.error_strategy, FlushErrorStrategy::FailFast);
+                assert_eq!(fr.reason, None);
+            }
+            _ => panic!("Expected FlushRegions instruction"),
+        }
+
+        let flush_regions = FlushRegions::async_batch(vec![region_id])
+            .with_reason(RegionFlushReason::RemoteWalPrune);
+        let instruction = Instruction::FlushRegions(flush_regions);
+        let serialized = serde_json::to_string(&instruction).unwrap();
+        assert!(serialized.contains(r#""reason":"RemoteWalPrune""#));
+        let deserialized: Instruction = serde_json::from_str(&serialized).unwrap();
+        match deserialized {
+            Instruction::FlushRegions(fr) => {
+                assert_eq!(fr.reason, Some(RegionFlushReason::RemoteWalPrune));
             }
             _ => panic!("Expected FlushRegions instruction"),
         }
@@ -1479,6 +1525,7 @@ mod tests {
                 assert!(!fr.is_hint());
                 assert!(fr.is_sync());
                 assert_eq!(fr.error_strategy, FlushErrorStrategy::TryAll);
+                assert_eq!(fr.reason, None);
             }
             _ => panic!("Expected FlushRegions instruction"),
         }

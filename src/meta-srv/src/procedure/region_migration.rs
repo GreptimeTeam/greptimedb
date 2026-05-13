@@ -924,7 +924,7 @@ impl Procedure for RegionMigrationProcedure {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::Arc;
 
     use common_meta::distributed_time_constants::default_distributed_time_constants;

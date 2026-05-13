@@ -44,6 +44,7 @@ common-version.workspace = true
 common-wal.workspace = true
 datatypes.workspace = true
 etcd-client.workspace = true
+fs2.workspace = true
 futures.workspace = true
 humantime.workspace = true
 meta-client.workspace = true
@@ -65,6 +66,8 @@ store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
 tracing-appender.workspace = true
+url.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 common-meta = { workspace = true, features = ["testing"] }
@@ -72,4 +75,3 @@ common-test-util.workspace = true
 common-version.workspace = true
 serde.workspace = true
 tempfile.workspace = true
-url.workspace = true

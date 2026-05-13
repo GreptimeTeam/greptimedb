@@ -184,32 +184,32 @@ CREATE TABLE t2 (
 ALTER TABLE
     t1
 ADD
-    COLUMN `at` STRING;
+    COLUMN `at` STRING PRIMARY KEY;
 
 ALTER TABLE
     t2
 ADD
-    COLUMN at3 STRING;
+    COLUMN at3 STRING PRIMARY KEY;
 
 ALTER TABLE
     t2
 ADD
-    COLUMN `at` STRING;
+    COLUMN `at` STRING PRIMARY KEY;
 
 ALTER TABLE
     t2
 ADD
-    COLUMN at2 STRING;
+    COLUMN at2 STRING PRIMARY KEY;
 
 ALTER TABLE
     t2
 ADD
-    COLUMN at4 UINT16;
+    COLUMN at4 STRING PRIMARY KEY;
 
 INSERT INTO
     t2
 VALUES
-    ("loc_1", "loc_2", "loc_3", 2, 'job1', 0, 1);
+    ("loc_1", "loc_2", "loc_3", "loc_4", 'job1', 0, 1);
 
 SELECT
     *

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod alter;
+mod bulk_insert;
 mod catchup;
 mod close;
 mod create;
@@ -288,9 +289,8 @@ impl RegionEngine for MetricEngine {
                 debug_assert_eq!(region_id, resp_region_id);
                 return response;
             }
-            RegionRequest::BulkInserts(_) => {
-                // todo(hl): find a way to support bulk inserts in metric engine.
-                UnsupportedRegionRequestSnafu { request }.fail()
+            RegionRequest::BulkInserts(bulk) => {
+                self.inner.bulk_insert_region(region_id, bulk).await
             }
         };
 
@@ -575,7 +575,7 @@ struct MetricEngineInner {
 
 #[cfg(test)]
 mod test {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::collections::HashMap;
 
     use common_telemetry::info;
@@ -688,9 +688,7 @@ mod test {
         metric_engine
             .handle_request(
                 physical_region_id,
-                RegionRequest::Flush(RegionFlushRequest {
-                    row_group_size: None,
-                }),
+                RegionRequest::Flush(RegionFlushRequest::default()),
             )
             .await
             .unwrap();

@@ -17,15 +17,13 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use async_trait::async_trait;
-use common_base::AffectedRows;
 use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
 use futures::Stream;
 use session::context::QueryContextRef;
-use table::TableRef;
 
 use crate::error::Result;
-use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
+use crate::grpc::flight::PutRecordBatchRequestStream;
 
 pub type ServerGrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler + Send + Sync>;
 
@@ -34,13 +32,6 @@ pub type RawRecordBatch = bytes::Bytes;
 #[async_trait]
 pub trait GrpcQueryHandler {
     async fn do_query(&self, query: Request, ctx: QueryContextRef) -> Result<Output>;
-
-    async fn put_record_batch(
-        &self,
-        request: PutRecordBatchRequest,
-        table_ref: &mut Option<TableRef>,
-        ctx: QueryContextRef,
-    ) -> Result<AffectedRows>;
 
     fn handle_put_record_batch_stream(
         &self,

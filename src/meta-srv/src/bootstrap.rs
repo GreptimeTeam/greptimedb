@@ -24,6 +24,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
+use common_meta::election::etcd::EtcdElection;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -42,9 +43,6 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-use crate::election::CANDIDATE_LEASE_SECS;
-use crate::election::etcd::EtcdElection;
 use crate::error::OtherSnafu;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
@@ -281,7 +279,8 @@ pub async fn metasrv_builder(
                 etcd_client,
                 opts.store_key_prefix.clone(),
             )
-            .await?;
+            .await
+            .context(error::KvBackendSnafu)?;
 
             (kv_backend, Some(election))
         }
@@ -290,16 +289,12 @@ pub async fn metasrv_builder(
             use std::time::Duration;
 
             use common_meta::distributed_time_constants::POSTGRES_KEEP_ALIVE_SECS;
-            use common_meta::kv_backend::rds::PgStore;
+            use common_meta::election::CANDIDATE_LEASE_SECS;
             use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod};
 
-            use crate::election::rds::postgres::{ElectionPgClient, PgElection};
-            use crate::utils::postgres::create_postgres_pool;
+            use crate::utils::postgres::{build_postgres_election, build_postgres_kv_backend};
 
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
-            let execution_timeout = Duration::from_secs(META_LEASE_SECS);
-            let statement_timeout = Duration::from_secs(META_LEASE_SECS);
-            let idle_session_timeout = Duration::from_secs(META_LEASE_SECS);
             let meta_lease_ttl = Duration::from_secs(META_LEASE_SECS);
 
             let mut cfg = Config::new();
@@ -308,23 +303,12 @@ pub async fn metasrv_builder(
             cfg.manager = Some(ManagerConfig {
                 recycling_method: RecyclingMethod::Verified,
             });
-            // Use a dedicated pool for the election client to allow customized session settings.
-            let pool = create_postgres_pool(
+
+            let election = build_postgres_election(
                 &opts.store_addrs,
                 Some(cfg.clone()),
                 opts.backend_tls.clone(),
-            )
-            .await?;
-
-            let election_client = ElectionPgClient::new(
-                pool,
-                execution_timeout,
-                idle_session_timeout,
-                statement_timeout,
-            )?;
-            let election = PgElection::with_pg_client(
                 opts.grpc.server_addr.clone(),
-                election_client,
                 opts.store_key_prefix.clone(),
                 candidate_lease_ttl,
                 meta_lease_ttl,
@@ -334,17 +318,16 @@ pub async fn metasrv_builder(
             )
             .await?;
 
-            let pool = create_postgres_pool(&opts.store_addrs, Some(cfg), opts.backend_tls.clone())
-                .await?;
-            let kv_backend = PgStore::with_pg_pool(
-                pool,
+            let kv_backend = build_postgres_kv_backend(
+                &opts.store_addrs,
+                Some(cfg),
+                opts.backend_tls.clone(),
                 opts.meta_schema_name.as_deref(),
                 &opts.meta_table_name,
                 opts.max_txn_ops,
                 opts.auto_create_schema,
             )
-            .await
-            .context(error::KvBackendSnafu)?;
+            .await?;
 
             (kv_backend, Some(election))
         }
@@ -352,42 +335,32 @@ pub async fn metasrv_builder(
         (None, BackendImpl::MysqlStore) => {
             use std::time::Duration;
 
-            use common_meta::kv_backend::rds::MySqlStore;
+            use common_meta::election::CANDIDATE_LEASE_SECS;
 
-            use crate::election::rds::mysql::{ElectionMysqlClient, MySqlElection};
-            use crate::utils::mysql::create_mysql_pool;
+            use crate::utils::mysql::{build_mysql_election, build_mysql_kv_backend};
 
-            let pool = create_mysql_pool(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
-            let kv_backend =
-                MySqlStore::with_mysql_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
-                    .await
-                    .context(error::KvBackendSnafu)?;
+            let kv_backend = build_mysql_kv_backend(
+                &opts.store_addrs,
+                opts.backend_tls.as_ref(),
+                &opts.meta_table_name,
+                opts.max_txn_ops,
+            )
+            .await?;
             // Since election will acquire a lock of the table, we need a separate table for election.
             let election_table_name = opts.meta_table_name.clone() + "_election";
-            // We use a separate pool for election since we need a different session keep-alive idle time.
-            let pool = create_mysql_pool(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
-            let execution_timeout = Duration::from_secs(META_LEASE_SECS);
-            let statement_timeout = Duration::from_secs(META_LEASE_SECS);
-            let idle_session_timeout = Duration::from_secs(META_LEASE_SECS);
             let innode_lock_wait_timeout = Duration::from_secs(META_LEASE_SECS / 2);
             let meta_lease_ttl = Duration::from_secs(META_LEASE_SECS);
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
 
-            let election_client = ElectionMysqlClient::new(
-                pool,
-                execution_timeout,
-                statement_timeout,
-                innode_lock_wait_timeout,
-                idle_session_timeout,
-                &election_table_name,
-            );
-            let election = MySqlElection::with_mysql_client(
+            let election = build_mysql_election(
+                &opts.store_addrs,
+                opts.backend_tls.as_ref(),
                 opts.grpc.server_addr.clone(),
-                election_client,
                 opts.store_key_prefix.clone(),
                 candidate_lease_ttl,
                 meta_lease_ttl,
                 &election_table_name,
+                innode_lock_wait_timeout,
             )
             .await?;
             (kv_backend, Some(election))

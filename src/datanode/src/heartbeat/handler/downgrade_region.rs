@@ -113,9 +113,7 @@ impl DowngradeRegionsHandler {
                     region_server_moved
                         .handle_request(
                             region_id,
-                            RegionRequest::Flush(RegionFlushRequest {
-                                row_group_size: None,
-                            }),
+                            RegionRequest::Flush(RegionFlushRequest::default()),
                         )
                         .await?;
 
@@ -225,7 +223,7 @@ impl HandlerContext {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::Arc;
     use std::time::Duration;
 

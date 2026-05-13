@@ -21,6 +21,7 @@ use std::sync::Arc;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_time::timezone::system_timezone_name;
+use common_version;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -119,7 +120,7 @@ static VAR_VALUES: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
         ("interactive_timeout", "31536000"),
         ("wait_timeout", "31536000"),
         ("net_write_timeout", "31536000"),
-        ("version_comment", "Greptime"),
+        ("version_comment", common_version::product_name()),
     ])
 });
 
@@ -380,7 +381,7 @@ mod test {
 +-------------------+
 | @@version_comment |
 +-------------------+
-| Greptime          |
+| GreptimeDB        |
 +-------------------+";
         test(query, expected);
 

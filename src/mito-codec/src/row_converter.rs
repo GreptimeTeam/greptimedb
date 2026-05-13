@@ -21,7 +21,7 @@ use std::sync::Arc;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::value::{Value, ValueRef};
 pub use dense::{DensePrimaryKeyCodec, SortField};
-pub use sparse::{COLUMN_ID_ENCODE_SIZE, SparsePrimaryKeyCodec, SparseValues};
+pub use sparse::{COLUMN_ID_ENCODE_SIZE, SparseOffsetsCache, SparsePrimaryKeyCodec, SparseValues};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
@@ -53,7 +53,7 @@ pub trait PrimaryKeyCodecExt {
 
 pub trait PrimaryKeyFilter: Send + Sync {
     /// Returns true if the primary key matches the filter.
-    fn matches(&mut self, pk: &[u8]) -> bool;
+    fn matches(&mut self, pk: &[u8]) -> Result<bool>;
 }
 
 /// Composite values decoded from primary key bytes.
@@ -65,6 +65,10 @@ pub enum CompositeValues {
 
 impl CompositeValues {
     /// Extends the composite values with the given values.
+    ///
+    /// Append-only: `values` must not contain a column id already present in
+    /// the composite; otherwise the existing entry would shadow the new one on
+    /// `SparseValues` lookup.
     pub fn extend(&mut self, values: &[(ColumnId, Value)]) {
         match self {
             CompositeValues::Dense(dense_values) => {
@@ -120,6 +124,7 @@ pub trait PrimaryKeyCodec: Send + Sync + Debug {
         &self,
         metadata: &RegionMetadataRef,
         filters: Arc<Vec<SimpleFilterEvaluator>>,
+        skip_partition_column: bool,
     ) -> Box<dyn PrimaryKeyFilter>;
 
     /// Returns the estimated size of the primary key.

@@ -35,7 +35,7 @@ use crate::error::{
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::read::Batch;
-use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
+use crate::sst::{internal_fields, tag_maybe_to_dictionary_field, with_field_id};
 
 /// Adapts a [`BoxedBatchIterator`] into an `Iterator<Item = Result<RecordBatch>>`
 /// producing flat-format record batches.
@@ -59,7 +59,7 @@ impl BatchToRecordBatchAdapter {
     /// - `metadata`: region metadata describing the schema.
     /// - `codec`: codec for decoding the encoded primary key bytes.
     /// - `read_column_ids`: projected column ids to read.
-    pub(crate) fn new(
+    pub fn new(
         iter: BoxedBatchIterator,
         metadata: RegionMetadataRef,
         codec: Arc<dyn PrimaryKeyCodec>,
@@ -212,38 +212,45 @@ fn compute_output_arrow_schema(
         if !read_column_id_set.contains(&column_metadata.column_id) {
             continue;
         }
-        let field = Arc::new(Field::new(
+        let field = Field::new(
             &column_metadata.column_schema.name,
             column_metadata.column_schema.data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
-        ));
-        let field = if column_metadata.semantic_type == SemanticType::Tag {
-            tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, &field)
+        );
+        let field = with_field_id(field, column_metadata.column_id);
+
+        if column_metadata.semantic_type == SemanticType::Tag {
+            fields.push(tag_maybe_to_dictionary_field(
+                &column_metadata.column_schema.data_type,
+                &Arc::new(field),
+            ));
         } else {
-            field
-        };
-        fields.push(field);
+            fields.push(Arc::new(field));
+        }
     }
 
     for column_metadata in metadata.field_columns() {
         if !read_column_id_set.contains(&column_metadata.column_id) {
             continue;
         }
-        let field = Arc::new(Field::new(
+        let field = Field::new(
             &column_metadata.column_schema.name,
             column_metadata.column_schema.data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
-        ));
-        fields.push(field);
+        );
+        fields.push(Arc::new(with_field_id(field, column_metadata.column_id)));
     }
 
     let time_index = metadata.time_index_column();
-    let time_index_field = Arc::new(Field::new(
+    let time_index_field = Field::new(
         &time_index.column_schema.name,
         time_index.column_schema.data_type.as_arrow_type(),
         time_index.column_schema.is_nullable(),
-    ));
-    fields.push(time_index_field);
+    );
+    fields.push(Arc::new(with_field_id(
+        time_index_field,
+        time_index.column_id,
+    )));
     fields.extend(internal_fields().iter().cloned());
 
     Arc::new(datatypes::arrow::datatypes::Schema::new(fields))
@@ -681,7 +688,7 @@ mod tests {
             BatchToRecordBatchAdapter::new(iter, metadata.clone(), codec, &read_column_ids);
         let rb = adapter.into_iter().next().unwrap().unwrap();
 
-        let mapper = FlatProjectionMapper::new(&metadata, [0, 3].into_iter()).unwrap();
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 3]).unwrap();
         assert_eq!(rb.schema(), mapper.input_arrow_schema(false));
         // tag_0 + field_1 + ts + 3 internal columns.
         assert_eq!(6, rb.num_columns());

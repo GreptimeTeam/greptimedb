@@ -32,15 +32,17 @@ use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
-use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef};
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerRef};
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::procedure_executor::LocalProcedureExecutor;
+use common_meta::node_manager::{FlownodeRef, NodeManagerRef};
+use common_meta::procedure_executor::{LocalProcedureExecutor, ProcedureExecutorRef};
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
-use common_meta::sequence::SequenceBuilder;
+use common_meta::sequence::{Sequence, SequenceBuilder};
 use common_meta::wal_provider::{WalProviderRef, build_wal_provider};
+use common_options::plugin_options::StandaloneFlag;
 use common_procedure::ProcedureManagerRef;
 use common_query::prelude::set_default_prefix;
 use common_telemetry::info;
@@ -49,6 +51,7 @@ use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
+use datanode::region_server::RegionServer;
 use flow::{
     FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient, FrontendInvoker,
     GrpcQueryHandlerWithBoxedError,
@@ -58,6 +61,7 @@ use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
+use plugins::PluginOptions;
 use plugins::frontend::context::{
     CatalogManagerConfigureContext, StandaloneCatalogManagerConfigureContext,
 };
@@ -121,6 +125,7 @@ pub struct Instance {
     flownode: FlownodeInstance,
     procedure_manager: ProcedureManagerRef,
     wal_provider: WalProviderRef,
+    leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
 }
@@ -129,6 +134,18 @@ impl Instance {
     /// Find the socket addr of a server by its `name`.
     pub fn server_addr(&self, name: &str) -> Option<SocketAddr> {
         self.frontend.server_handlers().addr(name)
+    }
+
+    /// Get the mutable Frontend component of this Standalone instance for externally modification
+    /// by others (might not be in this code base, so don't delete this function).
+    pub fn mut_frontend(&mut self) -> &mut Frontend {
+        &mut self.frontend
+    }
+
+    /// Get the Datanode component of this Standalone instance for externally usage
+    /// by others (might not be in this code base, so don't delete this function).
+    pub fn datanode(&self) -> &Datanode {
+        &self.datanode
     }
 }
 
@@ -141,15 +158,13 @@ impl App for Instance {
     async fn start(&mut self) -> Result<()> {
         self.datanode.start_telemetry();
 
-        self.procedure_manager
-            .start()
-            .await
-            .context(error::StartProcedureManagerSnafu)?;
-
-        self.wal_provider
-            .start()
-            .await
-            .context(error::StartWalProviderSnafu)?;
+        self.leader_services_controller
+            .start(
+                self.procedure_manager.clone(),
+                self.wal_provider.clone(),
+                self.datanode.region_server(),
+            )
+            .await?;
 
         plugins::start_frontend_plugins(self.frontend.instance.plugins().clone())
             .await
@@ -171,10 +186,12 @@ impl App for Instance {
             .await
             .context(error::ShutdownFrontendSnafu)?;
 
-        self.procedure_manager
-            .stop()
-            .await
-            .context(error::StopProcedureManagerSnafu)?;
+        self.leader_services_controller
+            .stop(
+                self.procedure_manager.clone(),
+                self.datanode.region_server(),
+            )
+            .await?;
 
         self.datanode
             .shutdown()
@@ -196,8 +213,8 @@ impl App for Instance {
 pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
-    #[clap(long, alias = "rpc-addr")]
-    rpc_bind_addr: Option<String>,
+    #[clap(long = "grpc-bind-addr", alias = "rpc-bind-addr", alias = "rpc-addr")]
+    grpc_bind_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
     #[clap(long)]
@@ -283,7 +300,7 @@ impl StartCommand {
                 .to_string();
         }
 
-        if let Some(addr) = &self.rpc_bind_addr {
+        if let Some(addr) = &self.grpc_bind_addr {
             // frontend grpc addr conflict with datanode default grpc addr
             let datanode_grpc_addr = DatanodeOptions::default().grpc.bind_addr;
             if addr.eq(&datanode_grpc_addr) {
@@ -342,9 +359,19 @@ impl StartCommand {
         info!("Standalone start command: {:#?}", self);
         info!("Standalone options: {opts:#?}");
 
+        let (mut instance, _) =
+            Self::build_with(opts.component, opts.plugins, InstanceCreator::default()).await?;
+        instance._guard.extend(guard);
+        Ok(instance)
+    }
+
+    pub async fn build_with(
+        mut opts: StandaloneOptions,
+        plugin_opts: Vec<PluginOptions>,
+        creator: InstanceCreator,
+    ) -> Result<(Instance, InstanceCreatorResult)> {
         let mut plugins = Plugins::new();
-        let plugin_opts = opts.plugins;
-        let mut opts = opts.component;
+        plugins.insert(StandaloneFlag);
         set_default_prefix(opts.default_column_prefix.as_deref())
             .map_err(BoxedError::new)
             .context(error::BuildCliSnafu)?;
@@ -370,8 +397,10 @@ impl StartCommand {
             .context(error::CreateDirSnafu { dir: data_home })?;
 
         let metadata_dir = metadata_store_dir(data_home);
-        let kv_backend = standalone::build_metadata_kvbackend(metadata_dir, opts.metadata_store)
-            .context(error::BuildMetadataKvbackendSnafu)?;
+        let kv_backend = creator
+            .metadata_kv_backend_creator
+            .create(metadata_dir, &opts)
+            .await?;
         let procedure_manager =
             standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);
 
@@ -392,6 +421,9 @@ impl StartCommand {
 
         let mut builder = DatanodeBuilder::new(dn_opts, plugins.clone(), kv_backend.clone());
         builder.with_cache_registry(layered_cache_registry.clone());
+        if let Some(writable) = creator.open_regions_writable_override {
+            builder.with_open_regions_writable_override(writable);
+        }
         let datanode = builder.build().await.context(error::StartDatanodeSnafu)?;
 
         let information_extension = Arc::new(StandaloneInformationExtension::new(
@@ -462,17 +494,16 @@ impl StartCommand {
                 .await;
         }
 
-        let node_manager = Arc::new(StandaloneDatanodeManager {
-            region_server: datanode.region_server(),
-            flow_server: flownode.flow_engine(),
-        });
+        let node_manager = creator
+            .node_manager_creator
+            .create(
+                &kv_backend,
+                datanode.region_server(),
+                flownode.flow_engine(),
+            )
+            .await?;
 
-        let table_id_allocator = Arc::new(
-            SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
-                .initial(MIN_USER_TABLE_ID as u64)
-                .step(10)
-                .build(),
-        );
+        let table_id_allocator = creator.table_id_allocator_creator.create(&kv_backend);
         let flow_id_sequence = Arc::new(
             SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
                 .initial(MIN_USER_FLOW_ID as u64)
@@ -489,7 +520,7 @@ impl StartCommand {
             .context(error::BuildWalProviderSnafu)?;
         let wal_provider = Arc::new(wal_provider);
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
-            table_id_allocator,
+            table_id_allocator.clone(),
             wal_provider.clone(),
         ));
         let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
@@ -532,10 +563,10 @@ impl StartCommand {
             ddl_manager
         };
 
-        let procedure_executor = Arc::new(LocalProcedureExecutor::new(
-            Arc::new(ddl_manager),
-            procedure_manager.clone(),
-        ));
+        let procedure_executor = creator
+            .procedure_executor_creator
+            .create(Arc::new(ddl_manager), procedure_manager.clone())
+            .await?;
 
         let fe_instance = FrontendBuilder::new(
             fe_opts.clone(),
@@ -568,7 +599,7 @@ impl StartCommand {
             kv_backend.clone(),
             layered_cache_registry.clone(),
             procedure_executor,
-            node_manager,
+            node_manager.clone(),
         )
         .await
         .context(StartFlownodeSnafu)?;
@@ -584,14 +615,21 @@ impl StartCommand {
             heartbeat_task: None,
         };
 
-        Ok(Instance {
+        let instance = Instance {
             datanode,
             frontend,
             flownode,
             procedure_manager,
             wal_provider,
-            _guard: guard,
-        })
+            leader_services_controller: creator.leader_services_controller,
+            _guard: vec![],
+        };
+        let result = InstanceCreatorResult {
+            kv_backend,
+            node_manager,
+            table_id_allocator,
+        };
+        Ok((instance, result))
     }
 
     pub async fn create_table_metadata_manager(
@@ -608,6 +646,258 @@ impl StartCommand {
     }
 }
 
+#[async_trait]
+pub trait NodeManagerCreator: Send + Sync {
+    async fn create(
+        &self,
+        kv_backend: &KvBackendRef,
+        region_server: RegionServer,
+        flow_server: FlownodeRef,
+    ) -> Result<NodeManagerRef>;
+}
+
+pub struct DefaultNodeManagerCreator;
+
+#[async_trait]
+impl NodeManagerCreator for DefaultNodeManagerCreator {
+    async fn create(
+        &self,
+        _: &KvBackendRef,
+        region_server: RegionServer,
+        flow_server: FlownodeRef,
+    ) -> Result<NodeManagerRef> {
+        Ok(Arc::new(StandaloneDatanodeManager {
+            region_server,
+            flow_server,
+        }))
+    }
+}
+
+/// Customizes how standalone opens its metadata KV backend.
+///
+/// The default implementation preserves the built-in raft-engine path. Other
+/// callers can provide a custom implementation without changing standalone
+/// configuration types.
+#[async_trait]
+pub trait MetadataKvBackendCreator: Send + Sync {
+    async fn create(&self, metadata_dir: String, opts: &StandaloneOptions) -> Result<KvBackendRef>;
+}
+
+pub struct DefaultMetadataKvBackendCreator;
+
+#[async_trait]
+impl MetadataKvBackendCreator for DefaultMetadataKvBackendCreator {
+    async fn create(&self, metadata_dir: String, opts: &StandaloneOptions) -> Result<KvBackendRef> {
+        standalone::build_metadata_kvbackend(metadata_dir, opts.metadata_store)
+            .context(error::BuildMetadataKvbackendSnafu)
+    }
+}
+
+pub trait TableIdAllocatorCreator: Send + Sync {
+    fn create(&self, kv_backend: &KvBackendRef) -> Arc<Sequence>;
+}
+
+struct DefaultTableIdAllocatorCreator;
+
+impl TableIdAllocatorCreator for DefaultTableIdAllocatorCreator {
+    fn create(&self, kv_backend: &KvBackendRef) -> Arc<Sequence> {
+        Arc::new(
+            SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
+                .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
+        )
+    }
+}
+
+#[async_trait]
+pub trait ProcedureExecutorCreator: Send + Sync {
+    async fn create(
+        &self,
+        ddl_manager: DdlManagerRef,
+        procedure_manager: ProcedureManagerRef,
+    ) -> Result<ProcedureExecutorRef>;
+}
+
+pub struct DefaultProcedureExecutorCreator;
+
+#[async_trait]
+impl ProcedureExecutorCreator for DefaultProcedureExecutorCreator {
+    async fn create(
+        &self,
+        ddl_manager: DdlManagerRef,
+        procedure_manager: ProcedureManagerRef,
+    ) -> Result<ProcedureExecutorRef> {
+        Ok(Arc::new(LocalProcedureExecutor::new(
+            ddl_manager,
+            procedure_manager,
+        )))
+    }
+}
+
+#[async_trait]
+pub trait StandaloneLeaderServicesController: Send + Sync {
+    /// Starts services that manage standalone metadata or WAL state.
+    ///
+    /// The default implementation starts the procedure manager and WAL provider
+    /// during instance startup.
+    async fn start(
+        &self,
+        procedure_manager: ProcedureManagerRef,
+        wal_provider: WalProviderRef,
+        region_server: RegionServer,
+    ) -> Result<()>;
+
+    /// Stops services started by [`StandaloneLeaderServicesController::start`].
+    async fn stop(
+        &self,
+        procedure_manager: ProcedureManagerRef,
+        region_server: RegionServer,
+    ) -> Result<()>;
+}
+
+pub struct DefaultStandaloneLeaderServicesController;
+
+#[async_trait]
+impl StandaloneLeaderServicesController for DefaultStandaloneLeaderServicesController {
+    async fn start(
+        &self,
+        procedure_manager: ProcedureManagerRef,
+        wal_provider: WalProviderRef,
+        _region_server: RegionServer,
+    ) -> Result<()> {
+        procedure_manager
+            .start()
+            .await
+            .context(error::StartProcedureManagerSnafu)?;
+        wal_provider
+            .start()
+            .await
+            .context(error::StartWalProviderSnafu)
+    }
+
+    async fn stop(
+        &self,
+        procedure_manager: ProcedureManagerRef,
+        _region_server: RegionServer,
+    ) -> Result<()> {
+        procedure_manager
+            .stop()
+            .await
+            .context(error::StopProcedureManagerSnafu)
+    }
+}
+
+/// `InstanceCreator` is used for grouping various component creators for building the
+/// Standalone instance, suitable for customizing how the instance can be built.
+pub struct InstanceCreator {
+    /// Hook for replacing metadata KV construction while reusing the rest of the
+    /// standalone build flow.
+    metadata_kv_backend_creator: Box<dyn MetadataKvBackendCreator>,
+    node_manager_creator: Box<dyn NodeManagerCreator>,
+    table_id_allocator_creator: Box<dyn TableIdAllocatorCreator>,
+    procedure_executor_creator: Box<dyn ProcedureExecutorCreator>,
+    leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
+    open_regions_writable_override: Option<bool>,
+}
+
+impl InstanceCreator {
+    pub fn new(
+        node_manager_creator: Box<dyn NodeManagerCreator>,
+        table_id_allocator_creator: Box<dyn TableIdAllocatorCreator>,
+        procedure_executor_creator: Box<dyn ProcedureExecutorCreator>,
+    ) -> Self {
+        Self {
+            metadata_kv_backend_creator: Box::new(DefaultMetadataKvBackendCreator),
+            node_manager_creator,
+            table_id_allocator_creator,
+            procedure_executor_creator,
+            leader_services_controller: Box::new(DefaultStandaloneLeaderServicesController),
+            open_regions_writable_override: None,
+        }
+    }
+
+    pub fn with_metadata_kv_backend_creator(
+        mut self,
+        metadata_kv_backend_creator: Box<dyn MetadataKvBackendCreator>,
+    ) -> Self {
+        self.metadata_kv_backend_creator = metadata_kv_backend_creator;
+        self
+    }
+
+    /// Wraps the metadata backend creator while retaining the default creator.
+    ///
+    /// This is useful for callers that need to add runtime behavior around
+    /// metadata access without reimplementing backend selection.
+    pub fn map_metadata_kv_backend_creator<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(Box<dyn MetadataKvBackendCreator>) -> Box<dyn MetadataKvBackendCreator>,
+    {
+        self.metadata_kv_backend_creator = f(self.metadata_kv_backend_creator);
+        self
+    }
+
+    /// Wraps node-manager creation while preserving the selected standalone node manager.
+    pub fn map_node_manager_creator<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(Box<dyn NodeManagerCreator>) -> Box<dyn NodeManagerCreator>,
+    {
+        self.node_manager_creator = f(self.node_manager_creator);
+        self
+    }
+
+    /// Wraps procedure-executor creation while preserving the current setup.
+    pub fn map_procedure_executor_creator<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(Box<dyn ProcedureExecutorCreator>) -> Box<dyn ProcedureExecutorCreator>,
+    {
+        self.procedure_executor_creator = f(self.procedure_executor_creator);
+        self
+    }
+
+    /// Replaces startup/shutdown ownership for procedure manager and WAL provider.
+    pub fn with_leader_services_controller(
+        mut self,
+        leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
+    ) -> Self {
+        self.leader_services_controller = leader_services_controller;
+        self
+    }
+
+    /// Overrides whether regions opened during startup should become writable.
+    ///
+    /// `None` keeps the default startup behavior (regions open writable).
+    ///
+    /// Warning: setting this to `false` in standalone mode will leave reopened regions
+    /// permanently read-only. Standalone has no metasrv heartbeat or region-role
+    /// reconciliation, so there is no path to promote regions to Leader after startup.
+    pub fn with_open_regions_writable_override(mut self, writable: bool) -> Self {
+        self.open_regions_writable_override = Some(writable);
+        self
+    }
+}
+
+impl Default for InstanceCreator {
+    fn default() -> Self {
+        Self {
+            metadata_kv_backend_creator: Box::new(DefaultMetadataKvBackendCreator),
+            node_manager_creator: Box::new(DefaultNodeManagerCreator),
+            table_id_allocator_creator: Box::new(DefaultTableIdAllocatorCreator),
+            procedure_executor_creator: Box::new(DefaultProcedureExecutorCreator),
+            leader_services_controller: Box::new(DefaultStandaloneLeaderServicesController),
+            open_regions_writable_override: None,
+        }
+    }
+}
+
+/// `InstanceCreatorResult` is expected to be used paired with [InstanceCreator].
+/// It stores the created and other important components for further reusing.
+pub struct InstanceCreatorResult {
+    pub kv_backend: KvBackendRef,
+    pub node_manager: NodeManagerRef,
+    pub table_id_allocator: Arc<Sequence>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::default::Default;
@@ -615,8 +905,10 @@ mod tests {
     use std::time::Duration;
 
     use auth::{Identity, Password, UserProviderRef};
+    use clap::{CommandFactory, Parser};
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
+    use common_options::plugin_options::StandaloneFlag;
     use common_test_util::temp_dir::create_named_temp_file;
     use common_wal::config::DatanodeWalConfig;
     use frontend::frontend::FrontendOptions;
@@ -634,6 +926,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
+        plugins.insert(StandaloneFlag);
         plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
             .await
             .unwrap();
@@ -858,6 +1151,35 @@ mod tests {
                 assert_eq!(fe_opts.grpc.bind_addr, GrpcOptions::default().bind_addr);
             },
         );
+    }
+
+    #[test]
+    fn test_parse_grpc_bind_addr_aliases() {
+        let command =
+            StartCommand::try_parse_from(["standalone", "--grpc-bind-addr", "127.0.0.1:14001"])
+                .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:14001"));
+
+        let command =
+            StartCommand::try_parse_from(["standalone", "--rpc-bind-addr", "127.0.0.1:24001"])
+                .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:24001"));
+
+        let command =
+            StartCommand::try_parse_from(["standalone", "--rpc-addr", "127.0.0.1:34001"]).unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:34001"));
+    }
+
+    #[test]
+    fn test_help_uses_grpc_option_names() {
+        let mut cmd = StartCommand::command();
+        let mut help = Vec::new();
+        cmd.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("--grpc-bind-addr"));
+        assert!(!help.contains("--rpc-bind-addr"));
+        assert!(!help.contains("--rpc-addr"));
     }
 
     #[test]

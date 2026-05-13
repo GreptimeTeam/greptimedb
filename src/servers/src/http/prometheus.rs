@@ -65,9 +65,8 @@ use store_api::metric_engine_consts::{
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
-    CatalogSnafu, CollectRecordbatchSnafu, ConvertScalarValueSnafu, DataFusionSnafu, Error,
-    InvalidQuerySnafu, NotSupportedSnafu, ParseTimestampSnafu, Result, TableNotFoundSnafu,
-    UnexpectedResultSnafu,
+    CollectRecordbatchSnafu, ConvertScalarValueSnafu, DataFusionSnafu, Error, InvalidQuerySnafu,
+    NotSupportedSnafu, ParseTimestampSnafu, Result, TableNotFoundSnafu, UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
 use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL, is_database_selection_label};
@@ -662,8 +661,7 @@ async fn retrieve_series_from_query_result(
             table_name,
             Some(query_ctx),
         )
-        .await
-        .context(CatalogSnafu)?
+        .await?
         .with_context(|| TableNotFoundSnafu {
             catalog: query_ctx.current_catalog(),
             schema: query_ctx.current_schema(),
@@ -1118,17 +1116,17 @@ fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
     match expr {
         PromqlExpr::Aggregate(AggregateExpr { modifier, expr, .. }) => {
             match modifier {
-                Some(LabelModifier::Include(labels)) => {
-                    if !labels.labels.contains(&METRIC_NAME.to_string()) {
-                        metric_names.clear();
-                        return;
-                    }
+                Some(LabelModifier::Include(labels))
+                    if !labels.labels.contains(&METRIC_NAME.to_string()) =>
+                {
+                    metric_names.clear();
+                    return;
                 }
-                Some(LabelModifier::Exclude(labels)) => {
-                    if labels.labels.contains(&METRIC_NAME.to_string()) {
-                        metric_names.clear();
-                        return;
-                    }
+                Some(LabelModifier::Exclude(labels))
+                    if labels.labels.contains(&METRIC_NAME.to_string()) =>
+                {
+                    metric_names.clear();
+                    return;
                 }
                 _ => {}
             }
@@ -1440,7 +1438,7 @@ async fn retrieve_table_names(
         });
 
     while let Some(table) = tables_stream.next().await {
-        let table = table.context(CatalogSnafu)?;
+        let table = table?;
         if !table
             .table_info()
             .meta
@@ -1497,7 +1495,7 @@ async fn retrieve_field_names(
             .next()
             .await
         {
-            let table = table.context(CatalogSnafu)?;
+            let table = table?;
             for column in table.field_columns() {
                 field_columns.insert(column.name);
             }
@@ -1508,8 +1506,7 @@ async fn retrieve_field_names(
     for table_name in matches {
         let table = manager
             .table(catalog, &schema, &table_name, Some(query_ctx))
-            .await
-            .context(CatalogSnafu)?
+            .await?
             .with_context(|| TableNotFoundSnafu {
                 catalog: catalog.to_string(),
                 schema: schema.clone(),
@@ -1533,8 +1530,7 @@ async fn retrieve_schema_names(
 
     let candidate_schemas = catalog_manager
         .schema_names(catalog, Some(query_ctx))
-        .await
-        .context(CatalogSnafu)?;
+        .await?;
 
     for schema in candidate_schemas {
         let mut found = true;
@@ -1542,8 +1538,7 @@ async fn retrieve_schema_names(
             if let Some(table_name) = retrieve_metric_name_from_promql(match_item) {
                 let exists = catalog_manager
                     .table_exists(catalog, &schema, &table_name, Some(query_ctx))
-                    .await
-                    .context(CatalogSnafu)?;
+                    .await?;
                 if !exists {
                     found = false;
                     break;

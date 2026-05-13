@@ -35,6 +35,7 @@ use snafu::prelude::*;
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{GREPTIME_DB_HEADER_METRICS, write_cost_header_map};
+use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
 use crate::prom_remote_write::validation::PromValidationMode;
@@ -52,6 +53,7 @@ pub struct PromStoreState {
     pub pipeline_handler: Option<PipelineHandlerRef>,
     pub prom_store_with_metric_engine: bool,
     pub prom_validation_mode: PromValidationMode,
+    pub pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,6 +94,7 @@ pub async fn remote_write(
         pipeline_handler,
         prom_store_with_metric_engine,
         prom_validation_mode,
+        pending_rows_batcher,
     } = state;
 
     if let Some(_vm_handshake) = params.get_vm_proto_version {
@@ -100,9 +103,11 @@ pub async fn remote_write(
 
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
-    if let Some(physical_table) = params.physical_table {
-        query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
-    }
+    let physical_table = params
+        .physical_table
+        .clone()
+        .unwrap_or_else(|| GREPTIME_PHYSICAL_TABLE.to_string());
+    query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table.clone());
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
@@ -134,6 +139,19 @@ pub async fn remote_write(
     } else {
         req.as_insert_requests()
     };
+
+    if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
+        for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
+            prom_store_handler
+                .pre_write(&reqs, temp_ctx.clone())
+                .await?;
+            let rows = batcher.submit(reqs, temp_ctx).await?;
+            crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
+                .with_label_values(&[db.as_str()])
+                .inc_by(rows);
+        }
+        return Ok((StatusCode::NO_CONTENT, write_cost_header_map(0)).into_response());
+    }
 
     let mut cost = 0;
     for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {

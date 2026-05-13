@@ -379,6 +379,7 @@ mod tests {
             cpu_usage_millicores: 0,
             memory_usage_bytes: 0,
             hostname: "test_hostname".to_string(),
+            env_vars: Default::default(),
         };
 
         let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
@@ -407,6 +408,7 @@ mod tests {
             cpu_usage_millicores: 0,
             memory_usage_bytes: 0,
             hostname: "test_hostname".to_string(),
+            env_vars: Default::default(),
         };
 
         in_memory
@@ -450,6 +452,7 @@ mod tests {
             cpu_usage_millicores: 0,
             memory_usage_bytes: 0,
             hostname: "test_hostname".to_string(),
+            env_vars: Default::default(),
         };
         let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
         in_memory
@@ -492,6 +495,7 @@ mod tests {
             cpu_usage_millicores: 0,
             memory_usage_bytes: 0,
             hostname: "test_hostname".to_string(),
+            env_vars: Default::default(),
         };
 
         let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);

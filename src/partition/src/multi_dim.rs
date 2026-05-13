@@ -338,8 +338,8 @@ impl PartitionRule for MultiDimPartitionRule {
         self
     }
 
-    fn partition_columns(&self) -> Vec<String> {
-        self.partition_columns.clone()
+    fn partition_columns(&self) -> &[String] {
+        &self.partition_columns
     }
 
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
@@ -356,7 +356,7 @@ impl PartitionRule for MultiDimPartitionRule {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use super::*;
     use crate::error::{self, Error};

@@ -675,7 +675,7 @@ impl TableRouteStorage {
     pub async fn get(&self, table_id: TableId) -> Result<Option<TableRouteValue>> {
         let mut table_route = self.get_inner(table_id).await?;
         if let Some(table_route) = &mut table_route {
-            self.remap_route_address(table_route).await?;
+            self.remap_table_route(table_route).await?;
         };
 
         Ok(table_route)
@@ -697,7 +697,7 @@ impl TableRouteStorage {
     ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>> {
         let mut table_route = self.get_with_raw_bytes_inner(table_id).await?;
         if let Some(table_route) = &mut table_route {
-            self.remap_route_address(table_route).await?;
+            self.remap_table_route(table_route).await?;
         };
 
         Ok(table_route)
@@ -791,15 +791,23 @@ impl TableRouteStorage {
         Ok(())
     }
 
-    pub(crate) async fn remap_route_address(
-        &self,
-        table_route: &mut TableRouteValue,
-    ) -> Result<()> {
+    pub(crate) async fn remap_table_route(&self, table_route: &mut TableRouteValue) -> Result<()> {
         let keys = extract_address_keys(table_route).into_iter().collect();
         let node_addrs = self.get_node_addresses(keys).await?;
         set_addresses(&node_addrs, table_route)?;
 
         Ok(())
+    }
+
+    pub(crate) async fn remap_region_routes(
+        &self,
+        region_routes: &mut [RegionRoute],
+    ) -> Result<()> {
+        let keys = extract_address_keys_from_region_routes(region_routes)
+            .into_iter()
+            .collect();
+        let node_addrs = self.get_node_addresses(keys).await?;
+        set_addresses_for_region_routes(&node_addrs, region_routes)
     }
 
     async fn get_node_addresses(
@@ -824,15 +832,11 @@ impl TableRouteStorage {
     }
 }
 
-fn set_addresses(
+fn set_addresses_for_region_routes(
     node_addrs: &HashMap<u64, NodeAddressValue>,
-    table_route: &mut TableRouteValue,
+    region_routes: &mut [RegionRoute],
 ) -> Result<()> {
-    let TableRouteValue::Physical(physical_table_route) = table_route else {
-        return Ok(());
-    };
-
-    for region_route in &mut physical_table_route.region_routes {
+    for region_route in region_routes {
         if let Some(leader) = &mut region_route.leader_peer
             && let Some(node_addr) = node_addrs.get(&leader.id)
         {
@@ -848,13 +852,18 @@ fn set_addresses(
     Ok(())
 }
 
-fn extract_address_keys(table_route: &TableRouteValue) -> HashSet<Vec<u8>> {
+fn set_addresses(
+    node_addrs: &HashMap<u64, NodeAddressValue>,
+    table_route: &mut TableRouteValue,
+) -> Result<()> {
     let TableRouteValue::Physical(physical_table_route) = table_route else {
-        return HashSet::default();
+        return Ok(());
     };
+    set_addresses_for_region_routes(node_addrs, &mut physical_table_route.region_routes)
+}
 
-    physical_table_route
-        .region_routes
+fn extract_address_keys_from_region_routes(region_routes: &[RegionRoute]) -> HashSet<Vec<u8>> {
+    region_routes
         .iter()
         .flat_map(|region_route| {
             region_route
@@ -869,6 +878,14 @@ fn extract_address_keys(table_route: &TableRouteValue) -> HashSet<Vec<u8>> {
                 )
         })
         .collect()
+}
+
+fn extract_address_keys(table_route: &TableRouteValue) -> HashSet<Vec<u8>> {
+    let TableRouteValue::Physical(physical_table_route) = table_route else {
+        return HashSet::default();
+    };
+
+    extract_address_keys_from_region_routes(&physical_table_route.region_routes)
 }
 
 #[cfg(test)]
@@ -1104,7 +1121,7 @@ mod tests {
         .unwrap();
 
         table_route_storage
-            .remap_route_address(&mut table_route)
+            .remap_table_route(&mut table_route)
             .await
             .unwrap();
 

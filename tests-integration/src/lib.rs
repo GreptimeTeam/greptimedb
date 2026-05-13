@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+#![recursion_limit = "256"]
 
 pub mod cluster;
 mod grpc;

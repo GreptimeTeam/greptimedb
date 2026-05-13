@@ -53,7 +53,9 @@ use store_api::metadata::RegionMetadata;
 use store_api::path_utils::WAL_DIR;
 use store_api::region_engine::{PrepareRequest, QueryScanContext, RegionEngine};
 use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
-use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+use store_api::storage::{
+    ProjectionInput, RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
+};
 use tokio::fs;
 
 use crate::datanode::objbench::{build_object_store, parse_config};
@@ -101,10 +103,6 @@ pub struct ScanbenchCommand {
     /// Output pprof flamegraph
     #[clap(long, value_name = "FILE")]
     pprof_file: Option<PathBuf>,
-
-    /// Force reading the region in flat format.
-    #[clap(long, default_value_t = false)]
-    force_flat_format: bool,
 
     /// Enable WAL replay when opening the region.
     #[clap(long, default_value_t = false)]
@@ -580,12 +578,11 @@ impl ScanbenchCommand {
         };
 
         println!(
-            "{} Scanner: {}, Parallelism: {}, Iterations: {}, Force flat format: {}",
+            "{} Scanner: {}, Parallelism: {}, Iterations: {}",
             "ℹ".blue(),
             self.scanner,
             self.parallelism,
             self.iterations,
-            self.force_flat_format,
         );
 
         // Start profiling if pprof_file is specified (unless pprof_after_warmup is set)
@@ -620,13 +617,13 @@ impl ScanbenchCommand {
         let mut total_rows_all = 0u64;
         let mut total_elapsed_all = std::time::Duration::ZERO;
 
+        let projection_input = projection.map(ProjectionInput::new);
         for iteration in 0..self.iterations {
             let request = ScanRequest {
-                projection: projection.clone(),
+                projection_input: projection_input.clone(),
                 filters: filters.clone(),
                 series_row_selector,
                 distribution,
-                force_flat_format: self.force_flat_format,
                 ..Default::default()
             };
 
@@ -662,7 +659,7 @@ impl ScanbenchCommand {
 
                 // Sort ranges within each partition by start time ascending
                 for partition in &mut partitions {
-                    partition.sort_by(|a, b| a.start.cmp(&b.start));
+                    partition.sort_by_key(|a| a.start);
                 }
 
                 scanner
@@ -677,7 +674,9 @@ impl ScanbenchCommand {
 
             // Scan all partitions
             let num_partitions = scanner.properties().partitions.len();
-            let ctx = QueryScanContext::default();
+            let ctx = QueryScanContext {
+                explain_verbose: self.verbose,
+            };
             let metrics_set = ExecutionPlanMetricsSet::new();
 
             let mut scan_futures = FuturesUnordered::new();

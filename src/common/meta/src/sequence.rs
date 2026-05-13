@@ -337,7 +337,7 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::collections::HashSet;
     use std::sync::Arc;
 

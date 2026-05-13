@@ -72,7 +72,7 @@ impl State for DropDatabaseStart {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::Arc;
 
     use crate::ddl::drop_database::cursor::DropDatabaseCursor;
@@ -93,6 +93,7 @@ mod tests {
             schema: "bar".to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let err = step.next(&ddl_context, &mut ctx).await.unwrap_err();
         assert_matches!(err, error::Error::SchemaNotFound { .. });
@@ -108,6 +109,7 @@ mod tests {
             schema: "bar".to_string(),
             drop_if_exists: true,
             tables: None,
+            retrying: false,
         };
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
         state.as_any().downcast_ref::<DropDatabaseEnd>().unwrap();
@@ -130,6 +132,7 @@ mod tests {
             schema: "bar".to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
         state.as_any().downcast_ref::<DropDatabaseCursor>().unwrap();

@@ -503,6 +503,7 @@ mod test {
     use mito2::config::MitoConfig;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
     use store_api::region_engine::RegionEngine;
+    use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
 
     use super::*;
     use crate::tests::mock_region_server;
@@ -620,5 +621,142 @@ mod test {
             countdown_handle.deadline().await.unwrap()
                 > Instant::now() + Duration::from_millis(heartbeat_interval_millis * 4)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renew_staging_leader_keeps_region_in_staging() {
+        let mut region_server = mock_region_server();
+        let mut engine_env = TestEnv::with_prefix("region-alive-keeper-staging").await;
+        let engine = engine_env.create_engine(MitoConfig::default()).await;
+        let engine = Arc::new(engine);
+        region_server.register_engine(engine.clone());
+
+        let alive_keeper = Arc::new(RegionAliveKeeper::new(
+            region_server.clone(),
+            None,
+            Duration::from_millis(100),
+        ));
+
+        let region_id = RegionId::new(1024, 2);
+        region_server
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        region_server
+            .handle_request(
+                region_id,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive: StagingPartitionDirective::RejectAllWrites,
+                }),
+            )
+            .await
+            .unwrap();
+
+        alive_keeper.register_region(region_id).await;
+        alive_keeper
+            .renew_region_leases(
+                &[GrantedRegion {
+                    region_id: region_id.as_u64(),
+                    role: api::v1::meta::RegionRole::StagingLeader.into(),
+                    extensions: HashMap::new(),
+                }],
+                Instant::now() + Duration::from_millis(3000),
+            )
+            .await;
+
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::StagingLeader);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renew_staging_leader_exit_into_leader() {
+        common_telemetry::init_default_ut_logging();
+        let mut region_server = mock_region_server();
+        let mut engine_env = TestEnv::with_prefix("region-alive-keeper-staging-exit").await;
+        let engine = engine_env.create_engine(MitoConfig::default()).await;
+        let engine = Arc::new(engine);
+        region_server.register_engine(engine.clone());
+
+        let alive_keeper = Arc::new(RegionAliveKeeper::new(
+            region_server.clone(),
+            None,
+            Duration::from_millis(100),
+        ));
+
+        let region_id = RegionId::new(1024, 2);
+        region_server
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        region_server
+            .handle_request(
+                region_id,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive: StagingPartitionDirective::RejectAllWrites,
+                }),
+            )
+            .await
+            .unwrap();
+
+        alive_keeper.register_region(region_id).await;
+        alive_keeper
+            .renew_region_leases(
+                &[GrantedRegion {
+                    region_id: region_id.as_u64(),
+                    role: api::v1::meta::RegionRole::Leader.into(),
+                    extensions: HashMap::new(),
+                }],
+                Instant::now() + Duration::from_millis(3000),
+            )
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::Leader);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renew_staging_leader_does_not_promote_normal_leader_into_staging() {
+        let mut region_server = mock_region_server();
+        let mut engine_env = TestEnv::with_prefix("region-alive-keeper-non-staging").await;
+        let engine = engine_env.create_engine(MitoConfig::default()).await;
+        let engine = Arc::new(engine);
+        region_server.register_engine(engine.clone());
+
+        let alive_keeper = Arc::new(RegionAliveKeeper::new(
+            region_server.clone(),
+            None,
+            Duration::from_millis(100),
+        ));
+
+        let region_id = RegionId::new(1024, 4);
+        region_server
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        region_server
+            .set_region_role(region_id, RegionRole::Leader)
+            .unwrap();
+
+        alive_keeper.register_region(region_id).await;
+        alive_keeper
+            .renew_region_leases(
+                &[GrantedRegion {
+                    region_id: region_id.as_u64(),
+                    role: api::v1::meta::RegionRole::StagingLeader.into(),
+                    extensions: HashMap::new(),
+                }],
+                Instant::now() + Duration::from_millis(3000),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::Leader);
     }
 }

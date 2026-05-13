@@ -23,7 +23,7 @@ use api::v1::meta::{
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
@@ -148,7 +148,7 @@ async fn handle_ask_leader(_req: AskLeaderRequest, ctx: Context) -> Result<AskLe
             if election.is_leader() {
                 ctx.server_addr
             } else {
-                election.leader().await?.0
+                election.leader().await.context(error::KvBackendSnafu)?.0
             }
         }
         None => ctx.server_addr,

@@ -73,4 +73,13 @@ EXECUTE stmt USING 'happy', 42, 0;
 DEALLOCATE stmt;
 
 -- SQLNESS PROTOCOL MYSQL
+PREPARE stmt FROM 'SELECT table_name, table_schema FROM information_schema.tables WHERE table_name = ?';
+
+-- SQLNESS PROTOCOL MYSQL
+EXECUTE stmt USING 'cake';
+
+-- SQLNESS PROTOCOL MYSQL
+DEALLOCATE stmt;
+
+-- SQLNESS PROTOCOL MYSQL
 DROP TABLE cake;

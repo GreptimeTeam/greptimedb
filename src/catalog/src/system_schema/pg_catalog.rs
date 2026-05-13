@@ -74,12 +74,10 @@ impl PGCatalogProvider {
         )
         .expect("Failed to initialize PgCatalogSchemaProvider");
 
-        let mut table_ids = HashMap::new();
-        let mut table_id = PG_CATALOG_TABLE_ID_START;
-        for name in PG_CATALOG_TABLES {
-            table_ids.insert(*name, table_id);
-            table_id += 1;
-        }
+        let table_ids: HashMap<_, _> = (PG_CATALOG_TABLE_ID_START..)
+            .zip(PG_CATALOG_TABLES.iter())
+            .map(|(id, name)| (*name, id))
+            .collect();
 
         let mut provider = Self {
             catalog_name,

@@ -426,7 +426,7 @@ fn decode_struct_with_context<'a>(
 
     let (items, fields) = struct_value.into_parts();
 
-    for (field, field_value) in fields.fields().iter().zip(items.into_iter()) {
+    for (field, field_value) in fields.fields().iter().zip(items) {
         let field_context = context.with_key(field.name());
         let json_value = decode_value_with_context(field_value, &field_context)?;
         json_object.insert(field.name().to_string(), json_value);
@@ -561,7 +561,7 @@ fn decode_struct_with_settings<'a>(
 
     // Process each field in the struct value
     let (struct_data, fields) = struct_value.into_parts();
-    for (field, value) in fields.fields().iter().zip(struct_data.into_iter()) {
+    for (field, value) in fields.fields().iter().zip(struct_data) {
         let field_context = context.with_key(field.name());
 
         // Check if this field should be treated as unstructured

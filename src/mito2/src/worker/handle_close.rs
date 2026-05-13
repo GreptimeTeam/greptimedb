@@ -50,9 +50,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             info!("Region {} has pending data, waiting for flush", region_id);
             self.handle_flush_request(
                 region_id,
-                RegionFlushRequest {
-                    row_group_size: None,
-                },
+                RegionFlushRequest::default(),
                 Some(FlushReason::Closing),
                 sender,
             );
@@ -71,6 +69,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
         region.stop().await;
+        self.fail_region_stalled_requests_as_not_found(&region_id);
+        self.reject_region_edit_queue_as_not_found(region_id);
         // Clean flush status.
         self.flush_scheduler.on_region_closed(region_id);
         // Clean compaction status.

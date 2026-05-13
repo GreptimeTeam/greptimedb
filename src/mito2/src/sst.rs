@@ -31,7 +31,6 @@ use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
 };
 
-use crate::read::Batch;
 use crate::sst::parquet::flat_format::time_index_column_index;
 
 pub mod file;
@@ -60,6 +59,17 @@ pub enum FormatType {
     Flat,
 }
 
+/// Iceberg-compatible column field ID key stored in Parquet column metadata.
+pub const PARQUET_FIELD_ID_KEY: &str = "PARQUET:field_id";
+
+/// Adds `PARQUET:field_id` metadata to an Arrow field.
+pub fn with_field_id(mut field: Field, column_id: u32) -> Field {
+    field
+        .metadata_mut()
+        .insert(PARQUET_FIELD_ID_KEY.to_string(), column_id.to_string());
+    field
+}
+
 /// Gets the arrow schema to store in parquet.
 pub fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
     let fields = Fields::from_iter(
@@ -71,13 +81,19 @@ pub fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
             .zip(&metadata.column_metadatas)
             .filter_map(|(field, column_meta)| {
                 if column_meta.semantic_type == SemanticType::Field {
-                    Some(field.clone())
+                    Some(Arc::new(with_field_id(
+                        (**field).clone(),
+                        column_meta.column_id,
+                    )))
                 } else {
                     // We have fixed positions for tags (primary key) and time index.
                     None
                 }
             })
-            .chain([metadata.time_index_field()])
+            .chain([Arc::new(with_field_id(
+                (*metadata.time_index_field()).clone(),
+                metadata.time_index_column().column_id,
+            ))])
             .chain(internal_fields()),
     );
 
@@ -136,13 +152,14 @@ pub fn to_flat_sst_arrow_schema(
     if options.raw_pk_columns {
         for pk_id in &metadata.primary_key {
             let pk_index = metadata.column_index_by_id(*pk_id).unwrap();
+            let column_id = metadata.column_metadatas[pk_index].column_id;
             if options.string_pk_use_dict {
                 let old_field = &schema.fields[pk_index];
                 let new_field = tag_maybe_to_dictionary_field(
                     &metadata.column_metadatas[pk_index].column_schema.data_type,
                     old_field,
                 );
-                fields.push(new_field);
+                fields.push(Arc::new(with_field_id((*new_field).clone(), column_id)));
             }
         }
     }
@@ -152,12 +169,18 @@ pub fn to_flat_sst_arrow_schema(
         .zip(&metadata.column_metadatas)
         .filter_map(|(field, column_meta)| {
             if column_meta.semantic_type == SemanticType::Field {
-                Some(field.clone())
+                Some(Arc::new(with_field_id(
+                    (**field).clone(),
+                    column_meta.column_id,
+                )))
             } else {
                 None
             }
         })
-        .chain([metadata.time_index_field()])
+        .chain([Arc::new(with_field_id(
+            (*metadata.time_index_field()).clone(),
+            metadata.time_index_column().column_id,
+        ))])
         .chain(internal_fields());
     for field in remaining_fields {
         fields.push(field);
@@ -180,12 +203,21 @@ pub fn flat_sst_arrow_schema_column_num(
 
 /// Helper function to create a dictionary field from a field.
 fn to_dictionary_field(field: &Field) -> Field {
-    Field::new_dictionary(
+    let mut new_field = Field::new_dictionary(
         field.name(),
         datatypes::arrow::datatypes::DataType::UInt32,
         field.data_type().clone(),
         field.is_nullable(),
-    )
+    );
+
+    // retain field_id metadata
+    if let Some(field_id) = field.metadata().get(PARQUET_FIELD_ID_KEY) {
+        new_field
+            .metadata_mut()
+            .insert(PARQUET_FIELD_ID_KEY.to_string(), field_id.clone());
+    }
+
+    new_field
 }
 
 /// Helper function to create a dictionary field from a field if it is a string column.
@@ -219,34 +251,6 @@ pub(crate) fn internal_fields() -> [FieldRef; 3] {
     ]
 }
 
-/// Gets the arrow schema to store in parquet.
-pub fn to_plain_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
-    let fields = Fields::from_iter(
-        metadata
-            .schema
-            .arrow_schema()
-            .fields()
-            .iter()
-            .cloned()
-            .chain(plain_internal_fields()),
-    );
-
-    Arc::new(Schema::new(fields))
-}
-
-/// Fields for internal columns.
-fn plain_internal_fields() -> [FieldRef; 2] {
-    // Internal columns are always not null.
-    [
-        Arc::new(Field::new(
-            SEQUENCE_COLUMN_NAME,
-            ArrowDataType::UInt64,
-            false,
-        )),
-        Arc::new(Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false)),
-    ]
-}
-
 /// Gets the estimated number of series from record batches.
 ///
 /// This struct tracks the last timestamp value to detect series boundaries
@@ -260,33 +264,6 @@ pub(crate) struct SeriesEstimator {
 }
 
 impl SeriesEstimator {
-    /// Updates the estimator with a new Batch.
-    ///
-    /// Since each Batch contains only one series, this increments the series count
-    /// and updates the last timestamp.
-    pub(crate) fn update(&mut self, batch: &Batch) {
-        let Some(last_ts) = batch.last_timestamp() else {
-            return;
-        };
-
-        // Checks if there's a boundary between the last batch and this batch
-        if let Some(prev_last_ts) = self.last_timestamp {
-            // If the first timestamp of this batch is less than the last timestamp
-            // we've seen, it indicates a new series
-            if let Some(first_ts) = batch.first_timestamp()
-                && first_ts.value() <= prev_last_ts
-            {
-                self.series_count += 1;
-            }
-        } else {
-            // First batch, counts as first series
-            self.series_count = 1;
-        }
-
-        // Updates the last timestamp
-        self.last_timestamp = Some(last_ts.value());
-    }
-
     /// Updates the estimator with a new record batch in flat format.
     ///
     /// This method examines the time index column to detect series boundaries.
@@ -340,43 +317,14 @@ impl SeriesEstimator {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::OpType;
     use datatypes::arrow::array::{
-        BinaryArray, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt8Builder,
-        UInt32Array, UInt64Array,
+        BinaryArray, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array,
+        UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
-    use crate::read::{Batch, BatchBuilder};
-
-    fn new_batch(
-        primary_key: &[u8],
-        timestamps: &[i64],
-        sequences: &[u64],
-        op_types: &[OpType],
-    ) -> Batch {
-        let timestamps = Arc::new(TimestampMillisecondArray::from(timestamps.to_vec()));
-        let sequences = Arc::new(UInt64Array::from(sequences.to_vec()));
-        let mut op_type_builder = UInt8Builder::with_capacity(op_types.len());
-        for op_type in op_types {
-            op_type_builder.append_value(*op_type as u8);
-        }
-        let op_types = Arc::new(UInt8Array::from(
-            op_types.iter().map(|op| *op as u8).collect::<Vec<_>>(),
-        ));
-
-        let mut builder = BatchBuilder::new(primary_key.to_vec());
-        builder
-            .timestamps_array(timestamps)
-            .unwrap()
-            .sequences_array(sequences)
-            .unwrap()
-            .op_types_array(op_types)
-            .unwrap();
-        builder.build().unwrap()
-    }
 
     fn new_flat_record_batch(timestamps: &[i64]) -> RecordBatch {
         // Flat format has: [fields..., time_index, __primary_key, __sequence, __op_type]
@@ -409,128 +357,6 @@ mod tests {
         ]));
 
         RecordBatch::try_new(schema, vec![time_array, pk_array, seq_array, op_array]).unwrap()
-    }
-
-    #[test]
-    fn test_series_estimator_empty_batch() {
-        let mut estimator = SeriesEstimator::default();
-        let batch = new_batch(b"test", &[], &[], &[]);
-        estimator.update(&batch);
-        assert_eq!(0, estimator.finish());
-    }
-
-    #[test]
-    fn test_series_estimator_single_batch() {
-        let mut estimator = SeriesEstimator::default();
-        let batch = new_batch(
-            b"test",
-            &[1, 2, 3],
-            &[1, 2, 3],
-            &[OpType::Put, OpType::Put, OpType::Put],
-        );
-        estimator.update(&batch);
-        assert_eq!(1, estimator.finish());
-    }
-
-    #[test]
-    fn test_series_estimator_multiple_batches_same_series() {
-        let mut estimator = SeriesEstimator::default();
-
-        // First batch with timestamps 1, 2, 3
-        let batch1 = new_batch(
-            b"test",
-            &[1, 2, 3],
-            &[1, 2, 3],
-            &[OpType::Put, OpType::Put, OpType::Put],
-        );
-        estimator.update(&batch1);
-
-        // Second batch with timestamps 4, 5, 6 (continuation)
-        let batch2 = new_batch(
-            b"test",
-            &[4, 5, 6],
-            &[4, 5, 6],
-            &[OpType::Put, OpType::Put, OpType::Put],
-        );
-        estimator.update(&batch2);
-
-        assert_eq!(1, estimator.finish());
-    }
-
-    #[test]
-    fn test_series_estimator_new_series_detected() {
-        let mut estimator = SeriesEstimator::default();
-
-        // First batch with timestamps 1, 2, 3
-        let batch1 = new_batch(
-            b"pk0",
-            &[1, 2, 3],
-            &[1, 2, 3],
-            &[OpType::Put, OpType::Put, OpType::Put],
-        );
-        estimator.update(&batch1);
-
-        // Second batch with timestamps 2, 3, 4 (timestamp goes back, new series)
-        let batch2 = new_batch(
-            b"pk1",
-            &[2, 3, 4],
-            &[4, 5, 6],
-            &[OpType::Put, OpType::Put, OpType::Put],
-        );
-        estimator.update(&batch2);
-
-        assert_eq!(2, estimator.finish());
-    }
-
-    #[test]
-    fn test_series_estimator_equal_timestamp_boundary() {
-        let mut estimator = SeriesEstimator::default();
-
-        // First batch ending at timestamp 5
-        let batch1 = new_batch(
-            b"test",
-            &[1, 2, 5],
-            &[1, 2, 3],
-            &[OpType::Put, OpType::Put, OpType::Put],
-        );
-        estimator.update(&batch1);
-
-        // Second batch starting at timestamp 5 (equal, indicates new series)
-        let batch2 = new_batch(
-            b"test",
-            &[5, 6, 7],
-            &[4, 5, 6],
-            &[OpType::Put, OpType::Put, OpType::Put],
-        );
-        estimator.update(&batch2);
-
-        assert_eq!(2, estimator.finish());
-    }
-
-    #[test]
-    fn test_series_estimator_finish_resets_state() {
-        let mut estimator = SeriesEstimator::default();
-
-        let batch1 = new_batch(
-            b"test",
-            &[1, 2, 3],
-            &[1, 2, 3],
-            &[OpType::Put, OpType::Put, OpType::Put],
-        );
-        estimator.update(&batch1);
-
-        assert_eq!(1, estimator.finish());
-
-        // After finish, state should be reset
-        let batch2 = new_batch(
-            b"test",
-            &[4, 5, 6],
-            &[4, 5, 6],
-            &[OpType::Put, OpType::Put, OpType::Put],
-        );
-        estimator.update(&batch2);
-
-        assert_eq!(1, estimator.finish());
     }
 
     #[test]

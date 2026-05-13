@@ -29,6 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let refresh = profile == "release";
 
     println!("cargo:rerun-if-env-changed=RUSTC");
+    println!("cargo:rerun-if-env-changed=GREPTIME_PRODUCT_NAME");
 
     // The "CARGO_WORKSPACE_DIR" is set manually (not by Rust itself) in Cargo config file, to
     // solve the problem where the "CARGO_MANIFEST_DIR" is not what we want when this repo is
@@ -43,6 +44,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let product_version = load_product_version(&workspace_root);
     println!("cargo:rustc-env=GREPTIME_PRODUCT_VERSION={product_version}");
+
+    let product_name = load_product_name();
+    println!("cargo:rustc-env=GREPTIME_PRODUCT_NAME={product_name}");
 
     let repository = open_repository(&workspace_root);
 
@@ -98,6 +102,10 @@ fn load_product_version(workspace_root: &Path) -> String {
         })
         .map(str::to_string)
         .unwrap_or_else(|| env::var("CARGO_PKG_VERSION").unwrap())
+}
+
+fn load_product_name() -> String {
+    env::var("GREPTIME_PRODUCT_NAME").unwrap_or_else(|_| "GreptimeDB".to_string())
 }
 
 fn emit_workspace_watch_list(

@@ -262,7 +262,7 @@ where
             tasks.push(task);
         }
 
-        let size = futures::future::try_join_all(tasks.into_iter())
+        let size = futures::future::try_join_all(tasks)
             .await
             .into_iter()
             .flatten()

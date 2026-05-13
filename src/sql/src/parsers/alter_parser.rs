@@ -677,7 +677,7 @@ fn parse_string_option_names(parser: &mut Parser) -> std::result::Result<String,
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use common_error::ext::ErrorExt;
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};

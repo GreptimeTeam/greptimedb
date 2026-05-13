@@ -27,6 +27,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::SyncRegionFromRequest;
+use store_api::region_request::RegionFlushReason;
 use store_api::storage::RegionId;
 
 use crate::error::{self, Error, Result};
@@ -85,6 +86,7 @@ impl SyncRegion {
             &prepare_result.central_region_datanode,
             operation_timeout,
             ErrorStrategy::Retry,
+            Some(RegionFlushReason::Repartition),
         )
         .await
     }
@@ -273,6 +275,14 @@ impl SyncRegion {
                 }
                 Ok(())
             }
+            Err(error::Error::MailboxChannelClosed { .. }) => error::RetryLaterSnafu {
+                reason: format!(
+                    "Mailbox closed when sending sync region to datanode {:?}, elapsed: {:?}",
+                    peer,
+                    now.elapsed()
+                ),
+            }
+            .fail()?,
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
                     "Mailbox received timeout for sync regions on datanode {:?}, elapsed: {:?}",
@@ -338,7 +348,7 @@ impl SyncRegion {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};

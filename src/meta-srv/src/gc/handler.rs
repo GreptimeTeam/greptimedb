@@ -346,7 +346,7 @@ impl GcScheduler {
                         // Add to need_retry_regions since it failed
                         combined_report
                             .need_retry_regions
-                            .extend(fast_list_regions.clone().into_iter());
+                            .extend(fast_list_regions.clone());
                     }
                 }
             }

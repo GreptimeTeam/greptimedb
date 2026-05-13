@@ -115,6 +115,7 @@ impl VersionControlBuilder {
                         .expect("partition expression should be valid JSON"),
                     None => None,
                 },
+                ..Default::default()
             },
         );
         self
@@ -207,6 +208,7 @@ pub(crate) fn apply_edit(
                         .expect("partition expression should be valid JSON"),
                     None => None,
                 },
+                ..Default::default()
             }
         })
         .collect();

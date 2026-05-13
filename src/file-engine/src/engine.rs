@@ -94,7 +94,7 @@ impl RegionEngine for FileRegionEngine {
         let stream = self.handle_query(region_id, request).await?;
         let metadata = self.get_metadata(region_id).await?;
         // We don't support enabling append mode for file engine.
-        let scanner = Box::new(SinglePartitionScanner::new(stream, false, metadata));
+        let scanner = Box::new(SinglePartitionScanner::new(stream, false, metadata, None));
         Ok(scanner)
     }
 

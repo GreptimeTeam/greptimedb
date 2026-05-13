@@ -22,16 +22,24 @@ pub struct SplitPartitionExpr {
     pub table_name: Ident,
     pub target: PartitionExpr,
     pub into: Vec<PartitionExpr>,
+    #[serde(default = "default_wait")]
+    pub wait: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergePartitionExpr {
     pub table_name: Ident,
     pub targets: Vec<PartitionExpr>,
+    #[serde(default = "default_wait")]
+    pub wait: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RepartitionExpr {
     Split(SplitPartitionExpr),
     Merge(MergePartitionExpr),
+}
+
+const fn default_wait() -> bool {
+    true
 }

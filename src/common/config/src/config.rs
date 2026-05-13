@@ -53,7 +53,7 @@ pub trait Configurable: Serialize + DeserializeOwned + Default + Sized {
 
             env.try_parsing(true)
                 .separator(ENV_VAR_SEP)
-                .ignore_empty(true)
+                .ignore_empty(false)
         };
 
         // Workaround: Replacement for `Config::try_from(&default_opts)` due to
@@ -234,6 +234,33 @@ mod tests {
 
                 // Should be default values.
                 assert_eq!(opts.node_id, None);
+            },
+        );
+    }
+
+    #[derive(Debug, Serialize, Deserialize, Default)]
+    struct SimpleConfig {
+        name: Option<String>,
+        prefix: Option<String>,
+    }
+
+    impl Configurable for SimpleConfig {}
+
+    #[test]
+    fn test_empty_env_var_is_not_ignored() {
+        let env_prefix = "SIMPLE_CFG_UT";
+        temp_env::with_vars(
+            [(
+                [env_prefix.to_string(), "PREFIX".to_string()].join(ENV_VAR_SEP),
+                Some(""),
+            )],
+            || {
+                let opts = SimpleConfig::load_layered_options(None, env_prefix).unwrap();
+                // With ignore_empty(false), an empty env var should yield Some("")
+                // rather than None (which was the previous behavior with ignore_empty(true)).
+                assert_eq!(opts.prefix, Some("".to_string()));
+                // Unset env var should remain None.
+                assert_eq!(opts.name, None);
             },
         );
     }

@@ -122,7 +122,7 @@ pub fn parse_column_default_constraint(
 
 #[cfg(test)]
 mod test {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use datatypes::prelude::{ConcreteDataType, Value};
     use datatypes::types::BooleanType;

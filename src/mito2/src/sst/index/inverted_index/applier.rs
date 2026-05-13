@@ -20,15 +20,18 @@ use std::time::Instant;
 
 use common_base::range_read::RangeReader;
 use common_telemetry::warn;
+use datatypes::data_type::ConcreteDataType;
 use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReadMetrics};
 use index::inverted_index::search::index_apply::{
-    ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
+    ApplyOutput, IndexApplier, IndexNotFoundStrategy, PredicatesIndexApplier, SearchContext,
 };
 use index::inverted_index::search::predicate::Predicate;
+use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
@@ -37,7 +40,8 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::inverted_index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
-    ApplyInvertedIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
+    ApplyInvertedIndexSnafu, BuildIndexApplierSnafu, MetadataSnafu, PuffinBuildReaderSnafu,
+    PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::RegionIndexId;
@@ -121,10 +125,6 @@ pub(crate) struct InvertedIndexApplier {
     /// The cache of index files.
     file_cache: Option<FileCacheRef>,
 
-    /// Predefined index applier used to apply predicates to index files
-    /// and return the relevant row group ids for further scan.
-    index_applier: Box<dyn IndexApplier>,
-
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
 
@@ -134,11 +134,23 @@ pub(crate) struct InvertedIndexApplier {
     /// Puffin metadata cache.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 
-    /// Predicate key. Used to identify the predicate and fetch result from cache.
-    predicate_key: PredicateKey,
+    /// All collected predicates.
+    predicates: BTreeMap<ColumnId, Vec<Predicate>>,
+
+    /// Default apply plan built from all collected predicates.
+    default_plan: SstApplyPlan,
+
+    /// Expected predicate column types from the latest region metadata.
+    expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
 }
 
 pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
+
+#[derive(Clone)]
+pub(crate) struct SstApplyPlan {
+    pub predicate_key: PredicateKey,
+    pub index_applier: Arc<PredicatesIndexApplier>,
+}
 
 impl InvertedIndexApplier {
     /// Creates a new `InvertedIndexApplier`.
@@ -146,23 +158,25 @@ impl InvertedIndexApplier {
         table_dir: String,
         path_type: PathType,
         store: ObjectStore,
-        index_applier: Box<dyn IndexApplier>,
         puffin_manager_factory: PuffinManagerFactory,
         predicates: BTreeMap<ColumnId, Vec<Predicate>>,
-    ) -> Self {
-        INDEX_APPLY_MEMORY_USAGE.add(index_applier.memory_usage() as i64);
+        expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
+    ) -> Result<Self> {
+        let default_plan = Self::build_apply_plan(&predicates)?;
+        INDEX_APPLY_MEMORY_USAGE.add(default_plan.index_applier.memory_usage() as i64);
 
-        Self {
+        Ok(Self {
             table_dir,
             path_type,
             store,
             file_cache: None,
-            index_applier,
             puffin_manager_factory,
             inverted_index_cache: None,
             puffin_metadata_cache: None,
-            predicate_key: PredicateKey::new_inverted(Arc::new(predicates)),
-        }
+            predicates,
+            default_plan,
+            expected_predicate_col_types,
+        })
     }
 
     /// Sets the file cache.
@@ -186,11 +200,12 @@ impl InvertedIndexApplier {
         self
     }
 
-    /// Applies predicates to the provided SST file id and returns the relevant row group ids.
+    /// Applies predicates to one SST file with the provided index applier.
     ///
     /// # Arguments
     /// * `file_id` - The region file ID to apply predicates to
     /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
+    /// * `index_applier` - Inverted index applier produced by `plan_for_sst`.
     /// * `metrics` - Optional mutable reference to collect metrics on demand
     #[tracing::instrument(
         skip_all,
@@ -200,6 +215,7 @@ impl InvertedIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
+        index_applier: &PredicatesIndexApplier,
         mut metrics: Option<&mut InvertedIndexApplyMetrics>,
     ) -> Result<ApplyOutput> {
         let start = Instant::now();
@@ -231,7 +247,7 @@ impl InvertedIndexApplier {
                 InvertedIndexBlobReader::new(blob),
                 index_cache.clone(),
             );
-            self.index_applier
+            index_applier
                 .apply(
                     context,
                     &mut index_reader,
@@ -243,7 +259,7 @@ impl InvertedIndexApplier {
                 .context(ApplyInvertedIndexSnafu)
         } else {
             let mut index_reader = InvertedIndexBlobReader::new(blob);
-            self.index_applier
+            index_applier
                 .apply(
                     context,
                     &mut index_reader,
@@ -344,82 +360,141 @@ impl InvertedIndexApplier {
             .context(PuffinBuildReaderSnafu)
     }
 
-    /// Returns the predicate key.
-    pub fn predicate_key(&self) -> &PredicateKey {
-        &self.predicate_key
+    /// Builds a per-SST apply plan.
+    ///
+    /// Returns `None` when no compatible predicate remains for this SST.
+    pub fn plan_for_sst(&self, sst_metadata: &RegionMetadataRef) -> Result<Option<SstApplyPlan>> {
+        let mut compatible_predicates = BTreeMap::new();
+        let mut has_type_mismatch = false;
+
+        for (col_id, expected) in &self.expected_predicate_col_types {
+            if let Some(sst_col) = sst_metadata.column_by_id(*col_id)
+                && sst_col.column_schema.data_type != *expected
+            {
+                has_type_mismatch = true;
+                continue;
+            }
+
+            if let Some(predicates) = self.predicates.get(col_id) {
+                compatible_predicates.insert(*col_id, predicates.clone());
+            }
+        }
+
+        if compatible_predicates.is_empty() {
+            return Ok(None);
+        }
+
+        if !has_type_mismatch {
+            return Ok(Some(self.default_plan.clone()));
+        }
+
+        let plan = Self::build_apply_plan(&compatible_predicates)?;
+        Ok(Some(plan))
+    }
+
+    fn build_apply_plan(
+        predicates_by_col: &BTreeMap<ColumnId, Vec<Predicate>>,
+    ) -> Result<SstApplyPlan> {
+        let predicates = predicates_by_col
+            .iter()
+            .map(|(col_id, preds)| (format!("{}", IndexTarget::ColumnId(*col_id)), preds.clone()))
+            .collect();
+
+        let index_applier =
+            PredicatesIndexApplier::try_from(predicates).context(BuildIndexApplierSnafu)?;
+
+        let predicate_key = PredicateKey::new_inverted(Arc::new(predicates_by_col.clone()));
+        Ok(SstApplyPlan {
+            predicate_key,
+            index_applier: Arc::new(index_applier),
+        })
     }
 }
 
 impl Drop for InvertedIndexApplier {
     fn drop(&mut self) {
-        INDEX_APPLY_MEMORY_USAGE.sub(self.index_applier.memory_usage() as i64);
+        INDEX_APPLY_MEMORY_USAGE.sub(self.default_plan.index_applier.memory_usage() as i64);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use api::v1::SemanticType;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
     use futures::io::Cursor;
-    use index::bitmap::Bitmap;
-    use index::inverted_index::search::index_apply::MockIndexApplier;
+    use index::inverted_index::search::predicate::RegexMatchPredicate;
     use object_store::services::Memory;
     use puffin::puffin_manager::PuffinWriter;
-    use store_api::storage::FileId;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::{FileId, RegionId};
 
     use super::*;
     use crate::sst::index::RegionFileId;
 
     #[tokio::test]
-    async fn test_index_applier_apply_basic() {
+    async fn test_plan_for_sst() {
         let (_d, puffin_manager_factory) =
-            PuffinManagerFactory::new_for_test_async("test_index_applier_apply_basic_").await;
+            PuffinManagerFactory::new_for_test_async("test_plan_for_sst_basic_").await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
-        let file_id = RegionFileId::new(0.into(), FileId::random());
-        let index_id = RegionIndexId::new(file_id, 0);
         let table_dir = "table_dir".to_string();
 
-        let puffin_manager = puffin_manager_factory.build(
-            object_store.clone(),
-            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
+        let mut predicates = BTreeMap::new();
+        predicates.insert(
+            1,
+            vec![Predicate::RegexMatch(RegexMatchPredicate {
+                pattern: "foo".to_string(),
+            })],
         );
-        let mut writer = puffin_manager.writer(&index_id).await.unwrap();
-        writer
-            .put_blob(
-                INDEX_BLOB_TYPE,
-                Cursor::new(vec![]),
-                Default::default(),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        writer.finish().await.unwrap();
-
-        let mut mock_index_applier = MockIndexApplier::new();
-        mock_index_applier.expect_memory_usage().returning(|| 100);
-        mock_index_applier.expect_apply().returning(|_, _, _| {
-            Ok(ApplyOutput {
-                matched_segment_ids: Bitmap::new_bitvec(),
-                total_row_count: 100,
-                segment_row_count: 10,
-            })
-        });
+        let expected_predicate_col_types =
+            BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]);
 
         let sst_index_applier = InvertedIndexApplier::new(
-            table_dir.clone(),
+            table_dir,
             PathType::Bare,
             object_store,
-            Box::new(mock_index_applier),
             puffin_manager_factory,
-            Default::default(),
+            predicates,
+            expected_predicate_col_types,
+        )
+        .unwrap();
+        let plan = sst_index_applier
+            .plan_for_sst(&mock_region_metadata())
+            .unwrap();
+        assert!(plan.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_plan_for_sst_type_mismatch() {
+        let (_d, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_plan_for_sst_type_mismatch_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "table_dir".to_string();
+
+        let mut predicates = BTreeMap::new();
+        predicates.insert(
+            1,
+            vec![Predicate::RegexMatch(RegexMatchPredicate {
+                pattern: "foo".to_string(),
+            })],
         );
-        let output = sst_index_applier.apply(index_id, None, None).await.unwrap();
-        assert_eq!(
-            output,
-            ApplyOutput {
-                matched_segment_ids: Bitmap::new_bitvec(),
-                total_row_count: 100,
-                segment_row_count: 10,
-            }
-        );
+        // Column id 1 is String in `mock_region_metadata`, set expected type to Int64.
+        let expected_predicate_col_types =
+            BTreeMap::from_iter([(1, ConcreteDataType::int64_datatype())]);
+
+        let sst_index_applier = InvertedIndexApplier::new(
+            table_dir,
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            predicates,
+            expected_predicate_col_types,
+        )
+        .unwrap();
+        let plan = sst_index_applier
+            .plan_for_sst(&mock_region_metadata())
+            .unwrap();
+        assert!(plan.is_none());
     }
 
     #[tokio::test]
@@ -448,19 +523,52 @@ mod tests {
             .unwrap();
         writer.finish().await.unwrap();
 
-        let mut mock_index_applier = MockIndexApplier::new();
-        mock_index_applier.expect_memory_usage().returning(|| 100);
-        mock_index_applier.expect_apply().never();
-
+        let mut predicates = BTreeMap::new();
+        predicates.insert(
+            1,
+            vec![Predicate::RegexMatch(RegexMatchPredicate {
+                pattern: "foo".to_string(),
+            })],
+        );
+        let expected_predicate_col_types =
+            BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]);
         let sst_index_applier = InvertedIndexApplier::new(
             table_dir.clone(),
             PathType::Bare,
             object_store,
-            Box::new(mock_index_applier),
             puffin_manager_factory,
-            Default::default(),
-        );
-        let res = sst_index_applier.apply(index_id, None, None).await;
+            predicates,
+            expected_predicate_col_types,
+        )
+        .unwrap();
+        let plan = sst_index_applier
+            .plan_for_sst(&mock_region_metadata())
+            .unwrap()
+            .unwrap();
+        let res = sst_index_applier
+            .apply(index_id, None, &plan.index_applier, None)
+            .await;
         assert!(format!("{:?}", res.unwrap_err()).contains("Blob not found"));
+    }
+
+    fn mock_region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![1]);
+        Arc::new(builder.build().unwrap())
     }
 }

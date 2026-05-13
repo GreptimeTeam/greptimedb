@@ -61,11 +61,13 @@ fn init_factory(table_info_manager: TableInfoManagerRef) -> Initializer<TableId,
 
 fn invalidator<'a>(
     cache: &'a Cache<TableId, Arc<TableInfo>>,
-    ident: &'a CacheIdent,
+    idents: &'a [&CacheIdent],
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
-        if let CacheIdent::TableId(table_id) = ident {
-            cache.invalidate(table_id).await
+        for ident in idents {
+            if let CacheIdent::TableId(table_id) = ident {
+                cache.invalidate(table_id).await
+            }
         }
         Ok(())
     })

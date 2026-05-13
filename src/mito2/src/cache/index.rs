@@ -229,14 +229,14 @@ where
         }
         if !cache_miss_range.is_empty() {
             let pages = load(cache_miss_range).await?;
-            for (i, page) in cache_miss_idx.into_iter().zip(pages.into_iter()) {
+            for (i, page) in cache_miss_idx.into_iter().zip(pages) {
                 let page_key = page_keys[i];
                 metrics.page_bytes += page.len() as u64;
                 data[i] = page.clone();
                 self.put_page(key, page_key, page.clone());
             }
         }
-        let buffer = Buffer::from_iter(data.into_iter());
+        let buffer = Buffer::from_iter(data);
         Ok((
             buffer
                 .slice(PageKey::calculate_range(offset, size, self.page_size))

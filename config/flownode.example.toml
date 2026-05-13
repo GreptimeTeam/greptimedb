@@ -2,6 +2,11 @@
 ## @toml2docs:none-default
 node_id = 14
 
+## The user provider for authentication.
+## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
+## @toml2docs:none-default
+#+ user_provider = "static_user_provider:file:/path/to/users"
+
 ## flow engine options.
 [flow]
 ## The number of flow worker in flownode.
@@ -22,10 +27,6 @@ node_id = 14
 ## if failed to find available frontend after frontend_scan_timeout elapsed, return error
 ## which prevent flownode from starting
 #+experimental_frontend_scan_timeout="30s"
-## Frontend activity timeout
-## if frontend is down(not sending heartbeat) for more than frontend_activity_timeout,
-## it will be removed from the list that flownode use to connect
-#+experimental_frontend_activity_timeout="60s"
 ## Maximum number of filters allowed in a single query
 #+experimental_max_filter_num_per_query=20
 ## Time window merge distance
@@ -95,14 +96,6 @@ metadata_cache_ttl = "10m"
 
 # TTI of the metadata cache.
 metadata_cache_tti = "5m"
-
-## The heartbeat options.
-[heartbeat]
-## Interval for sending heartbeat messages to the metasrv.
-interval = "3s"
-
-## Interval for retrying to send heartbeat messages to the metasrv.
-retry_interval = "3s"
 
 ## The logging options.
 [logging]

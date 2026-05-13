@@ -14,8 +14,6 @@
 
 //! Storage related APIs
 
-#![feature(iterator_try_collect)]
-
 pub mod codec;
 pub mod data_source;
 pub mod logstore;

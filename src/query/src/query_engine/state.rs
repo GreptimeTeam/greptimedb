@@ -59,8 +59,11 @@ use crate::dist_plan::{
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
+use crate::optimizer::const_normalization::ConstNormalizationRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
+use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
+use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
@@ -146,6 +149,7 @@ impl QueryEngineState {
 
         // The [`TypeConversionRule`] must be at first
         extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
+        extension_rules.push(Arc::new(CountNestAggrRule) as _);
 
         // Apply the datafusion rules
         let mut analyzer = Analyzer::new();
@@ -154,6 +158,7 @@ impl QueryEngineState {
         analyzer
             .rules
             .insert(0, Arc::new(CountWildcardToTimeIndexRule));
+        analyzer.rules.push(Arc::new(ConstNormalizationRule));
 
         // Add ApplyFunctionRewrites rule,
         // Note we cannot use `analyzer.add_function_rewrite`
@@ -172,6 +177,7 @@ impl QueryEngineState {
 
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
+        optimizer.rules.push(Arc::new(JsonTypeConcretizeRule));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();

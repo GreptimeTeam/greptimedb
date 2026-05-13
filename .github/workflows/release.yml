@@ -358,10 +358,9 @@ jobs:
           dst-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
           dst-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          aws-cn-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
-          aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          proxy-url: ${{ secrets.PROXY_URL }}
+          proxy-username: ${{ secrets.PROXY_USERNAME }}
+          proxy-password: ${{ secrets.PROXY_PASSWORD }}
           dev-mode: false
           upload-to-s3: true
           update-version-info: true

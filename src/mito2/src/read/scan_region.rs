@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -31,38 +31,47 @@ use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::extension::json::is_json_extension_type;
+use datatypes::schema::Schema;
+use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::types::json_type::JsonNativeType;
 use futures::StreamExt;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
-use snafu::{OptionExt as _, ResultExt};
+use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    ColumnId, RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
+    RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
+    TimeSeriesRowSelector,
 };
-use table::predicate::{Predicate, build_time_range_predicate};
+use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
-use crate::config::{DEFAULT_MAX_CONCURRENT_SCAN_FILES, DEFAULT_SCAN_CHANNEL_SIZE};
-use crate::error::{InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
+use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
+use crate::error::{InvalidPartitionExprSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};
 use crate::metrics::READ_SST_COUNT;
-use crate::read::compat::{self, CompatBatch, FlatCompatBatch, PrimaryKeyCompatBatch};
-use crate::read::projection::ProjectionMapper;
+use crate::read::compat::{self, FlatCompatBatch};
+use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
+use crate::read::range_cache::ScanRequestFingerprint;
+use crate::read::read_columns::{
+    ReadColumns, merge, read_columns_from_predicate, read_columns_from_projection,
+};
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
-use crate::read::{Batch, BoxedRecordBatchStream, RecordBatch, Source};
+use crate::read::{BoxedRecordBatchStream, RecordBatch};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
-use crate::sst::FormatType;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
@@ -76,8 +85,6 @@ use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexAp
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
 
-/// Parallel scan channel size for flat format.
-const FLAT_SCAN_CHANNEL_SIZE: usize = 2;
 #[cfg(feature = "vector_index")]
 const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
 
@@ -146,6 +153,14 @@ impl Scanner {
             Scanner::Seq(seq_scan) => seq_scan.input().index_ids(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().index_ids(),
             Scanner::Series(series_scan) => series_scan.input().index_ids(),
+        }
+    }
+
+    pub(crate) fn snapshot_sequence(&self) -> Option<SequenceNumber> {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.input().snapshot_sequence,
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().snapshot_sequence,
+            Scanner::Series(series_scan) => series_scan.input().snapshot_sequence,
         }
     }
 
@@ -221,8 +236,6 @@ pub(crate) struct ScanRegion {
     request: ScanRequest,
     /// Cache.
     cache_strategy: CacheStrategy,
-    /// Capacity of the channel to send data from parallel scan tasks to the main task.
-    parallel_scan_channel_size: usize,
     /// Maximum number of SST files to scan concurrently.
     max_concurrent_scan_files: usize,
     /// Whether to ignore inverted index.
@@ -253,7 +266,6 @@ impl ScanRegion {
             access_layer,
             request,
             cache_strategy,
-            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
@@ -263,16 +275,6 @@ impl ScanRegion {
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
-    }
-
-    /// Sets parallel scan task channel size.
-    #[must_use]
-    pub(crate) fn with_parallel_scan_channel_size(
-        mut self,
-        parallel_scan_channel_size: usize,
-    ) -> Self {
-        self.parallel_scan_channel_size = parallel_scan_channel_size;
-        self
     }
 
     /// Sets maximum number of SST files to scan concurrently.
@@ -398,41 +400,44 @@ impl ScanRegion {
         self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
     }
 
-    /// Returns true if the region use flat format.
-    fn use_flat_format(&self) -> bool {
-        self.request.force_flat_format
-            || self.version.options.sst_format.unwrap_or_default() == FormatType::Flat
-    }
-
     /// Creates a scan input.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
-    async fn scan_input(mut self) -> Result<ScanInput> {
+    async fn scan_input(self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
-        let flat_format = self.use_flat_format();
 
-        let read_column_ids = match &self.request.projection {
-            Some(p) => self.build_read_column_ids(p, &predicate)?,
-            None => self
-                .version
-                .metadata
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .collect(),
+        let read_cols = match &self.request.projection_input {
+            Some(p) => {
+                // Read columns include the pushed-down projection and columns
+                // resolved from the predicate.
+                let metadata = &self.version.metadata;
+                let from_projection = read_columns_from_projection(p.clone(), metadata)?;
+                let from_predicate = read_columns_from_predicate(&predicate, metadata);
+                merge(from_projection, from_predicate)
+            }
+            None => {
+                let read_col_ids = self
+                    .version
+                    .metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id);
+                ReadColumns::from_deduped_column_ids(read_col_ids)
+            }
         };
+        let read_col_ids = read_cols.column_ids();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
-        let mapper = match &self.request.projection {
-            Some(p) => ProjectionMapper::new_with_read_columns(
+        let mut mapper = match self.request.projection_indices() {
+            Some(p) => FlatProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
-                p.iter().copied(),
-                flat_format,
-                read_column_ids.clone(),
+                p.to_vec(),
+                read_cols,
             )?,
-            None => ProjectionMapper::all(&self.version.metadata, flat_format)?,
+            None => FlatProjectionMapper::all(&self.version.metadata)?,
         };
+        concretize_json_types(&mut mapper, &self.request.json_type_hint);
 
         let ssts = &self.version.ssts;
         let mut files = Vec::new();
@@ -478,7 +483,7 @@ impl ScanRegion {
                 continue;
             }
             let ranges_in_memtable = m.ranges(
-                Some(read_column_ids.as_slice()),
+                Some(&read_col_ids),
                 RangesOptions::default()
                     .with_predicate(predicate.clone())
                     .with_sequence(SequenceRange::new(
@@ -495,14 +500,13 @@ impl ScanRegion {
 
         let region_id = self.region_id();
         debug!(
-            "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}, flat_format: {}",
+            "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
             region_id,
             self.request,
             time_range,
             mem_range_builders.len(),
             files.len(),
             self.version.options.append_mode,
-            flat_format,
         );
 
         let (non_field_filters, field_filters) = self.partition_by_field_filters();
@@ -529,11 +533,6 @@ impl ScanRegion {
             }
         });
 
-        if flat_format {
-            // The batch is already large enough so we use a small channel size here.
-            self.parallel_scan_channel_size = FLAT_SCAN_CHANNEL_SIZE;
-        }
-
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
@@ -543,7 +542,6 @@ impl ScanRegion {
             .with_inverted_index_appliers(inverted_index_appliers)
             .with_bloom_filter_index_appliers(bloom_filter_appliers)
             .with_fulltext_index_appliers(fulltext_index_appliers)
-            .with_parallel_scan_channel_size(self.parallel_scan_channel_size)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
@@ -551,7 +549,15 @@ impl ScanRegion {
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution)
-            .with_flat_format(flat_format);
+            .with_explain_flat_format(
+                self.version.options.sst_format == Some(crate::sst::FormatType::Flat),
+            )
+            .with_snapshot_sequence(
+                self.request
+                    .snapshot_on_scan
+                    .then_some(self.request.memtable_max_sequence)
+                    .flatten(),
+            );
         #[cfg(feature = "vector_index")]
         let input = input
             .with_vector_index_applier(vector_index_applier)
@@ -584,72 +590,6 @@ impl ScanRegion {
             .expect("Time index must have timestamp-compatible type")
             .unit();
         build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
-    }
-
-    /// Return all columns id to read according to the projection and filters.
-    fn build_read_column_ids(
-        &self,
-        projection: &[usize],
-        predicate: &PredicateGroup,
-    ) -> Result<Vec<ColumnId>> {
-        let metadata = &self.version.metadata;
-        // use Vec for read_column_ids to keep the order of columns.
-        let mut read_column_ids = Vec::new();
-        let mut seen = HashSet::new();
-
-        for idx in projection {
-            let column =
-                metadata
-                    .column_metadatas
-                    .get(*idx)
-                    .with_context(|| InvalidRequestSnafu {
-                        region_id: metadata.region_id,
-                        reason: format!("projection index {} is out of bound", idx),
-                    })?;
-            seen.insert(column.column_id);
-            // keep the projection order
-            read_column_ids.push(column.column_id);
-        }
-
-        if projection.is_empty() {
-            let time_index = metadata.time_index_column().column_id;
-            if seen.insert(time_index) {
-                read_column_ids.push(time_index);
-            }
-        }
-
-        let mut extra_names = HashSet::new();
-        let mut columns = HashSet::new();
-
-        for expr in &self.request.filters {
-            columns.clear();
-            if expr_to_columns(expr, &mut columns).is_err() {
-                continue;
-            }
-            extra_names.extend(columns.iter().map(|column| column.name.clone()));
-        }
-
-        if let Some(expr) = predicate.region_partition_expr() {
-            expr.collect_column_names(&mut extra_names);
-        }
-
-        if !extra_names.is_empty() {
-            for column in &metadata.column_metadatas {
-                if extra_names.contains(column.column_schema.name.as_str())
-                    && !seen.contains(&column.column_id)
-                {
-                    read_column_ids.push(column.column_id);
-                }
-                extra_names.remove(column.column_schema.name.as_str());
-            }
-            if !extra_names.is_empty() {
-                warn!(
-                    "Some columns in filters are not found in region {}: {:?}",
-                    metadata.region_id, extra_names
-                );
-            }
-        }
-        Ok(read_column_ids)
     }
 
     /// Partitions filters into two groups: non-field filters and field filters.
@@ -793,6 +733,34 @@ impl ScanRegion {
     }
 }
 
+fn concretize_json_types(
+    mapper: &mut FlatProjectionMapper,
+    json_type_hint: &HashMap<String, JsonNativeType>,
+) {
+    let output_schema = mapper.output_schema();
+    let output_arrow_schema = output_schema.arrow_schema();
+    if !output_arrow_schema.has_json_extension_field() {
+        return;
+    }
+
+    let mut column_schemas = output_schema.column_schemas().to_vec();
+    for (idx, column_schema) in column_schemas.iter_mut().enumerate() {
+        if !is_json_extension_type(&output_arrow_schema.fields()[idx]) {
+            continue;
+        }
+        let Some(json_type) = json_type_hint.get(&column_schema.name) else {
+            continue;
+        };
+        column_schema.data_type = ConcreteDataType::from(json_type);
+    }
+
+    let output_schema = Arc::new(Schema::new_with_version(
+        column_schemas,
+        output_schema.version(),
+    ));
+    mapper.with_output_schema(output_schema);
+}
+
 /// Returns true if the time range of a SST `file` matches the `predicate`.
 fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
     if predicate == &TimestampRange::min_to_max() {
@@ -809,13 +777,13 @@ pub struct ScanInput {
     /// Region SST access layer.
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
-    pub(crate) mapper: Arc<ProjectionMapper>,
-    /// Column ids to read from memtables and SSTs.
+    pub(crate) mapper: Arc<FlatProjectionMapper>,
+    /// The columns to read from memtables and SSTs.
     /// Notice this is different from the columns in `mapper` which are projected columns.
     /// But this read columns might also include non-projected columns needed for filtering.
-    pub(crate) read_column_ids: Vec<ColumnId>,
+    pub(crate) read_cols: ReadColumns,
     /// Time range filter for time index.
-    time_range: Option<TimestampRange>,
+    pub(crate) time_range: Option<TimestampRange>,
     /// Predicate to push down.
     pub(crate) predicate: PredicateGroup,
     /// Region partition expr applied at read time.
@@ -828,8 +796,6 @@ pub struct ScanInput {
     pub(crate) cache_strategy: CacheStrategy,
     /// Ignores file not found error.
     ignore_file_not_found: bool,
-    /// Capacity of the channel to send data from parallel scan tasks to the main task.
-    pub(crate) parallel_scan_channel_size: usize,
     /// Maximum number of SST files to scan concurrently.
     pub(crate) max_concurrent_scan_files: usize,
     /// Index appliers.
@@ -854,8 +820,10 @@ pub struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
-    /// Whether to use flat format.
-    pub(crate) flat_format: bool,
+    /// Whether the region's configured SST format is flat.
+    explain_flat_format: bool,
+    /// Snapshot upper bound bound at scan open and propagated back to the caller.
+    pub(crate) snapshot_sequence: Option<SequenceNumber>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
     #[cfg(feature = "enterprise")]
@@ -865,10 +833,10 @@ pub struct ScanInput {
 impl ScanInput {
     /// Creates a new [ScanInput].
     #[must_use]
-    pub(crate) fn new(access_layer: AccessLayerRef, mapper: ProjectionMapper) -> ScanInput {
+    pub(crate) fn new(access_layer: AccessLayerRef, mapper: FlatProjectionMapper) -> ScanInput {
         ScanInput {
             access_layer,
-            read_column_ids: mapper.column_ids().to_vec(),
+            read_cols: mapper.read_columns().clone(),
             mapper: Arc::new(mapper),
             time_range: None,
             predicate: PredicateGroup::default(),
@@ -877,7 +845,6 @@ impl ScanInput {
             files: Vec::new(),
             cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
-            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
@@ -892,7 +859,8 @@ impl ScanInput {
             merge_mode: MergeMode::default(),
             series_row_selector: None,
             distribution: None,
-            flat_format: false,
+            explain_flat_format: false,
+            snapshot_sequence: None,
             compaction: false,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
@@ -939,16 +907,6 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_ignore_file_not_found(mut self, ignore: bool) -> Self {
         self.ignore_file_not_found = ignore;
-        self
-    }
-
-    /// Sets scan task channel size.
-    #[must_use]
-    pub(crate) fn with_parallel_scan_channel_size(
-        mut self,
-        parallel_scan_channel_size: usize,
-    ) -> Self {
-        self.parallel_scan_channel_size = parallel_scan_channel_size;
         self
     }
 
@@ -1048,6 +1006,13 @@ impl ScanInput {
         self
     }
 
+    /// Sets whether the region's configured SST format is flat for explain output.
+    #[must_use]
+    pub(crate) fn with_explain_flat_format(mut self, explain_flat_format: bool) -> Self {
+        self.explain_flat_format = explain_flat_format;
+        self
+    }
+
     /// Sets the time series row selector.
     #[must_use]
     pub(crate) fn with_series_row_selector(
@@ -1058,10 +1023,12 @@ impl ScanInput {
         self
     }
 
-    /// Sets whether to use flat format.
     #[must_use]
-    pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
-        self.flat_format = flat_format;
+    pub(crate) fn with_snapshot_sequence(
+        mut self,
+        snapshot_sequence: Option<SequenceNumber>,
+    ) -> Self {
+        self.snapshot_sequence = snapshot_sequence;
         self
     }
 
@@ -1070,38 +1037,6 @@ impl ScanInput {
     pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
         self
-    }
-
-    /// Scans sources in parallel.
-    ///
-    /// # Panics if the input doesn't allow parallel scan.
-    #[tracing::instrument(
-        skip(self, sources, semaphore),
-        fields(
-            region_id = %self.region_metadata().region_id,
-            source_count = sources.len()
-        )
-    )]
-    pub(crate) fn create_parallel_sources(
-        &self,
-        sources: Vec<Source>,
-        semaphore: Arc<Semaphore>,
-    ) -> Result<Vec<Source>> {
-        if sources.len() <= 1 {
-            return Ok(sources);
-        }
-
-        // Spawn a task for each source.
-        let sources = sources
-            .into_iter()
-            .map(|source| {
-                let (sender, receiver) = mpsc::channel(self.parallel_scan_channel_size);
-                self.spawn_scan_task(source, semaphore.clone(), sender);
-                let stream = Box::pin(ReceiverStream::new(receiver));
-                Source::Stream(stream)
-            })
-            .collect();
-        Ok(sources)
     }
 
     /// Builds memtable ranges to scan by `index`.
@@ -1141,16 +1076,21 @@ impl ScanInput {
     pub async fn prune_file(
         &self,
         file: &FileHandle,
+        pre_filter_mode: PreFilterMode,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
-        let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
-        let decode_pk_values = !self.compaction && self.mapper.has_tags();
+        let decode_pk_values = !self.compaction
+            && self
+                .mapper
+                .read_columns()
+                .column_ids_iter()
+                .any(|column_id| self.mapper.metadata().primary_key.contains(&column_id));
         let reader = self
             .access_layer
             .read_sst(file.clone())
             .predicate(predicate)
-            .projection(Some(self.read_column_ids.clone()))
+            .projection(Some(self.read_cols.clone()))
             .cache(self.cache_strategy.clone())
             .inverted_index_appliers(self.inverted_index_appliers.clone())
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
@@ -1164,9 +1104,8 @@ impl ScanInput {
         };
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
-            .flat_format(self.flat_format)
             .compaction(self.compaction)
-            .pre_filter_mode(filter_mode)
+            .pre_filter_mode(pre_filter_mode)
             .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)
             .await;
@@ -1193,68 +1132,15 @@ impl ScanInput {
         if need_compat {
             // They have different schema. We need to adapt the batch first so the
             // mapper can convert it.
-            let compat = if let Some(flat_format) = file_range_ctx.read_format().as_flat() {
-                let mapper = self.mapper.as_flat().unwrap();
-                FlatCompatBatch::try_new(
-                    mapper,
-                    flat_format.metadata(),
-                    flat_format.format_projection(),
-                    self.compaction,
-                )?
-                .map(CompatBatch::Flat)
-            } else {
-                let compact_batch = PrimaryKeyCompatBatch::new(
-                    &self.mapper,
-                    file_range_ctx.read_format().metadata().clone(),
-                )?;
-                Some(CompatBatch::PrimaryKey(compact_batch))
-            };
+            let compat = FlatCompatBatch::try_new(
+                &self.mapper,
+                file_range_ctx.read_format().metadata(),
+                file_range_ctx.read_format().format_projection(),
+                self.compaction,
+            )?;
             file_range_ctx.set_compat_batch(compat);
         }
         Ok(FileRangeBuilder::new(Arc::new(file_range_ctx), selection))
-    }
-
-    /// Scans the input source in another task and sends batches to the sender.
-    #[tracing::instrument(
-        skip(self, input, semaphore, sender),
-        fields(region_id = %self.region_metadata().region_id)
-    )]
-    pub(crate) fn spawn_scan_task(
-        &self,
-        mut input: Source,
-        semaphore: Arc<Semaphore>,
-        sender: mpsc::Sender<Result<Batch>>,
-    ) {
-        let region_id = self.region_metadata().region_id;
-        let span = tracing::info_span!(
-            "ScanInput::parallel_scan_task",
-            region_id = %region_id,
-            stream_kind = "batch"
-        );
-        common_runtime::spawn_global(
-            async move {
-                loop {
-                    // We release the permit before sending result to avoid the task waiting on
-                    // the channel with the permit held.
-                    let maybe_batch = {
-                        // Safety: We never close the semaphore.
-                        let _permit = semaphore.acquire().await.unwrap();
-                        input.next_batch().await
-                    };
-                    match maybe_batch {
-                        Ok(Some(batch)) => {
-                            let _ = sender.send(Ok(batch)).await;
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            let _ = sender.send(Err(e)).await;
-                            break;
-                        }
-                    }
-                }
-            }
-            .instrument(span),
-        );
     }
 
     /// Scans flat sources (RecordBatch streams) in parallel.
@@ -1271,6 +1157,7 @@ impl ScanInput {
         &self,
         sources: Vec<BoxedRecordBatchStream>,
         semaphore: Arc<Semaphore>,
+        channel_size: usize,
     ) -> Result<Vec<BoxedRecordBatchStream>> {
         if sources.len() <= 1 {
             return Ok(sources);
@@ -1280,7 +1167,7 @@ impl ScanInput {
         let sources = sources
             .into_iter()
             .map(|source| {
-                let (sender, receiver) = mpsc::channel(self.parallel_scan_channel_size);
+                let (sender, receiver) = mpsc::channel(channel_size);
                 self.spawn_flat_scan_task(source, semaphore.clone(), sender);
                 let stream = Box::pin(ReceiverStream::new(receiver));
                 Box::pin(stream) as _
@@ -1370,6 +1257,18 @@ impl ScanInput {
     pub fn region_metadata(&self) -> &RegionMetadataRef {
         self.mapper.metadata()
     }
+
+    fn range_pre_filter_mode(&self, source_count: usize) -> PreFilterMode {
+        if source_count <= 1 {
+            // Duplicated rows in the same source is not a normal case and we don't provide
+            // strict dedup semantic (last_row/last_non_null) for it. We expect the duplicated rows
+            // are exactly identical in the same source so we use PreFilterMode::All for
+            // performance reason.
+            return PreFilterMode::All;
+        }
+
+        pre_filter_mode(self.append_mode, self.merge_mode)
+    }
 }
 
 #[cfg(feature = "enterprise")]
@@ -1412,9 +1311,106 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 
     match merge_mode {
-        MergeMode::LastRow => PreFilterMode::SkipFieldsOnDelete,
+        MergeMode::LastRow => PreFilterMode::SkipFields,
         MergeMode::LastNonNull => PreFilterMode::SkipFields,
     }
+}
+
+/// Builds a [ScanRequestFingerprint] from a [ScanInput] if the scan is eligible
+/// for partition range caching.
+pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFingerprint> {
+    let eligible = !input.compaction
+        && !input.files.is_empty()
+        && matches!(input.cache_strategy, CacheStrategy::EnableAll(_));
+
+    if !eligible {
+        return None;
+    }
+
+    let metadata = input.region_metadata();
+    let tag_names: HashSet<&str> = metadata
+        .column_metadatas
+        .iter()
+        .filter(|col| col.semantic_type == SemanticType::Tag)
+        .map(|col| col.column_schema.name.as_str())
+        .collect();
+
+    let time_index = metadata.time_index_column();
+    let time_index_name = time_index.column_schema.name.clone();
+    let ts_col_unit = time_index
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .expect("Time index must have timestamp-compatible type")
+        .unit();
+
+    let exprs = input
+        .predicate_group()
+        .predicate_without_region()
+        .map(|predicate| predicate.exprs())
+        .unwrap_or_default();
+
+    let mut filters = Vec::new();
+    let mut time_filters = Vec::new();
+    let mut has_tag_filter = false;
+    let mut columns = HashSet::new();
+
+    for expr in exprs {
+        columns.clear();
+        let is_time_only = match expr_to_columns(expr, &mut columns) {
+            Ok(()) if !columns.is_empty() => {
+                has_tag_filter |= columns
+                    .iter()
+                    .any(|col| tag_names.contains(col.name.as_str()));
+                columns.iter().all(|col| col.name == time_index_name)
+            }
+            _ => false,
+        };
+
+        if is_time_only
+            && extract_time_range_from_expr(&time_index_name, ts_col_unit, expr).is_some()
+        {
+            // Range-reducible time predicates can be safely dropped from the
+            // cache key when the query time range covers the partition range.
+            time_filters.push(expr.to_string());
+        } else {
+            // Non-time filters and non-range time predicates (those that
+            // extract_time_range_from_expr cannot convert to a TimestampRange)
+            // always stay in the cache key.
+            filters.push(expr.to_string());
+        }
+    }
+
+    if !has_tag_filter {
+        // We only cache requests that have tag filters to avoid caching all series.
+        return None;
+    }
+
+    // Ensure the filters are sorted for consistent fingerprinting.
+    filters.sort_unstable();
+    time_filters.sort_unstable();
+    let read_columns = input.read_cols.clone();
+    Some(
+        crate::read::range_cache::ScanRequestFingerprintBuilder {
+            read_column_types: read_columns
+                .column_ids_iter()
+                .map(|id| {
+                    metadata
+                        .column_by_id(id)
+                        .map(|col| col.column_schema.data_type.clone())
+                })
+                .collect(),
+            read_columns,
+            filters,
+            time_filters,
+            series_row_selector: input.series_row_selector,
+            append_mode: input.append_mode,
+            filter_deleted: input.filter_deleted,
+            merge_mode: input.merge_mode,
+            partition_expr_version: metadata.partition_expr_version,
+        }
+        .build(),
+    )
 }
 
 /// Context shared by different streams from a scanner.
@@ -1424,6 +1420,10 @@ pub struct StreamContext {
     pub input: ScanInput,
     /// Metadata for partition ranges.
     pub(crate) ranges: Vec<RangeMeta>,
+    /// Precomputed scan fingerprint for partition range caching.
+    /// `None` when the scan is not eligible for caching.
+    #[allow(dead_code)]
+    pub(crate) scan_fingerprint: Option<ScanRequestFingerprint>,
 
     // Metrics:
     /// The start time of the query.
@@ -1436,10 +1436,12 @@ impl StreamContext {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
+        let scan_fingerprint = build_scan_fingerprint(&input);
 
         Self {
             input,
             ranges,
+            scan_fingerprint,
             query_start,
         }
     }
@@ -1449,10 +1451,12 @@ impl StreamContext {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
+        let scan_fingerprint = build_scan_fingerprint(&input);
 
         Self {
             input,
             ranges,
+            scan_fingerprint,
             query_start,
         }
     }
@@ -1465,6 +1469,13 @@ impl StreamContext {
     pub(crate) fn is_file_range_index(&self, index: RowGroupIndex) -> bool {
         !self.is_mem_range_index(index)
             && index.index < self.input.num_files() + self.input.num_memtables()
+    }
+
+    pub(crate) fn range_pre_filter_mode(&self, part_range: &PartitionRange) -> PreFilterMode {
+        let range_meta = &self.ranges[part_range.identifier];
+        let source_count = range_meta.indices.len();
+
+        self.input.range_pre_filter_mode(source_count)
     }
 
     /// Retrieves the partition ranges.
@@ -1601,8 +1612,7 @@ impl StreamContext {
                         .entries(self.input.files.iter().map(|file| FileWrapper { file }))
                         .finish()?;
                 }
-                write!(f, ", \"flat_format\": {}", self.input.flat_format)?;
-
+                write!(f, ", \"flat_format\": {}", self.input.explain_flat_format)?;
                 #[cfg(feature = "enterprise")]
                 self.format_extension_ranges(f)?;
 
@@ -1759,168 +1769,276 @@ impl PredicateGroup {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use datafusion::physical_plan::expressions::lit as physical_lit;
+    use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
-    use store_api::storage::ScanRequest;
+    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::JsonObjectType;
+    use datatypes::value::Value;
+    use partition::expr::col as partition_col;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::{RegionId, TimeSeriesDistribution, TimeSeriesRowSelector};
 
     use super::*;
-    use crate::memtable::time_partition::TimePartitions;
-    use crate::region::options::RegionOptions;
-    use crate::region::version::VersionBuilder;
-    use crate::sst::FormatType;
-    use crate::test_util::memtable_util::{EmptyMemtableBuilder, metadata_with_primary_key};
+    use crate::cache::CacheManager;
+    use crate::read::range_cache::ScanRequestFingerprintBuilder;
+    use crate::test_util::memtable_util::metadata_with_primary_key;
     use crate::test_util::scheduler_util::SchedulerEnv;
 
-    fn new_version(metadata: RegionMetadataRef) -> VersionRef {
-        let mutable = Arc::new(TimePartitions::new(
-            metadata.clone(),
-            Arc::new(EmptyMemtableBuilder::default()),
-            0,
-            None,
-        ));
-        Arc::new(VersionBuilder::new(metadata, mutable).build())
+    async fn new_scan_input(metadata: RegionMetadataRef, filters: Vec<Expr>) -> ScanInput {
+        let env = SchedulerEnv::new().await;
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate = PredicateGroup::new(metadata.as_ref(), &filters).unwrap();
+        let file = FileHandle::new(
+            crate::sst::file::FileMeta::default(),
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        );
+
+        ScanInput::new(env.access_layer.clone(), mapper)
+            .with_predicate(predicate)
+            .with_cache(CacheStrategy::EnableAll(Arc::new(
+                CacheManager::builder()
+                    .range_result_cache_size(1024)
+                    .build(),
+            )))
+            .with_files(vec![file])
     }
 
-    fn new_version_with_sst_format(
-        metadata: RegionMetadataRef,
-        sst_format: Option<FormatType>,
-    ) -> VersionRef {
-        let mutable = Arc::new(TimePartitions::new(
-            metadata.clone(),
-            Arc::new(EmptyMemtableBuilder::default()),
-            0,
-            None,
-        ));
-        let options = RegionOptions {
-            sst_format,
-            ..Default::default()
-        };
-        Arc::new(
-            VersionBuilder::new(metadata, mutable)
-                .options(options)
-                .build(),
-        )
+    /// Helper to create a timestamp millisecond literal.
+    fn ts_lit(val: i64) -> datafusion_expr::Expr {
+        lit(ScalarValue::TimestampMillisecond(Some(val), None))
+    }
+
+    fn metadata_with_json_field() -> RegionMetadataRef {
+        let mut json_column = ColumnSchema::new(
+            "payload",
+            ConcreteDataType::from(&JsonNativeType::Object(JsonObjectType::new())),
+            true,
+        );
+        json_column
+            .with_extension_type(&JsonExtensionType::new(Arc::new(JsonMetadata::default())))
+            .unwrap();
+
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "host",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: json_column,
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("value", ConcreteDataType::int64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .primary_key(vec![1]);
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn concrete_json_type_hint() -> JsonNativeType {
+        JsonNativeType::Object(JsonObjectType::from([
+            ("active".to_string(), JsonNativeType::Bool),
+            ("name".to_string(), JsonNativeType::String),
+        ]))
+    }
+
+    #[test]
+    fn test_concretize_json_types_rewrites_json_output_schema() -> Result<()> {
+        let metadata = metadata_with_json_field();
+        let mut mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3])?;
+        let output_schema = mapper.output_schema();
+        let original_arrow_schema = output_schema.arrow_schema();
+        assert!(original_arrow_schema.has_json_extension_field());
+        assert!(is_json_extension_type(&original_arrow_schema.fields()[1]));
+
+        let expected_type = concrete_json_type_hint();
+        concretize_json_types(
+            &mut mapper,
+            &HashMap::from([("payload".to_string(), expected_type.clone())]),
+        );
+
+        let output_schema = mapper.output_schema();
+        let output_arrow_schema = output_schema.arrow_schema();
+        assert!(output_arrow_schema.has_json_extension_field());
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            output_schema.column_schemas()[0].data_type
+        );
+        assert_eq!(
+            ConcreteDataType::from(&expected_type),
+            output_schema.column_schemas()[1].data_type
+        );
+        assert_eq!(
+            ConcreteDataType::int64_datatype(),
+            output_schema.column_schemas()[2].data_type
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_concretize_json_types_keeps_json_without_hint() {
+        let metadata = metadata_with_json_field();
+        let mut mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+
+        concretize_json_types(
+            &mut mapper,
+            &HashMap::from([("missing".to_string(), JsonNativeType::String)]),
+        );
+
+        let output_schema = mapper.output_schema();
+        let output_arrow_schema = output_schema.arrow_schema();
+        assert!(output_arrow_schema.has_json_extension_field());
+        assert!(is_json_extension_type(&output_arrow_schema.fields()[1]));
+
+        // Assert that the expected JSON type stays un-concretized: empty object.
+        assert_eq!(
+            ConcreteDataType::from(&JsonNativeType::Object(JsonObjectType::new())),
+            output_schema.column_schemas()[1].data_type
+        );
     }
 
     #[tokio::test]
-    async fn test_build_read_column_ids_includes_filters() {
+    async fn test_build_scan_fingerprint_for_eligible_scan() {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let version = new_version(metadata.clone());
-        let env = SchedulerEnv::new().await;
-        let request = ScanRequest {
-            projection: Some(vec![4]),
-            filters: vec![
-                col("v0").gt(lit(1)),
-                col("ts").gt(lit(0)),
+        let input = new_scan_input(
+            metadata.clone(),
+            vec![
+                col("ts").gt_eq(ts_lit(1000)),
                 col("k0").eq(lit("foo")),
+                col("v0").gt(lit(1)),
             ],
-            ..Default::default()
-        };
-        let scan_region = ScanRegion::new(
-            version,
-            env.access_layer.clone(),
-            request,
-            CacheStrategy::Disabled,
-        );
-        let predicate =
-            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = scan_region.request.projection.as_ref().unwrap();
-        let read_ids = scan_region
-            .build_read_column_ids(projection, &predicate)
-            .unwrap();
-        assert_eq!(vec![4, 0, 2, 3], read_ids);
+        )
+        .await
+        .with_distribution(Some(TimeSeriesDistribution::PerSeries))
+        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow))
+        .with_merge_mode(MergeMode::LastNonNull)
+        .with_filter_deleted(false);
+
+        let fingerprint = build_scan_fingerprint(&input).unwrap();
+
+        let expected = ScanRequestFingerprintBuilder {
+            read_columns: input.read_cols,
+            read_column_types: vec![
+                metadata
+                    .column_by_id(0)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(2)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(3)
+                    .map(|col| col.column_schema.data_type.clone()),
+            ],
+            filters: vec![
+                col("k0").eq(lit("foo")).to_string(),
+                col("v0").gt(lit(1)).to_string(),
+            ],
+            time_filters: vec![col("ts").gt_eq(ts_lit(1000)).to_string()],
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            append_mode: false,
+            filter_deleted: false,
+            merge_mode: MergeMode::LastNonNull,
+            partition_expr_version: 0,
+        }
+        .build();
+        assert_eq!(expected, fingerprint);
     }
 
     #[tokio::test]
-    async fn test_build_read_column_ids_empty_projection() {
+    async fn test_build_scan_fingerprint_requires_tag_filter() {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let version = new_version(metadata.clone());
-        let env = SchedulerEnv::new().await;
-        let request = ScanRequest {
-            projection: Some(vec![]),
-            ..Default::default()
-        };
-        let scan_region = ScanRegion::new(
-            version,
-            env.access_layer.clone(),
-            request,
-            CacheStrategy::Disabled,
-        );
-        let predicate =
-            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = scan_region.request.projection.as_ref().unwrap();
-        let read_ids = scan_region
-            .build_read_column_ids(projection, &predicate)
-            .unwrap();
-        // Empty projection should still read the time index column (id 2 in this test schema).
-        assert_eq!(vec![2], read_ids);
+        let input = new_scan_input(
+            metadata,
+            vec![col("ts").gt_eq(lit(1000)), col("v0").gt(lit(1))],
+        )
+        .await;
+
+        assert!(build_scan_fingerprint(&input).is_none());
     }
 
     #[tokio::test]
-    async fn test_build_read_column_ids_keeps_projection_order() {
+    async fn test_build_scan_fingerprint_respects_scan_eligibility() {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let version = new_version(metadata.clone());
-        let env = SchedulerEnv::new().await;
-        let request = ScanRequest {
-            projection: Some(vec![4, 1]),
-            filters: vec![col("v0").gt(lit(1))],
-            ..Default::default()
-        };
-        let scan_region = ScanRegion::new(
-            version,
-            env.access_layer.clone(),
-            request,
-            CacheStrategy::Disabled,
-        );
-        let predicate =
-            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = scan_region.request.projection.as_ref().unwrap();
-        let read_ids = scan_region
-            .build_read_column_ids(projection, &predicate)
-            .unwrap();
-        // Projection order preserved, extra columns appended in schema order.
-        assert_eq!(vec![4, 1, 3], read_ids);
+        let filters = vec![col("k0").eq(lit("foo"))];
+
+        let disabled = ScanInput::new(
+            SchedulerEnv::new().await.access_layer.clone(),
+            FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap(),
+        )
+        .with_predicate(PredicateGroup::new(metadata.as_ref(), &filters).unwrap());
+        assert!(build_scan_fingerprint(&disabled).is_none());
+
+        let compaction = new_scan_input(metadata.clone(), filters.clone())
+            .await
+            .with_compaction(true);
+        assert!(build_scan_fingerprint(&compaction).is_none());
+
+        // No files to read.
+        let no_files = new_scan_input(metadata, filters).await.with_files(vec![]);
+        assert!(build_scan_fingerprint(&no_files).is_none());
     }
 
     #[tokio::test]
-    async fn test_use_flat_format_honors_request_override() {
-        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let env = SchedulerEnv::new().await;
+    async fn test_build_scan_fingerprint_tracks_schema_and_partition_expr_changes() {
+        let base = metadata_with_primary_key(vec![0, 1], false);
+        let mut builder = RegionMetadataBuilder::from_existing(base);
+        let partition_expr = partition_col("k0")
+            .gt_eq(Value::String("foo".into()))
+            .as_json_str()
+            .unwrap();
+        builder.partition_expr_json(Some(partition_expr));
+        let metadata = Arc::new(builder.build_without_validation().unwrap());
 
-        let primary_key_version =
-            new_version_with_sst_format(metadata.clone(), Some(FormatType::PrimaryKey));
-        let request = ScanRequest::default();
-        let scan_region = ScanRegion::new(
-            primary_key_version.clone(),
-            env.access_layer.clone(),
-            request,
-            CacheStrategy::Disabled,
-        );
-        assert!(!scan_region.use_flat_format());
+        let input = new_scan_input(metadata.clone(), vec![col("k0").eq(lit("foo"))]).await;
+        let fingerprint = build_scan_fingerprint(&input).unwrap();
 
-        let request = ScanRequest {
-            force_flat_format: true,
-            ..Default::default()
-        };
-        let scan_region = ScanRegion::new(
-            primary_key_version,
-            env.access_layer.clone(),
-            request,
-            CacheStrategy::Disabled,
-        );
-        assert!(scan_region.use_flat_format());
-
-        let flat_version = new_version_with_sst_format(metadata, Some(FormatType::Flat));
-        let request = ScanRequest::default();
-        let scan_region = ScanRegion::new(
-            flat_version,
-            env.access_layer.clone(),
-            request,
-            CacheStrategy::Disabled,
-        );
-        assert!(scan_region.use_flat_format());
+        let expected = ScanRequestFingerprintBuilder {
+            read_columns: input.read_cols,
+            read_column_types: vec![
+                metadata
+                    .column_by_id(0)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(2)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(3)
+                    .map(|col| col.column_schema.data_type.clone()),
+            ],
+            filters: vec![col("k0").eq(lit("foo")).to_string()],
+            time_filters: vec![],
+            series_row_selector: None,
+            append_mode: false,
+            filter_deleted: true,
+            merge_mode: MergeMode::LastRow,
+            partition_expr_version: metadata.partition_expr_version,
+        }
+        .build();
+        assert_eq!(expected, fingerprint);
+        assert_ne!(0, metadata.partition_expr_version);
     }
 
     #[test]
@@ -1940,5 +2058,25 @@ mod tests {
         let predicate_without_region = predicate_group.predicate_without_region().unwrap();
         assert!(predicate_without_region.exprs().is_empty());
         assert_eq!(1, predicate_without_region.dyn_filters().len());
+    }
+
+    #[tokio::test]
+    async fn test_range_pre_filter_mode() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let cases = [
+            (true, MergeMode::LastRow, 1, PreFilterMode::All),
+            (false, MergeMode::LastNonNull, 1, PreFilterMode::All),
+            (false, MergeMode::LastRow, 2, PreFilterMode::SkipFields),
+            (true, MergeMode::LastRow, 2, PreFilterMode::All),
+        ];
+
+        for (append_mode, merge_mode, source_count, expected_mode) in cases {
+            let input = new_scan_input(metadata.clone(), vec![])
+                .await
+                .with_append_mode(append_mode)
+                .with_merge_mode(merge_mode);
+
+            assert_eq!(expected_mode, input.range_pre_filter_mode(source_count));
+        }
     }
 }

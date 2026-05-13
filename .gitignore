@@ -65,8 +65,14 @@ greptimedb_data
 # github
 !/.github
 
-# Claude code
+# AI related
 CLAUDE.md
-
-# AGENTS.md
 AGENTS.md
+.codex
+.gemini
+.opencode
+.worktrees/
+
+# local design docs
+docs/specs/
+.vs/ 

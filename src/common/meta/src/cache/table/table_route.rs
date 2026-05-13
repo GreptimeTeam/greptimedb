@@ -19,6 +19,7 @@ use moka::future::Cache;
 use snafu::OptionExt;
 use store_api::storage::TableId;
 
+use crate::cache::container::InitStrategy;
 use crate::cache::{CacheContainer, Initializer};
 use crate::error;
 use crate::error::Result;
@@ -65,7 +66,14 @@ pub fn new_table_route_cache(
     let table_info_manager = Arc::new(TableRouteManager::new(kv_backend));
     let init = init_factory(table_info_manager);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
+    CacheContainer::with_strategy(
+        name,
+        cache,
+        Box::new(invalidator),
+        init,
+        filter,
+        InitStrategy::VersionChecked,
+    )
 }
 
 fn init_factory(
@@ -92,11 +100,13 @@ fn init_factory(
 
 fn invalidator<'a>(
     cache: &'a Cache<TableId, Arc<TableRoute>>,
-    ident: &'a CacheIdent,
+    idents: &'a [&CacheIdent],
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
-        if let CacheIdent::TableId(table_id) = ident {
-            cache.invalidate(table_id).await
+        for ident in idents {
+            if let CacheIdent::TableId(table_id) = ident {
+                cache.invalidate(table_id).await
+            }
         }
         Ok(())
     })

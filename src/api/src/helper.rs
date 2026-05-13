@@ -444,7 +444,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                         JsonFormat::Jsonb => Some(ColumnDataTypeExtension {
                             type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
                         }),
-                        JsonFormat::Native(native_type) => {
+                        JsonFormat::Json2(native_type) => {
                             if native_type.is_null() {
                                 None
                             } else {
@@ -919,6 +919,7 @@ pub fn encode_json_value(value: JsonValue) -> v1::JsonValue {
                     .collect::<Vec<_>>();
                 Some(json_value::Value::Object(JsonObject { entries }))
             }
+            JsonVariant::Variant(x) => Some(json_value::Value::Variant(x)),
         };
         v1::JsonValue { value }
     }
@@ -952,6 +953,7 @@ fn decode_json_value(value: &v1::JsonValue) -> JsonValueRef<'_> {
             })
             .collect::<BTreeMap<_, _>>()
             .into(),
+        json_value::Value::Variant(x) => x.as_slice().into(),
     }
 }
 

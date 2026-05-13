@@ -62,7 +62,7 @@ use table::TableRef;
 use table::metadata::TableInfo;
 use table::requests::{
     AUTO_CREATE_TABLE_KEY, InsertRequest as TableInsertRequest, TABLE_DATA_MODEL,
-    TABLE_DATA_MODEL_TRACE_V1, VALID_TABLE_OPTION_KEYS,
+    TABLE_DATA_MODEL_TRACE_V1, TRACE_TABLE_PARTITIONS_HINT_KEY, VALID_TABLE_OPTION_KEYS,
 };
 use table::table_reference::TableReference;
 
@@ -103,7 +103,7 @@ pub enum AutoCreateTableType {
 }
 
 impl AutoCreateTableType {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             AutoCreateTableType::Logical(_) => "logical",
             AutoCreateTableType::Physical => "physical",
@@ -343,8 +343,7 @@ impl Inserter {
             .convert(request)
             .await?;
 
-        let table_infos =
-            HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
+        let table_infos = HashMap::from_iter([(table_info.table_id(), table_info.clone())]);
 
         self.do_request(inserts, &table_infos, &ctx).await
     }
@@ -353,15 +352,13 @@ impl Inserter {
         &self,
         insert: &Insert,
         ctx: &QueryContextRef,
-        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         let (inserts, table_info) =
             StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
-                .convert(insert, ctx, statement_executor)
+                .convert(insert, ctx)
                 .await?;
 
-        let table_infos =
-            HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
+        let table_infos = HashMap::from_iter([(table_info.table_id(), table_info.clone())]);
 
         self.do_request(inserts, &table_infos, ctx).await
     }
@@ -625,6 +622,23 @@ impl Inserter {
                     .extension(TRACE_TABLE_NAME_SESSION_KEY)
                     .unwrap_or(TRACE_TABLE_NAME);
 
+                let trace_table_partitions = if let Some(trace_table_partitions) =
+                    ctx.extension(TRACE_TABLE_PARTITIONS_HINT_KEY)
+                {
+                    let p = trace_table_partitions.parse::<u32>().map_err(|_| {
+                        InvalidInsertRequestSnafu {
+                            reason: format!(
+                                "Failed to parse trace_table_partitions: {}",
+                                trace_table_partitions
+                            ),
+                        }
+                        .build()
+                    })?;
+                    Some(p)
+                } else {
+                    None
+                };
+
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
@@ -649,8 +663,18 @@ impl Inserter {
                     } else {
                         // prebuilt partition rules for uuid data: see the function
                         // for more information
-                        let partitions = partition_rule_for_hexstring(TRACE_ID_COLUMN)
+                        let partitions = if matches!(trace_table_partitions, Some(0) | Some(1)) {
+                            // disable partitions
+                            None
+                        } else {
+                            let p = partition_rule_for_hexstring(
+                                TRACE_ID_COLUMN,
+                                trace_table_partitions,
+                            )
                             .context(CreatePartitionRulesSnafu)?;
+                            Some(p)
+                        };
+
                         // add skip index to
                         // - trace_id: when searching by trace id
                         // - parent_span_id: when searching root span
@@ -683,7 +707,7 @@ impl Inserter {
                         let table = self
                             .create_physical_table(
                                 create_table,
-                                Some(partitions),
+                                partitions,
                                 ctx,
                                 statement_executor,
                             )
@@ -1066,7 +1090,15 @@ pub fn fill_table_options_for_create(
             table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
         }
         AutoCreateTableType::LastNonNull => {
-            table_options.insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
+            if ctx
+                .extension(APPEND_MODE_KEY)
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+            {
+                table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+                table_options.insert(MERGE_MODE_KEY.to_string(), "last_row".to_string());
+            } else {
+                table_options.insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
+            }
         }
         AutoCreateTableType::Trace => {
             table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
@@ -1309,5 +1341,57 @@ mod tests {
         let req_schema = req.rows.as_ref().unwrap().schema.clone();
         assert_eq!(req_schema[0].column_name, ts_name);
         assert_eq!(req_schema[1].column_name, field_name);
+    }
+
+    #[test]
+    fn test_last_non_null_create_options_preserve_default_without_append_mode() {
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(&mut table_options, &AutoCreateTableType::LastNonNull, &ctx);
+
+        assert_eq!(
+            Some("last_non_null"),
+            table_options.get(MERGE_MODE_KEY).map(String::as_str)
+        );
+        assert!(!table_options.contains_key(APPEND_MODE_KEY));
+    }
+
+    #[test]
+    fn test_last_non_null_create_options_preserve_default_with_append_mode_false() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension(APPEND_MODE_KEY, "false");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(&mut table_options, &AutoCreateTableType::LastNonNull, &ctx);
+
+        assert!(!table_options.contains_key(APPEND_MODE_KEY));
+        assert_eq!(
+            Some("last_non_null"),
+            table_options.get(MERGE_MODE_KEY).map(String::as_str)
+        );
+    }
+
+    #[test]
+    fn test_last_non_null_create_options_use_last_row_with_append_mode_true() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension(APPEND_MODE_KEY, "true");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(&mut table_options, &AutoCreateTableType::LastNonNull, &ctx);
+
+        assert_eq!(
+            Some("true"),
+            table_options.get(APPEND_MODE_KEY).map(String::as_str)
+        );
+        assert_eq!(
+            Some("last_row"),
+            table_options.get(MERGE_MODE_KEY).map(String::as_str)
+        );
     }
 }

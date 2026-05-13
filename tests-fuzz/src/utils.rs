@@ -15,17 +15,25 @@
 pub mod cluster_info;
 pub mod config;
 pub mod crd;
+/// CSV dump writer utilities for fuzz tests.
+pub mod csv_dump_writer;
 pub mod health;
 pub mod migration;
+pub mod network_chaos;
 pub mod partition;
 pub mod pod_failure;
 pub mod procedure;
 #[cfg(feature = "unstable")]
 pub mod process;
+pub mod retry;
+/// SQL dump writer utilities for fuzz tests.
+pub mod sql_dump_writer;
 pub mod wait;
 
 use std::env;
+use std::str::FromStr;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::log::LevelFilter;
 use paste::paste;
@@ -45,6 +53,8 @@ const GT_MYSQL_ADDR: &str = "GT_MYSQL_ADDR";
 
 /// Connects to GreptimeDB via env variables.
 pub async fn init_greptime_connections_via_env() -> Connections {
+    crate::install_rustls_crypto_provider();
+
     let _ = dotenv::dotenv();
     let mysql = if let Ok(addr) = env::var(GT_MYSQL_ADDR) {
         Some(addr)
@@ -126,6 +136,14 @@ pub const GT_FUZZ_INPUT_MAX_COLUMNS: &str = "GT_FUZZ_INPUT_MAX_COLUMNS";
 pub const GT_FUZZ_INPUT_MAX_ALTER_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_ALTER_ACTIONS";
 pub const GT_FUZZ_INPUT_MAX_INSERT_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_INSERT_ACTIONS";
 pub const FUZZ_OVERRIDE_PREFIX: &str = "GT_FUZZ_OVERRIDE_";
+/// Enables CSV dump generation for fuzz runs.
+pub const GT_FUZZ_DUMP_TABLE_CSV: &str = "GT_FUZZ_DUMP_TABLE_CSV";
+/// Base directory for CSV dump sessions.
+pub const GT_FUZZ_DUMP_DIR: &str = "GT_FUZZ_DUMP_DIR";
+/// Directory suffix used by one CSV dump session.
+pub const GT_FUZZ_DUMP_SUFFIX: &str = "GT_FUZZ_DUMP_SUFFIX";
+/// Max in-memory CSV buffer size before auto flush.
+pub const GT_FUZZ_DUMP_BUFFER_MAX_BYTES: &str = "GT_FUZZ_DUMP_BUFFER_MAX_BYTES";
 
 /// Reads an override value for a fuzz parameter from env `GT_FUZZ_OVERRIDE_<NAME>`.
 pub fn get_fuzz_override<T>(name: &str) -> Option<T>
@@ -135,6 +153,33 @@ where
     let _ = dotenv::dotenv();
     let key = format!("{}{}", FUZZ_OVERRIDE_PREFIX, name.to_ascii_uppercase());
     env::var(&key).ok().and_then(|v| v.parse().ok())
+}
+
+/// Returns CSV dump base directory.
+pub fn get_gt_fuzz_dump_dir() -> String {
+    let _ = dotenv::dotenv();
+    env::var(GT_FUZZ_DUMP_DIR).unwrap_or_else(|_| "/tmp/greptime-fuzz-dumps".to_string())
+}
+
+/// Returns CSV dump directory suffix.
+pub fn get_gt_fuzz_dump_suffix() -> String {
+    let _ = dotenv::dotenv();
+    env::var(GT_FUZZ_DUMP_SUFFIX).unwrap_or_else(|_| ".repartition-metric-csv".to_string())
+}
+
+/// Returns max CSV in-memory buffer size.
+pub fn get_gt_fuzz_dump_buffer_max_bytes() -> usize {
+    let _ = dotenv::dotenv();
+    env::var(GT_FUZZ_DUMP_BUFFER_MAX_BYTES)
+        .ok()
+        .and_then(|value| {
+            value.parse::<usize>().ok().or_else(|| {
+                ReadableSize::from_str(&value)
+                    .ok()
+                    .map(|size| size.as_bytes() as usize)
+            })
+        })
+        .unwrap_or(8 * 1024 * 1024)
 }
 
 macro_rules! make_get_from_env_helper {

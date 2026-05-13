@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-
 mod client;
 pub mod client_manager;
 pub mod database;
@@ -34,7 +32,7 @@ pub use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use snafu::OptionExt;
 
 pub use self::client::Client;
-pub use self::database::Database;
+pub use self::database::{Database, OutputMetrics, OutputWithMetrics};
 pub use self::error::{Error, Result};
 use crate::error::{IllegalDatabaseResponseSnafu, ServerSnafu};
 

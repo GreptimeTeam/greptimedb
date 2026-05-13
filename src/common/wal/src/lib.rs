@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-
 use std::net::SocketAddr;
 
 use error::{EndpointIPV4NotFoundSnafu, ResolveEndpointSnafu, Result};
@@ -59,7 +57,7 @@ async fn resolve_to_ipv4_one<T: AsRef<str>>(endpoint: T) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use common_telemetry::warn;
     use rskafka::client::{Credentials, SaslConfig};

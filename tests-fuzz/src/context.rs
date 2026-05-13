@@ -376,6 +376,7 @@ mod tests {
                 table_name: expr.table_name.clone(),
                 target: partitions.last().unwrap().clone(),
                 into: vec![expected_exprs[2].clone(), expected_exprs[3].clone()],
+                wait: true,
             }))
             .unwrap();
         let partition_def = table_ctx.partition.as_ref().unwrap();
@@ -417,6 +418,7 @@ mod tests {
             .repartition(RepartitionExpr::Merge(MergePartitionExpr {
                 table_name: expr.table_name.clone(),
                 targets: vec![partitions[1].clone(), partitions[2].clone()],
+                wait: true,
             }))
             .unwrap();
         let partition_def = table_ctx.partition.as_ref().unwrap();

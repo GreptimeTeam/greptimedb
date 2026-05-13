@@ -753,7 +753,7 @@ impl RangeManipulateStream {
                 if ts <= curr_ts {
                     range_end = range_end.max(cursor);
                 } else {
-                    range_start_index = range_start_index.checked_sub(1usize).unwrap_or_default();
+                    range_start_index = range_start_index.saturating_sub(1usize);
                     break;
                 }
                 cursor += 1;

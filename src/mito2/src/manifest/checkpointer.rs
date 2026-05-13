@@ -16,7 +16,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use store_api::storage::RegionId;
 use store_api::{MIN_VERSION, ManifestVersion};
 
@@ -69,13 +69,17 @@ impl Inner {
             return;
         }
 
-        if let Err(e) = self.manifest_store.delete_until(version, true).await {
-            error!(e; "Failed to delete manifest actions until version {} for region {}", version, region_id);
-            return;
-        }
-
+        // Advance the in-memory checkpoint version as soon as the checkpoint file
+        // is durable. If the subsequent delta cleanup fails, the on-disk state is
+        // still consistent (the `_last_checkpoint` metadata points at the new
+        // checkpoint) and `maybe_do_checkpoint` must not re-checkpoint the same
+        // range.
         self.last_checkpoint_version
             .store(version, Ordering::Relaxed);
+
+        if let Err(e) = self.manifest_store.delete_until(version, true).await {
+            warn!(e; "Failed to delete manifest actions until version {} for region {}, leftover files will be ignored on recovery", version, region_id);
+        }
 
         info!(
             "Checkpoint for region {} success, version: {}",

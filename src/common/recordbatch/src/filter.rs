@@ -48,7 +48,7 @@ use crate::error::{ArrowComputeSnafu, Result, ToArrowScalarSnafu, UnsupportedOpe
 ///
 /// This struct contains normalized predicate expr. In the form of
 /// `col` `op` `literal` where the `col` is provided from input.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SimpleFilterEvaluator {
     /// Name of the referenced column.
     column_name: String,

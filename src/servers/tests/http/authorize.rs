@@ -17,14 +17,15 @@ use std::sync::Arc;
 use auth::UserProvider;
 use auth::tests::MockUserProvider;
 use axum::http;
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use hyper::{Request, StatusCode};
 use servers::http::AUTHORIZATION_HEADER;
 use servers::http::authorize::inner_auth;
 use session::context::QueryContext;
 
 async fn check_http_auth(header_key: &str) {
-    // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
-    let req = mock_http_request(header_key, Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
+    let req =
+        mock_http_request(header_key, Some(&basic_auth("username", "password")), None).unwrap();
     let req = inner_auth(None, req).await.unwrap();
     let ctx: &QueryContext = req.extensions().get().unwrap();
     let user_info = ctx.current_user();
@@ -34,8 +35,8 @@ async fn check_http_auth(header_key: &str) {
     // In mock user provider, right username:password == "greptime:greptime"
     let mock_user_provider = Some(Arc::new(MockUserProvider::default()) as Arc<dyn UserProvider>);
 
-    // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
-    let req = mock_http_request(header_key, Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="), None).unwrap();
+    let req =
+        mock_http_request(header_key, Some(&basic_auth("greptime", "greptime")), None).unwrap();
     let req = inner_auth(mock_user_provider.clone(), req).await.unwrap();
     let ctx: &QueryContext = req.extensions().get().unwrap();
     let user_info = ctx.current_user();
@@ -52,9 +53,8 @@ async fn check_http_auth(header_key: &str) {
         axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap().as_ref()
     );
 
-    // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
     let wrong_req =
-        mock_http_request(header_key, Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
+        mock_http_request(header_key, Some(&basic_auth("username", "password")), None).unwrap();
     let auth_res = inner_auth(mock_user_provider, wrong_req).await;
     assert!(auth_res.is_err());
     let resp = auth_res.unwrap_err();
@@ -78,12 +78,11 @@ async fn check_schema_validating(header: &str) {
     // In mock user provider, right username:password == "greptime:greptime"
     let mock_user_provider = Some(Arc::new(MockUserProvider::default()) as Arc<dyn UserProvider>);
 
-    // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
     // http://localhost/{http_api_version}/sql?db=greptime
     let version = servers::http::HTTP_API_VERSION;
     let req = mock_http_request(
         header,
-        Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="),
+        Some(&basic_auth("greptime", "greptime")),
         Some(format!("http://localhost/{version}/sql?db=public").as_str()),
     )
     .unwrap();
@@ -96,7 +95,7 @@ async fn check_schema_validating(header: &str) {
     // wrong database
     let req = mock_http_request(
         header,
-        Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="),
+        Some(&basic_auth("greptime", "greptime")),
         Some(format!("http://localhost/{version}/sql?db=wrong").as_str()),
     )
     .unwrap();
@@ -120,7 +119,6 @@ async fn check_auth_header(header_key: &str) {
     // In mock user provider, right username:password == "greptime:greptime"
     let mock_user_provider = Some(Arc::new(MockUserProvider::default()) as Arc<dyn UserProvider>);
 
-    // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
     // try auth path first
     let req = mock_http_request(header_key, None, None).unwrap();
     let auth_res = inner_auth(mock_user_provider.clone(), req).await;
@@ -142,6 +140,13 @@ async fn check_auth_header(header_key: &str) {
 async fn test_whitelist_no_auth() {
     check_auth_header(http::header::AUTHORIZATION.as_str()).await;
     check_auth_header(AUTHORIZATION_HEADER).await;
+}
+
+fn basic_auth(username: &str, password: &str) -> String {
+    format!(
+        "Basic {}",
+        BASE64_STANDARD.encode(format!("{username}:{password}"))
+    )
 }
 
 // copy from http::authorize

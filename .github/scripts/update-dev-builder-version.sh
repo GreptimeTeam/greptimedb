@@ -30,8 +30,11 @@ update_dev_builder_version() {
       --body "This PR updates the dev-builder image tag" \
       --base main \
       --head $BRANCH_NAME \
-      --reviewer zyy17 \
-      --reviewer daviderli614
+      --reviewer sunng87 \
+      --reviewer daviderli614 \
+      --reviewer killme2008 \
+      --reviewer evenyag \
+      --reviewer fengjiachun
 }
 
 update_dev_builder_version

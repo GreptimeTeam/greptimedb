@@ -23,7 +23,7 @@ use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_recordbatch::{EmptyRecordBatchStream, MemoryPermit, SendableRecordBatchStream};
+use common_recordbatch::{EmptyRecordBatchStream, QueryMemoryTracker, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
@@ -67,7 +67,7 @@ impl From<SettableRegionRoleState> for RegionRole {
             SettableRegionRoleState::Follower => RegionRole::Follower,
             SettableRegionRoleState::DowngradingLeader => RegionRole::DowngradingLeader,
             SettableRegionRoleState::Leader => RegionRole::Leader,
-            SettableRegionRoleState::StagingLeader => RegionRole::Leader, // Still a leader role
+            SettableRegionRoleState::StagingLeader => RegionRole::StagingLeader,
         }
     }
 }
@@ -210,6 +210,11 @@ pub enum RegionRole {
     Follower,
     // Writable region(mito2), Readonly region(file).
     Leader,
+    // Leader is in staging mode.
+    //
+    // This is leader-like and writable, but it follows the staging workflow
+    // semantics instead of a normal leader's steady state.
+    StagingLeader,
     // Leader is downgrading to follower.
     //
     // This state is used to prevent new write requests.
@@ -221,6 +226,7 @@ impl Display for RegionRole {
         match self {
             RegionRole::Follower => write!(f, "Follower"),
             RegionRole::Leader => write!(f, "Leader"),
+            RegionRole::StagingLeader => write!(f, "Leader(Staging)"),
             RegionRole::DowngradingLeader => write!(f, "Leader(Downgrading)"),
         }
     }
@@ -228,7 +234,7 @@ impl Display for RegionRole {
 
 impl RegionRole {
     pub fn writable(&self) -> bool {
-        matches!(self, RegionRole::Leader)
+        matches!(self, RegionRole::Leader | RegionRole::StagingLeader)
     }
 }
 
@@ -237,6 +243,7 @@ impl From<RegionRole> for PbRegionRole {
         match value {
             RegionRole::Follower => PbRegionRole::Follower,
             RegionRole::Leader => PbRegionRole::Leader,
+            RegionRole::StagingLeader => PbRegionRole::StagingLeader,
             RegionRole::DowngradingLeader => PbRegionRole::DowngradingLeader,
         }
     }
@@ -246,6 +253,7 @@ impl From<PbRegionRole> for RegionRole {
     fn from(value: PbRegionRole) -> Self {
         match value {
             PbRegionRole::Leader => RegionRole::Leader,
+            PbRegionRole::StagingLeader => RegionRole::StagingLeader,
             PbRegionRole::Follower => RegionRole::Follower,
             PbRegionRole::DowngradingLeader => RegionRole::DowngradingLeader,
         }
@@ -462,6 +470,10 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 
     /// Sets whether the scanner is reading a logical region.
     fn set_logical_region(&mut self, logical_region: bool);
+
+    fn snapshot_sequence(&self) -> Option<SequenceNumber> {
+        None
+    }
 }
 
 pub type RegionScannerRef = Box<dyn RegionScanner>;
@@ -886,8 +898,8 @@ pub trait RegionEngine: Send + Sync {
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError>;
 
-    /// Registers and returns a query memory permit.
-    fn register_query_memory_permit(&self) -> Option<Arc<MemoryPermit>> {
+    /// Returns the query memory tracker for scan execution.
+    fn query_memory_tracker(&self) -> Option<QueryMemoryTracker> {
         None
     }
 
@@ -945,6 +957,7 @@ pub struct SinglePartitionScanner {
     schema: SchemaRef,
     properties: ScannerProperties,
     metadata: RegionMetadataRef,
+    snapshot_sequence: Option<SequenceNumber>,
 }
 
 impl SinglePartitionScanner {
@@ -953,6 +966,7 @@ impl SinglePartitionScanner {
         stream: SendableRecordBatchStream,
         append_mode: bool,
         metadata: RegionMetadataRef,
+        snapshot_sequence: Option<SequenceNumber>,
     ) -> Self {
         let schema = stream.schema();
         Self {
@@ -960,6 +974,7 @@ impl SinglePartitionScanner {
             schema,
             properties: ScannerProperties::default().with_append_mode(append_mode),
             metadata,
+            snapshot_sequence,
         }
     }
 }
@@ -1018,6 +1033,10 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn set_logical_region(&mut self, logical_region: bool) {
         self.properties.set_logical_region(logical_region);
+    }
+
+    fn snapshot_sequence(&self) -> Option<SequenceNumber> {
+        self.snapshot_sequence
     }
 }
 

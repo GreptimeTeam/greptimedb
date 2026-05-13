@@ -287,7 +287,7 @@ impl WalPruneManager {
 
 #[cfg(test)]
 mod test {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::time::Duration;
 
     use common_meta::key::topic_name::TopicNameKey;

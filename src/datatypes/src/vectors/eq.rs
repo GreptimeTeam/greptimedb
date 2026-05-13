@@ -67,7 +67,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 .downcast_ref::<ConstantVector>()
                 .unwrap()
                 .inner(),
-            &**lhs
+            &**rhs
                 .as_any()
                 .downcast_ref::<ConstantVector>()
                 .unwrap()
@@ -257,6 +257,22 @@ mod tests {
         assert_vector_ref_eq(Arc::new(Decimal128Vector::from_values(vec![
             1i128, 2i128, 3i128,
         ])));
+    }
+
+    // Regression: second arm must downcast `rhs` (was `lhs`), or same-length ConstantVectors
+    // with different inners compare equal.
+    #[test]
+    fn test_constant_vector_eq_compares_both_inners() {
+        assert_vector_ref_ne(
+            Arc::new(ConstantVector::new(
+                Arc::new(BooleanVector::from(vec![true])),
+                5,
+            )),
+            Arc::new(ConstantVector::new(
+                Arc::new(BooleanVector::from(vec![false])),
+                5,
+            )),
+        );
     }
 
     #[test]

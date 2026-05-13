@@ -228,6 +228,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "STALE_CURSOR: incremental query stale, region: {}, given_seq: {}, min_readable_seq: {}, retry_hint: FALLBACK_FULL_RECOMPUTE",
+        region_id,
+        given_seq,
+        min_readable_seq
+    ))]
+    IncrementalQueryStale {
+        region_id: RegionId,
+        given_seq: u64,
+        min_readable_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Old manifest missing for region {}", region_id))]
     MissingOldManifest {
         region_id: RegionId,
@@ -612,15 +626,6 @@ pub enum Error {
     #[snafu(display("Empty manifest directory, manifest_dir: {}", manifest_dir,))]
     EmptyManifestDir {
         manifest_dir: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to read arrow record batch from parquet file {}", path))]
-    ArrowReader {
-        path: String,
-        #[snafu(source)]
-        error: ArrowError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1082,6 +1087,9 @@ pub enum Error {
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
+    #[snafu(display("Compaction is cancelled."))]
+    CompactionCancelled {},
+
     #[snafu(display("Compaction memory exhausted for region {region_id} (policy: {policy})",))]
     CompactionMemoryExhausted {
         region_id: RegionId,
@@ -1232,6 +1240,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to cast column"))]
+    CastColumn {
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1304,6 +1320,8 @@ impl ErrorExt for Error {
             | SerializePartitionExpr { .. }
             | InvalidSourceAndTargetRegion { .. } => StatusCode::InvalidArguments,
 
+            IncrementalQueryStale { .. } => StatusCode::RequestOutdated,
+
             RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
@@ -1319,6 +1337,7 @@ impl ErrorExt for Error {
             | ReadDataPart { .. }
             | BuildEntry { .. }
             | Metadata { .. }
+            | CastColumn { .. }
             | MitoManifestInfo { .. } => StatusCode::Internal,
 
             FetchManifests { source, .. } => source.status_code(),
@@ -1349,7 +1368,6 @@ impl ErrorExt for Error {
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
-            ArrowReader { .. } => StatusCode::StorageUnavailable,
             ConvertValue { source, .. } => source.status_code(),
             ApplyBloomFilterIndex { source, .. } => source.status_code(),
             InvalidPartitionExpr { source, .. } => source.status_code(),
@@ -1399,7 +1417,7 @@ impl ErrorExt for Error {
             #[cfg(feature = "vector_index")]
             VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
 
-            ManualCompactionOverride {} => StatusCode::Cancelled,
+            ManualCompactionOverride {} | CompactionCancelled {} => StatusCode::Cancelled,
 
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 

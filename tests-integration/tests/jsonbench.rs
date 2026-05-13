@@ -25,6 +25,8 @@ use servers::server::ServerHandlers;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 use tests_integration::test_util::execute_sql_and_expect;
 
+// TODO(LFC): Unignore the test when JSON2 is ready.
+#[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_load_jsonbench_data_by_pipeline() -> io::Result<()> {
     common_telemetry::init_default_ut_logging();
@@ -121,6 +123,8 @@ transform:
     assert!(response.starts_with(pattern));
 }
 
+// TODO(LFC): Unignore the test when JSON2 is ready.
+#[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_load_jsonbench_data_by_sql() -> io::Result<()> {
     common_telemetry::init_default_ut_logging();

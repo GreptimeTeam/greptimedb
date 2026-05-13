@@ -41,7 +41,7 @@ async fn test_engine_truncate_region_basic_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("truncate-basic").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -104,7 +104,7 @@ async fn test_engine_put_data_after_truncate_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("truncate-put").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -180,7 +180,7 @@ async fn test_engine_truncate_after_flush_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("truncate-flush").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -217,9 +217,7 @@ async fn test_engine_truncate_after_flush_with_format(flat_format: bool) {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -270,7 +268,7 @@ async fn test_engine_truncate_reopen_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("truncate-reopen").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -310,7 +308,7 @@ async fn test_engine_truncate_reopen_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -355,7 +353,7 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             Some(write_buffer_manager),
@@ -395,9 +393,7 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
         engine_cloned
             .handle_request(
                 region_id,
-                RegionRequest::Flush(RegionFlushRequest {
-                    row_group_size: None,
-                }),
+                RegionRequest::Flush(RegionFlushRequest::default()),
             )
             .await
     });
@@ -436,7 +432,7 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )

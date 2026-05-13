@@ -1388,7 +1388,7 @@ fn unset_column_skipping_index_options(
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;

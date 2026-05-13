@@ -508,42 +508,42 @@ Affected Rows: 0
 ALTER TABLE
     t1
 ADD
-    COLUMN `at` STRING;
+    COLUMN `at` STRING PRIMARY KEY;
 
 Affected Rows: 0
 
 ALTER TABLE
     t2
 ADD
-    COLUMN at3 STRING;
+    COLUMN at3 STRING PRIMARY KEY;
 
 Affected Rows: 0
 
 ALTER TABLE
     t2
 ADD
-    COLUMN `at` STRING;
+    COLUMN `at` STRING PRIMARY KEY;
 
 Affected Rows: 0
 
 ALTER TABLE
     t2
 ADD
-    COLUMN at2 STRING;
+    COLUMN at2 STRING PRIMARY KEY;
 
 Affected Rows: 0
 
 ALTER TABLE
     t2
 ADD
-    COLUMN at4 UINT16;
+    COLUMN at4 STRING PRIMARY KEY;
 
 Affected Rows: 0
 
 INSERT INTO
     t2
 VALUES
-    ("loc_1", "loc_2", "loc_3", 2, 'job1', 0, 1);
+    ("loc_1", "loc_2", "loc_3", "loc_4", 'job1', 0, 1);
 
 Affected Rows: 1
 
@@ -552,11 +552,11 @@ SELECT
 FROM
     t2;
 
-+-------+-------+-------+-----+------+---------------------+-----+
-| at    | at2   | at3   | at4 | job  | ts                  | val |
-+-------+-------+-------+-----+------+---------------------+-----+
-| loc_1 | loc_2 | loc_3 | 2   | job1 | 1970-01-01T00:00:00 | 1.0 |
-+-------+-------+-------+-----+------+---------------------+-----+
++-------+-------+-------+-------+------+---------------------+-----+
+| at    | at2   | at3   | at4   | job  | ts                  | val |
++-------+-------+-------+-------+------+---------------------+-----+
+| loc_1 | loc_2 | loc_3 | loc_4 | job1 | 1970-01-01T00:00:00 | 1.0 |
++-------+-------+-------+-------+------+---------------------+-----+
 
 DROP TABLE t1;
 

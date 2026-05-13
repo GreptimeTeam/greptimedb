@@ -62,6 +62,25 @@ impl GreptimedbManageResponse {
         }
     }
 
+    pub fn from_dashboard(name: String, execution_time_ms: u64) -> Self {
+        GreptimedbManageResponse {
+            manage_result: ManageResult::Dashboards {
+                dashboards: vec![DashboardOutput {
+                    name,
+                    definition: String::new(),
+                }],
+            },
+            execution_time_ms,
+        }
+    }
+
+    pub fn from_dashboards(dashboards: Vec<DashboardOutput>, execution_time_ms: u64) -> Self {
+        GreptimedbManageResponse {
+            manage_result: ManageResult::Dashboards { dashboards },
+            execution_time_ms,
+        }
+    }
+
     pub fn with_execution_time(mut self, execution_time: u64) -> Self {
         self.execution_time_ms = execution_time;
         self
@@ -77,6 +96,7 @@ impl GreptimedbManageResponse {
 pub enum ManageResult {
     Pipelines { pipelines: Vec<PipelineOutput> },
     Sql { sql: SqlOutput },
+    Dashboards { dashboards: Vec<DashboardOutput> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -85,6 +105,13 @@ pub struct PipelineOutput {
     version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pipeline: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DashboardOutput {
+    pub name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub definition: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

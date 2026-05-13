@@ -155,6 +155,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Trying to write to a read-only kv backend: {}", name))]
+    ReadOnlyKvBackend {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to get procedure state receiver, procedure id: {procedure_id}"))]
     ProcedureStateReceiver {
         procedure_id: ProcedureId,
@@ -334,6 +341,24 @@ pub enum Error {
     #[snafu(display("Unexpected: {err_msg}"))]
     Unexpected {
         err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Metasrv election has no leader at this moment"))]
+    ElectionNoLeader {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Metasrv election leader lease expired"))]
+    ElectionLeaderLeaseExpired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Metasrv election leader lease changed during election"))]
+    ElectionLeaderLeaseChanged {
         #[snafu(implicit)]
         location: Location,
     },
@@ -714,6 +739,16 @@ pub enum Error {
     #[snafu(display("Failed to get cache"))]
     GetCache { source: Arc<Error> },
 
+    #[snafu(display(
+        "Failed to get latest cache value after {} attempts due to concurrent invalidation",
+        attempts
+    ))]
+    GetLatestCacheRetryExceeded {
+        attempts: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "pg_kvbackend")]
     #[snafu(display("Failed to execute via Postgres, sql: {}", sql))]
     PostgresExecution {
@@ -737,6 +772,15 @@ pub enum Error {
     #[snafu(display("Failed to get Postgres connection from pool: {}", reason))]
     GetPostgresConnection {
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to get Postgres client"))]
+    GetPostgresClient {
+        #[snafu(source)]
+        error: deadpool::managed::PoolError<tokio_postgres::Error>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -796,6 +840,24 @@ pub enum Error {
     },
 
     #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to decode sql value"))]
+    DecodeSqlValue {
+        #[snafu(source)]
+        error: sqlx::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to acquire mysql client from pool"))]
+    AcquireMySqlClient {
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "mysql_kvbackend")]
     #[snafu(display("Failed to {} MySql transaction", operation))]
     MySqlTransaction {
         #[snafu(source)]
@@ -808,6 +870,15 @@ pub enum Error {
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     #[snafu(display("Rds transaction retry failed"))]
     RdsTransactionRetryFailed {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+    #[snafu(display("Sql execution timeout, sql: {}, duration: {:?}", sql, duration))]
+    SqlExecutionTimeout {
+        sql: String,
+        duration: std::time::Duration,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1063,8 +1134,12 @@ impl ErrorExt for Error {
             | ConnectEtcd { .. }
             | MoveValues { .. }
             | GetCache { .. }
+            | GetLatestCacheRetryExceeded { .. }
             | SerializeToJson { .. }
-            | DeserializeFromJson { .. } => StatusCode::Internal,
+            | DeserializeFromJson { .. }
+            | ElectionNoLeader { .. }
+            | ElectionLeaderLeaseExpired { .. }
+            | ElectionLeaderLeaseChanged { .. } => StatusCode::Internal,
 
             NoLeader { .. } => StatusCode::TableUnavailable,
             ValueNotExist { .. }
@@ -1078,7 +1153,7 @@ impl ErrorExt for Error {
             | ColumnIdMismatch { .. }
             | TimestampMismatch { .. } => StatusCode::Unexpected,
 
-            Unsupported { .. } => StatusCode::Unsupported,
+            Unsupported { .. } | ReadOnlyKvBackend { .. } => StatusCode::Unsupported,
             WriteObject { .. } | ReadObject { .. } => StatusCode::StorageUnavailable,
 
             SerdeJson { .. }
@@ -1187,15 +1262,18 @@ impl ErrorExt for Error {
             PostgresExecution { .. }
             | CreatePostgresPool { .. }
             | GetPostgresConnection { .. }
+            | GetPostgresClient { .. }
             | PostgresTransaction { .. }
             | PostgresTlsConfig { .. }
             | InvalidTlsConfig { .. } => StatusCode::Internal,
             #[cfg(feature = "mysql_kvbackend")]
-            MySqlExecution { .. } | CreateMySqlPool { .. } | MySqlTransaction { .. } => {
-                StatusCode::Internal
-            }
+            MySqlExecution { .. }
+            | CreateMySqlPool { .. }
+            | DecodeSqlValue { .. }
+            | AcquireMySqlClient { .. }
+            | MySqlTransaction { .. } => StatusCode::Internal,
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-            RdsTransactionRetryFailed { .. } => StatusCode::Internal,
+            RdsTransactionRetryFailed { .. } | SqlExecutionTimeout { .. } => StatusCode::Internal,
             DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }
@@ -1243,7 +1321,10 @@ impl Error {
 
     /// Determine whether it is a retry later type through [StatusCode]
     pub fn is_retry_later(&self) -> bool {
-        matches!(self, Error::RetryLater { .. })
+        matches!(
+            self,
+            Error::RetryLater { .. } | Error::GetLatestCacheRetryExceeded { .. }
+        )
     }
 
     /// Determine whether it needs to clean poisons.

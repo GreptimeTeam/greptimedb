@@ -17,8 +17,13 @@
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
+use arrow_schema::Schema;
 use common_time::Timestamp;
-use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt8Array, UInt64Array};
+use datatypes::arrow::array::{
+    ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringDictionaryBuilder,
+    TimestampMillisecondArray, UInt8Array, UInt64Array,
+};
+use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::ValueRef;
@@ -32,9 +37,10 @@ use store_api::metric_engine_consts::{
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{FileId, RegionId};
 
-use crate::read::{Batch, BatchBuilder, Source};
+use crate::read::{Batch, FlatSource};
 use crate::sst::file::{FileHandle, FileMeta};
-use crate::test_util::{VecBatchReader, new_batch_builder, new_noop_file_purger};
+use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+use crate::test_util::{new_batch_builder, new_noop_file_purger};
 
 /// Test region id.
 const REGION_ID: RegionId = RegionId::new(0, 0);
@@ -185,12 +191,6 @@ pub fn new_sparse_primary_key(
     buffer
 }
 
-/// Creates a [Source] from `batches`.
-pub fn new_source(batches: &[Batch]) -> Source {
-    let reader = VecBatchReader::new(batches);
-    Source::Reader(Box::new(reader))
-}
-
 /// Creates a SST file handle with provided file id
 pub fn sst_file_handle_with_file_id(file_id: FileId, start_ms: i64, end_ms: i64) -> FileHandle {
     let file_purger = new_noop_file_purger();
@@ -214,6 +214,7 @@ pub fn sst_file_handle_with_file_id(file_id: FileId, start_ms: i64, end_ms: i64)
             num_series: 0,
             sequence: None,
             partition_expr: None,
+            ..Default::default()
         },
         file_purger,
     )
@@ -246,34 +247,74 @@ pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
     new_batch_with_custom_sequence(tags, start, end, 1000)
 }
 
-pub fn new_batch_with_binary(tags: &[&str], start: usize, end: usize) -> Batch {
+/// Creates a flat format RecordBatch for testing.
+/// Similar to `new_batch_by_range` but returns a RecordBatch in flat format.
+pub fn new_record_batch_by_range(tags: &[&str], start: usize, end: usize) -> RecordBatch {
+    new_record_batch_with_custom_sequence(tags, start, end, 1000)
+}
+
+/// Creates a flat format RecordBatch for testing with a custom sequence.
+pub fn new_record_batch_with_custom_sequence(
+    tags: &[&str],
+    start: usize,
+    end: usize,
+    sequence: u64,
+) -> RecordBatch {
     assert!(end >= start);
+    let metadata = Arc::new(sst_region_metadata());
+    let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+
+    let num_rows = end - start;
+    let mut columns = Vec::new();
+
+    // Add primary key columns (tag_0, tag_1) as dictionary arrays
+    let mut tag_0_builder = StringDictionaryBuilder::<UInt32Type>::new();
+    let mut tag_1_builder = StringDictionaryBuilder::<UInt32Type>::new();
+
+    for _ in 0..num_rows {
+        tag_0_builder.append_value(tags[0]);
+        tag_1_builder.append_value(tags[1]);
+    }
+
+    columns.push(Arc::new(tag_0_builder.finish()) as ArrayRef);
+    columns.push(Arc::new(tag_1_builder.finish()) as ArrayRef);
+
+    // Add field column (field_0)
+    let field_values: Vec<u64> = (start..end).map(|v| v as u64).collect();
+    columns.push(Arc::new(UInt64Array::from(field_values)));
+
+    // Add time index column (ts)
+    let timestamps: Vec<i64> = (start..end).map(|v| v as i64).collect();
+    columns.push(Arc::new(TimestampMillisecondArray::from(timestamps)));
+
+    // Add encoded primary key column
     let pk = new_primary_key(tags);
-    let timestamps: Vec<_> = (start..end).map(|v| v as i64).collect();
-    let sequences = vec![1000; end - start];
-    let op_types = vec![OpType::Put; end - start];
+    let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+    for _ in 0..num_rows {
+        pk_builder.append(&pk).unwrap();
+    }
+    columns.push(Arc::new(pk_builder.finish()));
 
-    let field: Vec<_> = (start..end)
-        .map(|_v| "some data".as_bytes().to_vec())
-        .collect();
+    // Add sequence column
+    columns.push(Arc::new(UInt64Array::from_value(sequence, num_rows)));
 
-    let mut builder = BatchBuilder::new(pk);
-    builder
-        .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
-            timestamps.iter().copied(),
-        )))
-        .unwrap()
-        .sequences_array(Arc::new(UInt64Array::from_iter_values(
-            sequences.iter().copied(),
-        )))
-        .unwrap()
-        .op_types_array(Arc::new(UInt8Array::from_iter_values(
-            op_types.iter().map(|v| *v as u8),
-        )))
-        .unwrap()
-        .push_field_array(1, Arc::new(BinaryArray::from_iter_values(field)))
-        .unwrap();
-    builder.build().unwrap()
+    // Add op_type column
+    columns.push(Arc::new(UInt8Array::from_value(
+        OpType::Put as u8,
+        num_rows,
+    )));
+    RecordBatch::try_new(flat_schema, columns).unwrap()
+}
+
+/// Creates a FlatSource from flat format RecordBatches.
+pub(crate) fn new_flat_source_from_record_batches(batches: Vec<RecordBatch>) -> FlatSource {
+    FlatSource::new_iter(
+        batches
+            .first()
+            .map(|x| x.schema())
+            .unwrap_or_else(|| Arc::new(Schema::empty())),
+        Box::new(batches.into_iter().map(Ok)),
+    )
 }
 
 /// Creates a new region metadata for testing SSTs with binary datatype.

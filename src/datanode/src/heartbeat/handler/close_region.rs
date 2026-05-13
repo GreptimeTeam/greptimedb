@@ -47,7 +47,7 @@ impl InstructionHandler for CloseRegionsHandler {
         let results = join_all(futs).await;
 
         let mut errors = vec![];
-        for (region_id, result) in region_ids.into_iter().zip(results.into_iter()) {
+        for (region_id, result) in region_ids.into_iter().zip(results) {
             match result {
                 Ok(_) => (),
                 Err(error::Error::RegionNotFound { .. }) => {
@@ -79,7 +79,6 @@ mod tests {
     use std::assert_matches;
     use std::sync::Arc;
 
-    use assert_matches::assert_matches;
     use common_meta::RegionIdent;
     use common_meta::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
     use common_meta::heartbeat::mailbox::MessageMeta;

@@ -18,6 +18,7 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use axum::{Router, http};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use common_query::Output;
 use common_test_util::ports;
 use datafusion_expr::LogicalPlan;
@@ -33,6 +34,13 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 use tokio::sync::mpsc;
+
+fn basic_auth(username: &str, password: &str) -> String {
+    format!(
+        "basic {}",
+        BASE64_STANDARD.encode(format!("{username}:{password}"))
+    )
+}
 
 struct DummyInstance {
     tx: Arc<mpsc::Sender<(String, String)>>,
@@ -58,8 +66,8 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_exec_plan(
         &self,
-        _stmt: Option<Statement>,
         _plan: LogicalPlan,
+        _stmt: Option<Statement>,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
         unimplemented!()
@@ -146,7 +154,7 @@ async fn test_influxdb_write() {
         .body("monitor,host=host1 cpu=1.2 1664370459457010101")
         .header(
             http::header::AUTHORIZATION,
-            "basic Z3JlcHRpbWU6Z3JlcHRpbWU=",
+            basic_auth("greptime", "greptime"),
         )
         .send()
         .await;

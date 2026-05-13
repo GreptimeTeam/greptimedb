@@ -18,22 +18,31 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu};
+use common_recordbatch::error::{
+    ArrowComputeSnafu, DataTypesSnafu, ExternalSnafu, NewDfRecordBatchSnafu,
+};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
-use datatypes::arrow::datatypes::Field;
+use datatypes::arrow::array::Array;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
+use datatypes::value::Value;
 use datatypes::vectors::Helper;
+use datatypes::vectors::json::array::JsonArray;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
+use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
-use crate::read::projection::read_column_ids_from_projection;
+use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
+use crate::read::read_columns::ReadColumns;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
     FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
+    with_field_id,
 };
 
 /// Handles projection and converts batches in flat format with correct schema.
@@ -45,11 +54,11 @@ pub struct FlatProjectionMapper {
     metadata: RegionMetadataRef,
     /// Schema for converted [RecordBatch] to return.
     output_schema: SchemaRef,
-    /// Ids of columns to read from memtables and SSTs.
+    /// The columns to read from memtables and SSTs.
     /// The mapper won't deduplicate the column ids.
     ///
     /// Note that this doesn't contain the `__table_id` and `__tsid`.
-    read_column_ids: Vec<ColumnId>,
+    read_cols: ReadColumns,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
     ///
@@ -70,50 +79,48 @@ impl FlatProjectionMapper {
     /// empty `RecordBatch` and only use its row count in this query.
     pub fn new(
         metadata: &RegionMetadataRef,
-        projection: impl Iterator<Item = usize>,
+        projection: impl IntoIterator<Item = usize>,
     ) -> Result<Self> {
-        let projection: Vec<_> = projection.collect();
+        let projection: Vec<_> = projection.into_iter().collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
-        Self::new_with_read_columns(metadata, projection, read_column_ids)
+        let read_cols = ReadColumns::from_deduped_column_ids(read_column_ids);
+        Self::new_with_read_columns(metadata, projection, read_cols)
     }
 
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
         projection: Vec<usize>,
-        read_column_ids: Vec<ColumnId>,
+        read_cols: ReadColumns,
     ) -> Result<Self> {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
 
         // Output column schemas for the projection.
-        let mut column_schemas = Vec::with_capacity(projection.len());
+        let mut col_schemas = Vec::with_capacity(projection.len());
         // Column ids of the output projection without deduplication.
-        let mut output_column_ids = Vec::with_capacity(projection.len());
+        let mut output_col_ids = Vec::with_capacity(projection.len());
         for idx in &projection {
-            // For each projection index, we get the column id for projection.
-            let column =
-                metadata
-                    .column_metadatas
-                    .get(*idx)
-                    .with_context(|| InvalidRequestSnafu {
-                        region_id: metadata.region_id,
-                        reason: format!("projection index {} is out of bound", idx),
-                    })?;
-
-            output_column_ids.push(column.column_id);
-            // Safety: idx is valid.
-            column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
+            let col = metadata
+                .column_metadatas
+                .get(*idx)
+                .with_context(|| InvalidRequestSnafu {
+                    region_id: metadata.region_id,
+                    reason: format!("projection index {} is out of bound", idx),
+                })?;
+            output_col_ids.push(col.column_id);
+            col_schemas.push(col.column_schema.clone());
         }
 
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(metadata);
+
         // TODO(yingwen): Support different flat schema options.
         let format_projection = FormatProjection::compute_format_projection(
             &id_to_index,
             // All columns with internal columns.
             metadata.column_metadatas.len() + 3,
-            read_column_ids.iter().copied(),
+            read_cols.clone(),
         );
 
         let batch_schema = flat_projected_columns(metadata, &format_projection);
@@ -126,13 +133,13 @@ impl FlatProjectionMapper {
             Arc::new(Schema::new(vec![]))
         } else {
             // Safety: Columns come from existing schema.
-            Arc::new(Schema::new(column_schemas))
+            Arc::new(Schema::new(col_schemas))
         };
 
         let batch_indices = if is_empty_projection {
             vec![]
         } else {
-            output_column_ids
+            output_col_ids
                 .iter()
                 .map(|id| {
                     // Safety: The map is computed from the read projection.
@@ -160,7 +167,7 @@ impl FlatProjectionMapper {
         Ok(FlatProjectionMapper {
             metadata: metadata.clone(),
             output_schema,
-            read_column_ids,
+            read_cols,
             batch_schema,
             is_empty_projection,
             batch_indices,
@@ -177,11 +184,9 @@ impl FlatProjectionMapper {
     pub(crate) fn metadata(&self) -> &RegionMetadataRef {
         &self.metadata
     }
-
-    /// Returns ids of projected columns that we need to read
-    /// from memtables and SSTs.
-    pub(crate) fn column_ids(&self) -> &[ColumnId] {
-        &self.read_column_ids
+    /// Returns projected columns that we need to read from memtables and SSTs.
+    pub(crate) fn read_columns(&self) -> &ReadColumns {
+        &self.read_cols
     }
 
     /// Returns the field column start index in output batch.
@@ -237,9 +242,8 @@ impl FlatProjectionMapper {
         self.output_schema.clone()
     }
 
-    /// Returns an empty [RecordBatch].
-    pub(crate) fn empty_record_batch(&self) -> RecordBatch {
-        RecordBatch::new_empty(self.output_schema.clone())
+    pub(crate) fn with_output_schema(&mut self, schema: SchemaRef) {
+        self.output_schema = schema;
     }
 
     /// Converts a flat format [RecordBatch] to a normal [RecordBatch].
@@ -248,12 +252,63 @@ impl FlatProjectionMapper {
     pub(crate) fn convert(
         &self,
         batch: &datatypes::arrow::record_batch::RecordBatch,
+        cache_strategy: &CacheStrategy,
     ) -> common_recordbatch::error::Result<RecordBatch> {
         if self.is_empty_projection {
             return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
         }
-        let columns = self.project_vectors(batch)?;
-        RecordBatch::new(self.output_schema.clone(), columns)
+        // Construct output record batch directly from Arrow arrays to avoid
+        // Arrow -> Vector -> Arrow roundtrips in the hot path.
+        let mut arrays = Vec::with_capacity(self.output_schema.num_columns());
+        for (output_idx, index) in self.batch_indices.iter().enumerate() {
+            let mut array = batch.column(*index).clone();
+            // Cast dictionary values to the target type.
+            if let ArrowDataType::Dictionary(_key_type, value_type) = array.data_type() {
+                // When a string dictionary column contains only a single value, reuse a cached
+                // repeated vector to avoid repeatedly expanding the dictionary.
+                if let Some(dict_array) = single_value_string_dictionary(
+                    &array,
+                    &self.output_schema.column_schemas()[output_idx].data_type,
+                    value_type.as_ref(),
+                ) {
+                    let dict_values = dict_array.values();
+                    let value = if dict_values.is_null(0) {
+                        Value::Null
+                    } else {
+                        Value::from(datatypes::arrow_array::string_array_value(dict_values, 0))
+                    };
+
+                    let repeated = repeated_vector_with_cache(
+                        &self.output_schema.column_schemas()[output_idx].data_type,
+                        &value,
+                        batch.num_rows(),
+                        cache_strategy,
+                    )?;
+                    array = repeated.to_arrow_array();
+                } else {
+                    let casted = datatypes::arrow::compute::cast(&array, value_type)
+                        .context(ArrowComputeSnafu)?;
+                    array = casted;
+                }
+            }
+
+            let field = &self.output_schema.arrow_schema().fields()[output_idx];
+            if is_json_extension_type(field) {
+                array = JsonArray::from(&array)
+                    .try_align(field.data_type())
+                    .context(DataTypesSnafu)?;
+            }
+
+            arrays.push(array);
+        }
+
+        let df_record_batch =
+            DfRecordBatch::try_new(self.output_schema.arrow_schema().clone(), arrays)
+                .context(NewDfRecordBatchSnafu)?;
+        Ok(RecordBatch::from_df_record_batch(
+            self.output_schema.clone(),
+            df_record_batch,
+        ))
     }
 
     /// Projects columns from the input batch and converts them into vectors.
@@ -279,6 +334,28 @@ impl FlatProjectionMapper {
         }
         Ok(columns)
     }
+}
+
+fn single_value_string_dictionary<'a>(
+    array: &'a Arc<dyn Array>,
+    output_type: &ConcreteDataType,
+    value_type: &ArrowDataType,
+) -> Option<&'a datatypes::arrow::array::DictionaryArray<datatypes::arrow::datatypes::UInt32Type>> {
+    if !matches!(
+        value_type,
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View
+    ) || !output_type.is_string()
+    {
+        return None;
+    }
+
+    let dict_array = array
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::DictionaryArray<
+            datatypes::arrow::datatypes::UInt32Type,
+        >>()?;
+
+    (dict_array.values().len() == 1 && dict_array.null_count() == 0).then_some(dict_array)
 }
 
 /// Returns ids and datatypes of columns of the output batch after applying the `projection`.
@@ -332,17 +409,20 @@ pub(crate) fn compute_input_arrow_schema(
     let mut new_fields = Vec::with_capacity(batch_schema.len() + 3);
     for (column_id, _) in batch_schema {
         let column_metadata = metadata.column_by_id(*column_id).unwrap();
-        let field = Arc::new(Field::new(
+        let field = Field::new(
             &column_metadata.column_schema.name,
             column_metadata.column_schema.data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
-        ));
-        let field = if column_metadata.semantic_type == SemanticType::Tag {
-            tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, &field)
+        );
+        let field = with_field_id(field, *column_id);
+        if column_metadata.semantic_type == SemanticType::Tag {
+            new_fields.push(tag_maybe_to_dictionary_field(
+                &column_metadata.column_schema.data_type,
+                &Arc::new(field),
+            ));
         } else {
-            field
-        };
-        new_fields.push(field);
+            new_fields.push(Arc::new(field));
+        }
     }
     new_fields.extend_from_slice(&internal_fields());
 
@@ -372,15 +452,9 @@ impl CompactionProjectionMapper {
             .chain([metadata.time_index_column_pos()])
             .collect::<Vec<_>>();
 
-        let mapper = FlatProjectionMapper::new_with_read_columns(
-            metadata,
-            projection,
-            metadata
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .collect(),
-        )?;
+        let read_col_ids = metadata.column_metadatas.iter().map(|col| col.column_id);
+        let read_cols = ReadColumns::from_deduped_column_ids(read_col_ids);
+        let mapper = FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols)?;
         let assembler = DfBatchAssembler::new(mapper.output_schema());
 
         Ok(Self { mapper, assembler })

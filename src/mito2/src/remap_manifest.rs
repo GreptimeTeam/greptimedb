@@ -436,6 +436,7 @@ mod tests {
             sequence: NonZeroU64::new(1),
             partition_expr,
             num_series: 1,
+            ..Default::default()
         }
     }
 

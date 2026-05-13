@@ -32,7 +32,7 @@ pub struct LeaderHandler {
 impl LeaderHandler {
     async fn get_leader(&self) -> Result<Option<String>> {
         if let Some(election) = &self.election {
-            let leader_addr = election.leader().await?.0;
+            let leader_addr = election.leader().await.context(error::KvBackendSnafu)?.0;
             return Ok(Some(leader_addr));
         }
         Ok(None)

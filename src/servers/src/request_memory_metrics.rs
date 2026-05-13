@@ -34,7 +34,7 @@ impl MemoryMetrics for RequestMemoryMetrics {
         REQUEST_MEMORY_IN_USE.set(bytes);
     }
 
-    fn inc_rejected(&self, reason: &str) {
+    fn inc_exhausted(&self, reason: &str) {
         REQUEST_MEMORY_REJECTED.with_label_values(&[reason]).inc();
     }
 }

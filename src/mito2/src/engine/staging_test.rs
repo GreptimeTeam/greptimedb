@@ -14,10 +14,9 @@
 
 //! Integration tests for staging state functionality.
 
-use std::assert_matches::assert_matches;
-use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{assert_matches, fs};
 
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
@@ -27,8 +26,8 @@ use common_recordbatch::RecordBatches;
 use datatypes::value::Value;
 use object_store::Buffer;
 use object_store::layers::mock::{
-    Entry, Error as MockError, ErrorKind, List, Lister, Metadata, MockLayerBuilder,
-    Result as MockResult, Write, Writer,
+    Delete, Deleter, Entry, Error as MockError, ErrorKind, List, Lister, Metadata,
+    MockLayerBuilder, OpDelete, Result as MockResult, Write, Writer,
 };
 use partition::expr::{PartitionExpr, col};
 use store_api::region_engine::{
@@ -73,7 +72,7 @@ async fn test_staging_state_integration_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -131,7 +130,7 @@ async fn test_staging_blocks_alter_operations_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -172,7 +171,7 @@ async fn test_staging_blocks_truncate_operations_with_format(flat_format: bool) 
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -309,7 +308,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -403,9 +402,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -506,7 +503,7 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -548,7 +545,7 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
+    let staging_partition_info = region.manifest_ctx.staging_partition_info();
     assert_eq!(
         staging_partition_info
             .unwrap()
@@ -611,9 +608,7 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -658,7 +653,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -704,9 +699,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -721,9 +714,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -884,7 +875,7 @@ async fn test_enter_staging_writes_partition_expr_change_action_with_format(flat
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -948,7 +939,7 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -1033,7 +1024,7 @@ async fn test_write_stall_on_enter_staging_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -1153,11 +1144,28 @@ impl Write for MockWriter {
     }
 }
 
+struct MockDeleter {
+    inner: Deleter,
+}
+
+impl Delete for MockDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        if path.contains("staging") {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock error"));
+        }
+        self.inner.delete(path, args).await
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        self.inner.close().await
+    }
+}
+
 async fn test_enter_staging_error(env: &mut TestEnv, flat_format: bool) {
     let partition_expr = default_partition_expr();
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -1202,6 +1210,7 @@ async fn test_enter_staging_clean_staging_manifest_error_with_format(flat_format
                 inner: lister,
             })
         }))
+        .deleter_factory(Arc::new(|deleter| Box::new(MockDeleter { inner: deleter })))
         .build()
         .unwrap();
     let mut env = TestEnv::new().await.with_mock_layer(mock_layer);

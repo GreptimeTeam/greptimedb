@@ -208,8 +208,8 @@ impl Inner {
                         }
                     }
                 }
-            } else if let Err(err) = leader_provider.ask_leader().await {
-                return Err(err);
+            } else {
+                leader_provider.ask_leader().await?;
             }
         }
 

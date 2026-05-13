@@ -47,7 +47,7 @@ use crate::metrics::*;
 
 /// Try to write multiple output to the writer if possible.
 pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
-    w: QueryResultWriter<'_, W>,
+    mut writer: QueryResultWriter<'_, W>,
     query_context: QueryContextRef,
     session: SessionRef,
     outputs: Vec<Result<Output>>,
@@ -56,21 +56,87 @@ pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
         session.add_warning(warning);
     }
 
-    let mut writer = Some(MysqlResultWriter::new(
-        w,
-        query_context.clone(),
-        session.clone(),
-    ));
-    for output in outputs {
-        let result_writer = writer.take().context(error::InternalSnafu {
-            err_msg: "Sending multiple result set is unsupported",
-        })?;
-        writer = result_writer.try_write_one(output).await?;
+    enum Response {
+        ResultSet {
+            columns: Vec<Column>,
+            stream: SendableRecordBatchStream,
+        },
+        AffectedRows(usize),
     }
 
-    if let Some(result_writer) = writer {
-        result_writer.finish().await?;
+    let mut responses = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        match output {
+            Ok(x) => {
+                let output = match x.data {
+                    OutputData::Stream(stream) => either::Left(stream),
+                    OutputData::RecordBatches(record_batches) => {
+                        either::Left(record_batches.as_stream())
+                    }
+                    OutputData::AffectedRows(rows) => either::Right(rows),
+                };
+                responses.push(match output {
+                    either::Left(stream) => {
+                        let schema = stream.schema();
+                        let columns = match create_mysql_column_def(&schema) {
+                            Ok(columns) => columns,
+                            Err(e) => {
+                                MysqlResultWriter::write_query_error(
+                                    e,
+                                    writer,
+                                    query_context.clone(),
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                        };
+                        Response::ResultSet { columns, stream }
+                    }
+                    either::Right(rows) => Response::AffectedRows(rows),
+                });
+            }
+            Err(e) => {
+                MysqlResultWriter::write_query_error(e, writer, query_context.clone()).await?;
+                return Ok(());
+            }
+        }
     }
+
+    for response in &mut responses {
+        writer = match response {
+            Response::ResultSet { columns, stream } => {
+                let mut row_writer = writer.start(columns).await?;
+                while let Some(record_batch) = stream.next().await {
+                    match record_batch {
+                        Ok(record_batch) => {
+                            if let Err(e) = MysqlResultWriter::write_recordbatch(
+                                &mut row_writer,
+                                record_batch,
+                                query_context.clone(),
+                            )
+                            .await
+                            {
+                                let (kind, err) = handle_err(e, query_context);
+                                row_writer.finish_error(kind, &err.as_bytes()).await?;
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            let (kind, err) = handle_err(e, query_context);
+                            row_writer.finish_error(kind, &err.as_bytes()).await?;
+                            return Ok(());
+                        }
+                    }
+                }
+                row_writer.finish_one().await?
+            }
+            Response::AffectedRows(rows) => {
+                MysqlResultWriter::write_affected_rows(writer, *rows, &session).await?
+            }
+        }
+    }
+
+    writer.no_more_results().await?;
     Ok(())
 }
 
@@ -97,75 +163,10 @@ pub fn handle_err(e: impl ErrorExt, query_ctx: QueryContextRef) -> (ErrorKind, S
     (kind, err_msg)
 }
 
-struct QueryResult {
-    schema: SchemaRef,
-    stream: SendableRecordBatchStream,
-}
+struct MysqlResultWriter;
 
-pub struct MysqlResultWriter<'a, W: AsyncWrite + Unpin> {
-    writer: QueryResultWriter<'a, W>,
-    query_context: QueryContextRef,
-    session: SessionRef,
-}
-
-impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
-    pub fn new(
-        writer: QueryResultWriter<'a, W>,
-        query_context: QueryContextRef,
-        session: SessionRef,
-    ) -> MysqlResultWriter<'a, W> {
-        MysqlResultWriter::<'a, W> {
-            writer,
-            query_context,
-            session,
-        }
-    }
-
-    /// Try to write one result set. If there are more than one result set, return `Some`.
-    pub async fn try_write_one(
-        self,
-        output: Result<Output>,
-    ) -> io::Result<Option<MysqlResultWriter<'a, W>>> {
-        // We don't support sending multiple query result because the RowWriter's lifetime is bound to
-        // a local variable.
-        match output {
-            Ok(output) => match output.data {
-                OutputData::Stream(stream) => {
-                    let query_result = QueryResult {
-                        schema: stream.schema(),
-                        stream,
-                    };
-                    Self::write_query_result(query_result, self.writer, self.query_context).await?;
-                }
-                OutputData::RecordBatches(recordbatches) => {
-                    let query_result = QueryResult {
-                        schema: recordbatches.schema(),
-                        stream: recordbatches.as_stream(),
-                    };
-                    Self::write_query_result(query_result, self.writer, self.query_context).await?;
-                }
-                OutputData::AffectedRows(rows) => {
-                    let next_writer =
-                        Self::write_affected_rows(self.writer, rows, &self.session).await?;
-                    return Ok(Some(MysqlResultWriter::new(
-                        next_writer,
-                        self.query_context,
-                        self.session,
-                    )));
-                }
-            },
-            Err(error) => Self::write_query_error(error, self.writer, self.query_context).await?,
-        }
-        Ok(None)
-    }
-
-    /// Indicate no more result set to write. No need to call this if there is only one result set.
-    pub async fn finish(self) -> Result<()> {
-        self.writer.no_more_results().await?;
-        Ok(())
-    }
-
-    async fn write_affected_rows(
+impl MysqlResultWriter {
+    async fn write_affected_rows<'a, W: AsyncWrite + Unpin>(
         w: QueryResultWriter<'a, W>,
         rows: usize,
         session: &SessionRef,
@@ -182,54 +183,12 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         Ok(next_writer)
     }
 
-    async fn write_query_result(
-        mut query_result: QueryResult,
-        writer: QueryResultWriter<'a, W>,
-        query_context: QueryContextRef,
-    ) -> io::Result<()> {
-        match create_mysql_column_def(&query_result.schema) {
-            Ok(column_def) => {
-                // The RowWriter's lifetime is bound to `column_def` thus we can't use finish_one()
-                // to return a new QueryResultWriter.
-                let mut row_writer = writer.start(&column_def).await?;
-                while let Some(record_batch) = query_result.stream.next().await {
-                    match record_batch {
-                        Ok(record_batch) => {
-                            if let Err(e) = Self::write_recordbatch(
-                                &mut row_writer,
-                                record_batch,
-                                query_context.clone(),
-                                &query_result.schema,
-                            )
-                            .await
-                            {
-                                let (kind, err) = handle_err(e, query_context);
-                                row_writer.finish_error(kind, &err.as_bytes()).await?;
-                                return Ok(());
-                            }
-                        }
-                        Err(e) => {
-                            let (kind, err) = handle_err(e, query_context);
-                            debug!("Failed to get result, kind: {:?}, err: {}", kind, err);
-                            row_writer.finish_error(kind, &err.as_bytes()).await?;
-
-                            return Ok(());
-                        }
-                    }
-                }
-                row_writer.finish().await?;
-                Ok(())
-            }
-            Err(error) => Self::write_query_error(error, writer, query_context).await,
-        }
-    }
-
-    async fn write_recordbatch(
-        row_writer: &mut RowWriter<'_, W>,
+    async fn write_recordbatch<W: AsyncWrite + Unpin>(
+        row_writer: &mut RowWriter<'_, '_, W>,
         record_batch: RecordBatch,
         query_context: QueryContextRef,
-        schema: &SchemaRef,
     ) -> Result<()> {
+        let schema = record_batch.schema.clone();
         let record_batch = record_batch.into_df_record_batch();
         for i in 0..record_batch.num_rows() {
             for (j, column) in record_batch.columns().iter().enumerate() {
@@ -358,7 +317,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         Ok(())
     }
 
-    async fn write_query_error(
+    async fn write_query_error<'a, W: AsyncWrite + Unpin>(
         error: impl ErrorExt,
         w: QueryResultWriter<'a, W>,
         query_context: QueryContextRef,

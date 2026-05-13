@@ -141,7 +141,7 @@ where
             results.push((self.func)(v0, v1)?);
         }
 
-        let results = ScalarValue::iter_to_array(results.into_iter())?;
+        let results = ScalarValue::iter_to_array(results)?;
         Ok(ColumnarValue::Array(results))
     }
 }
@@ -200,7 +200,7 @@ where
             }
         }
 
-        let results = ScalarValue::iter_to_array(results.into_iter())?;
+        let results = ScalarValue::iter_to_array(results)?;
         Ok(ColumnarValue::Array(results))
     }
 }
@@ -232,7 +232,7 @@ where
             results.push((self.func)(&v)?);
         }
 
-        let results = ScalarValue::iter_to_array(results.into_iter())?;
+        let results = ScalarValue::iter_to_array(results)?;
         Ok(ColumnarValue::Array(results))
     }
 }

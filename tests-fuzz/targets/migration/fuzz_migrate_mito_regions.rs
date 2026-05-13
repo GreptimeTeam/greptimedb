@@ -261,13 +261,18 @@ async fn migrate_regions(ctx: &FuzzContext, migrations: &[Migration]) -> Result<
                     {
                         let output = procedure_state(&greptime, &procedure_id).await;
                         info!("Checking procedure: {procedure_id}, output: {output}");
-                        (fetch_partition(&greptime, region_id).await.unwrap(), output)
+                        (fetch_partition(&greptime, region_id).await.ok(), output)
                     }
                 })
             },
             |(partition, output)| {
-                info!("Region: {region_id},  datanode: {}", partition.datanode_id);
-                partition.datanode_id == migration.to_peer && output.contains("Done")
+                if let Some(partition) = partition {
+                    info!("Region: {region_id},  datanode: {}", partition.datanode_id);
+                    partition.datanode_id == migration.to_peer && output.contains("Done")
+                } else {
+                    info!("Region: {region_id}, partition not found yet");
+                    false
+                }
             },
             Duration::from_secs(5),
         )

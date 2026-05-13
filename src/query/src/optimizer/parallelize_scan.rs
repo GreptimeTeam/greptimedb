@@ -139,7 +139,7 @@ impl ParallelizeScan {
         }
 
         // Sort ranges by number of rows in descending order.
-        ranges.sort_by(|a, b| b.num_rows.cmp(&a.num_rows));
+        ranges.sort_by_key(|b| std::cmp::Reverse(b.num_rows));
         let mut partition_ranges = vec![vec![]; expected_partition_num];
 
         #[derive(Eq, PartialEq)]

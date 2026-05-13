@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Display;
 use std::net::SocketAddr;
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -75,10 +75,11 @@ use crate::http::result::null_result::NullResponse;
 use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
+use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, JaegerQueryHandlerRef, LogQueryHandlerRef,
+    DashboardHandlerRef, InfluxdbLineProtocolHandlerRef, JaegerQueryHandlerRef, LogQueryHandlerRef,
     OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
     PromStoreProtocolHandlerRef,
 };
@@ -112,8 +113,8 @@ pub mod utils;
 use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
 
+mod client_ip;
 use crate::prom_remote_write::validation::PromValidationMode;
-
 mod hints;
 mod read_preference;
 #[cfg(any(test, feature = "testing"))]
@@ -128,7 +129,8 @@ const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
-pub static PUBLIC_APIS: [&str; 3] = ["/v1/influxdb/ping", "/v1/influxdb/health", "/v1/health"];
+pub static PUBLIC_API_PREFIX: [&str; 3] =
+    ["/v1/influxdb/ping", "/v1/influxdb/health", "/v1/health"];
 
 #[derive(Default)]
 pub struct HttpServer {
@@ -507,6 +509,11 @@ pub struct GreptimeOptionsConfigState {
     pub greptime_config_options: String,
 }
 
+#[derive(Clone)]
+pub struct DashboardState {
+    pub handler: DashboardHandlerRef,
+}
+
 pub struct HttpServerBuilder {
     options: HttpOptions,
     plugins: Plugins,
@@ -580,12 +587,14 @@ impl HttpServerBuilder {
         pipeline_handler: Option<PipelineHandlerRef>,
         prom_store_with_metric_engine: bool,
         prom_validation_mode: PromValidationMode,
+        pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
     ) -> Self {
         let state = PromStoreState {
             prom_store_handler: handler,
             pipeline_handler,
             prom_store_with_metric_engine,
             prom_validation_mode,
+            pending_rows_batcher,
         };
 
         Self {
@@ -703,6 +712,16 @@ impl HttpServerBuilder {
         }
     }
 
+    pub fn with_dashboard_handler(self, handler: DashboardHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
+                &format!("/{HTTP_API_VERSION}/dashboards"),
+                HttpServer::route_dashboard(handler),
+            ),
+            ..self
+        }
+    }
+
     pub fn with_extra_router(self, router: Router) -> Self {
         Self {
             router: self.router.merge(router),
@@ -746,6 +765,7 @@ impl HttpServer {
         };
 
         router = router
+            .route("/", routing::get(handler::index))
             .route(
                 "/health",
                 routing::get(handler::health).post(handler::health),
@@ -868,6 +888,7 @@ impl HttpServer {
                         authorize::check_http_auth,
                     ))
                     .layer(middleware::from_fn(hints::extract_hints))
+                    .layer(middleware::from_fn(client_ip::log_error_with_client_ip))
                     .layer(middleware::from_fn(
                         read_preference::extract_read_preference,
                     )),
@@ -1169,6 +1190,26 @@ impl HttpServer {
             )
             .with_state(handler)
     }
+
+    #[cfg(feature = "dashboard")]
+    fn route_dashboard<S>(handler: DashboardHandlerRef) -> Router<S> {
+        use crate::http::dashboard::{add_dashboard, delete_dashboard, list_dashboards};
+
+        Router::new()
+            .route("/", routing::get(list_dashboards))
+            .route("/{dashboard_name}", routing::post(add_dashboard))
+            .route("/{dashboard_name}", routing::delete(delete_dashboard))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(DashboardState { handler })
+    }
+
+    #[cfg(not(feature = "dashboard"))]
+    fn route_dashboard<S>(handler: DashboardHandlerRef) -> Router<S> {
+        Router::new().with_state(DashboardState { handler })
+    }
 }
 
 pub const HTTP_SERVER: &str = "HTTP_SERVER";
@@ -1212,7 +1253,10 @@ impl Server for HttpServer {
                         error!(e; "Failed to set TCP_NODELAY on incoming connection");
                     }
                 });
-            let serve = axum::serve(listener, app.into_make_service());
+            let serve = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            );
 
             // FIXME(yingwen): Support keepalive.
             // See:
@@ -1270,7 +1314,7 @@ mod test {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    use arrow_ipc::reader::FileReader;
+    use arrow_ipc::reader::StreamReader;
     use arrow_schema::DataType;
     use axum::handler::Handler;
     use axum::http::StatusCode;
@@ -1310,8 +1354,8 @@ mod test {
 
         async fn do_exec_plan(
             &self,
-            _stmt: Option<Statement>,
             _plan: LogicalPlan,
+            _stmt: Option<Statement>,
             _query_ctx: QueryContextRef,
         ) -> Result<Output> {
             unimplemented!()
@@ -1642,8 +1686,8 @@ mod test {
 
                 HttpResponse::Arrow(resp) => {
                     let output = resp.data;
-                    let mut reader =
-                        FileReader::try_new(Cursor::new(output), None).expect("Arrow reader error");
+                    let mut reader = StreamReader::try_new(Cursor::new(output), None)
+                        .expect("Arrow reader error");
                     let schema = reader.schema();
                     assert_eq!(schema.fields[0].name(), "numbers");
                     assert_eq!(schema.fields[0].data_type(), &DataType::UInt32);

@@ -57,7 +57,7 @@ fn merge_multiple_values(
         let (key, value) = pairs.into_iter().next().unwrap();
         let prefix = KeySet::with_prefix(&key);
         let mut parsed_segments = parse_segments(segments, &prefix)?;
-        parsed_segments.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        parsed_segments.sort_unstable_by_key(|a| a.0);
 
         // Safety: `parsed_segments` must larger than 0.
         let segment_num = parsed_segments.last().unwrap().0;
@@ -133,7 +133,7 @@ pub fn multiple_value_stream(
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use futures::TryStreamExt;
     use futures::stream::{self};

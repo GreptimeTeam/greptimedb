@@ -35,7 +35,7 @@ mod duration;
 mod eq;
 mod helper;
 mod interval;
-pub(crate) mod json;
+pub mod json;
 mod list;
 mod null;
 pub(crate) mod operations;
@@ -307,10 +307,11 @@ macro_rules! impl_extend_for_builder {
     }};
 }
 
-pub(crate) use {
-    impl_extend_for_builder, impl_get_for_vector, impl_get_ref_for_vector,
-    impl_try_from_arrow_array_for_vector, impl_validity_for_vector,
-};
+pub(crate) use impl_extend_for_builder;
+pub(crate) use impl_get_for_vector;
+pub(crate) use impl_get_ref_for_vector;
+pub(crate) use impl_try_from_arrow_array_for_vector;
+pub(crate) use impl_validity_for_vector;
 
 #[cfg(test)]
 pub mod tests {

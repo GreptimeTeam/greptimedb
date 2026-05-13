@@ -199,57 +199,53 @@ impl TimeFilter {
         let mut start_dt = None;
         let mut end_dt = None;
 
-        if self.start.is_some() && self.end.is_none() && self.span.is_none() {
-            // Only 'start' is provided
-            let s = self.start.as_ref().unwrap();
-            let (start, end_opt) = Self::parse_datetime(s)?;
-            if end_opt.is_none() {
+        match (&self.start, &self.end, &self.span) {
+            (Some(start), None, None) => {
+                let (start, end_opt) = Self::parse_datetime(start)?;
+                if end_opt.is_none() {
+                    return Err(InvalidTimeFilterSnafu {
+                        filter: self.clone(),
+                    }
+                    .build());
+                }
+                start_dt = Some(start);
+                end_dt = end_opt;
+            }
+            (Some(start), Some(end), _) => {
+                // Both 'start' and 'end' are provided
+                let (start, _) = Self::parse_datetime(start)?;
+                let (end, _) = Self::parse_datetime(end)?;
+                start_dt = Some(start);
+                end_dt = Some(end);
+            }
+            (Some(start), None, Some(span)) => {
+                let (start, _) = Self::parse_datetime(start)?;
+                let span = Self::parse_span(span)?;
+                let end = start + span;
+                start_dt = Some(start);
+                end_dt = Some(end);
+            }
+            (None, Some(end), Some(span)) => {
+                let (end, _) = Self::parse_datetime(end)?;
+                let span = Self::parse_span(span)?;
+                let start = end - span;
+                start_dt = Some(start);
+                end_dt = Some(end);
+            }
+            (None, None, Some(span)) => {
+                let span = Self::parse_span(span)?;
+                let end = Utc::now();
+                let start = end - span;
+                start_dt = Some(start);
+                end_dt = Some(end);
+            }
+            _ => {
+                // Exception
                 return Err(InvalidTimeFilterSnafu {
                     filter: self.clone(),
                 }
                 .build());
             }
-            start_dt = Some(start);
-            end_dt = end_opt;
-        } else if self.start.is_some() && self.end.is_some() {
-            // Both 'start' and 'end' are provided
-            let (start, _) = Self::parse_datetime(self.start.as_ref().unwrap())?;
-            let (end, _) = Self::parse_datetime(self.end.as_ref().unwrap())?;
-            start_dt = Some(start);
-            end_dt = Some(end);
-        } else if self.span.is_some() && (self.start.is_some() || self.end.is_some()) {
-            // 'span' with 'start' or 'end'
-            let span = Self::parse_span(self.span.as_ref().unwrap())?;
-            if self.start.is_some() {
-                let (start, _) = Self::parse_datetime(self.start.as_ref().unwrap())?;
-                let end = start + span;
-                start_dt = Some(start);
-                end_dt = Some(end);
-            } else {
-                let (end, _) = Self::parse_datetime(self.end.as_ref().unwrap())?;
-                let start = end - span;
-                start_dt = Some(start);
-                end_dt = Some(end);
-            }
-        } else if self.span.is_some() && self.start.is_none() && self.end.is_none() {
-            // Only 'span' is provided
-            let span = Self::parse_span(self.span.as_ref().unwrap())?;
-            let end = Utc::now();
-            let start = end - span;
-            start_dt = Some(start);
-            end_dt = Some(end);
-        } else if self.start.is_some() && self.span.is_some() && self.end.is_some() {
-            // All fields are provided; 'start' and 'end' take priority
-            let (start, _) = Self::parse_datetime(self.start.as_ref().unwrap())?;
-            let (end, _) = Self::parse_datetime(self.end.as_ref().unwrap())?;
-            start_dt = Some(start);
-            end_dt = Some(end);
-        } else {
-            // Exception
-            return Err(InvalidTimeFilterSnafu {
-                filter: self.clone(),
-            }
-            .build());
         }
 
         // Validate that end is after start

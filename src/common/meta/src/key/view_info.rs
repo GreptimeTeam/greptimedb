@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
 
+use common_base::bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
@@ -30,9 +31,6 @@ use crate::key::{
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::Txn;
 use crate::rpc::store::BatchGetRequest;
-
-/// The VIEW logical plan encoded bytes
-type RawViewLogicalPlan = Vec<u8>;
 
 /// The key stores the metadata of the view.
 ///
@@ -86,7 +84,7 @@ impl MetadataKey<'_, ViewInfoKey> for ViewInfoKey {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ViewInfoValue {
     // The encoded logical plan
-    pub view_info: RawViewLogicalPlan,
+    pub view_info: Bytes,
     // The resolved fully table names in logical plan
     pub table_names: HashSet<TableName>,
     // The view columns
@@ -100,7 +98,7 @@ pub struct ViewInfoValue {
 
 impl ViewInfoValue {
     pub fn new(
-        view_info: RawViewLogicalPlan,
+        view_info: Bytes,
         table_names: HashSet<TableName>,
         columns: Vec<String>,
         plan_columns: Vec<String>,
@@ -118,7 +116,7 @@ impl ViewInfoValue {
 
     pub(crate) fn update(
         &self,
-        new_view_info: RawViewLogicalPlan,
+        new_view_info: Bytes,
         table_names: HashSet<TableName>,
         columns: Vec<String>,
         plan_columns: Vec<String>,
@@ -305,7 +303,7 @@ mod tests {
         };
 
         let value = ViewInfoValue {
-            view_info: vec![1, 2, 3],
+            view_info: Bytes::from([1, 2, 3].as_ref()),
             version: 1,
             table_names,
             columns: vec!["a".to_string()],
@@ -315,5 +313,54 @@ mod tests {
         let serialized = value.try_as_raw_value().unwrap();
         let deserialized = ViewInfoValue::try_from_raw_value(&serialized).unwrap();
         assert_eq!(value, deserialized);
+    }
+
+    #[test]
+    fn test_deserialize_view_info_value_with_vec_u8() {
+        #[derive(Serialize)]
+        struct OldViewInfoValue {
+            view_info: Vec<u8>,
+            table_names: HashSet<TableName>,
+            columns: Vec<String>,
+            plan_columns: Vec<String>,
+            definition: String,
+            version: u64,
+        }
+
+        let table_names = {
+            let mut set = HashSet::new();
+            set.insert(TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "a_table".to_string(),
+            });
+            set.insert(TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "b_table".to_string(),
+            });
+            set
+        };
+
+        let old_value = OldViewInfoValue {
+            view_info: vec![1, 2, 3],
+            table_names: table_names.clone(),
+            columns: vec!["a".to_string()],
+            plan_columns: vec!["number".to_string()],
+            definition: "CREATE VIEW test AS SELECT * FROM numbers".to_string(),
+            version: 1,
+        };
+
+        let serialized = serde_json::to_vec(&old_value).unwrap();
+        let deserialized = ViewInfoValue::try_from_raw_value(&serialized).unwrap();
+
+        assert_eq!(deserialized.view_info, vec![1, 2, 3]);
+        assert_eq!(deserialized.table_names, table_names);
+        assert_eq!(deserialized.columns, vec!["a".to_string()]);
+        assert_eq!(deserialized.plan_columns, vec!["number".to_string()]);
+        assert_eq!(
+            deserialized.definition,
+            "CREATE VIEW test AS SELECT * FROM numbers"
+        );
     }
 }

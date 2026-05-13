@@ -274,6 +274,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to align JSON value, reason: {}", reason))]
+    AlignJsonValue {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to align JSON array, reason: {reason}"))]
+    AlignJsonArray {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -316,7 +330,9 @@ impl ErrorExt for Error {
             | ConvertScalarToArrowArray { .. }
             | ParseExtendedType { .. }
             | InconsistentStructFieldsAndItems { .. }
-            | ArrowMetadata { .. } => StatusCode::Internal,
+            | ArrowMetadata { .. }
+            | AlignJsonValue { .. }
+            | AlignJsonArray { .. } => StatusCode::Internal,
         }
     }
 

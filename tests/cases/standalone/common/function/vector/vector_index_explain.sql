@@ -33,6 +33,9 @@ ADMIN FLUSH_TABLE('vectors_explain');
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE ,\s"vector_index_k":\s\d+
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT vec_id
 FROM vectors_explain
@@ -84,6 +87,7 @@ ADMIN FLUSH_TABLE('vectors_explain_left');
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE SeqScan:.* SeqScan: REDACTED 
 EXPLAIN ANALYZE VERBOSE
 SELECT l.vec_id
 FROM vectors_explain_left l
@@ -126,6 +130,9 @@ ADMIN FLUSH_TABLE('vectors_explain_metric');
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE SeqScan:.* SeqScan: REDACTED 
+-- SQLNESS REPLACE ,\s"vector_index_k":\s\d+
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT vec_id
 FROM vectors_explain_metric
@@ -146,6 +153,7 @@ LIMIT 2;
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE SeqScan:.* SeqScan: REDACTED 
 EXPLAIN ANALYZE VERBOSE
 SELECT vec_id
 FROM vectors_explain_metric

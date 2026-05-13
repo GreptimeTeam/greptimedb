@@ -181,5 +181,5 @@ create table if not exists invalid_merge_mode(
 engine=mito
 with('merge_mode'='last_non_null', 'append_mode'='true');
 
-Error: 1004(InvalidArguments), Invalid region options, merge_mode is not allowed when append_mode is enabled
+Error: 1004(InvalidArguments), Invalid region options, only last_row merge_mode is allowed when append_mode is enabled
 

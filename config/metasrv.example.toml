@@ -79,7 +79,7 @@ node_max_idle_time = "24hours"
 ## The frontend heartbeat interval is 6 times of the base heartbeat interval.
 ## The flownode/datanode heartbeat interval is 1 times of the base heartbeat interval.
 ## e.g., If the base heartbeat interval is 3s, the frontend heartbeat interval is 18s, the flownode/datanode heartbeat interval is 3s.
-## If you change this value, you need to change the heartbeat interval of the flownode/frontend/datanode accordingly.
+## Heartbeat intervals are negotiated from metasrv during handshake; local node configs do not override this.
 #+ heartbeat_interval = "3s"
 
 ## Whether to enable greptimedb telemetry. Enabled by default.
@@ -136,7 +136,7 @@ ca_cert_path = ""
 bind_addr = "127.0.0.1:3002"
 ## The communication server address for the frontend and datanode to connect to metasrv.
 ## If left empty or unset, the server will automatically use the IP address of the first network interface
-## on the host, with the same port number as the one specified in `bind_addr`.
+## on the host, with the same port number as the one specified in `grpc.bind_addr`.
 server_addr = "127.0.0.1:3002"
 ## The number of server worker threads.
 runtime_size = 8

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::assert_matches::assert_matches;
+use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -256,7 +256,7 @@ async fn test_on_submit_alter_request() {
         results.push(result);
     }
     rx.try_recv().unwrap_err();
-    results.sort_unstable_by(|(a, _), (b, _)| a.id.cmp(&b.id));
+    results.sort_unstable_by_key(|(a, _)| a.id);
 
     let (peer, request) = results.remove(0);
     assert_alter_request(peer, request, 1, RegionId::new(table_id, 1));
@@ -310,7 +310,7 @@ async fn test_on_submit_alter_request_without_sync_request() {
         results.push(result);
     }
     rx.try_recv().unwrap_err();
-    results.sort_unstable_by(|(a, _), (b, _)| a.id.cmp(&b.id));
+    results.sort_unstable_by_key(|(a, _)| a.id);
 
     let (peer, request) = results.remove(0);
     assert_alter_request(peer, request, 1, RegionId::new(table_id, 1));

@@ -290,7 +290,8 @@ pub(crate) async fn remove_region_dir_once(
             .context(OpenDalSnafu)?;
         // then remove the marker with this dir
         object_store
-            .remove_all(region_path)
+            .delete_with(region_path)
+            .recursive(true)
             .await
             .context(OpenDalSnafu)?;
         Ok(true)

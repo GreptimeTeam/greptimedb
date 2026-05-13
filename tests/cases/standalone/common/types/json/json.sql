@@ -35,20 +35,21 @@ INSERT INTO jsons VALUES('[null]', 0),
             }
         ]
     }
-}}', 11);
+}}', 11),
+('{"a":"abc\u2028tom"}', 12);
 
-INSERT INTO jsons VALUES(parse_json('[null]'), 12),
-(parse_json('[true]'), 13),
-(parse_json('[false]'), 14),
-(parse_json('[0]'), 15),
-(parse_json('["foo"]'), 16),
-(parse_json('[]'), 17),
-(parse_json('{}'), 18),
-(parse_json('[0,1]'), 19),
-(parse_json('{"foo":"bar"}'), 20),
-(parse_json('{"a":null,"foo":"bar"}'), 21),
-(parse_json('[-1]'), 22),
-(parse_json('[-2147483648]'), 23),
+INSERT INTO jsons VALUES(parse_json('[null]'), 1000),
+(parse_json('[true]'), 1001),
+(parse_json('[false]'), 1002),
+(parse_json('[0]'), 1003),
+(parse_json('["foo"]'), 1004),
+(parse_json('[]'), 1005),
+(parse_json('{}'), 1006),
+(parse_json('[0,1]'), 1007),
+(parse_json('{"foo":"bar"}'), 1008),
+(parse_json('{"a":null,"foo":"bar"}'), 1009),
+(parse_json('[-1]'), 1010),
+(parse_json('[-2147483648]'), 1011),
 (parse_json('{"entities": {
             "description": {
                 "urls": [
@@ -72,7 +73,8 @@ INSERT INTO jsons VALUES(parse_json('[null]'), 12),
                     }
                 ]
             }
-        }}'), 24);
+        }}'), 1012),
+(parse_json('{"a":"abc\u2028tom"}'), 1013);
 
 SELECT json_to_string(j), t FROM jsons;
 

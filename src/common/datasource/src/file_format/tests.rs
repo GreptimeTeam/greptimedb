@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::vec;
+use std::{assert_matches, vec};
 
 use common_test_util::find_workspace_path;
 use datafusion::assert_batches_eq;
@@ -45,7 +44,7 @@ struct Test<'a> {
 
 impl Test<'_> {
     async fn run(self, store: &ObjectStore) {
-        let store = Arc::new(object_store_opendal::OpendalStore::new(store.clone()));
+        let store = Arc::new(object_store::compat::OpendalStore::new(store.clone()));
         let file_opener = self
             .file_source
             .create_file_opener(store, &self.config, 0)

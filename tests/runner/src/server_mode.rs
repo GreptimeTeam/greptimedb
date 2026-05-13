@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -96,15 +96,7 @@ struct ConfigContext {
     use_etcd: bool,
     store_addrs: String,
     instance_id: usize,
-    // for following addrs, leave it empty if not needed
-    // required for datanode
-    metasrv_addr: String,
-    // for frontend and standalone
-    grpc_addr: String,
-    // for standalone
-    mysql_addr: String,
-    // for standalone
-    postgres_addr: String,
+    addrs: HashMap<String, String>,
     // enable flat format for storage engine
     enable_flat_format: bool,
 }
@@ -275,40 +267,26 @@ impl ServerMode {
         let procedure_dir = data_home.join("procedure").display().to_string();
 
         // Get the required addresses based on server mode
-        let (metasrv_addr, grpc_addr, mysql_addr, postgres_addr) = match self {
+        let addrs: HashMap<String, String> = match self {
             ServerMode::Standalone {
                 rpc_bind_addr,
                 mysql_addr,
                 postgres_addr,
-                ..
-            } => (
-                String::new(),
-                rpc_bind_addr.clone(),
-                mysql_addr.clone(),
-                postgres_addr.clone(),
-            ),
-            ServerMode::Frontend {
-                rpc_bind_addr,
-                mysql_addr,
-                postgres_addr,
-                ..
-            } => (
-                String::new(),
-                rpc_bind_addr.clone(),
-                mysql_addr.clone(),
-                postgres_addr.clone(),
-            ),
-            ServerMode::Datanode {
-                rpc_bind_addr,
-                metasrv_addr,
-                ..
-            } => (
-                metasrv_addr.clone(),
-                rpc_bind_addr.clone(),
-                String::new(),
-                String::new(),
-            ),
-            _ => (String::new(), String::new(), String::new(), String::new()),
+                http_addr,
+            } => [
+                ("http_addr".to_string(), http_addr.clone()),
+                ("grpc_addr".to_string(), rpc_bind_addr.clone()),
+                ("mysql_addr".to_string(), mysql_addr.clone()),
+                ("postgres_addr".to_string(), postgres_addr.clone()),
+            ]
+            .into(),
+            ServerMode::Frontend { rpc_bind_addr, .. } => {
+                [("grpc_addr".to_string(), rpc_bind_addr.clone())].into()
+            }
+            ServerMode::Datanode { metasrv_addr, .. } => {
+                [("metasrv_addr".to_string(), metasrv_addr.clone())].into()
+            }
+            _ => HashMap::new(),
         };
 
         let ctx = ConfigContext {
@@ -326,10 +304,7 @@ impl ServerMode {
                 .collect::<Vec<_>>()
                 .join(","),
             instance_id: id,
-            metasrv_addr,
-            grpc_addr,
-            mysql_addr,
-            postgres_addr,
+            addrs,
             enable_flat_format: db_ctx.store_config().enable_flat_format,
         };
 
@@ -380,7 +355,7 @@ impl ServerMode {
                     "-c".to_string(),
                     self.generate_config_file(sqlness_home, db_ctx, id),
                     format!("--http-addr={http_addr}"),
-                    format!("--rpc-addr={rpc_bind_addr}"),
+                    format!("--grpc-bind-addr={rpc_bind_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                 ]);
@@ -395,10 +370,10 @@ impl ServerMode {
                 args.extend([
                     format!("--metasrv-addrs={metasrv_addr}"),
                     format!("--http-addr={http_addr}"),
-                    format!("--rpc-addr={rpc_bind_addr}"),
+                    format!("--grpc-bind-addr={rpc_bind_addr}"),
                     // since sqlness run on local, bind addr is the same as server addr
                     // this is needed so that `cluster_info`'s server addr column can be correct
-                    format!("--rpc-server-addr={rpc_bind_addr}"),
+                    format!("--grpc-server-addr={rpc_bind_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                     format!(
@@ -416,9 +391,9 @@ impl ServerMode {
                 http_addr,
             } => {
                 args.extend([
-                    "--bind-addr".to_string(),
+                    "--grpc-bind-addr".to_string(),
                     rpc_bind_addr.clone(),
-                    "--server-addr".to_string(),
+                    "--grpc-server-addr".to_string(),
                     rpc_server_addr.clone(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
@@ -501,8 +476,8 @@ impl ServerMode {
                     db_ctx.time()
                 ));
                 args.extend([
-                    format!("--rpc-addr={rpc_bind_addr}"),
-                    format!("--rpc-server-addr={rpc_server_addr}"),
+                    format!("--grpc-bind-addr={rpc_bind_addr}"),
+                    format!("--grpc-server-addr={rpc_server_addr}"),
                     format!("--http-addr={http_addr}"),
                     format!("--data-home={}", data_home.display()),
                     format!("--log-dir={}/logs", data_home.display()),
@@ -520,8 +495,8 @@ impl ServerMode {
                 node_id,
             } => {
                 args.extend([
-                    format!("--rpc-addr={rpc_bind_addr}"),
-                    format!("--rpc-server-addr={rpc_server_addr}"),
+                    format!("--grpc-bind-addr={rpc_bind_addr}"),
+                    format!("--grpc-server-addr={rpc_server_addr}"),
                     format!("--node-id={node_id}"),
                     format!(
                         "--log-dir={}/greptimedb-{}-flownode/logs",

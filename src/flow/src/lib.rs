@@ -17,7 +17,6 @@
 //! It also contains definition of expression, adapter and plan, and internal state management.
 
 #![allow(dead_code)]
-#![warn(clippy::missing_docs_in_private_items)]
 #![warn(clippy::too_many_lines)]
 
 // TODO(discord9): enable this lint to handle out of bound access

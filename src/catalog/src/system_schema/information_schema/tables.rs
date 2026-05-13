@@ -372,22 +372,16 @@ impl InformationSchemaTablesBuilder {
         self.table_types.push(Some(table_type_text));
         self.table_ids.push(Some(table_id));
 
-        let data_length = region_stats.iter().map(|stat| stat.sst_size).sum();
-        let table_rows = region_stats.iter().map(|stat| stat.num_rows).sum();
-        let index_length = region_stats.iter().map(|stat| stat.index_size).sum();
+        let data_length: u64 = region_stats.iter().map(|stat| stat.sst_size).sum();
+        let table_rows: u64 = region_stats.iter().map(|stat| stat.num_rows).sum();
+        let index_length: u64 = region_stats.iter().map(|stat| stat.index_size).sum();
 
-        // It's not precise, but it is acceptable for long-term data storage.
-        let avg_row_length = if table_rows > 0 {
-            let total_data_length = data_length
-                + region_stats
-                    .iter()
-                    .map(|stat| stat.memtable_size)
-                    .sum::<u64>();
-
-            total_data_length / table_rows
-        } else {
-            0
-        };
+        let total_data_length: u64 = data_length
+            + region_stats
+                .iter()
+                .map(|stat| stat.memtable_size)
+                .sum::<u64>();
+        let avg_row_length = total_data_length.checked_div(table_rows).unwrap_or(0);
 
         self.data_length.push(Some(data_length));
         self.index_length.push(Some(index_length));

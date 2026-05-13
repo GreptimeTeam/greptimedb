@@ -200,6 +200,12 @@ impl Procedure for RepartitionGroupProcedure {
         Self::TYPE_NAME
     }
 
+    async fn rollback(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<()> {
+        // The parent repartition procedure is responsible for rollback and recovery.
+        // Subprocedures are not recovered after metasrv restarts, so implementing rollback for them is meaningless.
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, fields(
         state = %self.state.name(),
         table_id = self.context.persistent_ctx.table_id,
@@ -238,6 +244,8 @@ impl Procedure for RepartitionGroupProcedure {
     }
 
     fn rollback_supported(&self) -> bool {
+        // Parent repartition owns rollback and recovery because subprocedures are
+        // not relied on as durable rollback units across metasrv restarts.
         false
     }
 
@@ -304,7 +312,7 @@ impl Context {
 pub struct GroupPrepareResult {
     /// The validated source region routes.
     pub source_routes: Vec<RegionRoute>,
-    /// The validated target region routes.
+    /// Validated target region routes used for metadata rollback (logical rollback).
     pub target_routes: Vec<RegionRoute>,
     /// The primary source region id (first source region), used for retrieving region options.
     pub central_region: RegionId,
@@ -597,7 +605,7 @@ pub(crate) trait State: Sync + Send + Debug {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::Arc;
 
     use common_meta::key::TableMetadataManager;

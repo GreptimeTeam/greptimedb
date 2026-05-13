@@ -15,7 +15,9 @@
 use api::v1::Rows;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use store_api::region_engine::{RegionEngine, RegionRole};
-use store_api::region_request::{RegionCloseRequest, RegionRequest};
+use store_api::region_request::{
+    RegionCloseRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -167,4 +169,77 @@ async fn test_close_follower_region_skip_wal() {
     // If flush was triggered, data should be there even though WAL was skipped.
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(0, total_rows);
+}
+
+#[tokio::test]
+async fn test_close_region_after_truncate_skip_wal() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("close-truncate-skip-wal").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    let wal_options = WalOptions::Noop;
+    request.options.insert(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&wal_options).unwrap(),
+    );
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let version_data = region.version_control.current();
+    assert_eq!(
+        version_data.version.truncated_entry_id,
+        Some(version_data.last_entry_id)
+    );
+
+    let rows = Rows {
+        schema: rows_schema(&request),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    assert!(!region.version().memtables.is_empty());
+
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir: request.table_dir,
+                path_type: store_api::region_request::PathType::Bare,
+                options: request.options,
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = common_recordbatch::RecordBatches::try_collect(stream)
+        .await
+        .unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(3, total_rows);
 }

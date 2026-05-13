@@ -24,7 +24,9 @@ fn test_try_acquire_unlimited() {
     let manager = MemoryManager::new(0, NoOpMetrics);
     let guard = manager.try_acquire(10 * PERMIT_GRANULARITY_BYTES).unwrap();
     assert_eq!(manager.limit_bytes(), 0);
-    assert_eq!(guard.granted_bytes(), 0);
+    assert_eq!(manager.available_bytes(), u64::MAX);
+    assert_eq!(guard.granted_bytes(), 10 * PERMIT_GRANULARITY_BYTES);
+    assert_eq!(manager.used_bytes(), 10 * PERMIT_GRANULARITY_BYTES);
 }
 
 #[test]
@@ -136,7 +138,10 @@ fn test_request_additional_unlimited() {
 
     // Should always succeed with unlimited manager
     assert!(guard.try_acquire_additional(100 * PERMIT_GRANULARITY_BYTES));
-    assert_eq!(guard.granted_bytes(), 0);
+    assert_eq!(guard.granted_bytes(), 105 * PERMIT_GRANULARITY_BYTES);
+    assert_eq!(manager.used_bytes(), 105 * PERMIT_GRANULARITY_BYTES);
+
+    drop(guard);
     assert_eq!(manager.used_bytes(), 0);
 }
 
@@ -187,9 +192,10 @@ fn test_early_release_partial_unlimited() {
     let manager = MemoryManager::new(0, NoOpMetrics);
     let mut guard = manager.try_acquire(100 * PERMIT_GRANULARITY_BYTES).unwrap();
 
-    // Unlimited guard - release should succeed (no-op)
+    // Unlimited guard should track and release exact bytes.
     assert!(guard.release_partial(50 * PERMIT_GRANULARITY_BYTES));
-    assert_eq!(guard.granted_bytes(), 0);
+    assert_eq!(guard.granted_bytes(), 50 * PERMIT_GRANULARITY_BYTES);
+    assert_eq!(manager.used_bytes(), 50 * PERMIT_GRANULARITY_BYTES);
 }
 
 #[test]
@@ -406,6 +412,6 @@ async fn test_acquire_additional_unlimited() {
         .acquire_additional(1000 * PERMIT_GRANULARITY_BYTES)
         .await
         .unwrap();
-    assert_eq!(guard.granted_bytes(), 0);
-    assert_eq!(manager.used_bytes(), 0);
+    assert_eq!(guard.granted_bytes(), 1000 * PERMIT_GRANULARITY_BYTES);
+    assert_eq!(manager.used_bytes(), 1000 * PERMIT_GRANULARITY_BYTES);
 }

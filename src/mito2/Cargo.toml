@@ -16,10 +16,12 @@ workspace = true
 [dependencies]
 api.workspace = true
 aquamarine.workspace = true
+arrow-schema.workspace = true
 async-channel = "1.9"
 common-stat.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 bytemuck.workspace = true
 bytes.workspace = true
 chrono.workspace = true
@@ -105,6 +107,11 @@ toml.workspace = true
 
 [[bench]]
 name = "memtable_bench"
+harness = false
+required-features = ["test"]
+
+[[bench]]
+name = "bench_cache_stream"
 harness = false
 required-features = ["test"]
 

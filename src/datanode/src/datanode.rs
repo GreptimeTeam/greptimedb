@@ -163,6 +163,7 @@ pub struct DatanodeBuilder {
     kv_backend: KvBackendRef,
     cache_registry: Option<Arc<LayeredCacheRegistry>>,
     topic_stats_reporter: Option<Box<dyn TopicStatsReporter>>,
+    open_regions_writable_override: Option<bool>,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<mito2::extension::BoxedExtensionRangeProviderFactory>,
 }
@@ -176,6 +177,7 @@ impl DatanodeBuilder {
             meta_client: None,
             kv_backend,
             cache_registry: None,
+            open_regions_writable_override: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
             topic_stats_reporter: None,
@@ -202,6 +204,20 @@ impl DatanodeBuilder {
 
     pub fn with_table_provider_factory(&mut self, factory: TableProviderFactoryRef) -> &mut Self {
         self.table_provider_factory = Some(factory);
+        self
+    }
+
+    /// Overrides whether regions opened during datanode startup should become writable.
+    ///
+    /// When unset, the builder uses its default writable policy for reopened regions
+    /// (writable only when no metasrv client is configured).
+    ///
+    /// Warning: setting this to `true` on a metasrv-controlled datanode (one built
+    /// with `with_meta_client`) will promote regions to Leader before heartbeat and
+    /// lease coordination begin, bypassing the metasrv safety contract and creating a
+    /// potential split-brain window during startup.
+    pub fn with_open_regions_writable_override(&mut self, writable: bool) -> &mut Self {
+        self.open_regions_writable_override = Some(writable);
         self
     }
 
@@ -274,10 +290,13 @@ impl DatanodeBuilder {
 
         let region_open_requests =
             build_region_open_requests(node_id, self.kv_backend.clone()).await?;
+        let open_with_writable = self
+            .open_regions_writable_override
+            .unwrap_or(!controlled_by_metasrv);
         let open_all_regions = open_all_regions(
             region_server.clone(),
             region_open_requests,
-            !controlled_by_metasrv,
+            open_with_writable,
             self.opts.init_regions_parallelism,
             // Ignore nonexistent regions in recovery mode.
             is_recovery_mode,
@@ -538,7 +557,6 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher.clone(),
                     plugins,
-                    opts.max_concurrent_queries,
                 );
 
                 #[cfg(feature = "enterprise")]
@@ -552,14 +570,15 @@ impl DatanodeBuilder {
                 if kafka_config.create_index && opts.node_id.is_none() {
                     warn!("The WAL index creation only available in distributed mode.")
                 }
-                let global_index_collector = if kafka_config.create_index && opts.node_id.is_some()
+                let global_index_collector = if kafka_config.create_index
+                    && let Some(node_id) = opts.node_id
                 {
                     let operator = new_object_store_without_cache(
                         &opts.storage.store,
                         &opts.storage.data_home,
                     )
                     .await?;
-                    let path = default_index_file(opts.node_id.unwrap());
+                    let path = default_index_file(node_id);
                     Some(Self::build_global_index_collector(
                         kafka_config.dump_index_interval,
                         operator,
@@ -581,7 +600,6 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher,
                     plugins,
-                    opts.max_concurrent_queries,
                 );
 
                 #[cfg(feature = "enterprise")]
@@ -603,7 +621,6 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher.clone(),
                     plugins,
-                    opts.max_concurrent_queries,
                 );
 
                 #[cfg(feature = "enterprise")]
@@ -785,7 +802,7 @@ async fn open_all_regions(
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 

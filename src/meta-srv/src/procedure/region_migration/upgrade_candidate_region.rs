@@ -353,7 +353,7 @@ impl UpgradeCandidateRegion {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::collections::HashMap;
 
     use common_meta::key::table_route::TableRouteValue;

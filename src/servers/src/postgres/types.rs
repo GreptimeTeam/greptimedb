@@ -33,7 +33,7 @@ use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{Schema, SchemaRef};
-use datatypes::types::{IntervalType, TimestampType, jsonb_to_string};
+use datatypes::types::{Decimal128Type, IntervalType, TimestampType, jsonb_to_string};
 use datatypes::value::StructValue;
 use futures::Stream;
 use pg_interval::Interval as PgInterval;
@@ -43,6 +43,8 @@ use pgwire::api::results::FieldInfo;
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::types::format::FormatOptions as PgFormatOptions;
 use query::planner::DfLogicalPlanner;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
@@ -235,7 +237,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
     match origin {
         &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
         &ConcreteDataType::Boolean(_) => Ok(Type::BOOL),
-        &ConcreteDataType::Int8(_) => Ok(Type::CHAR),
+        &ConcreteDataType::Int8(_) => Ok(Type::INT2),
         &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt8(_) => Ok(Type::INT2),
         &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT4),
         &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT8),
@@ -253,7 +255,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         ConcreteDataType::List(list) => match list.item_type() {
             &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
             &ConcreteDataType::Boolean(_) => Ok(Type::BOOL_ARRAY),
-            &ConcreteDataType::Int8(_) => Ok(Type::CHAR_ARRAY),
+            &ConcreteDataType::Int8(_) => Ok(Type::INT2_ARRAY),
             &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt8(_) => Ok(Type::INT2_ARRAY),
             &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT4_ARRAY),
             &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT8_ARRAY),
@@ -293,11 +295,11 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
     // Note that we only support a small amount of pg data types
     match origin {
         &Type::BOOL => Ok(ConcreteDataType::boolean_datatype()),
-        &Type::CHAR => Ok(ConcreteDataType::int8_datatype()),
         &Type::INT2 => Ok(ConcreteDataType::int16_datatype()),
         &Type::INT4 => Ok(ConcreteDataType::int32_datatype()),
         &Type::INT8 => Ok(ConcreteDataType::int64_datatype()),
-        &Type::VARCHAR | &Type::TEXT => Ok(ConcreteDataType::string_datatype()),
+        &Type::NUMERIC => Ok(ConcreteDataType::uint64_datatype()),
+        &Type::VARCHAR | &Type::CHAR | &Type::TEXT => Ok(ConcreteDataType::string_datatype()),
         &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Ok(ConcreteDataType::timestamp_datatype(
             common_time::timestamp::TimeUnit::Millisecond,
         )),
@@ -305,9 +307,6 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         &Type::TIME => Ok(ConcreteDataType::timestamp_datatype(
             common_time::timestamp::TimeUnit::Microsecond,
         )),
-        &Type::CHAR_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
-            ConcreteDataType::int8_datatype(),
-        ))),
         &Type::INT2_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
             ConcreteDataType::int16_datatype(),
         ))),
@@ -317,70 +316,16 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         &Type::INT8_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
             ConcreteDataType::int64_datatype(),
         ))),
-        &Type::VARCHAR_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
-            ConcreteDataType::string_datatype(),
+        &Type::NUMERIC_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
+            ConcreteDataType::uint64_datatype(),
         ))),
+        &Type::VARCHAR_ARRAY | &Type::CHAR_ARRAY | &Type::TEXT_ARRAY => Ok(
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
+        ),
         _ => server_error::InternalSnafu {
             err_msg: format!("unimplemented datatype {origin:?}"),
         }
         .fail(),
-    }
-}
-
-pub(super) fn parameter_to_string(portal: &Portal<PgSqlPlan>, idx: usize) -> PgWireResult<String> {
-    // the index is managed from portal's parameters count so it's safe to
-    // unwrap here.
-    let param_type = portal
-        .statement
-        .parameter_types
-        .get(idx)
-        .unwrap()
-        .as_ref()
-        .unwrap_or(&Type::UNKNOWN);
-    match param_type {
-        &Type::VARCHAR | &Type::TEXT => Ok(format!(
-            "'{}'",
-            portal
-                .parameter::<String>(idx, param_type)?
-                .as_deref()
-                .unwrap_or("")
-        )),
-        &Type::BOOL => Ok(portal
-            .parameter::<bool>(idx, param_type)?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::INT4 => Ok(portal
-            .parameter::<i32>(idx, param_type)?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::INT8 => Ok(portal
-            .parameter::<i64>(idx, param_type)?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::FLOAT4 => Ok(portal
-            .parameter::<f32>(idx, param_type)?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::FLOAT8 => Ok(portal
-            .parameter::<f64>(idx, param_type)?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::DATE => Ok(portal
-            .parameter::<NaiveDate>(idx, param_type)?
-            .map(|v| v.format("%Y-%m-%d").to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::TIMESTAMP => Ok(portal
-            .parameter::<NaiveDateTime>(idx, param_type)?
-            .map(|v| v.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
-            .unwrap_or_else(|| "".to_owned())),
-        &Type::INTERVAL => Ok(portal
-            .parameter::<PgInterval>(idx, param_type)?
-            .map(|v| v.to_sql())
-            .unwrap_or_else(|| "".to_owned())),
-        _ => Err(invalid_parameter_error(
-            "unsupported_parameter_type",
-            Some(param_type.to_string()),
-        )),
     }
 }
 
@@ -405,6 +350,24 @@ where
     } else {
         Ok(ScalarValue::Null)
     }
+}
+
+fn to_decimal_scalar_value(data: Option<Decimal>, ctype: &Decimal128Type) -> ScalarValue {
+    if let Some(data) = data {
+        let mut value = data;
+        value.rescale(ctype.scale() as u32);
+
+        ScalarValue::Decimal128(Some(value.mantissa()), ctype.precision(), ctype.scale())
+    } else {
+        ScalarValue::Decimal128(None, ctype.precision(), ctype.scale())
+    }
+}
+
+fn numeric_out_of_range_error(value: impl std::fmt::Display) -> PgWireError {
+    invalid_parameter_error(
+        "numeric_value_out_of_range",
+        Some(format!("value {} is out of range for target type", value)),
+    )
 }
 
 pub(super) fn parameters_to_scalar_values(
@@ -435,14 +398,14 @@ pub(super) fn parameters_to_scalar_values(
             return Err(invalid_parameter_error(
                 "unknown_parameter_type",
                 Some(format!(
-                    "Cannot get parameter type information for parameter {}",
-                    idx
+                    "Cannot get type for parameter {}, try to provide a type using ${}::<type>",
+                    idx, idx
                 )),
             ));
         };
 
         let value = match &client_type {
-            &Type::VARCHAR | &Type::TEXT => {
+            &Type::VARCHAR | &Type::TEXT | &Type::CHAR => {
                 let data = portal.parameter::<String>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
@@ -484,14 +447,29 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<i16>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(
+                            data.map(|n| n.to_i8().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
                         ConcreteDataType::Int16(_) => ScalarValue::Int16(data),
                         ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
                         ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(
+                            data.map(|n| n.to_u8().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(
+                            data.map(|n| n.to_u16().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(
+                            data.map(|n| n.to_u32().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(
+                            data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
                         ConcreteDataType::Timestamp(unit) => {
                             to_timestamp_scalar_value(data, unit, server_type)?
                         }
@@ -510,14 +488,32 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<i32>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(
+                            data.map(|n| n.to_i8().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(
+                            data.map(|n| n.to_i16().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
                         ConcreteDataType::Int32(_) => ScalarValue::Int32(data),
                         ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(
+                            data.map(|n| n.to_u8().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(
+                            data.map(|n| n.to_u16().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(
+                            data.map(|n| n.to_u32().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(
+                            data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
                         ConcreteDataType::Timestamp(unit) => {
                             to_timestamp_scalar_value(data, unit, server_type)?
                         }
@@ -536,14 +532,35 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<i64>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(
+                            data.map(|n| n.to_i8().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(
+                            data.map(|n| n.to_i16().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(
+                            data.map(|n| n.to_i32().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
                         ConcreteDataType::Int64(_) => ScalarValue::Int64(data),
-                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(
+                            data.map(|n| n.to_u8().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(
+                            data.map(|n| n.to_u16().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(
+                            data.map(|n| n.to_u32().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(
+                            data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
                         ConcreteDataType::Timestamp(unit) => {
                             to_timestamp_scalar_value(data, unit, server_type)?
                         }
@@ -558,18 +575,60 @@ pub(super) fn parameters_to_scalar_values(
                     ScalarValue::Int64(data)
                 }
             }
+            &Type::NUMERIC => {
+                let data = portal.parameter::<Decimal>(idx, &client_type)?;
+                match &server_type {
+                    Some(ConcreteDataType::Decimal128(dt)) => to_decimal_scalar_value(data, dt),
+                    Some(st @ ConcreteDataType::Timestamp(unit)) => {
+                        to_timestamp_scalar_value(data.and_then(|n| n.to_i64()), unit, st)?
+                    }
+                    Some(ConcreteDataType::UInt64(_)) | None => {
+                        ScalarValue::UInt64(data.and_then(|n| n.to_u64()))
+                    }
+                    Some(st) => {
+                        return Err(invalid_parameter_error(
+                            "invalid_parameter_type",
+                            Some(format!("Expected: {}, found: {}", st, client_type)),
+                        ));
+                    }
+                }
+            }
             &Type::FLOAT4 => {
                 let data = portal.parameter::<f32>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(
+                            data.map(|n| n.to_i8().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(
+                            data.map(|n| n.to_i16().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(
+                            data.map(|n| n.to_i32().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(
+                            data.map(|n| n.to_i64().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(
+                            data.map(|n| n.to_u8().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(
+                            data.map(|n| n.to_u16().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(
+                            data.map(|n| n.to_u32().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(
+                            data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
                         ConcreteDataType::Float32(_) => ScalarValue::Float32(data),
                         ConcreteDataType::Float64(_) => {
                             ScalarValue::Float64(data.map(|n| n as f64))
@@ -589,17 +648,42 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<f64>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Int8(_) => ScalarValue::Int8(data.map(|n| n as i8)),
-                        ConcreteDataType::Int16(_) => ScalarValue::Int16(data.map(|n| n as i16)),
-                        ConcreteDataType::Int32(_) => ScalarValue::Int32(data.map(|n| n as i32)),
-                        ConcreteDataType::Int64(_) => ScalarValue::Int64(data.map(|n| n as i64)),
-                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(data.map(|n| n as u8)),
-                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(data.map(|n| n as u16)),
-                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(data.map(|n| n as u32)),
-                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
-                        ConcreteDataType::Float32(_) => {
-                            ScalarValue::Float32(data.map(|n| n as f32))
-                        }
+                        ConcreteDataType::Int8(_) => ScalarValue::Int8(
+                            data.map(|n| n.to_i8().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::Int16(_) => ScalarValue::Int16(
+                            data.map(|n| n.to_i16().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::Int32(_) => ScalarValue::Int32(
+                            data.map(|n| n.to_i32().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::Int64(_) => ScalarValue::Int64(
+                            data.map(|n| n.to_i64().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(
+                            data.map(|n| n.to_u8().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(
+                            data.map(|n| n.to_u16().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(
+                            data.map(|n| n.to_u32().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(
+                            data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
+                        ConcreteDataType::Float32(_) => ScalarValue::Float32(
+                            data.map(|n| n.to_f32().ok_or_else(|| numeric_out_of_range_error(n)))
+                                .transpose()?,
+                        ),
                         ConcreteDataType::Float64(_) => ScalarValue::Float64(data),
                         _ => {
                             return Err(invalid_parameter_error(
@@ -837,7 +921,67 @@ pub(super) fn parameters_to_scalar_values(
                     ScalarValue::Null
                 }
             }
-            &Type::VARCHAR_ARRAY => {
+            &Type::NUMERIC_ARRAY => {
+                let data = portal.parameter::<Vec<Option<Decimal>>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    let build_u64_list = |data: Vec<Option<Decimal>>| {
+                        let values = data
+                            .into_iter()
+                            .map(|n| ScalarValue::UInt64(n.and_then(|n| n.to_u64())))
+                            .collect::<Vec<_>>();
+                        ScalarValue::List(ScalarValue::new_list(
+                            &values,
+                            &ArrowDataType::UInt64,
+                            true,
+                        ))
+                    };
+                    if let Some(server_type) = &server_type {
+                        match server_type {
+                            ConcreteDataType::List(list_type) => match list_type.item_type() {
+                                ConcreteDataType::UInt64(_) => build_u64_list(data),
+                                ConcreteDataType::Decimal128(dt) => {
+                                    let values = data
+                                        .into_iter()
+                                        .map(|n| to_decimal_scalar_value(n, dt))
+                                        .collect::<Vec<_>>();
+                                    ScalarValue::List(ScalarValue::new_list(
+                                        &values,
+                                        &ArrowDataType::Decimal128(dt.precision(), dt.scale()),
+                                        true,
+                                    ))
+                                }
+                                _ => {
+                                    // the server type is not a list of decimal or uint64
+                                    return Err(invalid_parameter_error(
+                                        "invalid_parameter_type",
+                                        Some(format!(
+                                            "Expected: {}, found: {}",
+                                            list_type.item_type(),
+                                            client_type
+                                        )),
+                                    ));
+                                }
+                            },
+                            _ => {
+                                // the server type is not a list
+                                return Err(invalid_parameter_error(
+                                    "invalid_parameter_type",
+                                    Some(format!(
+                                        "Expected: {}, found: {}",
+                                        server_type, client_type
+                                    )),
+                                ));
+                            }
+                        }
+                    } else {
+                        // server type not provided
+                        build_u64_list(data)
+                    }
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::VARCHAR_ARRAY | &Type::TEXT_ARRAY | &Type::CHAR_ARRAY => {
                 let data = portal.parameter::<Vec<Option<String>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
@@ -1098,12 +1242,16 @@ pub fn format_options_from_query_ctx(query_ctx: &QueryContextRef) -> Arc<PgForma
 
 #[cfg(test)]
 mod test {
+    use std::str::FromStr;
     use std::sync::Arc;
 
     use arrow::array::{
         Float64Builder, Int64Builder, ListBuilder, StringBuilder, TimestampSecondBuilder,
     };
     use arrow_schema::{Field, IntervalUnit};
+    use bytes::Bytes;
+    use datafusion_expr::expr::Placeholder;
+    use datafusion_expr::{Expr, LogicalPlanBuilder};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{
         BinaryVector, BooleanVector, DateVector, Float32Vector, Float64Vector, Int8Vector,
@@ -1113,10 +1261,15 @@ mod test {
     };
     use futures::{StreamExt as FuturesStreamExt, stream};
     use pgwire::api::Type;
+    use pgwire::api::portal::{Format, Portal};
     use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
+    use pgwire::api::stmt::StoredStatement;
+    use pgwire::messages::extendedquery::Bind;
     use session::context::QueryContextBuilder;
 
     use super::*;
+    use crate::SqlPlan;
+    use crate::postgres::handler::PgSqlPlan;
 
     #[test]
     fn test_schema_convert() {
@@ -1151,7 +1304,7 @@ mod test {
         let pg_field_info = vec![
             FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
             FieldInfo::new("bools".into(), None, None, Type::BOOL, FieldFormat::Text),
-            FieldInfo::new("int8s".into(), None, None, Type::CHAR, FieldFormat::Text),
+            FieldInfo::new("int8s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),
             FieldInfo::new("int64s".into(), None, None, Type::INT8, FieldFormat::Text),
@@ -1230,7 +1383,7 @@ mod test {
                 Type::NUMERIC,
                 FieldFormat::Text,
             ),
-            FieldInfo::new("int8s".into(), None, None, Type::CHAR, FieldFormat::Text),
+            FieldInfo::new("int8s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),
             FieldInfo::new("int64s".into(), None, None, Type::INT8, FieldFormat::Text),
@@ -1515,5 +1668,361 @@ mod test {
         } else {
             panic!("test_invalid_parameter failed");
         }
+    }
+
+    #[test]
+    fn test_to_decimal_scalar_value() {
+        let dt = Decimal128Type::new(18, 4);
+
+        let d = Decimal::from_str("12345.6789").unwrap();
+        assert_eq!(d.mantissa(), 123456789i128);
+        let scalar = to_decimal_scalar_value(Some(d), &dt);
+        assert_eq!(scalar, ScalarValue::Decimal128(Some(123456789), 18, 4));
+
+        let d = Decimal::from_str("100.5").unwrap();
+        assert_eq!(d.mantissa(), 1005);
+        let scalar = to_decimal_scalar_value(Some(d), &dt);
+        assert_eq!(scalar, ScalarValue::Decimal128(Some(1005000), 18, 4));
+
+        let d = Decimal::from_str("-9876.5432").unwrap();
+        let scalar = to_decimal_scalar_value(Some(d), &dt);
+        assert_eq!(scalar, ScalarValue::Decimal128(Some(-98765432), 18, 4));
+
+        let scalar = to_decimal_scalar_value(None, &dt);
+        assert_eq!(scalar, ScalarValue::Decimal128(None, 18, 4));
+    }
+
+    fn s(v: &str) -> Option<String> {
+        Some(v.to_string())
+    }
+
+    fn typed_param(id: &str, dt: DataType) -> Expr {
+        Expr::Placeholder(Placeholder::new_with_field(
+            id.to_string(),
+            Some(Arc::new(arrow_schema::Field::new(id, dt, true))),
+        ))
+    }
+
+    fn build_plan_with_params(params: Vec<(&str, DataType)>) -> LogicalPlan {
+        let exprs: Vec<Expr> = params
+            .into_iter()
+            .map(|(id, dt)| typed_param(id, dt))
+            .collect();
+        LogicalPlanBuilder::empty(true)
+            .project(exprs)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn make_portal(
+        client_param_types: Vec<Option<Type>>,
+        param_data: Vec<Option<String>>,
+    ) -> Portal<PgSqlPlan> {
+        let bind = Bind::new(
+            None,
+            None,
+            vec![],
+            param_data
+                .into_iter()
+                .map(|opt| opt.map(Bytes::from))
+                .collect(),
+            vec![],
+        );
+        let statement = Arc::new(StoredStatement::new(
+            String::new(),
+            PgSqlPlan {
+                plan: SqlPlan::Empty,
+                copy_to_stdout_format: None,
+            },
+            client_param_types,
+        ));
+        Portal::try_new(&bind, statement).unwrap()
+    }
+
+    #[test]
+    fn test_int2_coerce_in_range() {
+        let plan = build_plan_with_params(vec![
+            ("$1", DataType::Int8),
+            ("$2", DataType::Int16),
+            ("$3", DataType::Int32),
+            ("$4", DataType::Int64),
+            ("$5", DataType::UInt8),
+            ("$6", DataType::UInt16),
+            ("$7", DataType::UInt32),
+            ("$8", DataType::UInt64),
+        ]);
+        let portal = make_portal(
+            vec![
+                Some(Type::INT2),
+                Some(Type::INT2),
+                Some(Type::INT2),
+                Some(Type::INT2),
+                Some(Type::INT2),
+                Some(Type::INT2),
+                Some(Type::INT2),
+                Some(Type::INT2),
+            ],
+            vec![
+                s("100"),
+                s("100"),
+                s("100"),
+                s("100"),
+                s("100"),
+                s("100"),
+                s("100"),
+                s("100"),
+            ],
+        );
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(values[0], ScalarValue::Int8(Some(100)));
+        assert_eq!(values[1], ScalarValue::Int16(Some(100)));
+        assert_eq!(values[2], ScalarValue::Int32(Some(100)));
+        assert_eq!(values[3], ScalarValue::Int64(Some(100)));
+        assert_eq!(values[4], ScalarValue::UInt8(Some(100)));
+        assert_eq!(values[5], ScalarValue::UInt16(Some(100)));
+        assert_eq!(values[6], ScalarValue::UInt32(Some(100)));
+        assert_eq!(values[7], ScalarValue::UInt64(Some(100)));
+    }
+
+    #[test]
+    fn test_int2_coerce_out_of_range() {
+        let plan = build_plan_with_params(vec![("$1", DataType::Int8)]);
+        let portal = make_portal(vec![Some(Type::INT2)], vec![s("200")]);
+        let result = parameters_to_scalar_values(&plan, &portal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_int2_coerce_negative_to_unsigned_out_of_range() {
+        let plan = build_plan_with_params(vec![("$1", DataType::UInt64)]);
+        let portal = make_portal(vec![Some(Type::INT2)], vec![s("-1")]);
+        let result = parameters_to_scalar_values(&plan, &portal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_int4_coerce_in_range() {
+        let plan = build_plan_with_params(vec![
+            ("$1", DataType::Int8),
+            ("$2", DataType::Int16),
+            ("$3", DataType::Int32),
+            ("$4", DataType::Int64),
+            ("$5", DataType::UInt8),
+            ("$6", DataType::UInt16),
+            ("$7", DataType::UInt32),
+            ("$8", DataType::UInt64),
+        ]);
+        let portal = make_portal(
+            vec![
+                Some(Type::INT4),
+                Some(Type::INT4),
+                Some(Type::INT4),
+                Some(Type::INT4),
+                Some(Type::INT4),
+                Some(Type::INT4),
+                Some(Type::INT4),
+                Some(Type::INT4),
+            ],
+            vec![
+                s("100"),
+                s("1000"),
+                s("100000"),
+                s("100000"),
+                s("200"),
+                s("1000"),
+                s("100000"),
+                s("100000"),
+            ],
+        );
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(values[0], ScalarValue::Int8(Some(100)));
+        assert_eq!(values[1], ScalarValue::Int16(Some(1000)));
+        assert_eq!(values[2], ScalarValue::Int32(Some(100000)));
+        assert_eq!(values[3], ScalarValue::Int64(Some(100000)));
+        assert_eq!(values[4], ScalarValue::UInt8(Some(200)));
+        assert_eq!(values[5], ScalarValue::UInt16(Some(1000)));
+        assert_eq!(values[6], ScalarValue::UInt32(Some(100000)));
+        assert_eq!(values[7], ScalarValue::UInt64(Some(100000)));
+    }
+
+    #[test]
+    fn test_int4_coerce_out_of_range() {
+        let plan = build_plan_with_params(vec![("$1", DataType::Int8)]);
+        let portal = make_portal(vec![Some(Type::INT4)], vec![s("200")]);
+        let result = parameters_to_scalar_values(&plan, &portal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_int4_coerce_i32_max_to_i16_out_of_range() {
+        let plan = build_plan_with_params(vec![("$1", DataType::Int16)]);
+        let portal = make_portal(vec![Some(Type::INT4)], vec![Some(i32::MAX.to_string())]);
+        let result = parameters_to_scalar_values(&plan, &portal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_int8_coerce_in_range() {
+        let plan = build_plan_with_params(vec![
+            ("$1", DataType::Int8),
+            ("$2", DataType::Int16),
+            ("$3", DataType::Int32),
+            ("$4", DataType::Int64),
+            ("$5", DataType::UInt8),
+            ("$6", DataType::UInt16),
+            ("$7", DataType::UInt32),
+            ("$8", DataType::UInt64),
+        ]);
+        let portal = make_portal(
+            vec![
+                Some(Type::INT8),
+                Some(Type::INT8),
+                Some(Type::INT8),
+                Some(Type::INT8),
+                Some(Type::INT8),
+                Some(Type::INT8),
+                Some(Type::INT8),
+                Some(Type::INT8),
+            ],
+            vec![
+                s("100"),
+                s("1000"),
+                s("100000"),
+                s("100000"),
+                s("200"),
+                s("1000"),
+                s("3000000000"),
+                s("3000000000"),
+            ],
+        );
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(values[0], ScalarValue::Int8(Some(100)));
+        assert_eq!(values[1], ScalarValue::Int16(Some(1000)));
+        assert_eq!(values[2], ScalarValue::Int32(Some(100000)));
+        assert_eq!(values[3], ScalarValue::Int64(Some(100000)));
+        assert_eq!(values[4], ScalarValue::UInt8(Some(200)));
+        assert_eq!(values[5], ScalarValue::UInt16(Some(1000)));
+        assert_eq!(values[6], ScalarValue::UInt32(Some(3000000000)));
+        assert_eq!(values[7], ScalarValue::UInt64(Some(3000000000)));
+    }
+
+    #[test]
+    fn test_int8_coerce_out_of_range() {
+        let plan = build_plan_with_params(vec![("$1", DataType::Int32)]);
+        let portal = make_portal(
+            vec![Some(Type::INT8)],
+            vec![Some((i32::MAX as i64 + 1).to_string())],
+        );
+        let result = parameters_to_scalar_values(&plan, &portal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_int8_coerce_negative_to_unsigned_out_of_range() {
+        let plan = build_plan_with_params(vec![("$1", DataType::UInt64)]);
+        let portal = make_portal(vec![Some(Type::INT8)], vec![s("-1")]);
+        let result = parameters_to_scalar_values(&plan, &portal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_float4_coerce_in_range() {
+        let plan =
+            build_plan_with_params(vec![("$1", DataType::Float32), ("$2", DataType::Float64)]);
+        let portal = make_portal(
+            vec![Some(Type::FLOAT4), Some(Type::FLOAT4)],
+            vec![s("1.5"), s("2.5")],
+        );
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(values[0], ScalarValue::Float32(Some(1.5)));
+        assert_eq!(values[1], ScalarValue::Float64(Some(2.5)));
+    }
+
+    #[test]
+    fn test_float4_coerce_to_int_in_range() {
+        let plan = build_plan_with_params(vec![
+            ("$1", DataType::Int8),
+            ("$2", DataType::Int32),
+            ("$3", DataType::UInt64),
+        ]);
+        let portal = make_portal(
+            vec![Some(Type::FLOAT4), Some(Type::FLOAT4), Some(Type::FLOAT4)],
+            vec![s("100"), s("1000"), s("200")],
+        );
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(values[0], ScalarValue::Int8(Some(100)));
+        assert_eq!(values[1], ScalarValue::Int32(Some(1000)));
+        assert_eq!(values[2], ScalarValue::UInt64(Some(200)));
+    }
+
+    #[test]
+    fn test_float4_coerce_to_int_out_of_range() {
+        let plan = build_plan_with_params(vec![("$1", DataType::Int8)]);
+        let portal = make_portal(vec![Some(Type::FLOAT4)], vec![s("200")]);
+        let result = parameters_to_scalar_values(&plan, &portal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_float8_coerce_in_range() {
+        let plan =
+            build_plan_with_params(vec![("$1", DataType::Float32), ("$2", DataType::Float64)]);
+        let portal = make_portal(
+            vec![Some(Type::FLOAT8), Some(Type::FLOAT8)],
+            vec![s("1.5"), s("2.5")],
+        );
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(values[0], ScalarValue::Float32(Some(1.5)));
+        assert_eq!(values[1], ScalarValue::Float64(Some(2.5)));
+    }
+
+    #[test]
+    fn test_float8_coerce_to_int_in_range() {
+        let plan = build_plan_with_params(vec![
+            ("$1", DataType::Int8),
+            ("$2", DataType::Int64),
+            ("$3", DataType::UInt64),
+        ]);
+        let portal = make_portal(
+            vec![Some(Type::FLOAT8), Some(Type::FLOAT8), Some(Type::FLOAT8)],
+            vec![s("100"), s("1000000"), s("200")],
+        );
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(values[0], ScalarValue::Int8(Some(100)));
+        assert_eq!(values[1], ScalarValue::Int64(Some(1000000)));
+        assert_eq!(values[2], ScalarValue::UInt64(Some(200)));
+    }
+
+    #[test]
+    fn test_float8_coerce_to_int_out_of_range() {
+        let plan = build_plan_with_params(vec![("$1", DataType::Int8)]);
+        let portal = make_portal(vec![Some(Type::FLOAT8)], vec![s("200")]);
+        let result = parameters_to_scalar_values(&plan, &portal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_float8_coerce_negative_to_unsigned_out_of_range() {
+        let plan = build_plan_with_params(vec![("$1", DataType::UInt64)]);
+        let portal = make_portal(vec![Some(Type::FLOAT8)], vec![s("-1")]);
+        let result = parameters_to_scalar_values(&plan, &portal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_null_parameter() {
+        let plan = build_plan_with_params(vec![("$1", DataType::Int8)]);
+        let portal = make_portal(vec![Some(Type::INT2)], vec![None]);
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(values[0], ScalarValue::Int8(None));
     }
 }

@@ -50,8 +50,9 @@
 //!              └─────────────────────┘
 //! ```
 
-#![feature(assert_matches)]
+#![recursion_limit = "256"]
 
+pub mod batch_modifier;
 pub mod config;
 mod data_region;
 pub mod engine;

@@ -38,8 +38,7 @@ use datafusion_expr::{Expr, ExprFunctionExt, SortExpr, col, lit, lit_timestamp_n
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
-    CatalogSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult,
-    TableNotFoundSnafu,
+    CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult, TableNotFoundSnafu,
 };
 use servers::http::jaeger::{JAEGER_QUERY_TABLE_NAME_KEY, QueryTraceParams, TraceUserAgent};
 use servers::otlp::trace::{
@@ -336,8 +335,7 @@ async fn query_trace_table(
             table_name,
             Some(&ctx),
         )
-        .await
-        .context(CatalogSnafu)?
+        .await?
         .with_context(|| TableNotFoundSnafu {
             table: table_name,
             catalog: ctx.current_catalog(),
@@ -425,8 +423,7 @@ async fn get_table(
             table_name,
             Some(&ctx),
         )
-        .await
-        .context(CatalogSnafu)?
+        .await?
         .with_context(|| TableNotFoundSnafu {
             table: table_name,
             catalog: ctx.current_catalog(),

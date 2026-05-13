@@ -170,20 +170,22 @@ async fn handle_drop_flow(
 
 fn invalidator<'a>(
     cache: &'a Cache<TableId, FlownodeFlowSet>,
-    ident: &'a CacheIdent,
+    idents: &'a [&CacheIdent],
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
-        match ident {
-            CacheIdent::CreateFlow(create_flow) => handle_create_flow(cache, create_flow).await,
-            CacheIdent::DropFlow(drop_flow) => handle_drop_flow(cache, drop_flow).await,
-            CacheIdent::FlowNodeAddressChange(node_id) => {
-                info!(
-                    "Invalidate flow node cache for node_id in table_flownode: {}",
-                    node_id
-                );
-                cache.invalidate_all();
+        for ident in idents {
+            match ident {
+                CacheIdent::CreateFlow(create_flow) => handle_create_flow(cache, create_flow).await,
+                CacheIdent::DropFlow(drop_flow) => handle_drop_flow(cache, drop_flow).await,
+                CacheIdent::FlowNodeAddressChange(node_id) => {
+                    info!(
+                        "Invalidate flow node cache for node_id in table_flownode: {}",
+                        node_id
+                    );
+                    cache.invalidate_all();
+                }
+                _ => {}
             }
-            _ => {}
         }
         Ok(())
     })

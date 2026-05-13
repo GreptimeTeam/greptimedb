@@ -23,6 +23,7 @@ use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
 };
@@ -264,7 +265,10 @@ struct IterIndex {
 }
 
 impl IterIndex {
-    fn new(row_schema: &[ColumnSchema], name_to_column_id: &HashMap<String, ColumnId>) -> Self {
+    fn new(
+        row_schema: &[ColumnSchema],
+        physical_columns: &HashMap<String, ColumnMetadata>,
+    ) -> Self {
         let mut reserved_indices = SmallVec::<[ValueIndex; 2]>::new();
         // Uses BTreeMap to keep the primary key column name order (lexicographical)
         let mut primary_key_indices = BTreeMap::new();
@@ -290,7 +294,10 @@ impl IterIndex {
                         primary_key_indices.insert(
                             col.column_name.as_str(),
                             ValueIndex {
-                                column_id: *name_to_column_id.get(&col.column_name).unwrap(),
+                                column_id: physical_columns
+                                    .get(&col.column_name)
+                                    .unwrap()
+                                    .column_id,
                                 index: idx,
                             },
                         );
@@ -298,13 +305,13 @@ impl IterIndex {
                 },
                 SemanticType::Field => {
                     field_indices.push(ValueIndex {
-                        column_id: *name_to_column_id.get(&col.column_name).unwrap(),
+                        column_id: physical_columns.get(&col.column_name).unwrap().column_id,
                         index: idx,
                     });
                 }
                 SemanticType::Timestamp => {
                     ts_index = Some(ValueIndex {
-                        column_id: *name_to_column_id.get(&col.column_name).unwrap(),
+                        column_id: physical_columns.get(&col.column_name).unwrap().column_id,
                         index: idx,
                     });
                 }
@@ -338,8 +345,8 @@ pub struct RowsIter {
 }
 
 impl RowsIter {
-    pub fn new(rows: Rows, name_to_column_id: &HashMap<String, ColumnId>) -> Self {
-        let index: IterIndex = IterIndex::new(&rows.schema, name_to_column_id);
+    pub fn new(rows: Rows, physical_columns: &HashMap<String, ColumnMetadata>) -> Self {
+        let index: IterIndex = IterIndex::new(&rows.schema, physical_columns);
         Self { rows, index }
     }
 
@@ -455,8 +462,23 @@ mod tests {
         }
     }
 
-    fn test_name_to_column_id() -> HashMap<String, ColumnId> {
-        HashMap::from([("namespace".to_string(), 1), ("host".to_string(), 2)])
+    fn make_info(name: &str, column_id: ColumnId) -> ColumnMetadata {
+        ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                name.to_string(),
+                datatypes::prelude::ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id,
+        }
+    }
+
+    fn test_name_to_column_id() -> HashMap<String, ColumnMetadata> {
+        HashMap::from([
+            ("namespace".to_string(), make_info("namespace", 1)),
+            ("host".to_string(), make_info("host", 2)),
+        ])
     }
 
     #[test]
@@ -657,11 +679,11 @@ mod tests {
     }
 
     /// Helper function to create a name_to_column_id map
-    fn create_name_to_column_id(labels: &[&str]) -> HashMap<String, ColumnId> {
+    fn create_name_to_column_id(labels: &[&str]) -> HashMap<String, ColumnMetadata> {
         labels
             .iter()
             .enumerate()
-            .map(|(idx, name)| (name.to_string(), idx as ColumnId + 1))
+            .map(|(idx, name)| (name.to_string(), make_info(name, idx as ColumnId + 1)))
             .collect()
     }
 
@@ -692,7 +714,7 @@ mod tests {
     fn extract_tsid(
         schema: Vec<ColumnSchema>,
         row: Row,
-        name_to_column_id: &HashMap<String, ColumnId>,
+        name_to_column_id: &HashMap<String, ColumnMetadata>,
         table_id: TableId,
     ) -> u64 {
         let rows = Rows {

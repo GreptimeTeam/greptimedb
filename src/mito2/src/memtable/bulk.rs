@@ -14,9 +14,8 @@
 
 //! Memtable implementation for bulk load
 
-#[allow(unused)]
+pub(crate) mod chunk_reader;
 pub mod context;
-#[allow(unused)]
 pub mod part;
 pub mod part_reader;
 mod row_group_reader;
@@ -34,6 +33,7 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+use common_time::Timestamp;
 use datatypes::arrow::datatypes::SchemaRef;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
@@ -46,6 +46,7 @@ use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::context::BulkIterContext;
 use crate::memtable::bulk::part::{
     BulkPart, BulkPartEncodeMetrics, BulkPartEncoder, MultiBulkPart, UnorderedPart,
+    should_prune_bulk_part,
 };
 use crate::memtable::bulk::part_reader::BulkPartBatchIter;
 use crate::memtable::stats::WriteMetrics;
@@ -57,7 +58,7 @@ use crate::memtable::{
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::MergeMode;
-use crate::sst::parquet::format::FIXED_POS_COLUMN_NUM;
+use crate::sst::parquet::flat_format::field_column_start;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
@@ -137,7 +138,7 @@ struct CollectedParts {
 /// All parts in a bulk memtable.
 #[derive(Default)]
 struct BulkParts {
-    /// Unordered small parts (< 1024 rows).
+    /// Unordered small parts.
     unordered_part: UnorderedPart,
     /// All parts (raw and encoded).
     parts: Vec<BulkPartWrapper>,
@@ -460,16 +461,6 @@ impl Memtable for BulkMemtable {
         }
 
         Ok(())
-    }
-
-    #[cfg(any(test, feature = "test"))]
-    fn iter(
-        &self,
-        _projection: Option<&[ColumnId]>,
-        _predicate: Option<table::predicate::Predicate>,
-        _sequence: Option<SequenceRange>,
-    ) -> Result<crate::memtable::BoxedBatchIterator> {
-        todo!()
     }
 
     fn ranges(
@@ -802,8 +793,14 @@ impl IterBuilder for BulkRangeIterBuilder {
 
     fn build_record_batch(
         &self,
+        _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
+        let metadata = self.context.read_format().metadata();
+        if should_prune_bulk_part(&self.part.batch, &self.context, metadata) {
+            return Ok(Box::new(std::iter::empty()));
+        }
+
         let series_count = self.part.estimated_series_count();
         let iter = BulkPartBatchIter::from_single(
             self.part.batch.clone(),
@@ -835,16 +832,17 @@ impl IterBuilder for MultiBulkRangeIterBuilder {
 
     fn build_record_batch(
         &self,
+        _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
-        self.part
+        match self
+            .part
             .read(self.context.clone(), self.sequence, metrics)?
-            .ok_or_else(|| {
-                UnsupportedOperationSnafu {
-                    err_msg: "Failed to create iterator for multi bulk part",
-                }
-                .build()
-            })
+        {
+            Some(iter) => Ok(iter),
+            // All batches were pruned by the predicate. Return an empty iterator.
+            None => Ok(Box::new(std::iter::empty())),
+        }
     }
 
     fn encoded_range(&self) -> Option<EncodedRange> {
@@ -874,6 +872,7 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
 
     fn build_record_batch(
         &self,
+        _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
         if let Some(iter) = self
@@ -1186,13 +1185,8 @@ impl MemtableCompactor {
                     Box::new(dedup_iter)
                 }
                 MergeMode::LastNonNull => {
-                    // Calculates field column start: total columns - fixed columns - field columns
-                    // Field column count = total metadata columns - time index column - primary key columns
-                    let field_column_count =
-                        metadata.column_metadatas.len() - 1 - metadata.primary_key.len();
-                    let total_columns = arrow_schema.fields().len();
                     let field_column_start =
-                        total_columns - FIXED_POS_COLUMN_NUM - field_column_count;
+                        field_column_start(metadata, arrow_schema.fields().len());
 
                     let dedup_iter = FlatDedupIterator::new(
                         merged_iter,
@@ -1244,6 +1238,7 @@ impl MemtableCompactor {
                 max_timestamp,
                 max_sequence,
                 estimated_series_count,
+                metadata,
             );
 
             common_telemetry::trace!(
@@ -2219,5 +2214,58 @@ mod tests {
             }
         }
         assert_eq!(expected_rows, total_rows_read);
+    }
+
+    #[test]
+    fn test_multi_bulk_range_iter_builder_all_pruned() {
+        let metadata = metadata_for_test();
+        let merge_threshold = 8;
+        let config = BulkMemtableConfig {
+            merge_threshold,
+            ..Default::default()
+        };
+        let memtable = BulkMemtable::new(
+            2006,
+            config,
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
+        memtable.set_unordered_part_threshold(0);
+
+        // Write enough bulk parts to trigger merge into MultiBulkPart.
+        for i in 0..merge_threshold {
+            let part = create_bulk_part_with_converter(
+                &format!("key_{}", i),
+                i as u32,
+                vec![1000 + i as i64 * 100, 2000 + i as i64 * 100],
+                vec![Some(i as f64 * 10.0), Some(i as f64 * 10.0 + 1.0)],
+                100 + i as u64,
+            )
+            .unwrap();
+            memtable.write_bulk(part).unwrap();
+        }
+        memtable.compact(false).unwrap();
+
+        // Use a predicate that matches no rows so all batches are pruned.
+        let filter = datafusion_expr::col("k0").eq(datafusion_expr::lit("nonexistent"));
+        let predicate_group = PredicateGroup::new(&metadata, &[filter]).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
+
+        // Should return ranges but each range should produce an empty iterator
+        // instead of an error.
+        for (_range_id, range) in ranges.ranges.iter() {
+            assert!(range.is_record_batch());
+            let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
+            let total_rows: usize = record_batch_iter.map(|r| r.unwrap().num_rows()).sum();
+            assert_eq!(0, total_rows);
+        }
     }
 }

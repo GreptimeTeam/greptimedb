@@ -523,8 +523,7 @@ impl PromPlanner {
                     .use_tsid
                     .then_some(DfExpr::Column(Column::from_name(
                         DATA_SCHEMA_TSID_COLUMN_NAME,
-                    )))
-                    .into_iter(),
+                    ))),
             )
             .chain(Some(self.create_time_index_column_expr()?));
 
@@ -710,7 +709,13 @@ impl PromPlanner {
                         self.ctx.table_name = Some("rhs".to_string());
                     }
                 }
-                let mut field_columns = left_field_columns.iter().zip(right_field_columns.iter());
+                let (output_field_columns, field_columns) =
+                    Self::align_binary_field_columns(&left_field_columns, &right_field_columns);
+                // PromQL binary arithmetic only combines the shared prefix of value columns.
+                // Keep the output field count aligned with that zipped prefix so planning
+                // remains stable even when the two sides have uneven multi-field schemas.
+                self.ctx.field_columns = output_field_columns;
+                let mut field_columns = field_columns.into_iter();
 
                 let join_plan = self.join_on_non_field_columns(
                     left_input,
@@ -811,11 +816,10 @@ impl PromPlanner {
 
         // Preserve `__tsid` if present, so it can still be used internally downstream. It's
         // stripped from the final output anyway.
-        if context.use_tsid
-            && let Ok(tsid_col) =
-                schema.qualified_field_with_name(Some(table_ref), DATA_SCHEMA_TSID_COLUMN_NAME)
+        if let Some(tsid_col) =
+            Self::optional_tsid_projection(schema, Some(table_ref), context.use_tsid)
         {
-            project_exprs.push(DfExpr::Column(tsid_col.into()));
+            project_exprs.push(tsid_col);
         }
 
         let plan = LogicalPlanBuilder::from(input)
@@ -1318,8 +1322,7 @@ impl PromPlanner {
                         .use_tsid
                         .then_some(DfExpr::Column(Column::new_unqualified(
                             DATA_SCHEMA_TSID_COLUMN_NAME,
-                        )))
-                        .into_iter(),
+                        ))),
                 )
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();
@@ -1833,15 +1836,10 @@ impl PromPlanner {
                         .iter()
                         .map(|tag| DfExpr::Column(Column::from_name(tag))),
                 )
-                .chain(
-                    self.ctx
-                        .use_tsid
-                        .then_some(DfExpr::Column(Column::new(
-                            Some(table_ref.clone()),
-                            DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
-                        )))
-                        .into_iter(),
-                )
+                .chain(self.ctx.use_tsid.then_some(DfExpr::Column(Column::new(
+                    Some(table_ref.clone()),
+                    DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ))))
                 .chain(Some(DfExpr::Alias(Alias {
                     expr: Box::new(DfExpr::Cast(Cast {
                         expr: Box::new(self.create_time_index_column_expr()?),
@@ -1879,8 +1877,7 @@ impl PromPlanner {
                         .use_tsid
                         .then_some(DfExpr::Column(Column::from_name(
                             DATA_SCHEMA_TSID_COLUMN_NAME,
-                        )))
-                        .into_iter(),
+                        ))),
                 )
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();
@@ -3328,28 +3325,55 @@ impl PromPlanner {
     fn prom_token_to_binary_expr_builder(
         token: TokenType,
     ) -> Result<Box<dyn Fn(DfExpr, DfExpr) -> Result<DfExpr>>> {
+        let cast_float = |expr| {
+            if matches!(
+                &expr,
+                DfExpr::Cast(Cast {
+                    data_type: ArrowDataType::Float64,
+                    ..
+                })
+            ) || matches!(&expr, DfExpr::Literal(ScalarValue::Float64(_), _))
+            {
+                expr
+            } else {
+                DfExpr::Cast(Cast {
+                    expr: Box::new(expr),
+                    data_type: ArrowDataType::Float64,
+                })
+            }
+        };
         match token.id() {
-            token::T_ADD => Ok(Box::new(|lhs, rhs| Ok(lhs + rhs))),
-            token::T_SUB => Ok(Box::new(|lhs, rhs| Ok(lhs - rhs))),
-            token::T_MUL => Ok(Box::new(|lhs, rhs| Ok(lhs * rhs))),
-            token::T_DIV => Ok(Box::new(|lhs, rhs| Ok(lhs / rhs))),
-            token::T_MOD => Ok(Box::new(|lhs: DfExpr, rhs| Ok(lhs % rhs))),
+            token::T_ADD => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) + cast_float(rhs))
+            })),
+            token::T_SUB => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) - cast_float(rhs))
+            })),
+            token::T_MUL => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) * cast_float(rhs))
+            })),
+            token::T_DIV => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) / cast_float(rhs))
+            })),
+            token::T_MOD => Ok(Box::new(move |lhs: DfExpr, rhs| {
+                Ok(cast_float(lhs) % cast_float(rhs))
+            })),
             token::T_EQLC => Ok(Box::new(|lhs, rhs| Ok(lhs.eq(rhs)))),
             token::T_NEQ => Ok(Box::new(|lhs, rhs| Ok(lhs.not_eq(rhs)))),
             token::T_GTR => Ok(Box::new(|lhs, rhs| Ok(lhs.gt(rhs)))),
             token::T_LSS => Ok(Box::new(|lhs, rhs| Ok(lhs.lt(rhs)))),
             token::T_GTE => Ok(Box::new(|lhs, rhs| Ok(lhs.gt_eq(rhs)))),
             token::T_LTE => Ok(Box::new(|lhs, rhs| Ok(lhs.lt_eq(rhs)))),
-            token::T_POW => Ok(Box::new(|lhs, rhs| {
+            token::T_POW => Ok(Box::new(move |lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: datafusion_functions::math::power(),
-                    args: vec![lhs, rhs],
+                    args: vec![cast_float(lhs), cast_float(rhs)],
                 }))
             })),
-            token::T_ATAN2 => Ok(Box::new(|lhs, rhs| {
+            token::T_ATAN2 => Ok(Box::new(move |lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: datafusion_functions::math::atan2(),
-                    args: vec![lhs, rhs],
+                    args: vec![cast_float(lhs), cast_float(rhs)],
                 }))
             })),
             _ => UnexpectedTokenSnafu { token }.fail(),
@@ -3379,6 +3403,97 @@ impl PromPlanner {
         )
     }
 
+    fn align_binary_field_columns<'a>(
+        left_field_columns: &'a [String],
+        right_field_columns: &'a [String],
+    ) -> (Vec<String>, Vec<(&'a String, &'a String)>) {
+        let field_pairs = left_field_columns
+            .iter()
+            .zip(right_field_columns.iter())
+            .collect::<Vec<_>>();
+        let output_field_columns = field_pairs
+            .iter()
+            .map(|(left_col_name, _)| (*left_col_name).clone())
+            .collect();
+        (output_field_columns, field_pairs)
+    }
+
+    fn plan_has_tsid_column(plan: &LogicalPlan) -> bool {
+        plan.schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+    }
+
+    fn optional_tsid_projection(
+        schema: &DFSchemaRef,
+        table_ref: Option<&TableReference>,
+        keep_tsid: bool,
+    ) -> Option<DfExpr> {
+        keep_tsid.then_some(()).and_then(|_| {
+            schema
+                .qualified_field_with_name(table_ref, DATA_SCHEMA_TSID_COLUMN_NAME)
+                .ok()
+                .map(|field| DfExpr::Column(field.into()))
+        })
+    }
+
+    fn binary_join_key_columns(
+        &self,
+        left: &LogicalPlan,
+        right: &LogicalPlan,
+        only_join_time_index: bool,
+        modifier: &Option<BinModifier>,
+    ) -> (BTreeSet<String>, BTreeSet<String>) {
+        let use_tsid_join = !only_join_time_index
+            && modifier.as_ref().is_none_or(|modifier| {
+                modifier.matching.is_none()
+                    && matches!(modifier.card, VectorMatchCardinality::OneToOne)
+            })
+            && Self::plan_has_tsid_column(left)
+            && Self::plan_has_tsid_column(right);
+
+        let (mut left_tag_columns, mut right_tag_columns) = if use_tsid_join {
+            (
+                BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]),
+                BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]),
+            )
+        } else {
+            let left_tag_columns = if only_join_time_index {
+                BTreeSet::new()
+            } else {
+                self.ctx
+                    .tag_columns
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            };
+            let right_tag_columns = left_tag_columns.clone();
+            (left_tag_columns, right_tag_columns)
+        };
+
+        if !use_tsid_join
+            && let Some(modifier) = modifier
+            && let Some(matching) = &modifier.matching
+        {
+            match matching {
+                LabelModifier::Include(on) => {
+                    let mask = on.labels.iter().cloned().collect::<BTreeSet<_>>();
+                    left_tag_columns = left_tag_columns.intersection(&mask).cloned().collect();
+                    right_tag_columns = right_tag_columns.intersection(&mask).cloned().collect();
+                }
+                LabelModifier::Exclude(ignoring) => {
+                    for label in &ignoring.labels {
+                        let _ = left_tag_columns.remove(label);
+                        let _ = right_tag_columns.remove(label);
+                    }
+                }
+            }
+        }
+
+        (left_tag_columns, right_tag_columns)
+    }
+
     /// Build a inner join on time index column and tag columns to concat two logical plans.
     /// When `only_join_time_index == true` we only join on the time index, because these two plan may not have the same tag columns
     #[allow(clippy::too_many_arguments)]
@@ -3393,40 +3508,8 @@ impl PromPlanner {
         only_join_time_index: bool,
         modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
-        let mut left_tag_columns = if only_join_time_index {
-            BTreeSet::new()
-        } else {
-            self.ctx
-                .tag_columns
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        };
-        let mut right_tag_columns = left_tag_columns.clone();
-
-        // apply modifier
-        if let Some(modifier) = modifier {
-            // apply label modifier
-            if let Some(matching) = &modifier.matching {
-                match matching {
-                    // keeps columns mentioned in `on`
-                    LabelModifier::Include(on) => {
-                        let mask = on.labels.iter().cloned().collect::<BTreeSet<_>>();
-                        left_tag_columns = left_tag_columns.intersection(&mask).cloned().collect();
-                        right_tag_columns =
-                            right_tag_columns.intersection(&mask).cloned().collect();
-                    }
-                    // removes columns memtioned in `ignoring`
-                    LabelModifier::Exclude(ignoring) => {
-                        // doesn't check existence of label
-                        for label in &ignoring.labels {
-                            let _ = left_tag_columns.remove(label);
-                            let _ = right_tag_columns.remove(label);
-                        }
-                    }
-                }
-            }
-        }
+        let (mut left_tag_columns, mut right_tag_columns) =
+            self.binary_join_key_columns(&left, &right, only_join_time_index, modifier);
 
         // push time index column if it exists
         if let (Some(left_time_index_column), Some(right_time_index_column)) =
@@ -3842,17 +3925,17 @@ impl PromPlanner {
     where
         F: FnMut(&String) -> Result<DfExpr>,
     {
+        let table_ref = self.ctx.table_name.clone().map(TableReference::bare);
         let non_field_columns_iter = self
             .ctx
             .tag_columns
             .iter()
             .chain(self.ctx.time_index_column.iter())
-            .map(|col| {
-                Ok(DfExpr::Column(Column::new(
-                    self.ctx.table_name.clone().map(TableReference::bare),
-                    col,
-                )))
-            });
+            .map(|col| Ok(DfExpr::Column(Column::new(table_ref.clone(), col))));
+        let tsid_iter =
+            Self::optional_tsid_projection(input.schema(), table_ref.as_ref(), self.ctx.use_tsid)
+                .into_iter()
+                .map(Ok);
 
         // build computation exprs
         let result_field_columns = self
@@ -3874,6 +3957,7 @@ impl PromPlanner {
 
         // chain non-field columns (unchanged) and field columns (applied computation then alias)
         let project_fields = non_field_columns_iter
+            .chain(tsid_iter)
             .chain(field_columns_iter)
             .collect::<Result<Vec<_>>>()?;
 
@@ -4038,6 +4122,7 @@ mod test {
     use table::test_util::EmptyTable;
 
     use super::*;
+    use crate::QueryEngineContext;
     use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
 
@@ -4063,6 +4148,76 @@ mod test {
             Plugins::default(),
             QueryOptions::default(),
         )
+    }
+
+    async fn build_optimized_promql_plan(
+        table_provider: DfTableSourceProvider,
+        eval_stmt: &EvalStmt,
+    ) -> LogicalPlan {
+        let state = build_query_engine_state();
+        let raw_plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &state)
+            .await
+            .unwrap();
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        state
+            .optimize_by_extension_rules(raw_plan, &context)
+            .unwrap()
+    }
+
+    async fn build_optimized_tsid_plan(
+        query: &str,
+        num_tag: usize,
+        num_field: usize,
+        end_secs: u64,
+        lookback_secs: u64,
+    ) -> String {
+        let eval_stmt = EvalStmt {
+            expr: parser::parse(query).unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(end_secs))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(lookback_secs),
+        };
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            num_tag,
+            num_field,
+        )
+        .await;
+
+        build_optimized_promql_plan(table_provider, &eval_stmt)
+            .await
+            .display_indent_schema()
+            .to_string()
+    }
+
+    async fn assert_nested_count_rewrite_applies(query: &str, expected_outer_agg: &str) {
+        let plan_str = build_optimized_tsid_plan(query, 2, 1, 100_000, 1).await;
+
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
+        assert!(plan_str.contains("Projection: some_metric.timestamp, some_metric.tag_0"));
+        assert!(plan_str.contains("Distinct:"));
+        assert!(plan_str.contains(expected_outer_agg), "{plan_str}");
+        assert!(!plan_str.contains("PromSeriesDivide: tags=[\"tag_0\"]"));
+    }
+
+    async fn assert_nested_count_rewrite_missing(query: &str, num_tag: usize, lookback_secs: u64) {
+        let plan_str = build_optimized_tsid_plan(query, num_tag, 1, 100_000, lookback_secs).await;
+        assert!(!plan_str.contains("Distinct:"), "{plan_str}");
+    }
+
+    fn build_eval_stmt(expr: &str) -> EvalStmt {
+        EvalStmt {
+            expr: parser::parse(expr).unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        }
     }
 
     async fn build_test_table_provider(
@@ -4137,10 +4292,26 @@ mod test {
         num_tag: usize,
         num_field: usize,
     ) -> DfTableSourceProvider {
+        let table_specs = table_name_tuples
+            .iter()
+            .map(|(schema_name, table_name)| ((schema_name.clone(), table_name.clone()), num_field))
+            .collect::<Vec<_>>();
+        build_test_table_provider_with_tsid_fields(&table_specs, num_tag).await
+    }
+
+    async fn build_test_table_provider_with_tsid_fields(
+        table_specs: &[((String, String), usize)],
+        num_tag: usize,
+    ) -> DfTableSourceProvider {
         let catalog_list = MemoryCatalogManager::with_default_setup();
 
         let physical_table_name = "phy";
         let physical_table_id = 999u32;
+        let physical_num_field = table_specs
+            .iter()
+            .map(|(_, num_field)| *num_field)
+            .max()
+            .unwrap_or(0);
 
         // Register a metric engine physical table with internal columns.
         {
@@ -4171,7 +4342,7 @@ mod test {
                 )
                 .with_time_index(true),
             );
-            for i in 0..num_field {
+            for i in 0..physical_num_field {
                 columns.push(ColumnSchema::new(
                     format!("field_{i}"),
                     ConcreteDataType::float64_datatype(),
@@ -4184,7 +4355,7 @@ mod test {
             let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
                 .primary_key_indices(primary_key_indices)
-                .value_indices((2 + num_tag..2 + num_tag + 1 + num_field).collect())
+                .value_indices((2 + num_tag..2 + num_tag + 1 + physical_num_field).collect())
                 .engine(METRIC_ENGINE_NAME.to_string())
                 .next_column_id(1024)
                 .build()
@@ -4211,7 +4382,7 @@ mod test {
         }
 
         // Register metric engine logical tables without `__tsid`, referencing the physical table.
-        for (idx, (schema_name, table_name)) in table_name_tuples.iter().enumerate() {
+        for (idx, ((schema_name, table_name), num_field)) in table_specs.iter().enumerate() {
             let mut columns = vec![];
             for i in 0..num_tag {
                 columns.push(ColumnSchema::new(
@@ -4228,7 +4399,7 @@ mod test {
                 )
                 .with_time_index(true),
             );
-            for i in 0..num_field {
+            for i in 0..*num_field {
                 columns.push(ColumnSchema::new(
                     format!("field_{i}"),
                     ConcreteDataType::float64_datatype(),
@@ -4246,7 +4417,7 @@ mod test {
             let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
                 .primary_key_indices((0..num_tag).collect())
-                .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
+                .value_indices((num_tag + 1..num_tag + 1 + *num_field).collect())
                 .engine(METRIC_ENGINE_NAME.to_string())
                 .options(options)
                 .next_column_id(1024)
@@ -4681,6 +4852,396 @@ mod test {
             MemorySourceConfig::try_new(&[], Arc::new(ArrowSchema::empty()), None).unwrap(),
         ))));
         assert!(format!("{exec:?}").contains("reuse_all_non_sample_columns: true"));
+    }
+
+    #[tokio::test]
+    async fn default_binary_join_uses_tsid_when_available() {
+        let eval_stmt = build_eval_stmt("some_metric / some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("some_metric.__tsid = some_alt_metric.__tsid"),
+            "{plan_str}"
+        );
+        assert!(
+            !plan_str.contains("some_metric.tag_0 = some_alt_metric.tag_0"),
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tsid_is_preserved_for_nested_default_binary_joins() {
+        let eval_stmt = build_eval_stmt("(some_metric - some_alt_metric) / some_third_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_third_metric".to_string(),
+                ),
+            ],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn repeated_tsid_binary_operand_keeps_tsid_join_keys() {
+        let eval_stmt = build_eval_stmt("((some_metric - some_alt_metric) / some_metric) * 100");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn repeated_tsid_binary_operand_keeps_shorter_field_side() {
+        let eval_stmt =
+            build_eval_stmt("((two_field_metric - one_field_metric) / one_field_metric) * 100");
+
+        let table_provider = build_test_table_provider_with_tsid_fields(
+            &[
+                (
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "two_field_metric".to_string(),
+                    ),
+                    2,
+                ),
+                (
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "one_field_metric".to_string(),
+                    ),
+                    1,
+                ),
+            ],
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let field_names = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        let value_columns = field_names
+            .iter()
+            .filter(|name| {
+                *name != "tag_0" && *name != "timestamp" && *name != DATA_SCHEMA_TSID_COLUMN_NAME
+            })
+            .count();
+        assert_eq!(value_columns, 1, "{field_names:?}");
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn tsid_binary_join_uses_shorter_field_side() {
+        let eval_stmt = build_eval_stmt("one_field_metric / two_field_metric");
+
+        let table_provider = build_test_table_provider_with_tsid_fields(
+            &[
+                (
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "one_field_metric".to_string(),
+                    ),
+                    1,
+                ),
+                (
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "two_field_metric".to_string(),
+                    ),
+                    2,
+                ),
+            ],
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let field_names = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        let value_columns = field_names
+            .iter()
+            .filter(|name| {
+                *name != "tag_0" && *name != "timestamp" && *name != DATA_SCHEMA_TSID_COLUMN_NAME
+            })
+            .count();
+        assert_eq!(value_columns, 1, "{field_names:?}");
+    }
+
+    #[tokio::test]
+    async fn label_matching_modifier_disables_tsid_binary_join() {
+        let eval_stmt = build_eval_stmt("some_metric / ignoring(tag_0) some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(!plan_str.contains("__tsid ="), "{plan_str}");
+        assert!(
+            plan_str.contains("some_metric.tag_1 = some_alt_metric.tag_1"),
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn comparison_binary_join_uses_tsid_and_keeps_it_in_filtered_result() {
+        let eval_stmt = build_eval_stmt("some_metric > some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+        };
+        let plan = planner
+            .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
+            .await
+            .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("some_metric.__tsid = some_alt_metric.__tsid"),
+            "{plan_str}"
+        );
+        assert!(
+            plan.schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME),
+            "{plan_str}"
+        );
+        assert!(planner.ctx.use_tsid, "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn comparison_bool_binary_join_uses_tsid_when_available() {
+        let eval_stmt = build_eval_stmt("some_metric > bool some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("some_metric.__tsid = some_alt_metric.__tsid"),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+        assert!(!plan_str.contains("tag_1 ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn scalar_count_count_range_keeps_full_window() {
+        let plan_str = build_optimized_tsid_plan(
+            "scalar(count(count(some_metric) by (tag_0)))",
+            1,
+            1,
+            100_000,
+            1,
+        )
+        .await;
+        assert!(plan_str.contains("ScalarCalculate: tags=[]"));
+        assert!(plan_str.contains("PromInstantManipulate: range=[0..100000000]"));
+        assert!(!plan_str.contains("PromInstantManipulate: range=[99999000..99999000]"));
+    }
+
+    #[tokio::test]
+    async fn scalar_count_count_rewrite_applies_inside_binary_expr_for_tsid_input() {
+        let plan_str = build_optimized_tsid_plan(
+            "sum(irate(some_metric[1h])) / scalar(count(count(some_metric) by (tag_0)))",
+            2,
+            1,
+            10,
+            300,
+        )
+        .await;
+        assert!(plan_str.contains("Distinct:"), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn nested_count_rewrite_keeps_full_series_key_with_tsid_input() {
+        assert_nested_count_rewrite_applies(
+            "count(count(some_metric) by (tag_0))",
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(count(some_metric.field_0))]]"
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn nested_sum_count_rewrite_keeps_full_series_key_with_tsid_input() {
+        assert_nested_count_rewrite_applies(
+            "count(sum(some_metric) by (tag_0))",
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(sum(some_metric.field_0))]]"
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn nested_supported_inner_aggs_rewrite_apply_for_tsid_input() {
+        for (query, expected_outer_agg) in [
+            (
+                "count(avg(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(avg(some_metric.field_0))]]",
+            ),
+            (
+                "count(min(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(min(some_metric.field_0))]]",
+            ),
+            (
+                "count(max(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(max(some_metric.field_0))]]",
+            ),
+            (
+                "count(stddev(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(stddev_pop(some_metric.field_0))]]",
+            ),
+            (
+                "count(stdvar(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(var_pop(some_metric.field_0))]]",
+            ),
+        ] {
+            assert_nested_count_rewrite_applies(query, expected_outer_agg).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_non_count_inner_aggs_rewrite_filter_null_values_for_tsid_input() {
+        let count_plan =
+            build_optimized_tsid_plan("count(count(some_metric) by (tag_0))", 2, 1, 100_000, 1)
+                .await;
+        assert!(
+            !count_plan.contains("some_metric.field_0 IS NOT NULL"),
+            "{count_plan}"
+        );
+
+        for query in [
+            "count(sum(some_metric) by (tag_0))",
+            "count(avg(some_metric) by (tag_0))",
+            "count(min(some_metric) by (tag_0))",
+            "count(max(some_metric) by (tag_0))",
+            "count(stddev(some_metric) by (tag_0))",
+            "count(stdvar(some_metric) by (tag_0))",
+        ] {
+            let plan_str = build_optimized_tsid_plan(query, 2, 1, 100_000, 1).await;
+            assert!(
+                plan_str.contains("Filter: some_metric.field_0 IS NOT NULL"),
+                "{query}: {plan_str}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_unsupported_or_non_direct_inner_aggs_do_not_rewrite() {
+        assert_nested_count_rewrite_missing("count(group(some_metric) by (tag_0))", 2, 1).await;
+        assert_nested_count_rewrite_missing(
+            "count(sum(irate(some_metric[1h])) by (tag_0))",
+            2,
+            300,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -5194,7 +5755,7 @@ mod test {
                 .unwrap();
 
         let expected = String::from(
-            "Projection: rhs.tag_0, rhs.timestamp, lhs.field_0 + rhs.field_0 AS lhs.field_0 + rhs.field_0 [tag_0:Utf8, timestamp:Timestamp(ms), lhs.field_0 + rhs.field_0:Float64;N]\
+            "Projection: rhs.tag_0, rhs.timestamp, CAST(lhs.field_0 AS Float64) + CAST(rhs.field_0 AS Float64) AS lhs.field_0 + rhs.field_0 [tag_0:Utf8, timestamp:Timestamp(ms), lhs.field_0 + rhs.field_0:Float64;N]\
             \n  Inner Join: lhs.tag_0 = rhs.tag_0, lhs.timestamp = rhs.timestamp [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    SubqueryAlias: lhs [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -5249,7 +5810,7 @@ mod test {
     async fn binary_op_literal_column() {
         let query = r#"1 + some_metric{tag_0="bar"}"#;
         let expected = String::from(
-            "Projection: some_metric.tag_0, some_metric.timestamp, Float64(1) + some_metric.field_0 AS Float64(1) + field_0 [tag_0:Utf8, timestamp:Timestamp(ms), Float64(1) + field_0:Float64;N]\
+            "Projection: some_metric.tag_0, some_metric.timestamp, Float64(1) + CAST(some_metric.field_0 AS Float64) AS Float64(1) + field_0 [tag_0:Utf8, timestamp:Timestamp(ms), Float64(1) + field_0:Float64;N]\
             \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -5287,7 +5848,7 @@ mod test {
     async fn bool_with_additional_arithmetic() {
         let query = "some_metric + (1 == bool 2)";
         let expected = String::from(
-            "Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0 + CAST(Float64(1) = Float64(2) AS Float64) AS field_0 + Float64(1) = Float64(2) [tag_0:Utf8, timestamp:Timestamp(ms), field_0 + Float64(1) = Float64(2):Float64;N]\
+            "Projection: some_metric.tag_0, some_metric.timestamp, CAST(some_metric.field_0 AS Float64) + CAST(Float64(1) = Float64(2) AS Float64) AS field_0 + Float64(1) = Float64(2) [tag_0:Utf8, timestamp:Timestamp(ms), field_0 + Float64(1) = Float64(2):Float64;N]\
             \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -5397,7 +5958,7 @@ mod test {
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                 .await
                 .unwrap();
-        let expected = "Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value\
+        let expected = "Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, CAST(http_server_requests_seconds_sum.greptime_value AS Float64) / CAST(http_server_requests_seconds_count.greptime_value AS Float64) AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value\
             \n  Inner Join: http_server_requests_seconds_sum.greptime_timestamp = http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.uri = http_server_requests_seconds_count.uri\
             \n    SubqueryAlias: http_server_requests_seconds_sum\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]\
@@ -5788,7 +6349,7 @@ mod test {
 
         let query = "some_alt_metric{__schema__=\"greptime_private\"} / some_metric";
         let expected = String::from(
-            "Projection: some_metric.tag_0, some_metric.timestamp, greptime_private.some_alt_metric.field_0 / some_metric.field_0 AS greptime_private.some_alt_metric.field_0 / some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(ms), greptime_private.some_alt_metric.field_0 / some_metric.field_0:Float64;N]\
+            "Projection: some_metric.tag_0, some_metric.timestamp, CAST(greptime_private.some_alt_metric.field_0 AS Float64) / CAST(some_metric.field_0 AS Float64) AS greptime_private.some_alt_metric.field_0 / some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(ms), greptime_private.some_alt_metric.field_0 / some_metric.field_0:Float64;N]\
             \n  Inner Join: greptime_private.some_alt_metric.tag_0 = some_metric.tag_0, greptime_private.some_alt_metric.timestamp = some_metric.timestamp [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    SubqueryAlias: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\

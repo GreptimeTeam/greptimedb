@@ -37,17 +37,14 @@ inputs:
     description: Whether to push the latest tag of the image
     required: false
     default: 'true'
-  aws-cn-s3-bucket:
-    description: S3 bucket to store released artifacts in CN region
+  proxy-url:
+    description: The url of the S3 proxy server
     required: true
-  aws-cn-access-key-id:
-    description: AWS access key id in CN region
+  proxy-username:
+    description: The username of the S3 proxy
     required: true
-  aws-cn-secret-access-key:
-    description: AWS secret access key in CN region
-    required: true
-  aws-cn-region:
-    description: AWS region in CN
+  proxy-password:
+    description: The password of the S3 proxy
     required: true
   upload-to-s3:
     description: Upload to S3
@@ -77,21 +74,13 @@ runs:
       with:
         path: ${{ inputs.artifacts-dir }}
 
-    - name: Install s5cmd
-      shell: bash
-      run: |
-        wget https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_Linux-64bit.tar.gz
-        tar -xzf s5cmd_2.3.0_Linux-64bit.tar.gz
-        sudo mv s5cmd /usr/local/bin/
-        sudo chmod +x /usr/local/bin/s5cmd
-
     - name: Release artifacts to cn region
       uses: nick-invision/retry@v2
       if: ${{ inputs.upload-to-s3 == 'true' }}
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws-cn-access-key-id }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-cn-secret-access-key }}
-        AWS_REGION: ${{ inputs.aws-cn-region }}
+        PROXY_URL: ${{ inputs.proxy-url }}
+        PROXY_USERNAME: ${{ inputs.proxy-username }}
+        PROXY_PASSWORD: ${{ inputs.proxy-password }}
         UPDATE_VERSION_INFO: ${{ inputs.update-version-info }}
       with:
         max_attempts: ${{ inputs.upload-max-retry-times }}
@@ -99,8 +88,7 @@ runs:
         command: |
           ./.github/scripts/upload-artifacts-to-s3.sh \
             ${{ inputs.artifacts-dir }} \
-            ${{ inputs.version }} \
-            ${{ inputs.aws-cn-s3-bucket }}
+            ${{ inputs.version }}
 
     - name: Push greptimedb image from Dockerhub to ACR
       shell: bash

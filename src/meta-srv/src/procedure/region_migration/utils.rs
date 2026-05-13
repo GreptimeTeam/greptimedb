@@ -242,7 +242,7 @@ pub async fn analyze_region_migration_task(
 #[cfg(test)]
 mod tests {
 
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::Arc;
     use std::time::Duration;
 

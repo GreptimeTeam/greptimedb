@@ -620,7 +620,7 @@ impl RegionMigrationManager {
 
 #[cfg(test)]
 mod test {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use common_meta::key::table_route::LogicalTableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;

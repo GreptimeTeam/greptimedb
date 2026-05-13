@@ -306,7 +306,7 @@ pub(crate) fn parse_string_to_value(
                 let v = parse_string_to_jsonb(&s).context(DatatypeSnafu)?;
                 Ok(Value::Binary(v.into()))
             }
-            JsonFormat::Native(_) => {
+            JsonFormat::Json2(_) => {
                 let extension_type: Option<JsonExtensionType> =
                     column_schema.extension_type().context(DatatypeSnafu)?;
                 let json_structure_settings = extension_type

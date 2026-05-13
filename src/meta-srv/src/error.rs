@@ -1136,6 +1136,12 @@ impl Error {
             Error::RetryLater { .. }
                 | Error::RetryLaterWithSource { .. }
                 | Error::MailboxTimeout { .. }
+        ) || matches!(
+            self,
+            Error::AllocateRegions { source, .. } if source.is_retry_later()
+        ) || matches!(
+            self,
+            Error::DeallocateRegions { source, .. } if source.is_retry_later()
         )
     }
 }
@@ -1322,5 +1328,37 @@ pub(crate) fn match_for_io_error(err_status: &tonic::Status) -> Option<&std::io:
         }
 
         err = err.source()?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::mock::MockError;
+    use common_error::status_code::StatusCode;
+    use snafu::ResultExt;
+
+    use super::DeallocateRegionsSnafu;
+
+    #[test]
+    fn test_deallocate_regions_is_retryable_when_source_is_retry_later() {
+        let source = common_meta::error::Error::retry_later(MockError::new(StatusCode::Internal));
+        let err = Err::<(), _>(source)
+            .context(DeallocateRegionsSnafu { table_id: 1024_u32 })
+            .unwrap_err();
+
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_deallocate_regions_is_not_retryable_when_source_is_not_retry_later() {
+        let source = common_meta::error::UnexpectedSnafu {
+            err_msg: "mock error",
+        }
+        .build();
+        let err = Err::<(), _>(source)
+            .context(DeallocateRegionsSnafu { table_id: 1024_u32 })
+            .unwrap_err();
+
+        assert!(!err.is_retryable());
     }
 }

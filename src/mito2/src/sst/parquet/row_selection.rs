@@ -554,11 +554,23 @@ fn intersect_row_selections(left: &RowSelection, right: &RowSelection) -> RowSel
 /// or if there's a gap that requires skipping rows. It handles both "select" and "skip" actions,
 /// optimizing the list of selectors by merging contiguous actions of the same type.
 ///
+/// The returned selection intentionally stops at the end of the last matched range and may omit a
+/// trailing `skip` that would extend it to `total_row_count`. That is fine when the selection is
+/// used directly by the parquet reader, which simply stops once the selectors are exhausted.
+///
 /// Note: overlapping ranges are not supported and will result in an incorrect selection.
 pub(crate) fn row_selection_from_row_ranges(
     row_ranges: impl Iterator<Item = Range<usize>>,
     total_row_count: usize,
 ) -> RowSelection {
+    let (selectors, _) = build_selectors_from_row_ranges(row_ranges, total_row_count);
+    RowSelection::from(selectors)
+}
+
+fn build_selectors_from_row_ranges(
+    row_ranges: impl Iterator<Item = Range<usize>>,
+    total_row_count: usize,
+) -> (Vec<RowSelector>, usize) {
     let mut selectors: Vec<RowSelector> = Vec::new();
     let mut last_processed_end = 0;
 
@@ -572,7 +584,7 @@ pub(crate) fn row_selection_from_row_ranges(
         last_processed_end = end;
     }
 
-    RowSelection::from(selectors)
+    (selectors, last_processed_end)
 }
 
 /// Converts an iterator of sorted row IDs into a `RowSelection`.

@@ -21,7 +21,10 @@ use std::time::Duration;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::KvCacheInvalidator;
 use common_meta::error::Error::CacheNotGet;
-use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, GetKvCacheSnafu, Result};
+use common_meta::error::{
+    CacheNotGetSnafu, Error, ExternalSnafu, GetKvCacheSnafu, Result, UnsupportedSnafu,
+};
+use common_meta::kv_backend::read_only::ReadOnlyKvBackend;
 use common_meta::kv_backend::txn::{Txn, TxnResponse};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::KeyValue;
@@ -357,19 +360,35 @@ impl CachedKvBackend {
 }
 
 #[derive(Debug)]
-pub struct MetaKvBackend {
-    pub client: Arc<MetaClient>,
+pub(crate) struct MetaKvBackend {
+    client: Arc<MetaClient>,
 }
 
 impl MetaKvBackend {
     /// Constructs a [MetaKvBackend].
-    pub fn new(client: Arc<MetaClient>) -> MetaKvBackend {
+    fn new(client: Arc<MetaClient>) -> MetaKvBackend {
         MetaKvBackend { client }
     }
 }
 
+pub fn new_read_only_meta_kv_backend(client: Arc<MetaClient>) -> KvBackendRef {
+    Arc::new(ReadOnlyKvBackend::new(Arc::new(MetaKvBackend::new(client))))
+}
+
+#[async_trait::async_trait]
 impl TxnService for MetaKvBackend {
     type Error = Error;
+
+    async fn txn(&self, _txn: Txn) -> Result<TxnResponse> {
+        UnsupportedSnafu {
+            operation: "MetaKvBackend txn",
+        }
+        .fail()
+    }
+
+    fn max_txn_ops(&self) -> usize {
+        usize::MAX
+    }
 }
 
 /// Implement `KvBackend` trait for `MetaKvBackend` instead of opendal's `Accessor` since
@@ -465,6 +484,9 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use async_trait::async_trait;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::read_only::ReadOnlyKvBackend;
+    use common_meta::kv_backend::txn::{Txn, TxnOp};
     use common_meta::kv_backend::{KvBackend, TxnService};
     use common_meta::rpc::KeyValue;
     use common_meta::rpc::store::{
@@ -473,8 +495,9 @@ mod tests {
         PutResponse, RangeRequest, RangeResponse,
     };
     use dashmap::DashMap;
+    use meta_client::client::MetaClientBuilder;
 
-    use super::CachedKvBackend;
+    use super::{CachedKvBackend, new_read_only_meta_kv_backend};
 
     #[derive(Default)]
     pub struct SimpleKvBackend {
@@ -577,6 +600,62 @@ mod tests {
 
             assert_eq!(get_execute_times.load(Ordering::SeqCst), 3);
         }
+    }
+
+    #[tokio::test]
+    async fn test_cached_kv_backend_rejects_writes_with_read_only_inner() {
+        let inner = Arc::new(MemoryKvBackend::<common_meta::error::Error>::new());
+        let cached_kv = CachedKvBackend::wrap(Arc::new(ReadOnlyKvBackend::new(inner)));
+
+        let err = cached_kv
+            .put(PutRequest {
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            common_meta::error::Error::ReadOnlyKvBackend { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_read_only_meta_kv_backend_rejects_writes() {
+        let meta_client = Arc::new(MetaClientBuilder::frontend_default_options().build());
+        let backend = new_read_only_meta_kv_backend(meta_client);
+
+        let err = backend
+            .put(PutRequest {
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            common_meta::error::Error::ReadOnlyKvBackend { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_read_only_meta_kv_backend_does_not_emulate_txn() {
+        let meta_client = Arc::new(MetaClientBuilder::frontend_default_options().build());
+        let backend = new_read_only_meta_kv_backend(meta_client);
+
+        let result = backend
+            .txn(Txn::new().and_then(vec![TxnOp::Get(b"k1".to_vec())]))
+            .await;
+        let err = match result {
+            Ok(_) => panic!("expected unsupported txn error"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, common_meta::error::Error::Unsupported { .. }));
     }
 
     async fn add_some_vals(kv_backend: &impl KvBackend) {

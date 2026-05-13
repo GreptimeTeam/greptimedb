@@ -34,7 +34,7 @@ use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 
 use crate::access_layer::TempFileCleaner;
-use crate::cache::{FILE_TYPE, INDEX_TYPE};
+use crate::cache::{CachedSstMeta, FILE_TYPE, INDEX_TYPE};
 use crate::error::{self, OpenDalSnafu, Result};
 use crate::metrics::{
     CACHE_BYTES, CACHE_HIT, CACHE_MISS, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
@@ -288,6 +288,17 @@ pub(crate) struct FileCache {
 pub(crate) type FileCacheRef = Arc<FileCache>;
 
 impl FileCache {
+    /// Splits the configured total capacity between parquet and puffin caches
+    /// without exceeding the requested overall budget.
+    fn split_cache_capacities(total_capacity: u64, index_percent: u8) -> (u64, u64) {
+        let desired_puffin_capacity = total_capacity * u64::from(index_percent) / 100;
+        let min_cache_capacity = MIN_CACHE_CAPACITY.min(total_capacity / 2);
+        let puffin_capacity =
+            desired_puffin_capacity.clamp(min_cache_capacity, total_capacity - min_cache_capacity);
+        let parquet_capacity = total_capacity - puffin_capacity;
+        (parquet_capacity, puffin_capacity)
+    }
+
     /// Creates a new file cache.
     pub(crate) fn new(
         local_store: ObjectStore,
@@ -302,14 +313,8 @@ impl FileCache {
             .unwrap_or(DEFAULT_INDEX_CACHE_PERCENT);
         let total_capacity = capacity.as_bytes();
 
-        // Convert percent to ratio and calculate capacity for each cache
-        let index_ratio = index_percent as f64 / 100.0;
-        let puffin_capacity = (total_capacity as f64 * index_ratio) as u64;
-        let parquet_capacity = total_capacity - puffin_capacity;
-
-        // Ensure both capacities are at least 512MB
-        let puffin_capacity = puffin_capacity.max(MIN_CACHE_CAPACITY);
-        let parquet_capacity = parquet_capacity.max(MIN_CACHE_CAPACITY);
+        let (parquet_capacity, puffin_capacity) =
+            Self::split_cache_capacities(total_capacity, index_percent);
 
         info!(
             "Initializing file cache with index_percent: {}%, total_capacity: {}, parquet_capacity: {}, puffin_capacity: {}",
@@ -610,6 +615,34 @@ impl FileCache {
                 .inc();
             None
         }
+    }
+
+    /// Get fused SST metadata from the file cache.
+    /// If the file is not in the cache, or metadata loading/decoding fails, return None.
+    pub(crate) async fn get_sst_meta_data(
+        &self,
+        key: IndexKey,
+        cache_metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
+    ) -> Option<Arc<CachedSstMeta>> {
+        let file_path = self.inner.cache_file_path(key);
+        self.get_parquet_meta_data(key, cache_metrics, page_index_policy)
+            .await
+            .and_then(
+                |metadata| match CachedSstMeta::try_new(&file_path, metadata) {
+                    Ok(metadata) => Some(Arc::new(metadata)),
+                    Err(err) => {
+                        CACHE_MISS
+                            .with_label_values(&[key.file_type.metric_label()])
+                            .inc();
+                        warn!(
+                            err; "Failed to decode cached parquet metadata for key {:?}",
+                            key
+                        );
+                        None
+                    }
+                },
+            )
     }
 
     async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
@@ -1034,6 +1067,28 @@ mod tests {
         assert_eq!(b"grep", bytes[1].as_ref());
         assert_eq!(b"data", bytes[2].as_ref());
         assert_eq!(data, bytes[3].as_ref());
+    }
+
+    #[test]
+    fn test_file_cache_capacity_respects_total_budget() {
+        let total_capacity = ReadableSize::mb(256).as_bytes();
+        let (parquet_capacity, puffin_capacity) =
+            FileCache::split_cache_capacities(total_capacity, 20);
+
+        assert_eq!(total_capacity, parquet_capacity + puffin_capacity);
+        assert_eq!(ReadableSize::mb(128).as_bytes(), parquet_capacity);
+        assert_eq!(ReadableSize::mb(128).as_bytes(), puffin_capacity);
+    }
+
+    #[test]
+    fn test_file_cache_capacity_keeps_split_when_total_allows_it() {
+        let total_capacity = ReadableSize::gb(5).as_bytes();
+        let (parquet_capacity, puffin_capacity) =
+            FileCache::split_cache_capacities(total_capacity, 20);
+
+        assert_eq!(total_capacity, parquet_capacity + puffin_capacity);
+        assert_eq!(ReadableSize::gb(4).as_bytes(), parquet_capacity);
+        assert_eq!(ReadableSize::gb(1).as_bytes(), puffin_capacity);
     }
 
     #[test]

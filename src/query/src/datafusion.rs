@@ -15,6 +15,7 @@
 //! Planner, QueryEngine implementations based on DataFusion.
 
 mod error;
+mod json_expr_planner;
 mod planner;
 
 use std::any::Any;
@@ -54,12 +55,15 @@ use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{DistPlannerOptions, MergeScanLogicalPlan};
 use crate::error::{
-    CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
+    CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
     TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
-use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
+use crate::metrics::{
+    OnDone, QUERY_STAGE_ELAPSED, maybe_attach_region_watermark_metrics,
+    should_collect_region_watermark_from_query_ctx,
+};
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -100,8 +104,10 @@ impl DatafusionQueryEngine {
             optimized_physical_plan
         };
 
+        let stream = self.execute_stream(&ctx, &physical_plan)?;
+
         Ok(Output::new(
-            OutputData::Stream(self.execute_stream(&ctx, &physical_plan)?),
+            OutputData::Stream(stream),
             OutputMeta::new_with_plan(physical_plan),
         ))
     }
@@ -128,10 +134,10 @@ impl DatafusionQueryEngine {
         let table_name = dml.table_name.resolve(default_catalog, default_schema);
         let table = self.find_table(&table_name, &query_ctx).await?;
 
-        let output = self
+        let Output { data, meta } = self
             .exec_query_plan((*dml.input).clone(), query_ctx.clone())
             .await?;
-        let mut stream = match output.data {
+        let mut stream = match data {
             OutputData::RecordBatches(batches) => batches.as_stream(),
             OutputData::Stream(stream) => stream,
             _ => unreachable!(),
@@ -167,7 +173,7 @@ impl DatafusionQueryEngine {
         }
         Ok(Output::new(
             OutputData::AffectedRows(affected_rows),
-            OutputMeta::new_with_cost(insert_cost),
+            OutputMeta::new(meta.plan, insert_cost),
         ))
     }
 
@@ -355,25 +361,6 @@ impl DatafusionQueryEngine {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn optimize(
-        &self,
-        context: &QueryEngineContext,
-        plan: &LogicalPlan,
-    ) -> Result<LogicalPlan> {
-        let _timer = metrics::OPTIMIZE_LOGICAL_ELAPSED.start_timer();
-
-        // Optimized by extension rules
-        let optimized_plan = self
-            .state
-            .optimize_by_extension_rules(plan.clone(), context)?;
-
-        // Optimized by datafusion optimizer
-        let optimized_plan = self.state.session_state().optimize(&optimized_plan)?;
-
-        Ok(optimized_plan)
-    }
-
-    #[tracing::instrument(skip_all)]
     fn optimize_physical_plan(
         &self,
         ctx: &mut QueryEngineContext,
@@ -444,32 +431,9 @@ impl QueryEngine for DatafusionQueryEngine {
     async fn describe(
         &self,
         plan: LogicalPlan,
-        query_ctx: QueryContextRef,
+        _query_ctx: QueryContextRef,
     ) -> Result<DescribeResult> {
-        let ctx = self.engine_context(query_ctx);
-        if let Ok(optimised_plan) = self.optimize(&ctx, &plan) {
-            let schema = optimised_plan
-                .schema()
-                .clone()
-                .try_into()
-                .context(ConvertSchemaSnafu)?;
-            Ok(DescribeResult {
-                schema,
-                logical_plan: optimised_plan,
-            })
-        } else {
-            // Table's like those in information_schema cannot be optimized when
-            // it contains parameters. So we fallback to original plans.
-            let schema = plan
-                .schema()
-                .clone()
-                .try_into()
-                .context(ConvertSchemaSnafu)?;
-            Ok(DescribeResult {
-                schema,
-                logical_plan: plan,
-            })
-        }
+        Ok(DescribeResult { logical_plan: plan })
     }
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
@@ -585,7 +549,10 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        let explain_verbose = ctx.query_ctx().explain_verbose();
+        let query_ctx = ctx.query_ctx();
+        let explain_verbose = query_ctx.explain_verbose();
+        let should_collect_region_watermark =
+            should_collect_region_watermark_from_query_ctx(&query_ctx)?;
         let output_partitions = plan.properties().output_partitioning().partition_count();
         if explain_verbose {
             common_telemetry::info!("Executing query plan, output_partitions: {output_partitions}");
@@ -621,7 +588,11 @@ impl QueryExecutor for DatafusionQueryEngine {
                         );
                     }
                 });
-                Ok(Box::pin(stream))
+                Ok(maybe_attach_region_watermark_metrics(
+                    Box::pin(stream),
+                    plan.clone(),
+                    should_collect_region_watermark,
+                ))
             }
             _ => {
                 // merge into a single partition
@@ -640,7 +611,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
-                stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
+                stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
                     let exec_cost = exec_timer.stop_and_record();
                     if explain_verbose {
@@ -650,7 +621,11 @@ impl QueryExecutor for DatafusionQueryEngine {
                         );
                     }
                 });
-                Ok(Box::pin(stream))
+                Ok(maybe_attach_region_watermark_metrics(
+                    Box::pin(stream),
+                    plan.clone(),
+                    should_collect_region_watermark,
+                ))
             }
         }
     }
@@ -910,10 +885,10 @@ mod tests {
             .await
             .unwrap();
 
-        let DescribeResult {
-            schema,
-            logical_plan,
-        } = engine.describe(plan, QueryContext::arc()).await.unwrap();
+        let DescribeResult { logical_plan } =
+            engine.describe(plan, QueryContext::arc()).await.unwrap();
+
+        let schema: Schema = logical_plan.schema().clone().try_into().unwrap();
 
         assert_eq!(
             schema.column_schemas()[0],
@@ -924,7 +899,7 @@ mod tests {
             )
         );
         assert_eq!(
-            "Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]",
+            "Limit: skip=0, fetch=20\n  Projection: sum(numbers.number)\n    Aggregate: groupBy=[[]], aggr=[[sum(numbers.number)]]\n      TableScan: numbers",
             format!("{}", logical_plan.display_indent())
         );
     }

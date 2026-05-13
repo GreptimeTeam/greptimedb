@@ -38,6 +38,8 @@ use crate::memtable::partition_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS
 use crate::sst::FormatType;
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
+const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
+const MEMTABLE_PARTITION_TREE_PREFIX: &str = "memtable.partition_tree.";
 
 pub(crate) fn parse_wal_options(
     options_map: &HashMap<String, String>,
@@ -50,7 +52,7 @@ pub(crate) fn parse_wal_options(
 }
 
 /// Mode to handle duplicate rows while merging.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, EnumString)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum MergeMode {
@@ -96,9 +98,10 @@ impl RegionOptions {
     pub fn validate(&self) -> Result<()> {
         if self.append_mode {
             ensure!(
-                self.merge_mode.is_none(),
+                self.merge_mode
+                    .is_none_or(|mode| mode == MergeMode::LastRow),
                 InvalidRegionOptionsSnafu {
-                    reason: "merge_mode is not allowed when append_mode is enabled",
+                    reason: "only last_row merge_mode is allowed when append_mode is enabled",
                 }
             );
         }
@@ -137,7 +140,8 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         // See https://github.com/serde-rs/serde/issues/1626
         let options: RegionOptionsWithoutEnum =
             serde_json::from_str(&json).context(JsonOptionsSnafu)?;
-        let has_compaction_type = validate_enum_options(options_map, "compaction.type")?;
+        let has_compaction_type =
+            validate_enum_options(options_map, "compaction.type", &[COMPACTION_TWCS_PREFIX])?;
         let compaction = if has_compaction_type {
             serde_json::from_str(&json).context(JsonOptionsSnafu)?
         } else {
@@ -147,7 +151,11 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         let wal_options = parse_wal_options(options_map).context(JsonOptionsSnafu)?;
 
         let index_options: IndexOptions = serde_json::from_str(&json).context(JsonOptionsSnafu)?;
-        let memtable = if validate_enum_options(options_map, "memtable.type")? {
+        let memtable = if validate_enum_options(
+            options_map,
+            "memtable.type",
+            &[MEMTABLE_PARTITION_TREE_PREFIX],
+        )? {
             Some(serde_json::from_str(&json).context(JsonOptionsSnafu)?)
         } else {
             None
@@ -436,25 +444,36 @@ fn options_map_to_value(options: &HashMap<String, String>) -> Value {
 // `#[serde(default)]` doesn't support enum (https://github.com/serde-rs/serde/issues/1799) so we
 // check the type key first.
 /// Validates whether the `options_map` has valid options for specific `enum_tag_key`
-/// and returns `true` if the map contains enum options.
+/// and returns `true` if the map contains the enum tag.
+///
+/// Variant options must start with one of `enum_option_prefixes`. If variant options
+/// are provided, the tagged enum type key must also be provided.
 fn validate_enum_options(
     options_map: &HashMap<String, String>,
     enum_tag_key: &str,
+    enum_option_prefixes: &[&str],
 ) -> Result<bool> {
-    let enum_type = enum_tag_key.split('.').next().unwrap();
-    let mut has_other_options = false;
+    let mut has_enum_options = false;
     let mut has_tag = false;
     for key in options_map.keys() {
         if key == enum_tag_key {
             has_tag = true;
-        } else if key.starts_with(enum_type) {
-            has_other_options = true;
+        } else if !has_enum_options
+            && enum_option_prefixes
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+        {
+            has_enum_options = true;
+        }
+
+        if has_tag && has_enum_options {
+            break;
         }
     }
 
     // If tag is not provided, then other options for the enum should not exist.
     ensure!(
-        has_tag || !has_other_options,
+        has_tag || !has_enum_options,
         InvalidRegionOptionsSnafu {
             reason: format!("missing key {} in options", enum_tag_key),
         }
@@ -537,6 +556,34 @@ mod tests {
         assert_eq!(expect, options);
     }
 
+    #[test]
+    fn test_with_compaction_override_true_without_compaction_type() {
+        let map = make_map(&[(COMPACTION_OVERRIDE, "true")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            compaction_override: true,
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_with_compaction_override_false_without_compaction_type() {
+        let map = make_map(&[(COMPACTION_OVERRIDE, "false")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert_eq!(RegionOptions::default(), options);
+    }
+
+    #[test]
+    fn test_compaction_twcs_options_still_require_compaction_type_with_override() {
+        let map = make_map(&[
+            (COMPACTION_OVERRIDE, "true"),
+            ("compaction.twcs.time_window", "2h"),
+        ]);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
     fn test_with_wal_options(wal_options: &WalOptions) -> bool {
         let encoded_wal_options = serde_json::to_string(&wal_options).unwrap();
         let map = make_map(&[(WAL_OPTIONS_KEY, &encoded_wal_options)]);
@@ -608,6 +655,13 @@ mod tests {
     }
 
     #[test]
+    fn test_without_memtable_type() {
+        let map = make_map(&[("memtable.partition_tree.index_max_keys_per_shard", "2048")]);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
     fn test_with_merge_mode() {
         let map = make_map(&[("merge_mode", "last_row")]);
         let options = RegionOptions::try_from(&map).unwrap();
@@ -618,6 +672,18 @@ mod tests {
         assert_eq!(MergeMode::LastNonNull, options.merge_mode());
 
         let map = make_map(&[("merge_mode", "unknown")]);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_append_mode_allows_last_row_merge_mode() {
+        let map = make_map(&[("append_mode", "true"), ("merge_mode", "last_row")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert!(options.append_mode);
+        assert_eq!(MergeMode::LastRow, options.merge_mode());
+
+        let map = make_map(&[("append_mode", "true"), ("merge_mode", "last_non_null")]);
         let err = RegionOptions::try_from(&map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }

@@ -25,7 +25,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::{Value, ValueRef};
 use mito_codec::row_converter::{
-    DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
+    DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SparseOffsetsCache,
+    SparsePrimaryKeyCodec,
 };
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, RegionId};
@@ -182,7 +183,7 @@ fn matches_sparse_scalar(
     codec: &SparsePrimaryKeyCodec,
     filters: &[SimpleFilterEvaluator],
     pk: &[u8],
-    offsets_map: &mut std::collections::HashMap<ColumnId, usize>,
+    offsets_map: &mut SparseOffsetsCache,
 ) -> bool {
     offsets_map.clear();
     if filters.is_empty() || metadata.primary_key.is_empty() {
@@ -246,18 +247,18 @@ fn bench_primary_key_filter(c: &mut Criterion) {
 
         let dense_pk = encode_dense_pk(&metadata, &row);
         let dense_codec = DensePrimaryKeyCodec::new(&metadata);
-        let mut dense_fast = dense_codec.primary_key_filter(&metadata, filters.clone());
+        let mut dense_fast = dense_codec.primary_key_filter(&metadata, filters.clone(), false);
         let mut dense_offsets = Vec::new();
 
         let sparse_pk = encode_sparse_pk(&metadata, &row);
         let sparse_codec = SparsePrimaryKeyCodec::new(&metadata);
-        let mut sparse_fast = sparse_codec.primary_key_filter(&metadata, filters.clone());
-        let mut sparse_offsets = std::collections::HashMap::new();
+        let mut sparse_fast = sparse_codec.primary_key_filter(&metadata, filters.clone(), false);
+        let mut sparse_offsets = SparseOffsetsCache::new();
 
         let mut group = c.benchmark_group(format!("primary_key_filter/{case_name}"));
 
         group.bench_function("dense/fast", |b| {
-            b.iter(|| black_box(dense_fast.matches(black_box(&dense_pk))))
+            b.iter(|| black_box(dense_fast.matches(black_box(&dense_pk)).unwrap()))
         });
         group.bench_function("dense/scalar", |b| {
             b.iter(|| {
@@ -272,7 +273,7 @@ fn bench_primary_key_filter(c: &mut Criterion) {
         });
 
         group.bench_function("sparse/fast", |b| {
-            b.iter(|| black_box(sparse_fast.matches(black_box(&sparse_pk))))
+            b.iter(|| black_box(sparse_fast.matches(black_box(&sparse_pk)).unwrap()))
         });
         group.bench_function("sparse/scalar", |b| {
             b.iter(|| {

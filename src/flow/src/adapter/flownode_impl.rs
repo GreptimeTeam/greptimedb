@@ -213,7 +213,7 @@ impl FlowDualEngine {
             if !frontend_list.is_empty() {
                 let fe_list = frontend_list
                     .iter()
-                    .map(|(_, info)| &info.peer.addr)
+                    .map(|peer| &peer.addr)
                     .collect::<Vec<_>>();
                 info!("Available frontend found: {:?}", fe_list);
                 return Ok(());
@@ -1060,7 +1060,7 @@ impl StreamingEngine {
 
                 let fetch_order: Vec<FetchFromRow> = table_col_names
                     .iter()
-                    .zip(default_vals.into_iter())
+                    .zip(default_vals)
                     .map(|(col_name, col_default_val)| {
                         name_to_col
                             .get(col_name)

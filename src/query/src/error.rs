@@ -368,6 +368,27 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid query context extension: {}", reason))]
+    InvalidQueryContextExtension {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Conflicting snapshot sequence observed for region {} in a single query (existing={}, new={})",
+        region_id,
+        existing,
+        new
+    ))]
+    ConflictingSnapshotSequence {
+        region_id: RegionId,
+        existing: u64,
+        new: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(transparent)]
     Datatypes {
         source: datatypes::error::Error,
@@ -399,7 +420,9 @@ impl ErrorExt for Error {
             | ColumnSchemaNoDefault { .. }
             | CteColumnSchemaMismatch { .. }
             | ConvertValue { .. }
-            | TryIntoDuration { .. } => StatusCode::InvalidArguments,
+            | TryIntoDuration { .. }
+            | InvalidQueryContextExtension { .. }
+            | ConflictingSnapshotSequence { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
 

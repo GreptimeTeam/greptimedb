@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod builder;
+mod dashboard;
 mod grpc;
 mod influxdb;
 mod jaeger;
@@ -194,7 +195,7 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        if should_capture_statement(Some(&stmt)) {
+        if stmt.is_readonly() {
             let slow_query_timer = self
                 .slow_query_options
                 .enable
@@ -482,6 +483,19 @@ fn derive_timeout(stmt: &Statement, query_ctx: &QueryContextRef) -> Option<Durat
     }
 }
 
+/// Derives timeout for plan execution.
+fn derive_timeout_for_plan(plan: &LogicalPlan, query_ctx: &QueryContextRef) -> Option<Duration> {
+    let query_timeout = query_ctx.query_timeout()?;
+    if query_timeout.is_zero() {
+        return None;
+    }
+    match query_ctx.channel() {
+        Channel::Mysql if is_readonly_plan(plan) => Some(query_timeout),
+        Channel::Postgres => Some(query_timeout),
+        _ => None,
+    }
+}
+
 fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
     if timeout.is_zero() {
         return StatementTimeoutSnafu.fail();
@@ -587,18 +601,53 @@ impl Instance {
         }
     }
 
+    async fn exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
+        self.query_engine
+            .execute(plan, query_ctx)
+            .await
+            .context(ExecLogicalPlanSnafu)
+    }
+
+    async fn exec_plan_with_timeout(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let timeout = derive_timeout_for_plan(&plan, &query_ctx);
+        match timeout {
+            Some(timeout) => {
+                let start = tokio::time::Instant::now();
+                let output = tokio::time::timeout(timeout, self.exec_plan(plan, query_ctx))
+                    .await
+                    .map_err(|_| StatementTimeoutSnafu.build())??;
+                let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
+                attach_timeout(output, remaining_timeout)
+            }
+            None => self.exec_plan(plan, query_ctx).await,
+        }
+    }
+
     async fn do_exec_plan_inner(
         &self,
-        stmt: Option<Statement>,
         plan: LogicalPlan,
+        stmt: Option<Statement>,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
 
-        if should_capture_statement(stmt.as_ref()) {
-            // It's safe to unwrap here because we've already checked the type.
-            let stmt = stmt.unwrap();
-            let query = stmt.to_string();
+        let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let query_interceptor = query_interceptor_opt.as_ref();
+
+        if let Some(ref s) = stmt {
+            query_interceptor.pre_execute(s, Some(&plan), query_ctx.clone())?;
+        }
+
+        let query = stmt
+            .as_ref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| plan.display_indent().to_string());
+
+        let result = if is_readonly_plan(&plan) {
             let slow_query_timer = self
                 .slow_query_options
                 .enable
@@ -606,7 +655,7 @@ impl Instance {
                 .flatten()
                 .map(|event_recorder| {
                     SlowQueryTimer::new(
-                        CatalogQueryStatement::Sql(stmt.clone()),
+                        CatalogQueryStatement::Plan(query.clone()),
                         self.slow_query_options.threshold,
                         self.slow_query_options.sample_ratio,
                         self.slow_query_options.record_type,
@@ -623,7 +672,7 @@ impl Instance {
                 slow_query_timer,
             );
 
-            let query_fut = self.query_engine.execute(plan.clone(), query_ctx);
+            let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone());
 
             CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
@@ -639,15 +688,11 @@ impl Instance {
                     };
                     Output { data, meta }
                 })
-                .context(ExecLogicalPlanSnafu)
         } else {
-            // plan should be prepared before exec
-            // we'll do check there
-            self.query_engine
-                .execute(plan.clone(), query_ctx)
-                .await
-                .context(ExecLogicalPlanSnafu)
-        }
+            self.exec_plan_with_timeout(plan, query_ctx.clone()).await
+        };
+
+        result.and_then(|output| query_interceptor.post_execute(output, query_ctx))
     }
 
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_promql_query")]
@@ -676,10 +721,19 @@ impl Instance {
     ) -> Result<Option<DescribeResult>> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
 
-        if matches!(
-            stmt,
-            Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
-        ) {
+        // EXPLAIN / EXPLAIN ANALYZE wrap an inner statement; describe them when the
+        // wrapped statement is something we already plan (so that bind parameters
+        // in the inner query get their types inferred). See #8029.
+        let is_inner_plannable = |s: &Statement| {
+            matches!(
+                s,
+                Statement::Insert(_) | Statement::Query(_) | Statement::Delete(_)
+            )
+        };
+        let plannable = is_inner_plannable(&stmt)
+            || matches!(&stmt, Statement::Explain(explain) if is_inner_plannable(explain.statement.as_ref()));
+
+        if plannable {
             self.plugins
                 .get::<PermissionCheckerRef>()
                 .as_ref()
@@ -726,11 +780,11 @@ impl SqlQueryHandler for Instance {
 
     async fn do_exec_plan(
         &self,
-        stmt: Option<Statement>,
         plan: LogicalPlan,
+        stmt: Option<Statement>,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        self.do_exec_plan_inner(stmt, plan, query_ctx)
+        self.do_exec_plan_inner(plan, stmt, query_ctx)
             .await
             .map_err(BoxedError::new)
             .context(server_error::ExecutePlanSnafu)
@@ -1118,13 +1172,8 @@ fn validate_database(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<(
         .context(SqlExecInterceptedSnafu)
 }
 
-// Create a query ticket and slow query timer if the statement is a query or readonly statement.
-fn should_capture_statement(stmt: Option<&Statement>) -> bool {
-    if let Some(stmt) = stmt {
-        matches!(stmt, Statement::Query(_)) || stmt.is_readonly()
-    } else {
-        false
-    }
+fn is_readonly_plan(plan: &LogicalPlan) -> bool {
+    !matches!(plan, LogicalPlan::Dml(_) | LogicalPlan::Ddl(_))
 }
 
 #[cfg(test)]

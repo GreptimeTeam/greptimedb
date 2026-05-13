@@ -49,7 +49,7 @@ use table::table_reference::TableReference;
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    CatalogSnafu, Error, InvalidParameterSnafu, OtherSnafu, ParseJsonSnafu, PipelineSnafu, Result,
+    Error, InvalidParameterSnafu, OtherSnafu, ParseJsonSnafu, PipelineSnafu, Result,
     status_code_to_http_status,
 };
 use crate::http::HttpResponse;
@@ -265,12 +265,7 @@ pub async fn query_pipeline_ddl(
         .map_err(BoxedError::new)
         .context(OtherSnafu)?;
 
-    let message = if handler
-        .get_table(&table_name, &query_ctx)
-        .await
-        .context(CatalogSnafu)?
-        .is_some()
-    {
+    let message = if handler.get_table(&table_name, &query_ctx).await?.is_some() {
         Some(CREATE_TABLE_SQL_TABLE_EXISTS.to_string())
     } else if pipeline.is_variant_table_name() {
         Some(CREATE_TABLE_SQL_SUFFIX_EXISTS.to_string())

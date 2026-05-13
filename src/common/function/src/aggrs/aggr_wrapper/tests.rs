@@ -40,10 +40,13 @@ use datafusion_common::arrow::array::AsArray;
 use datafusion_common::arrow::datatypes::{Float64Type, UInt64Type};
 use datafusion_common::{Column, TableReference};
 use datafusion_expr::expr::{AggregateFunction, NullTreatment};
+use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{
-    Aggregate, ColumnarValue, Expr, LogicalPlan, ScalarFunctionArgs, SortExpr, TableScan, lit,
+    Aggregate, AggregateUDFImpl, ColumnarValue, Expr, LogicalPlan, ScalarFunctionArgs, SortExpr,
+    TableScan, lit,
 };
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
+use datafusion_physical_expr::expressions::col;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
 use datatypes::arrow_array::StringArray;
 use futures::{Stream, StreamExt as _};
@@ -254,6 +257,38 @@ fn dummy_table_scan_with_ts() -> LogicalPlan {
         )
         .unwrap(),
     )
+}
+
+fn create_avg_state_groups_accumulator() -> Box<dyn GroupsAccumulator> {
+    let state_wrapper = StateWrapper::new((*avg_udaf()).clone()).unwrap();
+    let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
+        "number",
+        DataType::Float64,
+        true,
+    )]));
+    let expr = col("number", &schema).unwrap();
+    let expr_field = expr.return_field(&schema).unwrap();
+    let return_field = Arc::new(Field::new(
+        "__avg_state(number)",
+        state_wrapper.return_type(&[DataType::Float64]).unwrap(),
+        true,
+    ));
+    let exprs = [expr];
+    let expr_fields = [expr_field];
+    let acc_args = AccumulatorArgs {
+        return_field,
+        schema: &schema,
+        ignore_nulls: false,
+        order_bys: &[],
+        is_reversed: false,
+        name: "__avg_state(number)",
+        is_distinct: false,
+        exprs: &exprs,
+        expr_fields: &expr_fields,
+    };
+
+    assert!(state_wrapper.groups_accumulator_supported(acc_args.clone()));
+    state_wrapper.create_groups_accumulator(acc_args).unwrap()
 }
 
 #[tokio::test]
@@ -794,6 +829,95 @@ async fn test_last_value_order_by_udaf() {
     let merge_eval_res = merge_accum.evaluate().unwrap();
     // the merge function returns the last value, which is 4
     assert_eq!(merge_eval_res, ScalarValue::Int64(Some(4)));
+}
+
+#[test]
+fn test_avg_state_groups_accumulator_evaluate() {
+    let mut state_accum = create_avg_state_groups_accumulator();
+    let values = vec![Arc::new(Float64Array::from(vec![
+        Some(1.0),
+        Some(2.0),
+        None,
+        Some(3.0),
+        Some(4.0),
+        Some(5.0),
+    ])) as ArrayRef];
+    let group_indices = vec![0, 1, 0, 0, 1, 2];
+
+    state_accum
+        .update_batch(&values, &group_indices, None, 3)
+        .unwrap();
+
+    let result = state_accum.evaluate(EmitTo::All).unwrap();
+    let result = result.as_any().downcast_ref::<StructArray>().unwrap();
+
+    assert_eq!(
+        result
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap(),
+        &UInt64Array::from(vec![2, 2, 1])
+    );
+    assert_eq!(
+        result
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap(),
+        &Float64Array::from(vec![4.0, 6.0, 5.0])
+    );
+}
+
+#[test]
+fn test_avg_state_groups_accumulator_state_merge_evaluate() {
+    let mut source_accum = create_avg_state_groups_accumulator();
+    let source_values = vec![Arc::new(Float64Array::from(vec![
+        Some(1.0),
+        Some(2.0),
+        None,
+        Some(3.0),
+        Some(4.0),
+        Some(5.0),
+    ])) as ArrayRef];
+    let source_group_indices = vec![0, 1, 0, 0, 1, 2];
+
+    source_accum
+        .update_batch(&source_values, &source_group_indices, None, 3)
+        .unwrap();
+    let source_state = source_accum.state(EmitTo::All).unwrap();
+
+    let mut merged_accum = create_avg_state_groups_accumulator();
+    let merged_values =
+        vec![Arc::new(Float64Array::from(vec![Some(10.0), Some(20.0), Some(30.0)])) as ArrayRef];
+    let merged_group_indices = vec![0, 1, 2];
+
+    merged_accum
+        .update_batch(&merged_values, &merged_group_indices, None, 3)
+        .unwrap();
+    merged_accum
+        .merge_batch(&source_state, &[1, 2, 0], None, 3)
+        .unwrap();
+
+    let result = merged_accum.evaluate(EmitTo::All).unwrap();
+    let result = result.as_any().downcast_ref::<StructArray>().unwrap();
+
+    assert_eq!(
+        result
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap(),
+        &UInt64Array::from(vec![2, 3, 3])
+    );
+    assert_eq!(
+        result
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap(),
+        &Float64Array::from(vec![15.0, 24.0, 36.0])
+    );
 }
 
 /// For testing whether the UDAF state fields are correctly implemented.

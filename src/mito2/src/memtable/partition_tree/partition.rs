@@ -152,7 +152,8 @@ impl Partition {
         filters: &Arc<Vec<SimpleFilterEvaluator>>,
     ) -> Option<Box<dyn PrimaryKeyFilter>> {
         if need_prune_key {
-            let filter = row_codec.primary_key_filter(metadata, filters.clone());
+            // TODO(yingwen): Remove `skip_partition_column` after dropping PartitionTreeMemtable.
+            let filter = row_codec.primary_key_filter(metadata, filters.clone(), true);
             Some(filter)
         } else {
             None
