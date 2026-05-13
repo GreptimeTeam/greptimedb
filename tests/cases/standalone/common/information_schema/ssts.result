@@ -228,3 +228,4 @@ SELECT * FROM information_schema.ssts_storage order by file_path;
 DROP TABLE sst_case;
 
 Affected Rows: 0
+
