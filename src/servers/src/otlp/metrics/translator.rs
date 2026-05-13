@@ -198,11 +198,11 @@ fn build_utf8_metric_name(input_name: &str, unit: &str, metric_type: &MetricType
 }
 
 fn trim_suffix_and_delimiter(name: &str, suffix: &str) -> String {
-    if name.ends_with(suffix) && name.len() > suffix.len() + 1 {
-        name[..name.len() - (suffix.len() + 1)].to_string()
-    } else {
-        name.to_string()
-    }
+    name.strip_suffix(suffix)
+        .and_then(|prefix| prefix.strip_suffix('_'))
+        .filter(|prefix| !prefix.is_empty())
+        .unwrap_or(name)
+        .to_string()
 }
 
 fn build_clean_unit_suffix(unit: &str) -> (Option<String>, Option<String>) {
@@ -378,6 +378,29 @@ mod tests {
         assert_eq!(
             translate_metric_name(&metric, &MetricType::Gauge, NoUtf8EscapingWithSuffixes),
             "cpu.utilization_ratio"
+        );
+
+        let metric = Metric {
+            name: "subtotal".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_metric_name(
+                &metric,
+                &MetricType::MonotonicSum,
+                NoUtf8EscapingWithSuffixes
+            ),
+            "subtotal_total"
+        );
+
+        let metric = Metric {
+            name: "utilizationratio".to_string(),
+            unit: "1".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_metric_name(&metric, &MetricType::Gauge, NoUtf8EscapingWithSuffixes),
+            "utilizationratio_ratio"
         );
     }
 
