@@ -1215,3 +1215,98 @@ groups:
               datasource:
                 type: mysql
                 uid: ${information_schema}
+    - title: Autopilot
+      panels:
+        - title: Region Balancer Actions
+          type: timeseries
+          description: Region balancer action count
+          unit: short
+          queries:
+            - expr: |-
+                sum by (result) (
+                  changes(greptime_region_balancer_actions_total[$__rate_interval])
+                )
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{result}}'
+        - title: Region Balancer Gate Stops
+          type: timeseries
+          description: Region balancer gate stop count by gate and reason
+          unit: short
+          queries:
+            - expr: sum by (gate, reason) (changes(greptime_region_balancer_gate_stop_total[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{gate}} / {{reason}}'
+        - title: Region Balancer Datanodes
+          type: stat
+          description: Region balancer datanode count by state
+          unit: short
+          queries:
+            - expr: sum by (state) (greptime_region_balancer_datanodes)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{state}}'
+        - title: Region Balancer Regions
+          type: stat
+          description: Region balancer region count by state
+          unit: short
+          queries:
+            - expr: sum by (state) (greptime_region_balancer_regions)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{state}}'
+        - title: Region Balancer Datanode Stability
+          type: stat
+          description: Region balancer datanode stability statistics by state
+          unit: binBps
+          queries:
+            - expr: sum by (state) (greptime_region_balancer_datanode_stability)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{state}}'
+        - title: Auto Repartition Actions
+          type: timeseries
+          description: Auto repartition action count by result
+          unit: short
+          queries:
+            - expr: sum by (result) (changes(greptime_auto_repartition_actions_total[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{result}}'
+        - title: Auto Repartition Gate Stops
+          type: timeseries
+          description: Auto repartition gate stop count by gate and reason
+          unit: short
+          queries:
+            - expr: sum by (gate, reason) (changes(greptime_auto_repartition_gate_stop_total[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{gate}} / {{reason}}'
+        - title: Auto Repartition Sampling P99
+          type: timeseries
+          description: Auto repartition sampling elapsed time by stage
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by (le, stage) (rate(greptime_auto_repartition_sampling_elapsed_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{stage}}'
+        - title: Auto Repartition Executor P99
+          type: timeseries
+          description: Auto repartition executor elapsed time by stage
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by (le, stage) (rate(greptime_auto_repartition_executor_elapsed_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{stage}}'

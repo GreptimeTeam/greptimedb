@@ -226,3 +226,17 @@ SELECT
 FROM leader_regions
 GROUP BY datanode
 ORDER BY data_size DESC;` | `piechart` | Distribution of leader regions and data size across datanodes. | `mysql` | `bytes` | -- |
+# Autopilot
+| Title | Query | Type | Description | Datasource | Unit | Legend Format |
+| --- | --- | --- | --- | --- | --- | --- |
+| Region Balancer Actions | `sum by (result) (
+  changes(greptime_region_balancer_actions_total[$__rate_interval])
+)` | `timeseries` | Region balancer action count | `prometheus` | `short` | `{{result}}` |
+| Region Balancer Gate Stops | `sum by (gate, reason) (changes(greptime_region_balancer_gate_stop_total[$__rate_interval]))` | `timeseries` | Region balancer gate stop count by gate and reason | `prometheus` | `short` | `{{gate}} / {{reason}}` |
+| Region Balancer Datanodes | `sum by (state) (greptime_region_balancer_datanodes)` | `stat` | Region balancer datanode count by state | `prometheus` | `short` | `{{state}}` |
+| Region Balancer Regions | `sum by (state) (greptime_region_balancer_regions)` | `stat` | Region balancer region count by state | `prometheus` | `short` | `{{state}}` |
+| Region Balancer Datanode Stability | `sum by (state) (greptime_region_balancer_datanode_stability)` | `stat` | Region balancer datanode stability statistics by state | `prometheus` | `binBps` | `{{state}}` |
+| Auto Repartition Actions | `sum by (result) (changes(greptime_auto_repartition_actions_total[$__rate_interval]))` | `timeseries` | Auto repartition action count by result | `prometheus` | `short` | `{{result}}` |
+| Auto Repartition Gate Stops | `sum by (gate, reason) (changes(greptime_auto_repartition_gate_stop_total[$__rate_interval]))` | `timeseries` | Auto repartition gate stop count by gate and reason | `prometheus` | `short` | `{{gate}} / {{reason}}` |
+| Auto Repartition Sampling P99 | `histogram_quantile(0.99, sum by (le, stage) (rate(greptime_auto_repartition_sampling_elapsed_bucket[$__rate_interval])))` | `timeseries` | Auto repartition sampling elapsed time by stage | `prometheus` | `s` | `{{stage}}` |
+| Auto Repartition Executor P99 | `histogram_quantile(0.99, sum by (le, stage) (rate(greptime_auto_repartition_executor_elapsed_bucket[$__rate_interval])))` | `timeseries` | Auto repartition executor elapsed time by stage | `prometheus` | `s` | `{{stage}}` |
