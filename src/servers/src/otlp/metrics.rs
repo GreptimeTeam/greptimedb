@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ahash::{HashMap, HashSet};
+use ahash::HashSet;
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_COUNT, greptime_timestamp, greptime_value};
@@ -20,12 +20,16 @@ use lazy_static::lazy_static;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{metric, number_data_point, *};
-use regex::Regex;
 use session::protocol_ctx::{MetricType, OtlpMetricCtx};
 
 use crate::error::Result;
 use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME};
 use crate::row_writer::{self, MultiTableData, TableData};
+
+mod translator;
+
+pub use translator::{legacy_normalize_otlp_name, normalize_label_name, normalize_metric_name};
+use translator::{translate_label_name, translate_metric_name};
 
 /// the default column count for table writer
 const APPROXIMATE_COLUMN_COUNT: usize = 8;
@@ -35,11 +39,6 @@ const SUM_TABLE_SUFFIX: &str = "_sum";
 
 const JOB_KEY: &str = "job";
 const INSTANCE_KEY: &str = "instance";
-
-const UNDERSCORE: &str = "_";
-const DOUBLE_UNDERSCORE: &str = "__";
-const TOTAL: &str = "total";
-const RATIO: &str = "ratio";
 
 // see: https://prometheus.io/docs/guides/opentelemetry/#promoting-resource-attributes
 const DEFAULT_PROMOTE_ATTRS: [&str; 19] = [
@@ -67,48 +66,6 @@ const DEFAULT_PROMOTE_ATTRS: [&str; 19] = [
 lazy_static! {
     static ref DEFAULT_PROMOTE_ATTRS_SET: HashSet<String> =
         HashSet::from_iter(DEFAULT_PROMOTE_ATTRS.iter().map(|s| s.to_string()));
-    static ref NON_ALPHA_NUM_CHAR: Regex = Regex::new(r"[^a-zA-Z0-9]").unwrap();
-    static ref UNIT_MAP: HashMap<String, String> = [
-        // Time
-        ("d", "days"),
-        ("h", "hours"),
-        ("min", "minutes"),
-        ("s", "seconds"),
-        ("ms", "milliseconds"),
-        ("us", "microseconds"),
-        ("ns", "nanoseconds"),
-        // Bytes
-        ("By", "bytes"),
-        ("KiBy", "kibibytes"),
-        ("MiBy", "mebibytes"),
-        ("GiBy", "gibibytes"),
-        ("TiBy", "tibibytes"),
-        ("KBy", "kilobytes"),
-        ("MBy", "megabytes"),
-        ("GBy", "gigabytes"),
-        ("TBy", "terabytes"),
-        // SI
-        ("m", "meters"),
-        ("V", "volts"),
-        ("A", "amperes"),
-        ("J", "joules"),
-        ("W", "watts"),
-        ("g", "grams"),
-        // Misc
-        ("Cel", "celsius"),
-        ("Hz", "hertz"),
-        ("1", ""),
-        ("%", "percent"),
-    ].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-    static ref PER_UNIT_MAP: HashMap<String, String> = [
-        ("s", "second"),
-        ("m", "minute"),
-        ("h", "hour"),
-        ("d", "day"),
-        ("w", "week"),
-        ("mo", "month"),
-        ("y", "year"),
-    ].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
 }
 
 const OTEL_SCOPE_NAME: &str = "name";
@@ -248,120 +205,6 @@ fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Opti
     })
 }
 
-// See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/145942706622aba5c276ca47f48df438228bfea4/pkg/translator/prometheus/normalize_name.go#L55
-pub fn normalize_metric_name(metric: &Metric, metric_type: &MetricType) -> String {
-    // Split metric name in "tokens" (remove all non-alphanumeric), filtering out empty strings
-    let mut name_tokens: Vec<String> = NON_ALPHA_NUM_CHAR
-        .split(&metric.name)
-        .filter_map(|s| {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        })
-        .collect();
-
-    // Append unit if it exists
-    if !metric.unit.is_empty() {
-        let (main, per) = build_unit_suffix(&metric.unit);
-        if let Some(main) = main
-            && !name_tokens.contains(&main)
-        {
-            name_tokens.push(main);
-        }
-        if let Some(per) = per
-            && !name_tokens.contains(&per)
-        {
-            name_tokens.push("per".to_string());
-            name_tokens.push(per);
-        }
-    }
-
-    // Append _total for Counters (monotonic sums)
-    if matches!(metric_type, MetricType::MonotonicSum) {
-        // Remove existing "total" tokens first, then append
-        name_tokens.retain(|t| t != TOTAL);
-        name_tokens.push(TOTAL.to_string());
-    }
-
-    // Append _ratio for metrics with unit "1" (gauges only)
-    if metric.unit == "1" && matches!(metric_type, MetricType::Gauge) {
-        // Remove existing "ratio" tokens first, then append
-        name_tokens.retain(|t| t != RATIO);
-        name_tokens.push(RATIO.to_string());
-    }
-
-    // Build the string from the tokens, separated with underscores
-    let name = name_tokens.join(UNDERSCORE);
-
-    // Metric name cannot start with a digit, so prefix it with "_" in this case
-    if let Some((_, first)) = name.char_indices().next()
-        && first.is_ascii_digit()
-    {
-        format!("_{}", name)
-    } else {
-        name
-    }
-}
-
-fn build_unit_suffix(unit: &str) -> (Option<String>, Option<String>) {
-    let (main, per) = unit.split_once('/').unwrap_or((unit, ""));
-    (check_unit(main, &UNIT_MAP), check_unit(per, &PER_UNIT_MAP))
-}
-
-fn check_unit(unit_str: &str, unit_map: &HashMap<String, String>) -> Option<String> {
-    let u = unit_str.trim();
-    // Skip units that are empty, contain "{" or "}" characters
-    if !u.is_empty() && !u.contains('{') && !u.contains('}') {
-        let u = unit_map.get(u).map(|s| s.as_ref()).unwrap_or(u);
-        let u = clean_unit_name(u);
-        if !u.is_empty() {
-            return Some(u);
-        }
-    }
-    None
-}
-
-fn clean_unit_name(name: &str) -> String {
-    // Split on non-alphanumeric characters, filter out empty strings, then join with underscores
-    // This matches the Go implementation: strings.FieldsFunc + strings.Join
-    NON_ALPHA_NUM_CHAR
-        .split(name)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<&str>>()
-        .join(UNDERSCORE)
-}
-
-// See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/145942706622aba5c276ca47f48df438228bfea4/pkg/translator/prometheus/normalize_label.go#L27
-pub fn normalize_label_name(name: &str) -> String {
-    if name.is_empty() {
-        return name.to_string();
-    }
-
-    let n = NON_ALPHA_NUM_CHAR.replace_all(name, UNDERSCORE);
-    if let Some((_, first)) = n.char_indices().next()
-        && first.is_ascii_digit()
-    {
-        return format!("key_{}", n);
-    }
-    if n.starts_with(UNDERSCORE) && !n.starts_with(DOUBLE_UNDERSCORE) {
-        return format!("key{}", n);
-    }
-    n.to_string()
-}
-
-/// Normalize otlp instrumentation, metric and attribute names
-///
-/// <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md#instrument-name-syntax>
-/// - since the name are case-insensitive, we transform them to lowercase for
-///   better sql usability
-/// - replace `.` and `-` with `_`
-pub fn legacy_normalize_otlp_name(name: &str) -> String {
-    name.to_lowercase().replace(['.', '-'], "_")
-}
-
 fn encode_metrics(
     table_writer: &mut MultiTableData,
     metric: &Metric,
@@ -372,7 +215,11 @@ fn encode_metrics(
     let name = if metric_ctx.is_legacy {
         legacy_normalize_otlp_name(&metric.name)
     } else {
-        normalize_metric_name(metric, &metric_ctx.metric_type)
+        translate_metric_name(
+            metric,
+            &metric_ctx.metric_type,
+            metric_ctx.metric_translation_strategy,
+        )
     };
 
     // note that we don't store description or unit, we might want to deal with
@@ -440,6 +287,7 @@ fn write_attributes(
     row: &mut Vec<Value>,
     attrs: Option<&Vec<KeyValue>>,
     attribute_type: AttributeType,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
     let Some(attrs) = attrs else {
         return Ok(());
@@ -452,10 +300,13 @@ fn write_attributes(
             .and_then(|val| {
                 let key = match attribute_type {
                     AttributeType::Resource | AttributeType::DataPoint => {
-                        normalize_label_name(&attr.key)
+                        translate_label_name(&attr.key, metric_ctx.metric_translation_strategy)
                     }
                     AttributeType::Scope => {
-                        format!("otel_scope_{}", normalize_label_name(&attr.key))
+                        format!(
+                            "otel_scope_{}",
+                            translate_label_name(&attr.key, metric_ctx.metric_translation_strategy)
+                        )
                     }
                     AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
                 };
@@ -526,14 +377,38 @@ fn write_tags_and_timestamp(
     metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
     if metric_ctx.is_legacy {
-        write_attributes(table, row, resource_attrs, AttributeType::Legacy)?;
-        write_attributes(table, row, scope_attrs, AttributeType::Legacy)?;
-        write_attributes(table, row, data_point_attrs, AttributeType::Legacy)?;
+        write_attributes(
+            table,
+            row,
+            resource_attrs,
+            AttributeType::Legacy,
+            metric_ctx,
+        )?;
+        write_attributes(table, row, scope_attrs, AttributeType::Legacy, metric_ctx)?;
+        write_attributes(
+            table,
+            row,
+            data_point_attrs,
+            AttributeType::Legacy,
+            metric_ctx,
+        )?;
     } else {
         // TODO(shuiyisong): check `__type__` and `__unit__` tags in prometheus
-        write_attributes(table, row, resource_attrs, AttributeType::Resource)?;
-        write_attributes(table, row, scope_attrs, AttributeType::Scope)?;
-        write_attributes(table, row, data_point_attrs, AttributeType::DataPoint)?;
+        write_attributes(
+            table,
+            row,
+            resource_attrs,
+            AttributeType::Resource,
+            metric_ctx,
+        )?;
+        write_attributes(table, row, scope_attrs, AttributeType::Scope, metric_ctx)?;
+        write_attributes(
+            table,
+            row,
+            data_point_attrs,
+            AttributeType::DataPoint,
+            metric_ctx,
+        )?;
     }
 
     write_timestamp(table, row, timestamp_nanos, metric_ctx.is_legacy)?;
@@ -1128,23 +1003,6 @@ mod tests {
                 input, result, expected
             );
         }
-    }
-
-    #[test]
-    fn test_clean_unit_name() {
-        // Test the improved clean_unit_name function
-        assert_eq!(clean_unit_name("faults"), "faults");
-        assert_eq!(clean_unit_name("{faults}"), "faults"); // clean_unit_name still processes braces internally
-        assert_eq!(clean_unit_name("req/sec"), "req_sec");
-        assert_eq!(clean_unit_name("m/s"), "m_s");
-        assert_eq!(clean_unit_name("___test___"), "test");
-        assert_eq!(
-            clean_unit_name("multiple__underscores"),
-            "multiple_underscores"
-        );
-        assert_eq!(clean_unit_name(""), "");
-        assert_eq!(clean_unit_name("___"), "");
-        assert_eq!(clean_unit_name("bytes.per.second"), "bytes_per_second");
     }
 
     #[test]

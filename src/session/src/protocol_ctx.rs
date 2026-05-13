@@ -55,6 +55,7 @@ pub struct OtlpMetricCtx {
     pub with_metric_engine: bool,
     pub is_legacy: bool,
     pub metric_type: MetricType,
+    pub metric_translation_strategy: OtlpMetricTranslationStrategy,
 }
 
 impl OtlpMetricCtx {
@@ -74,4 +75,29 @@ pub enum MetricType {
     Histogram,
     ExponentialHistogram,
     Summary,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OtlpMetricTranslationStrategy {
+    #[default]
+    UnderscoreEscapingWithSuffixes,
+    UnderscoreEscapingWithoutSuffixes,
+    NoUtf8EscapingWithSuffixes,
+    NoTranslation,
+}
+
+impl OtlpMetricTranslationStrategy {
+    pub fn should_escape(self) -> bool {
+        matches!(
+            self,
+            Self::UnderscoreEscapingWithSuffixes | Self::UnderscoreEscapingWithoutSuffixes
+        )
+    }
+
+    pub fn should_add_suffixes(self) -> bool {
+        matches!(
+            self,
+            Self::UnderscoreEscapingWithSuffixes | Self::NoUtf8EscapingWithSuffixes
+        )
+    }
 }

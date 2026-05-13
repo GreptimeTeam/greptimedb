@@ -114,6 +114,7 @@ pub async fn metrics(
         // set is_legacy later
         is_legacy: false,
         metric_type: MetricType::Init,
+        metric_translation_strategy: Default::default(),
     }));
     let query_ctx = Arc::new(query_ctx);
 
