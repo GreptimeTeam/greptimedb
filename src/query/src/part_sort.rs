@@ -97,9 +97,11 @@ fn group_ranges_by_primary_end(
 
 /// Sort input within given PartitionRange
 ///
-/// Input is assumed to be segmented by empty RecordBatch, which indicates a new `PartitionRange` is starting
+/// Partition range transitions are detected by comparing sort column values against
+/// the current range boundaries (via [`PartSortStream::try_find_next_range`]).
+/// Empty RecordBatches from upstream are tolerated but do not serve as range delimiters.
 ///
-/// and this operator will sort each partition independently within the partition.
+/// This operator sorts each partition independently.
 #[derive(Debug, Clone)]
 pub struct PartSortExec {
     /// Physical sort expressions(that is, sort by timestamp)
@@ -731,6 +733,11 @@ impl PartSortStream {
         let next_primary = get_primary_end(&next_range, descending).value();
 
         let can_stop = match threshold {
+            // When the k-th element is NULL:
+            // - nulls_first=true: nulls are the best values (Arrow sorts NULLs first
+            //   regardless of ASC/DESC), so top-k is already optimal → stop early.
+            // - nulls_first=false: nulls are the worst, non-null values from the
+            //   next group could displace them → continue reading.
             TopKThreshold::Null => self.expression.options.nulls_first,
             TopKThreshold::Value(value) => {
                 if descending {
