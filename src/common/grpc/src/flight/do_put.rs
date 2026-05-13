@@ -55,6 +55,12 @@ impl DoPutMetadata {
     pub fn max_timestamp(&self) -> Option<i64> {
         self.max_timestamp
     }
+
+    pub fn timestamp_range(&self) -> Option<(i64, i64)> {
+        self.min_timestamp
+            .zip(self.max_timestamp)
+            .filter(|(min, max)| max >= min)
+    }
 }
 
 /// The response in the "DoPut" returned stream.
@@ -107,6 +113,14 @@ mod tests {
         let serialized = r#"{"request_id":42}"#;
         let metadata = serde_json::from_str::<DoPutMetadata>(serialized).unwrap();
         assert_eq!(metadata.request_id(), 42);
+    }
+
+    #[test]
+    fn test_serde_do_put_metadata_with_timestamp_range() {
+        let serialized = r#"{"request_id":42,"min_timestamp":1000,"max_timestamp":2000}"#;
+        let metadata = serde_json::from_str::<DoPutMetadata>(serialized).unwrap();
+        assert_eq!(metadata.request_id(), 42);
+        assert_eq!(metadata.timestamp_range(), Some((1000, 2000)));
     }
 
     #[test]
