@@ -4058,7 +4058,7 @@ dependencies = [
 [[package]]
 name = "datafusion-orc"
 version = "0.8.0"
-source = "git+https://github.com/datafusion-contrib/datafusion-orc.git?rev=73a7036a68dcc277b76d4e29d1d9a4a1fffae70c#73a7036a68dcc277b76d4e29d1d9a4a1fffae70c"
+source = "git+https://github.com/datafusion-contrib/datafusion-orc.git?rev=6c07fa282dc8d62db2aa4ded06ab55485efc811a#6c07fa282dc8d62db2aa4ded06ab55485efc811a"
 dependencies = [
  "async-trait",
  "bytes",
