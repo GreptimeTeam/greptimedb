@@ -950,7 +950,11 @@ async fn verify_snapshot(storage: &OpenDalStorage) -> Result<VerifyReport> {
     let manifest = storage.read_manifest().await?;
     let schema_index_path = format!("{}/{}", SCHEMA_DIR, SCHEMAS_FILE);
     let schema_index_exists = storage.file_exists(&schema_index_path).await?;
-    let ddl_files = storage.list_files_recursive("schema/ddl/").await?;
+    let ddl_files: HashSet<_> = storage
+        .list_files_recursive("schema/ddl/")
+        .await?
+        .into_iter()
+        .collect();
     let ddl_file_count = ddl_files
         .iter()
         .filter(|path| path.ends_with(".sql"))
@@ -979,7 +983,7 @@ async fn verify_snapshot(storage: &OpenDalStorage) -> Result<VerifyReport> {
 
     for schema in &report.manifest.schemas {
         let ddl_path = ddl_path_for_schema(schema);
-        if !storage.file_exists(&ddl_path).await? {
+        if !ddl_files.contains(ddl_path.as_str()) {
             report.problems.push(VerifyProblem {
                 severity: VerifySeverity::Error,
                 message: format!("Schema '{}': missing DDL file '{}'", schema, ddl_path),
@@ -1010,56 +1014,84 @@ async fn verify_chunks_and_data_files(
     storage: &OpenDalStorage,
     report: &mut VerifyReport,
 ) -> Result<()> {
-    for chunk in report.manifest.chunks.clone() {
+    let existing_files: HashSet<_> = storage
+        .list_files_recursive("data/")
+        .await?
+        .into_iter()
+        .collect();
+    let mut data_files_total = 0;
+    let mut data_files_verified = 0;
+    let mut problems = Vec::new();
+
+    for chunk in &report.manifest.chunks {
         match chunk.status {
             ChunkStatus::Completed => {
                 if chunk.files.is_empty() {
-                    report.push_error(format!(
-                        "Chunk {}: completed chunk has no data files",
-                        chunk.id
-                    ));
+                    problems.push(VerifyProblem {
+                        severity: VerifySeverity::Error,
+                        message: format!("Chunk {}: completed chunk has no data files", chunk.id),
+                    });
                     continue;
                 }
-                for file in chunk.files {
-                    report.data_files_total += 1;
-                    let Some(path) = valid_manifest_data_file_path(&file) else {
-                        report.push_error(format!(
-                            "Chunk {}: invalid data file path '{}'",
-                            chunk.id, file
-                        ));
+                for file in &chunk.files {
+                    data_files_total += 1;
+                    let Some(path) = valid_manifest_data_file_path(file) else {
+                        problems.push(VerifyProblem {
+                            severity: VerifySeverity::Error,
+                            message: format!(
+                                "Chunk {}: invalid data file path '{}'",
+                                chunk.id, file
+                            ),
+                        });
                         continue;
                     };
 
-                    if storage.file_exists(path).await? {
-                        report.data_files_verified += 1;
+                    if existing_files.contains(path) {
+                        data_files_verified += 1;
                     } else {
-                        report.push_error(format!("Chunk {}: missing file '{}'", chunk.id, path));
+                        problems.push(VerifyProblem {
+                            severity: VerifySeverity::Error,
+                            message: format!("Chunk {}: missing file '{}'", chunk.id, path),
+                        });
                     }
                 }
             }
             ChunkStatus::Skipped => {
                 if !chunk.files.is_empty() {
-                    report.push_error(format!(
-                        "Chunk {}: skipped chunk should not list data files",
-                        chunk.id
-                    ));
+                    problems.push(VerifyProblem {
+                        severity: VerifySeverity::Error,
+                        message: format!(
+                            "Chunk {}: skipped chunk should not list data files",
+                            chunk.id
+                        ),
+                    });
                 }
             }
             ChunkStatus::Pending => {
-                report.push_error(format!("Chunk {}: status is 'pending'", chunk.id));
+                problems.push(VerifyProblem {
+                    severity: VerifySeverity::Error,
+                    message: format!("Chunk {}: status is 'pending'", chunk.id),
+                });
             }
             ChunkStatus::InProgress => {
-                report.push_error(format!("Chunk {}: status is 'in_progress'", chunk.id));
+                problems.push(VerifyProblem {
+                    severity: VerifySeverity::Error,
+                    message: format!("Chunk {}: status is 'in_progress'", chunk.id),
+                });
             }
             ChunkStatus::Failed => {
                 let reason = chunk.error.as_deref().unwrap_or("unknown error");
-                report.push_error(format!(
-                    "Chunk {}: status is 'failed' (error: {})",
-                    chunk.id, reason
-                ));
+                problems.push(VerifyProblem {
+                    severity: VerifySeverity::Error,
+                    message: format!("Chunk {}: status is 'failed' (error: {})", chunk.id, reason),
+                });
             }
         }
     }
+
+    report.data_files_total = data_files_total;
+    report.data_files_verified = data_files_verified;
+    report.problems.extend(problems);
 
     Ok(())
 }
