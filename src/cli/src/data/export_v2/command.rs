@@ -34,7 +34,7 @@ use crate::data::export_v2::error::{
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
 use crate::data::export_v2::manifest::{
-    ChunkMeta, DataFormat, MANIFEST_VERSION, Manifest, TimeRange,
+    ChunkMeta, DataFormat, MANIFEST_FILE, MANIFEST_VERSION, Manifest, TimeRange,
 };
 use crate::data::path::ddl_path_for_schema;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
@@ -46,13 +46,70 @@ use crate::database::{DatabaseClient, parse_proxy_opts};
 pub enum ExportV2Command {
     /// Create a new snapshot.
     Create(ExportCreateCommand),
+    /// List snapshots under a parent location.
+    List(ExportListCommand),
 }
 
 impl ExportV2Command {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         match self {
             ExportV2Command::Create(cmd) => cmd.build().await,
+            ExportV2Command::List(cmd) => cmd.build().await,
         }
+    }
+}
+
+/// List snapshots under a parent location.
+#[derive(Debug, Parser)]
+pub struct ExportListCommand {
+    /// Parent storage location whose direct subdirectories are snapshots.
+    #[clap(long)]
+    location: String,
+
+    /// Object store configuration for remote storage backends.
+    #[clap(flatten)]
+    storage: ObjectStoreConfig,
+}
+
+impl ExportListCommand {
+    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+        validate_uri(&self.location).map_err(BoxedError::new)?;
+        let storage = OpenDalStorage::from_parent_uri(&self.location, &self.storage)
+            .map_err(BoxedError::new)?;
+
+        Ok(Box::new(ExportList {
+            location: self.location.clone(),
+            storage,
+        }))
+    }
+}
+
+/// Export list tool implementation.
+pub struct ExportList {
+    location: String,
+    storage: OpenDalStorage,
+}
+
+#[async_trait]
+impl Tool for ExportList {
+    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
+        self.run().await.map_err(BoxedError::new)
+    }
+}
+
+impl ExportList {
+    async fn run(&self) -> Result<()> {
+        let result = scan_snapshots(&self.storage).await?;
+
+        println!("Scanning: {}", self.location);
+        if result.snapshots.is_empty() {
+            println!("No snapshots found.");
+        } else {
+            print_snapshot_list(&result.snapshots, result.unreadable.len());
+        }
+        print_unreadable_warnings(&result.unreadable);
+
+        Ok(())
     }
 }
 
@@ -628,10 +685,138 @@ fn format_chunk_plan(chunks: &[ChunkMeta]) -> String {
     format!("[{}]", items.join(", "))
 }
 
+#[derive(Debug)]
+struct SnapshotListEntry {
+    path: String,
+    manifest: Manifest,
+}
+
+#[derive(Debug, Default)]
+struct SnapshotScanResult {
+    snapshots: Vec<SnapshotListEntry>,
+    unreadable: Vec<String>,
+}
+
+async fn scan_snapshots(storage: &OpenDalStorage) -> Result<SnapshotScanResult> {
+    let mut result = SnapshotScanResult::default();
+    for dir in storage.list_direct_child_dirs().await? {
+        let manifest_path = format!("{}/{}", dir.trim_matches('/'), MANIFEST_FILE);
+        let Some(data) = storage.read_file_if_exists(&manifest_path).await? else {
+            continue;
+        };
+
+        match serde_json::from_slice::<Manifest>(&data) {
+            Ok(manifest) => result.snapshots.push(SnapshotListEntry {
+                path: format!("{}/", dir.trim_matches('/')),
+                manifest,
+            }),
+            Err(_) => result
+                .unreadable
+                .push(format!("{}/", dir.trim_matches('/'))),
+        }
+    }
+
+    result
+        .snapshots
+        .sort_by_key(|entry| std::cmp::Reverse(entry.manifest.created_at));
+    result.unreadable.sort();
+    Ok(result)
+}
+
+fn print_snapshot_list(snapshots: &[SnapshotListEntry], unreadable_count: usize) {
+    if unreadable_count == 0 {
+        println!("Found {} snapshots:", snapshots.len());
+    } else {
+        println!(
+            "Found {} snapshots ({} {} skipped: unreadable manifest):",
+            snapshots.len(),
+            unreadable_count,
+            directory_word(unreadable_count)
+        );
+    }
+    println!();
+    println!(
+        "  {:<24}  {:<36}  {:<19}  {:<9}  {:<7}  {:<6}  Status",
+        "Path", "ID", "Created", "Catalog", "Schemas", "Chunks"
+    );
+    println!(
+        "  {:<24}  {:<36}  {:<19}  {:<9}  {:<7}  {:<6}  {:<10}",
+        "-".repeat(24),
+        "-".repeat(36),
+        "-".repeat(19),
+        "-".repeat(9),
+        "-".repeat(7),
+        "-".repeat(6),
+        "-".repeat(10)
+    );
+    for entry in snapshots {
+        let manifest = &entry.manifest;
+        println!(
+            "  {:<24}  {:<36}  {:<19}  {:<9}  {:<7}  {:<6}  {}",
+            entry.path,
+            manifest.snapshot_id,
+            manifest.created_at.format("%Y-%m-%d %H:%M:%S"),
+            manifest.catalog,
+            manifest.schemas.len(),
+            format_list_chunks(manifest),
+            snapshot_status(manifest)
+        );
+    }
+}
+
+fn print_unreadable_warnings(unreadable: &[String]) {
+    if unreadable.is_empty() {
+        return;
+    }
+
+    println!();
+    println!(
+        "Warning: {} {} had corrupt/unreadable manifest.json:",
+        unreadable.len(),
+        directory_word(unreadable.len())
+    );
+    for path in unreadable {
+        println!("  - {}", path);
+    }
+}
+
+fn directory_word(count: usize) -> &'static str {
+    if count == 1 {
+        "directory"
+    } else {
+        "directories"
+    }
+}
+
+fn snapshot_status(manifest: &Manifest) -> &'static str {
+    if manifest.schema_only {
+        "schema-only"
+    } else if manifest.is_complete() {
+        "complete"
+    } else {
+        "incomplete"
+    }
+}
+
+fn format_list_chunks(manifest: &Manifest) -> String {
+    let total = manifest.chunks.len();
+    if total == 0 {
+        return "0".to_string();
+    }
+
+    format!(
+        "{}/{}",
+        manifest.completed_count() + manifest.skipped_count(),
+        total
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
     use clap::Parser;
+    use tempfile::tempdir;
+    use url::Url;
 
     use super::*;
     use crate::data::path::ddl_path_for_schema;
@@ -885,5 +1070,125 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("time_range"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_snapshots_sorts_and_tracks_unreadable_manifests() {
+        let dir = tempdir().unwrap();
+        write_test_manifest(
+            dir.path(),
+            "older",
+            test_manifest(
+                chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                false,
+                true,
+            ),
+        );
+        write_test_manifest(
+            dir.path(),
+            "newer",
+            test_manifest(
+                chrono::Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap(),
+                false,
+                true,
+            ),
+        );
+
+        std::fs::create_dir_all(dir.path().join("empty-dir")).unwrap();
+        std::fs::create_dir_all(dir.path().join("not-snapshot")).unwrap();
+        std::fs::write(dir.path().join("not-snapshot").join("data.txt"), "x").unwrap();
+        std::fs::create_dir_all(dir.path().join("broken")).unwrap();
+        std::fs::write(dir.path().join("broken").join(MANIFEST_FILE), "{not-json").unwrap();
+
+        let uri = Url::from_directory_path(dir.path()).unwrap().to_string();
+        let storage = OpenDalStorage::from_file_uri(&uri).unwrap();
+        let result = scan_snapshots(&storage).await.unwrap();
+
+        assert_eq!(result.snapshots.len(), 2);
+        assert_eq!(
+            result.snapshots[0].manifest.created_at,
+            chrono::Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            result.snapshots[1].manifest.created_at,
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+        );
+        assert_eq!(result.unreadable, vec!["broken/".to_string()]);
+        assert_eq!(result.snapshots[0].path, "newer/");
+        assert_eq!(result.snapshots[1].path, "older/");
+    }
+
+    #[test]
+    fn test_snapshot_list_status_and_chunk_summary() {
+        let schema_only = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            true,
+            true,
+        );
+        assert_eq!(snapshot_status(&schema_only), "schema-only");
+        assert_eq!(format_list_chunks(&schema_only), "0");
+
+        let complete = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            false,
+            true,
+        );
+        assert_eq!(snapshot_status(&complete), "complete");
+        assert_eq!(format_list_chunks(&complete), "2/2");
+
+        let incomplete = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            false,
+            false,
+        );
+        assert_eq!(snapshot_status(&incomplete), "incomplete");
+        assert_eq!(format_list_chunks(&incomplete), "1/2");
+    }
+
+    fn write_test_manifest(root: &std::path::Path, dir: &str, manifest: Manifest) {
+        let snapshot_dir = root.join(dir);
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+        std::fs::write(
+            snapshot_dir.join(MANIFEST_FILE),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn test_manifest(
+        created_at: chrono::DateTime<chrono::Utc>,
+        schema_only: bool,
+        complete: bool,
+    ) -> Manifest {
+        let mut manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string(), "analytics".to_string()],
+            schema_only,
+            TimeRange::unbounded(),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        manifest.created_at = created_at;
+        manifest.updated_at = created_at;
+
+        if !schema_only {
+            manifest.chunks.clear();
+            let mut first = ChunkMeta::new(1, TimeRange::unbounded());
+            first.mark_completed(vec!["data/public/chunk_1/file.parquet".to_string()], None);
+            manifest.chunks.push(first);
+
+            if complete {
+                manifest
+                    .chunks
+                    .push(ChunkMeta::skipped(2, TimeRange::unbounded()));
+            } else {
+                manifest
+                    .chunks
+                    .push(ChunkMeta::new(2, TimeRange::unbounded()));
+            }
+        }
+
+        manifest
     }
 }

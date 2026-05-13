@@ -142,3 +142,87 @@
   rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])
 )` | `timeseries` | Elapsed time to persist trigger alert records. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{storage_type}}]-p99` |
 | Save Alert Failure Rate | `rate(greptime_trigger_save_alert_record_failure_count[$__rate_interval])` | `timeseries` | Rate of failures when persisting trigger alert records. | `prometheus` | `none` | `__auto` |
+# Hotspot
+| Title | Query | Type | Description | Datasource | Unit | Legend Format |
+| --- | --- | --- | --- | --- | --- | --- |
+| Hotspot Regions | `WITH table_stats AS (
+  SELECT
+    table_id,
+    COUNT(*) AS region_count,
+    SUM(disk_size) AS total_disk_size,
+    SUM(region_rows) as total_region_rows
+  FROM information_schema.region_statistics
+  WHERE region_role = 'Leader'
+  GROUP BY table_id
+  HAVING COUNT(*) > 1
+)
+
+SELECT
+  t.table_schema,
+  t.table_name,
+
+  r.region_id,
+  t.table_id,
+  r.region_number,
+
+  p.partition_description,
+
+
+  ROUND(
+    r.disk_size * 100.0
+      / NULLIF(ts.total_disk_size, 0),
+    2
+  ) AS disk_size_share_percent,
+
+  r.disk_size,
+  
+  ROUND(
+    r.region_rows * 100.0
+      / NULLIF(ts.total_region_rows, 0),
+    2
+  ) AS region_rows_share_percent,
+  r.region_rows
+
+FROM information_schema.region_statistics r
+
+JOIN table_stats ts
+  ON r.table_id = ts.table_id
+
+JOIN information_schema.tables t
+  ON r.table_id = t.table_id
+
+LEFT JOIN information_schema.partitions p
+  ON p.table_schema = t.table_schema
+ AND p.table_name = t.table_name
+ AND p.greptime_partition_id = r.region_id
+
+WHERE r.region_role = 'Leader'
+
+ORDER BY region_rows_share_percent DESC
+LIMIT 100;` | `table` |  | `mysql` | -- | -- |
+| Datanode Load(Write) | `greptime_datanode_history_load` | `timeseries` | Write load of each datanode over time. | `prometheus` | `binBps` | `datanode-{{datanode_id}}({{instance}})` |
+| Datanode Load(Write) Distribution | `greptime_datanode_history_load` | `piechart` | Distribution of write load across datanodes. | `prometheus` | `binBps` | `datanode-{{datanode_id}}({{instance}})` |
+| Datanode Data Distribution | `WITH leader_regions AS (
+  SELECT
+    CONCAT(
+      'datanode-',
+      p.peer_id,
+      ' (',
+      p.peer_addr,
+      ')'
+    ) AS datanode,
+    r.disk_size
+  FROM information_schema.region_statistics r
+  JOIN information_schema.region_peers p
+    ON r.region_id = p.region_id
+  WHERE r.region_role = 'Leader'
+    AND p.is_leader = 'Yes'
+)
+
+SELECT
+  datanode,
+  COUNT(*) AS leader_region_count,
+  SUM(disk_size) AS data_size
+FROM leader_regions
+GROUP BY datanode
+ORDER BY data_size DESC;` | `piechart` | Distribution of leader regions and data size across datanodes. | `mysql` | `bytes` | -- |

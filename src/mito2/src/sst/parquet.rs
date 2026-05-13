@@ -929,11 +929,14 @@ mod tests {
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 3);
         assert_eq!(metrics.filter_metrics.rg_inverted_filtered, 0);
         assert_eq!(metrics.filter_metrics.rows_inverted_filtered, 30);
+        let plan = inverted_index_applier
+            .as_ref()
+            .unwrap()
+            .plan_for_sst(&metadata)
+            .unwrap()
+            .unwrap();
         let cached = index_result_cache
-            .get(
-                inverted_index_applier.unwrap().predicate_key(),
-                handle.file_id().file_id(),
-            )
+            .get(&plan.predicate_key, handle.file_id().file_id())
             .unwrap();
         // inverted index will search all row groups
         assert!(cached.contains_row_group(0));

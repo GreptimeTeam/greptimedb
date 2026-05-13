@@ -1153,3 +1153,65 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: __auto
+    - title: Hotspot
+      panels:
+        - title: Hotspot Regions
+          type: table
+          queries:
+            - expr: "WITH table_stats AS (\n  SELECT\n    table_id,\n    COUNT(*) AS region_count,\n    SUM(disk_size) AS total_disk_size,\n    SUM(region_rows) as total_region_rows\n  FROM information_schema.region_statistics\n  WHERE region_role = 'Leader'\n  GROUP BY table_id\n  HAVING COUNT(*) > 1\n)\n\nSELECT\n  t.table_schema,\n  t.table_name,\n\n  r.region_id,\n  t.table_id,\n  r.region_number,\n\n  p.partition_description,\n\n\n  ROUND(\n    r.disk_size * 100.0\n      / NULLIF(ts.total_disk_size, 0),\n    2\n  ) AS disk_size_share_percent,\n\n  r.disk_size,\n  \n  ROUND(\n    r.region_rows * 100.0\n      / NULLIF(ts.total_region_rows, 0),\n    2\n  ) AS region_rows_share_percent,\n  r.region_rows\n\nFROM information_schema.region_statistics r\n\nJOIN table_stats ts\n  ON r.table_id = ts.table_id\n\nJOIN information_schema.tables t\n  ON r.table_id = t.table_id\n\nLEFT JOIN information_schema.partitions p\n  ON p.table_schema = t.table_schema\n AND p.table_name = t.table_name\n AND p.greptime_partition_id = r.region_id\n\nWHERE r.region_role = 'Leader'\n\nORDER BY region_rows_share_percent DESC\nLIMIT 100;"
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+        - title: Datanode Load(Write)
+          type: timeseries
+          description: Write load of each datanode over time.
+          unit: binBps
+          queries:
+            - expr: greptime_datanode_history_load
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: datanode-{{datanode_id}}({{instance}})
+        - title: Datanode Load(Write) Distribution
+          type: piechart
+          description: Distribution of write load across datanodes.
+          unit: binBps
+          queries:
+            - expr: greptime_datanode_history_load
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: datanode-{{datanode_id}}({{instance}})
+        - title: Datanode Data Distribution
+          type: piechart
+          description: Distribution of leader regions and data size across datanodes.
+          unit: bytes
+          queries:
+            - expr: |-
+                WITH leader_regions AS (
+                  SELECT
+                    CONCAT(
+                      'datanode-',
+                      p.peer_id,
+                      ' (',
+                      p.peer_addr,
+                      ')'
+                    ) AS datanode,
+                    r.disk_size
+                  FROM information_schema.region_statistics r
+                  JOIN information_schema.region_peers p
+                    ON r.region_id = p.region_id
+                  WHERE r.region_role = 'Leader'
+                    AND p.is_leader = 'Yes'
+                )
+
+                SELECT
+                  datanode,
+                  COUNT(*) AS leader_region_count,
+                  SUM(disk_size) AS data_size
+                FROM leader_regions
+                GROUP BY datanode
+                ORDER BY data_size DESC;
+              datasource:
+                type: mysql
+                uid: ${information_schema}
