@@ -717,7 +717,7 @@ impl TableRouteStorage {
 
     /// Returns batch of [`TableRouteValue`] that respects the order of `table_ids`.
     pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
-        let raw_table_routes = self.batch_get_inner(table_ids).await?;
+        let raw_table_routes = self.batch_get_with_raw_bytes(table_ids).await?;
 
         Ok(raw_table_routes
             .into_iter()
@@ -1083,6 +1083,63 @@ mod tests {
         assert_eq!(results[1].as_ref().unwrap(), &routes[1].1);
         assert!(results[2].is_none());
         assert_eq!(results[3].as_ref().unwrap(), &routes[0].1);
+    }
+
+    #[tokio::test]
+    async fn test_table_route_batch_get_remaps_addresses() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let table_route_storage = TableRouteStorage::new(kv.clone());
+        let table_route_manager = TableRouteManager::new(kv.clone());
+        let table_route_value = TableRouteValue::Physical(PhysicalTableRouteValue {
+            region_routes: vec![RegionRoute {
+                leader_peer: Some(Peer {
+                    id: 1,
+                    addr: "old-leader".to_string(),
+                }),
+                follower_peers: vec![Peer {
+                    id: 2,
+                    addr: "old-follower".to_string(),
+                }],
+                ..Default::default()
+            }],
+            max_region_number: 0,
+            version: 0,
+        });
+        let (txn, _) = table_route_manager
+            .table_route_storage()
+            .build_create_txn(1024, &table_route_value)
+            .unwrap();
+        let r = kv.txn(txn).await.unwrap();
+        assert!(r.succeeded);
+
+        for (node_id, addr) in [(1, "new-leader"), (2, "new-follower")] {
+            kv.put(PutRequest {
+                key: NodeAddressKey::with_datanode(node_id).to_bytes(),
+                value: NodeAddressValue {
+                    peer: Peer {
+                        id: node_id,
+                        addr: addr.to_string(),
+                    },
+                }
+                .try_as_raw_value()
+                .unwrap(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        let results = table_route_storage.batch_get(&[1024]).await.unwrap();
+        let TableRouteValue::Physical(physical_table_route) = results[0].as_ref().unwrap() else {
+            panic!("Expected PhysicalTableRouteValue");
+        };
+
+        let region_route = &physical_table_route.region_routes[0];
+        assert_eq!(
+            region_route.leader_peer.as_ref().unwrap().addr,
+            "new-leader"
+        );
+        assert_eq!(region_route.follower_peers[0].addr, "new-follower");
     }
 
     #[tokio::test]
