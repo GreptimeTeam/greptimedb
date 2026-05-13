@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::num::NonZero;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::Plugins;
 use common_base::cancellation::{CancellableFuture, CancellationHandle};
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, info, warn};
@@ -37,10 +39,12 @@ use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
 use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
 use crate::config::MitoConfig;
+use crate::engine::flush_hook::FlushHookRef;
 use crate::error;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, ObjectStoreNotFoundSnafu, Result,
 };
+use crate::flush::{SharedPrimaryKeys, wrap_with_pk_collector};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::options::RegionOptions;
@@ -53,8 +57,8 @@ use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
-use crate::sst::parquet::WriteOptions;
 use crate::sst::parquet::metadata::extract_primary_key_range;
+use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::version::{SstVersion, SstVersionRef};
 
 /// Region version for compaction that does not hold memtables.
@@ -106,6 +110,8 @@ pub struct CompactionRegion {
     /// The parallel is inside this compaction task, not across different compaction tasks.
     /// It can be different windows of the same compaction task or something like this.
     pub max_parallelism: usize,
+
+    pub(crate) plugins: Plugins,
 }
 
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
@@ -230,6 +236,7 @@ pub async fn open_compaction_region(
         file_purger: Some(file_purger),
         ttl: Some(ttl),
         max_parallelism: req.max_parallelism,
+        plugins: Plugins::new(),
     })
 }
 
@@ -250,11 +257,15 @@ impl CompactionRegion {
 }
 
 /// `[MergeOutput]` represents the output of merging SST files.
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 pub struct MergeOutput {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
     pub compaction_time_window: Option<i64>,
+    #[serde(skip)]
+    pub sst_infos: Vec<SstInfo>,
+    #[serde(skip)]
+    pub primary_keys: Vec<Vec<u8>>,
 }
 
 impl MergeOutput {
@@ -300,7 +311,7 @@ pub trait SstMerger: Send + Sync + 'static {
         compaction_region: CompactionRegion,
         output: CompactionOutput,
         write_opts: WriteOptions,
-    ) -> Result<Vec<FileMeta>>;
+    ) -> Result<(Vec<FileMeta>, Vec<SstInfo>, Vec<Vec<u8>>)>;
 }
 
 /// The production [`SstMerger`] that reads, merges, and writes SST files.
@@ -314,7 +325,7 @@ impl SstMerger for DefaultSstMerger {
         compaction_region: CompactionRegion,
         output: CompactionOutput,
         write_opts: WriteOptions,
-    ) -> Result<Vec<FileMeta>> {
+    ) -> Result<(Vec<FileMeta>, Vec<SstInfo>, Vec<Vec<u8>>)> {
         let region_id = compaction_region.region_id;
         let storage = compaction_region.region_options.storage.clone();
         let index_options = compaction_region
@@ -359,6 +370,20 @@ impl SstMerger for DefaultSstMerger {
             merge_mode,
         };
         let source = builder.build_flat_sst_reader().await?;
+
+        let hook: Option<FlushHookRef> = compaction_region.plugins.get();
+        let pk_collector: Option<SharedPrimaryKeys> = hook
+            .as_ref()
+            .map(|_| Arc::new(std::sync::Mutex::new(HashSet::new())));
+        let source = if let Some(collector) = &pk_collector {
+            crate::read::FlatSource::new_iter(
+                source.schema().clone(),
+                wrap_with_pk_collector(source.take_iter(), &Some(collector.clone())),
+            )
+        } else {
+            source
+        };
+
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = compaction_region.region_metadata.clone();
         let sst_infos = compaction_region
@@ -400,7 +425,7 @@ impl SstMerger for DefaultSstMerger {
         };
 
         let output_files = sst_infos
-            .into_iter()
+            .iter()
             .map(|sst_info| {
                 let pk_range = sst_info
                     .file_metadata
@@ -438,7 +463,10 @@ impl SstMerger for DefaultSstMerger {
             region_id, input_file_names, output_file_names, flat_format, metrics
         );
         metrics.observe();
-        Ok(output_files)
+        let primary_keys: Vec<Vec<u8>> = pk_collector
+            .map(|c| c.lock().unwrap().drain().collect())
+            .unwrap_or_default();
+        Ok((output_files, sst_infos.into_iter().collect(), primary_keys))
     }
 }
 
@@ -507,6 +535,8 @@ where
         }
 
         let mut output_files = Vec::with_capacity(tasks.len());
+        let mut all_sst_infos: Vec<SstInfo> = Vec::new();
+        let mut all_primary_keys: HashSet<Vec<u8>> = HashSet::new();
         let mut compacted_inputs = Vec::with_capacity(
             tasks.iter().map(|(inputs, _)| inputs.len()).sum::<usize>()
                 + picker_output.expired_ssts.len(),
@@ -530,8 +560,10 @@ where
             while let Some((inputs, handle)) = spawned.pop() {
                 let abort_handle = handle.abort_handle();
                 match CancellableFuture::new(handle, self.cancel_handle.clone()).await {
-                    Ok(Ok(Ok(files))) => {
+                    Ok(Ok(Ok((files, infos, pks)))) => {
                         output_files.extend(files);
+                        all_sst_infos.extend(infos);
+                        all_primary_keys.extend(pks);
                         compacted_inputs.extend(inputs);
                     }
                     Ok(Ok(Err(e))) => {
@@ -591,6 +623,8 @@ where
             files_to_add: output_files,
             files_to_remove: compacted_inputs,
             compaction_time_window: Some(compaction_time_window),
+            sst_infos: all_sst_infos,
+            primary_keys: all_primary_keys.into_iter().collect(),
         })
     }
 
@@ -679,6 +713,7 @@ mod tests {
             file_purger: None,
             ttl: None,
             max_parallelism: 1,
+            plugins: Plugins::new(),
         }
     }
 
@@ -707,10 +742,10 @@ mod tests {
             _compaction_region: CompactionRegion,
             _output: CompactionOutput,
             _write_opts: WriteOptions,
-        ) -> Result<Vec<FileMeta>> {
+        ) -> Result<(Vec<FileMeta>, Vec<SstInfo>, Vec<Vec<u8>>)> {
             let idx = self.call_idx.fetch_add(1, Ordering::SeqCst);
             match self.results.lock().unwrap().get(idx) {
-                Some(Ok(files)) => Ok(files.clone()),
+                Some(Ok(files)) => Ok((files.clone(), Vec::new(), Vec::new())),
                 Some(Err(_)) => error::InvalidMetaSnafu {
                     reason: format!("simulated failure at index {idx}"),
                 }
@@ -879,7 +914,7 @@ mod tests {
             _compaction_region: CompactionRegion,
             _output: CompactionOutput,
             _write_opts: WriteOptions,
-        ) -> Result<Vec<FileMeta>> {
+        ) -> Result<(Vec<FileMeta>, Vec<SstInfo>, Vec<Vec<u8>>)> {
             self.call_idx.fetch_add(1, Ordering::SeqCst);
             std::future::pending().await
         }

@@ -298,10 +298,20 @@ impl TestEnv {
     }
 
     pub(crate) async fn new_mito_engine(&self, config: MitoConfig) -> MitoEngine {
+        self.new_mito_engine_with_plugins(config, Plugins::new())
+            .await
+    }
+
+    pub(crate) async fn new_mito_engine_with_plugins(
+        &self,
+        config: MitoConfig,
+        plugins: Plugins,
+    ) -> MitoEngine {
         async fn create<S: LogStore>(
             zelf: &TestEnv,
             config: MitoConfig,
             log_store: Arc<S>,
+            plugins: Plugins,
         ) -> MitoEngine {
             let data_home = zelf.data_home().display().to_string();
             MitoEngine::new(
@@ -312,15 +322,15 @@ impl TestEnv {
                 zelf.schema_metadata_manager.clone(),
                 zelf.file_ref_manager.clone(),
                 zelf.partition_expr_fetcher.clone(),
-                Plugins::new(),
+                plugins,
             )
             .await
             .unwrap()
         }
 
         match self.log_store.as_ref().unwrap().clone() {
-            LogStoreImpl::RaftEngine(log_store) => create(self, config, log_store).await,
-            LogStoreImpl::Kafka(log_store) => create(self, config, log_store).await,
+            LogStoreImpl::RaftEngine(log_store) => create(self, config, log_store, plugins).await,
+            LogStoreImpl::Kafka(log_store) => create(self, config, log_store, plugins).await,
         }
     }
 
@@ -333,6 +343,21 @@ impl TestEnv {
         self.object_store_manager = Some(object_store_manager.clone());
 
         self.new_mito_engine(config).await
+    }
+
+    /// Creates a new engine with specific config and plugins.
+    pub async fn create_engine_with_plugins(
+        &mut self,
+        config: MitoConfig,
+        plugins: Plugins,
+    ) -> MitoEngine {
+        let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
+
+        let object_store_manager = Arc::new(object_store_manager);
+        self.log_store = Some(log_store.clone());
+        self.object_store_manager = Some(object_store_manager.clone());
+
+        self.new_mito_engine_with_plugins(config, plugins).await
     }
 
     /// Creates a new engine with specific config and existing logstore and object store manager.

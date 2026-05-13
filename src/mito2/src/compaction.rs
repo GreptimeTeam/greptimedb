@@ -515,6 +515,7 @@ impl CompactionScheduler {
             file_purger: None,
             ttl: Some(ttl),
             max_parallelism,
+            plugins: self.plugins.clone(),
         };
 
         let picker_output = {

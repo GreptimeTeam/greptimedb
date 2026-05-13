@@ -27,6 +27,7 @@ use crate::compaction::LocalCompactionState;
 use crate::compaction::compactor::{CompactionRegion, Compactor, MergeOutput};
 use crate::compaction::memory_manager::{CompactionMemoryGuard, CompactionMemoryManager};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
+use crate::engine::flush_hook::{FlushHookRef, SstFileInfo};
 use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
@@ -282,6 +283,43 @@ impl CompactionTaskImpl {
             );
         }
     }
+
+    async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
+        let hook: Option<FlushHookRef> = self.compaction_region.plugins.get();
+        if let Some(hook) = hook {
+            let files: Vec<SstFileInfo<'_>> = merge_output
+                .sst_infos
+                .iter()
+                .zip(merge_output.files_to_add.iter())
+                .map(|(info, meta)| SstFileInfo {
+                    file_meta: meta.clone(),
+                    sst_info_ref: info,
+                })
+                .collect();
+            hook.on_sst_files_written(
+                self.compaction_region.region_id,
+                &self.compaction_region.region_metadata,
+                &files,
+                &merge_output.primary_keys,
+            )
+            .await;
+        }
+    }
+
+    async fn invoke_manifest_hook(&self, edit: &RegionEdit) {
+        let hook: Option<FlushHookRef> = self.compaction_region.plugins.get();
+        if let Some(hook) = hook {
+            let manifest_version = self
+                .compaction_region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .last_version();
+            hook.on_manifest_updated(self.compaction_region.region_id, edit, manifest_version)
+                .await;
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -320,6 +358,7 @@ impl CompactionTask for CompactionTaskImpl {
         .await
         {
             Ok(Ok(merge_output)) => {
+                self.invoke_sst_hook(&merge_output).await;
                 // Stop accepting cancellation once we are about to publish the compaction edit.
                 if !self.state.mark_commit_started() {
                     let senders = std::mem::take(&mut self.waiters);
@@ -330,6 +369,7 @@ impl CompactionTask for CompactionTaskImpl {
                 } else {
                     match self.update_manifest(merge_output).await {
                         Ok(edit) => {
+                            self.invoke_manifest_hook(&edit).await;
                             let senders = std::mem::take(&mut self.waiters);
                             BackgroundNotify::CompactionFinished(CompactionFinished {
                                 region_id: self.compaction_region.region_id,

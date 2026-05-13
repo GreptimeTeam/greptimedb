@@ -1163,7 +1163,7 @@ impl FlatSource {
         }
     }
 
-    pub(crate) fn schema(&self) -> &SchemaRef {
+    pub fn schema(&self) -> &SchemaRef {
         &self.schema
     }
 
@@ -1171,7 +1171,6 @@ impl FlatSource {
         self.inner.next_batch().await
     }
 
-    #[cfg(test)]
     pub(crate) fn take_iter(self) -> BoxedRecordBatchIterator {
         match self.inner {
             FlatSourceInner::Iter(iter) => iter,

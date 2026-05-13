@@ -619,6 +619,7 @@ impl<S: LogStore> WorkerStarter<S> {
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
+            plugins: self.plugins,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -892,6 +893,8 @@ struct RegionWorkerLoop<S> {
     partition_expr_fetcher: PartitionExprFetcherRef,
     /// Semaphore to control flush concurrency.
     flush_semaphore: Arc<Semaphore>,
+    /// Plugins for flush hooks.
+    plugins: Plugins,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
