@@ -87,6 +87,22 @@ pub enum OtlpMetricTranslationStrategy {
 }
 
 impl OtlpMetricTranslationStrategy {
+    pub const VALUES: [&'static str; 4] = [
+        "UnderscoreEscapingWithSuffixes",
+        "UnderscoreEscapingWithoutSuffixes",
+        "NoUTF8EscapingWithSuffixes",
+        "NoTranslation",
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnderscoreEscapingWithSuffixes => "UnderscoreEscapingWithSuffixes",
+            Self::UnderscoreEscapingWithoutSuffixes => "UnderscoreEscapingWithoutSuffixes",
+            Self::NoUtf8EscapingWithSuffixes => "NoUTF8EscapingWithSuffixes",
+            Self::NoTranslation => "NoTranslation",
+        }
+    }
+
     pub fn should_escape(self) -> bool {
         matches!(
             self,
@@ -99,5 +115,25 @@ impl OtlpMetricTranslationStrategy {
             self,
             Self::UnderscoreEscapingWithSuffixes | Self::NoUtf8EscapingWithSuffixes
         )
+    }
+}
+
+impl std::str::FromStr for OtlpMetricTranslationStrategy {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "UnderscoreEscapingWithSuffixes" => Ok(Self::UnderscoreEscapingWithSuffixes),
+            "UnderscoreEscapingWithoutSuffixes" => Ok(Self::UnderscoreEscapingWithoutSuffixes),
+            "NoUTF8EscapingWithSuffixes" => Ok(Self::NoUtf8EscapingWithSuffixes),
+            "NoTranslation" => Ok(Self::NoTranslation),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for OtlpMetricTranslationStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }

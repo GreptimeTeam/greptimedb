@@ -68,6 +68,8 @@ pub mod constants {
         "x-greptime-otlp-metric-ignore-resource-attrs";
     pub const GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME: &str =
         "x-greptime-otlp-metric-promote-scope-attrs";
+    pub const GREPTIME_OTLP_METRIC_TRANSLATION_STRATEGY_HEADER_NAME: &str =
+        "x-greptime-otlp-metric-translation-strategy";
 
     /// The header key that contains the pipeline params.
     pub const GREPTIME_PIPELINE_PARAMS_HEADER: &str = "x-greptime-pipeline-params";
