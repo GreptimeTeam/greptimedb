@@ -145,6 +145,7 @@ macro_rules! http_tests {
 
                 test_otlp_metrics_new,
                 test_otlp_metric_translation_strategies,
+                test_otlp_metric_translation_strategy_ingestion_matrix,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
                 test_otlp_logs,
@@ -5290,6 +5291,192 @@ pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {
     assert_eq!(StatusCode::BAD_REQUEST, res.status());
 
     guard.remove_all().await;
+}
+
+pub async fn test_otlp_metric_translation_strategy_ingestion_matrix(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(
+        store_type,
+        "test_otlp_metric_translation_strategy_ingestion_matrix",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    for (strategy, prefix) in [
+        ("UnderscoreEscapingWithSuffixes", "matrix.ues"),
+        ("UnderscoreEscapingWithoutSuffixes", "matrix.uewo"),
+        ("NoUTF8EscapingWithSuffixes", "matrix.noutf8"),
+        ("NoTranslation", "matrix.nt"),
+    ] {
+        let body = otlp_metric_translation_matrix_body(prefix);
+        let res = send_req(
+            &client,
+            vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-otlp-metric-translation-strategy"),
+                    HeaderValue::from_static(strategy),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-otlp-metric-promote-scope-attrs"),
+                    HeaderValue::from_static("true"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-otlp-metric-promote-all-resource-attrs"),
+                    HeaderValue::from_static("true"),
+                ),
+            ],
+            "/v1/otlp/v1/metrics",
+            body,
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status(), "strategy: {strategy}");
+    }
+
+    let expected_tables = "[[\"matrix.noutf8.duration_milliseconds_total\"],[\"matrix.noutf8.queue.depth\"],[\"matrix.noutf8.request.rate_per_second\"],[\"matrix.noutf8.utilization_ratio\"],[\"matrix.nt.duration\"],[\"matrix.nt.queue.depth\"],[\"matrix.nt.request.rate\"],[\"matrix.nt.utilization\"],[\"matrix_ues_duration_milliseconds_total\"],[\"matrix_ues_queue_depth\"],[\"matrix_ues_request_rate_per_second\"],[\"matrix_ues_utilization_ratio\"],[\"matrix_uewo_duration\"],[\"matrix_uewo_queue_depth\"],[\"matrix_uewo_request_rate\"],[\"matrix_uewo_utilization\"]]";
+    validate_data(
+        "otlp_metric_translation_strategy_matrix_tables",
+        &client,
+        "select table_name from information_schema.tables where table_schema = 'public' and table_name like 'matrix%' order by table_name;",
+        expected_tables,
+    )
+    .await;
+
+    let expected_duration_row =
+        "[[11.0,\"duration-a\",\"scope-a\",\"resource-a\",\"strategy-service\"]]";
+    validate_data(
+        "otlp_metric_translation_strategy_default_ingestion",
+        &client,
+        "select greptime_value, data_point_label, otel_scope_scope_attr, resource_attr, job from matrix_ues_duration_milliseconds_total;",
+        expected_duration_row,
+    )
+    .await;
+    validate_data(
+        "otlp_metric_translation_strategy_without_suffixes_ingestion",
+        &client,
+        "select greptime_value, data_point_label, otel_scope_scope_attr, resource_attr, job from matrix_uewo_duration;",
+        expected_duration_row,
+    )
+    .await;
+    validate_data(
+        "otlp_metric_translation_strategy_no_utf8_escape_ingestion",
+        &client,
+        "select greptime_value, \"data.point.label\", \"otel_scope_scope.attr\", \"resource.attr\", job from \"matrix.noutf8.duration_milliseconds_total\";",
+        expected_duration_row,
+    )
+    .await;
+    validate_data(
+        "otlp_metric_translation_strategy_no_translation_ingestion",
+        &client,
+        "select greptime_value, \"data.point.label\", \"otel_scope_scope.attr\", \"resource.attr\", job from \"matrix.nt.duration\";",
+        expected_duration_row,
+    )
+    .await;
+
+    for (test_name, table_name, expected) in [
+        (
+            "default_ratio",
+            "matrix_ues_utilization_ratio",
+            "[[0.75,\"utilization-a\"]]",
+        ),
+        (
+            "default_per_unit",
+            "matrix_ues_request_rate_per_second",
+            "[[3.5,\"rate-a\"]]",
+        ),
+        (
+            "default_braced_custom_unit",
+            "matrix_ues_queue_depth",
+            "[[7.0,\"queue-a\"]]",
+        ),
+        (
+            "no_suffix_ratio",
+            "matrix_uewo_utilization",
+            "[[0.75,\"utilization-a\"]]",
+        ),
+        (
+            "no_suffix_per_unit",
+            "matrix_uewo_request_rate",
+            "[[3.5,\"rate-a\"]]",
+        ),
+        (
+            "no_suffix_braced_custom_unit",
+            "matrix_uewo_queue_depth",
+            "[[7.0,\"queue-a\"]]",
+        ),
+    ] {
+        validate_data(
+            test_name,
+            &client,
+            &format!("select greptime_value, data_point_label from {table_name};"),
+            expected,
+        )
+        .await;
+    }
+
+    for (test_name, table_name, label_column, expected) in [
+        (
+            "no_utf8_ratio",
+            "matrix.noutf8.utilization_ratio",
+            "data.point.label",
+            "[[0.75,\"utilization-a\"]]",
+        ),
+        (
+            "no_utf8_per_unit",
+            "matrix.noutf8.request.rate_per_second",
+            "data.point.label",
+            "[[3.5,\"rate-a\"]]",
+        ),
+        (
+            "no_utf8_braced_custom_unit",
+            "matrix.noutf8.queue.depth",
+            "data.point.label",
+            "[[7.0,\"queue-a\"]]",
+        ),
+        (
+            "no_translation_ratio",
+            "matrix.nt.utilization",
+            "data.point.label",
+            "[[0.75,\"utilization-a\"]]",
+        ),
+        (
+            "no_translation_per_unit",
+            "matrix.nt.request.rate",
+            "data.point.label",
+            "[[3.5,\"rate-a\"]]",
+        ),
+        (
+            "no_translation_braced_custom_unit",
+            "matrix.nt.queue.depth",
+            "data.point.label",
+            "[[7.0,\"queue-a\"]]",
+        ),
+    ] {
+        validate_data(
+            test_name,
+            &client,
+            &format!("select greptime_value, \"{label_column}\" from \"{table_name}\";"),
+            expected,
+        )
+        .await;
+    }
+
+    guard.remove_all().await;
+}
+
+fn otlp_metric_translation_matrix_body(prefix: &str) -> Vec<u8> {
+    let content = format!(
+        r#"
+{{"resourceMetrics":[{{"resource":{{"attributes":[{{"key":"service.name","value":{{"stringValue":"strategy-service"}}}},{{"key":"resource.attr","value":{{"stringValue":"resource-a"}}}}]}},"scopeMetrics":[{{"scope":{{"name":"matrix.scope","version":"1.0.0","attributes":[{{"key":"scope.attr","value":{{"stringValue":"scope-a"}}}}]}},"schemaUrl":"https://example.com/schema","metrics":[{{"name":"{prefix}.duration","description":"duration test","unit":"ms","sum":{{"dataPoints":[{{"attributes":[{{"key":"data.point.label","value":{{"stringValue":"duration-a"}}}}],"startTimeUnixNano":"1000000","timeUnixNano":"2000000","asDouble":11.0}}],"aggregationTemporality":2,"isMonotonic":true}}}},{{"name":"{prefix}.utilization","description":"ratio test","unit":"1","gauge":{{"dataPoints":[{{"attributes":[{{"key":"data.point.label","value":{{"stringValue":"utilization-a"}}}}],"timeUnixNano":"3000000","asDouble":0.75}}]}}}},{{"name":"{prefix}.request.rate","description":"per unit test","unit":"1/s","gauge":{{"dataPoints":[{{"attributes":[{{"key":"data.point.label","value":{{"stringValue":"rate-a"}}}}],"timeUnixNano":"4000000","asDouble":3.5}}]}}}},{{"name":"{prefix}.queue.depth","description":"braced custom unit test","unit":"{{items}}","gauge":{{"dataPoints":[{{"attributes":[{{"key":"data.point.label","value":{{"stringValue":"queue-a"}}}}],"timeUnixNano":"5000000","asDouble":7.0}}]}}}}]}}]}}]}}
+    "#
+    );
+
+    let req: ExportMetricsServiceRequest = serde_json::from_str(&content).unwrap();
+    req.encode_to_vec()
 }
 
 pub async fn test_otlp_traces_v0(store_type: StorageType) {
