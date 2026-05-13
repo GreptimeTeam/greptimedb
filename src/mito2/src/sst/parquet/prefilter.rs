@@ -1239,7 +1239,7 @@ mod tests {
             &parquet_schema,
             &codec,
         );
-        let plan_ba = build_reader_filter_plan(
+        let plan_b_a = build_reader_filter_plan(
             Some(&Predicate::new(vec![expr_b, expr_a])),
             None,
             PreFilterMode::All,
@@ -1249,9 +1249,9 @@ mod tests {
         );
 
         let parts_ab = plan_ab.prefilter_builder.unwrap().cache_key_parts;
-        let parts_ba = plan_ba.prefilter_builder.unwrap().cache_key_parts;
+        let parts_b_a = plan_b_a.prefilter_builder.unwrap().cache_key_parts;
         assert!(parts_ab.is_some());
-        assert_eq!(parts_ab, parts_ba);
+        assert_eq!(parts_ab, parts_b_a);
     }
 
     #[test]
