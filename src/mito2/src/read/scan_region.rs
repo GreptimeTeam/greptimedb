@@ -1373,8 +1373,10 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
         // `FileTimeRange`, but `extract_time_range_from_expr` is not precise enough to prove
         // a time predicate is implied by that range (it can return a wider range than the
         // predicate, and it does not analyze AND/OR shapes), which let the cache reuse rows
-        // that should have been filtered. Once we have an accurate per-predicate cover check
-        // we can revive the optimization; until then both buckets land in the fingerprint.
+        // that should have been filtered. Reviving the optimization needs a per-predicate
+        // implication check that walks each time-only `Expr` (recursing through AND/OR/NOT)
+        // and proves the predicate holds for every timestamp inside the partition's
+        // `FileTimeRange`; until then both buckets land in the fingerprint.
         if is_time_only
             && extract_time_range_from_expr(&time_index_name, ts_col_unit, expr).is_some()
         {

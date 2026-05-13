@@ -296,9 +296,12 @@ pub(crate) fn build_range_cache_key(
     // `TimestampRange` fully covered the partition's `FileTimeRange`, so different queries that
     // all enclosed the same partition could share a cache entry. The cover check turned out to
     // be too coarse: it returned true in cases where the dropped time predicates would still
-    // have excluded rows, so the cache served results that should have been filtered. Until we
-    // have a sound check that proves each individual time predicate is implied by the query
-    // `TimestampRange`, always carry the full fingerprint so cache reuse stays correct.
+    // have excluded rows, so the cache served results that should have been filtered. Reviving
+    // the optimization needs a per-predicate implication check that walks each time-only `Expr`
+    // (recursing through AND/OR/NOT) and proves the predicate is satisfied for every timestamp
+    // inside the partition's `FileTimeRange` — not the looser "does `extract_time_range_from_expr`
+    // return a range that covers the partition" used previously. Until then, always carry the
+    // full fingerprint so cache reuse stays correct.
     let scan = fingerprint.clone();
 
     Some(RangeScanCacheKey {

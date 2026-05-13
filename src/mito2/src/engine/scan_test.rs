@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 
 use api::v1::Rows;
+use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
@@ -810,6 +811,9 @@ async fn test_range_cache_separates_or_equality_time_filters() {
     let engine = env
         .create_engine(MitoConfig {
             default_flat_format: true,
+            // Explicitly enable the range result cache: the bug only reproduces
+            // when the second scan can replay the first scan's cached batches.
+            range_result_cache_size: ReadableSize::mb(64),
             ..Default::default()
         })
         .await;
