@@ -42,6 +42,7 @@ use crate::sst::FormatType;
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
 const MEMTABLE_PARTITION_TREE_PREFIX: &str = "memtable.partition_tree.";
+const MEMTABLE_BULK_PREFIX: &str = "memtable.bulk.";
 
 /// Legacy memtable type identifier accepted for backward compatibility.
 /// The partition tree memtable has been removed; parsing this value falls
@@ -160,7 +161,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         let memtable = if validate_enum_options(
             options_map,
             "memtable.type",
-            &[MEMTABLE_PARTITION_TREE_PREFIX],
+            &[MEMTABLE_PARTITION_TREE_PREFIX, MEMTABLE_BULK_PREFIX],
         )? {
             let is_legacy_partition_tree = options_map
                 .get("memtable.type")
@@ -704,6 +705,10 @@ mod tests {
     #[test]
     fn test_without_memtable_type() {
         let map = make_map(&[("memtable.partition_tree.index_max_keys_per_shard", "2048")]);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+
+        let map = make_map(&[("memtable.bulk.merge_threshold", "7")]);
         let err = RegionOptions::try_from(&map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
