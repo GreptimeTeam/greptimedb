@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use common_datasource::file_format::Format;
 use common_datasource::file_format::csv::CsvFormat;
+use common_datasource::file_format::orc::OrcSource;
 use common_datasource::file_format::parquet::DefaultParquetFileReaderFactory;
 use datafusion::common::ToDFSchema;
 use datafusion::config::CsvOptions;
@@ -34,7 +35,6 @@ use datafusion::physical_plan::{
 use datafusion::prelude::SessionContext;
 use datafusion_expr::expr::Expr;
 use datafusion_expr::utils::conjunction;
-use datafusion_orc::OrcSource;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;

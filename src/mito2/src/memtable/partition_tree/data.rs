@@ -756,7 +756,7 @@ impl<'a> DataPartEncoder<'a> {
     fn writer_props(self) -> WriterProperties {
         let mut builder = WriterProperties::builder();
         if let Some(row_group_size) = self.row_group_size {
-            builder = builder.set_max_row_group_size(row_group_size)
+            builder = builder.set_max_row_group_row_count(Some(row_group_size))
         }
 
         let ts_col = ColumnPath::new(vec![self.timestamp_column_name]);

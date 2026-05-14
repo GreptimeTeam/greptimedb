@@ -425,7 +425,7 @@ where
                 .set_key_value_metadata(Some(vec![key_value_meta]))
                 .set_compression(Compression::ZSTD(ZstdLevel::default()))
                 .set_encoding(Encoding::PLAIN)
-                .set_max_row_group_size(opts.row_group_size)
+                .set_max_row_group_row_count(Some(opts.row_group_size))
                 .set_column_index_truncate_length(None)
                 .set_statistics_truncate_length(None);
 

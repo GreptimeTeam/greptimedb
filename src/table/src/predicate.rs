@@ -605,7 +605,7 @@ mod tests {
             .unwrap();
 
         let write_props = WriterProperties::builder()
-            .set_max_row_group_size(10)
+            .set_max_row_group_row_count(Some(10))
             .build();
         let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(write_props)).unwrap();
 

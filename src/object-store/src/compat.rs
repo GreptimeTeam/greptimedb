@@ -23,13 +23,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use datafusion_object_store::path::Path;
 use datafusion_object_store::{
-    Attribute, Attributes, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
-    MultipartUpload, ObjectMeta, ObjectStore as ArrowObjectStore, PutMode, PutMultipartOptions,
-    PutOptions, PutPayload, PutResult, UploadPart,
+    Attribute, Attributes, CopyMode, CopyOptions, GetOptions, GetRange, GetResult,
+    GetResultPayload, ListResult, MultipartUpload, ObjectMeta, ObjectStore as ArrowObjectStore,
+    PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, UploadPart,
 };
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt, TryStreamExt};
-use opendal::options::CopyOptions;
+use opendal::options::CopyOptions as OpendalCopyOptions;
 use opendal::raw::percent_decode_path;
 use opendal::{Buffer, Operator, OperatorInfo, Writer};
 use tokio::sync::{Mutex, oneshot};
@@ -107,7 +107,7 @@ impl OpendalStore {
         to: &Path,
         if_not_exists: bool,
     ) -> datafusion_object_store::Result<()> {
-        let mut copy_options = CopyOptions::default();
+        let mut copy_options = OpendalCopyOptions::default();
         if if_not_exists {
             copy_options.if_not_exists = true;
         }
@@ -210,22 +210,6 @@ impl ArrowObjectStore for OpendalStore {
         let version = rp.version().map(|s| s.to_string());
 
         Ok(PutResult { e_tag, version })
-    }
-
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> datafusion_object_store::Result<Box<dyn MultipartUpload>> {
-        let decoded_location = percent_decode_path(location.as_ref());
-        let writer = self
-            .inner
-            .writer_with(&decoded_location)
-            .concurrent(8)
-            .await
-            .map_err(|err| format_object_store_error(err, location.as_ref()))?;
-        let upload = OpendalMultipartUpload::new(writer, location.clone());
-
-        Ok(Box::new(upload))
     }
 
     async fn put_multipart_opts(
@@ -403,33 +387,49 @@ impl ArrowObjectStore for OpendalStore {
         })
     }
 
-    async fn get_range(
+    async fn get_ranges(
         &self,
         location: &Path,
-        range: Range<u64>,
-    ) -> datafusion_object_store::Result<Bytes> {
+        ranges: &[Range<u64>],
+    ) -> datafusion_object_store::Result<Vec<Bytes>> {
+        if ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let raw_location = percent_decode_path(location.as_ref());
         let reader = self
             .inner
-            .reader_with(&raw_location)
+            .reader_with(raw_location.as_ref())
+            .await
+            .map_err(|err| format_object_store_error(err, location.as_ref()))?;
+        let buffers = reader
+            .fetch(ranges.to_vec())
             .await
             .map_err(|err| format_object_store_error(err, location.as_ref()))?;
 
-        reader
-            .read(range.start..range.end)
-            .await
-            .map(|buf| buf.to_bytes())
-            .map_err(|err| format_object_store_error(err, location.as_ref()))
+        Ok(buffers.into_iter().map(|buf| buf.to_bytes()).collect())
     }
 
-    async fn delete(&self, location: &Path) -> datafusion_object_store::Result<()> {
-        let decoded_location = percent_decode_path(location.as_ref());
-        self.inner
-            .delete(&decoded_location)
-            .await
-            .map_err(|err| format_object_store_error(err, location.as_ref()))?;
-
-        Ok(())
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, datafusion_object_store::Result<Path>>,
+    ) -> BoxStream<'static, datafusion_object_store::Result<Path>> {
+        let this = self.clone();
+        locations
+            .map(move |location| {
+                let this = this.clone();
+                async move {
+                    let location = location?;
+                    let decoded_location = percent_decode_path(location.as_ref());
+                    this.inner
+                        .delete(&decoded_location)
+                        .await
+                        .map_err(|err| format_object_store_error(err, location.as_ref()))?;
+                    Ok(location)
+                }
+            })
+            .buffered(10)
+            .boxed()
     }
 
     fn list(
@@ -568,28 +568,14 @@ impl ArrowObjectStore for OpendalStore {
         })
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> datafusion_object_store::Result<()> {
-        self.copy_request(from, to, false).await
-    }
-
-    async fn rename(&self, from: &Path, to: &Path) -> datafusion_object_store::Result<()> {
-        self.inner
-            .rename(
-                &percent_decode_path(from.as_ref()),
-                &percent_decode_path(to.as_ref()),
-            )
-            .await
-            .map_err(|err| format_object_store_error(err, from.as_ref()))?;
-
-        Ok(())
-    }
-
-    async fn copy_if_not_exists(
+    async fn copy_opts(
         &self,
         from: &Path,
         to: &Path,
+        options: CopyOptions,
     ) -> datafusion_object_store::Result<()> {
-        self.copy_request(from, to, true).await
+        let if_not_exists = options.mode == CopyMode::Create;
+        self.copy_request(from, to, if_not_exists).await
     }
 }
 
@@ -731,7 +717,9 @@ mod tests {
 
     use bytes::Bytes;
     use datafusion_object_store::path::Path;
-    use datafusion_object_store::{ObjectStore as ArrowObjectStore, WriteMultipart};
+    use datafusion_object_store::{
+        ObjectStore as ArrowObjectStore, ObjectStoreExt, WriteMultipart,
+    };
     use opendal::{Operator, services};
     use rand::{Rng, RngCore};
 
@@ -1003,7 +991,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_range_no_stat() {
+    async fn test_get_ranges_no_stat() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         // Create a stat counter and operator with tracking layer
@@ -1022,13 +1010,17 @@ mod tests {
         // Reset counter after put
         stat_count.store(0, Ordering::SeqCst);
 
-        // Test 1: get_range should NOT call stat()
-        let ret = store.get_range(&location, 0..5).await.unwrap();
-        assert_eq!(Bytes::from_static(b"Hello"), ret);
+        // Test 1: get_ranges should NOT call stat()
+        let range = 0..5;
+        let ret = store
+            .get_ranges(&location, std::slice::from_ref(&range))
+            .await
+            .unwrap();
+        assert_eq!(vec![Bytes::from_static(b"Hello")], ret);
         assert_eq!(
             stat_count.load(Ordering::SeqCst),
             0,
-            "get_range should not call stat()"
+            "get_ranges should not call stat()"
         );
 
         // Reset counter
