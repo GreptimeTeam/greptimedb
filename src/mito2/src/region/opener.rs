@@ -179,7 +179,8 @@ impl RegionOpener {
 
     /// Parses and sets options for the region.
     pub(crate) fn parse_options(self, options: HashMap<String, String>) -> Result<Self> {
-        self.options(RegionOptions::try_from(&options)?)
+        let region_id = self.region_id;
+        self.options(RegionOptions::try_from_options(region_id, &options)?)
     }
 
     /// Sets the replay checkpoint for the region.

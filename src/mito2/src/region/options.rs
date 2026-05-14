@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_telemetry::info;
 use common_time::TimeToLive;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use serde::de::Error as _;
@@ -32,10 +33,10 @@ use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
 use store_api::mito_engine_options::COMPACTION_OVERRIDE;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, RegionId};
 use strum::EnumString;
 
-use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
+use crate::error::{InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
 use crate::memtable::bulk::BulkMemtableConfig;
 use crate::sst::FormatType;
 
@@ -135,10 +136,12 @@ impl RegionOptions {
     }
 }
 
-impl TryFrom<&HashMap<String, String>> for RegionOptions {
-    type Error = Error;
-
-    fn try_from(options_map: &HashMap<String, String>) -> Result<Self> {
+impl RegionOptions {
+    /// Parses [RegionOptions] from the raw `options_map`.
+    pub(crate) fn try_from_options(
+        region_id: RegionId,
+        options_map: &HashMap<String, String>,
+    ) -> Result<Self> {
         let value = options_map_to_value(options_map);
         let json = serde_json::to_string(&value).context(JsonOptionsSnafu)?;
 
@@ -158,15 +161,15 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         let wal_options = parse_wal_options(options_map).context(JsonOptionsSnafu)?;
 
         let index_options: IndexOptions = serde_json::from_str(&json).context(JsonOptionsSnafu)?;
+        let is_legacy_partition_tree = options_map
+            .get("memtable.type")
+            .map(|s| s.eq_ignore_ascii_case(LEGACY_PARTITION_TREE_MEMTABLE_TYPE))
+            .unwrap_or(false);
         let memtable = if validate_enum_options(
             options_map,
             "memtable.type",
             &[MEMTABLE_PARTITION_TREE_PREFIX, MEMTABLE_BULK_PREFIX],
         )? {
-            let is_legacy_partition_tree = options_map
-                .get("memtable.type")
-                .map(|s| s.eq_ignore_ascii_case(LEGACY_PARTITION_TREE_MEMTABLE_TYPE))
-                .unwrap_or(false);
             if is_legacy_partition_tree {
                 // The partition tree memtable has been removed. Fall back to the
                 // default memtable; the primary key encoding (if any) is still
@@ -178,6 +181,18 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         } else {
             None
         };
+
+        // The partition tree memtable has been removed. Besides falling back to
+        // the default memtable, also override the SST format to flat.
+        let mut sst_format = options.sst_format;
+        if is_legacy_partition_tree {
+            info!(
+                "Region {} specified the removed partition_tree memtable; \
+                 overriding memtable to the default and SST format to flat",
+                region_id
+            );
+            sst_format = Some(FormatType::Flat);
+        }
 
         let compaction_override_flag = options_map
             .get(COMPACTION_OVERRIDE)
@@ -207,7 +222,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             index_options,
             memtable,
             merge_mode: options.merge_mode,
-            sst_format: options.sst_format,
+            sst_format,
             primary_key_encoding,
         };
         opts.validate()?;
@@ -483,14 +498,14 @@ mod tests {
     #[test]
     fn test_empty_region_options() {
         let map = make_map(&[]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(RegionOptions::default(), options);
     }
 
     #[test]
     fn test_with_ttl() {
         let map = make_map(&[("ttl", "7d")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             ..Default::default()
@@ -501,7 +516,7 @@ mod tests {
     #[test]
     fn test_with_storage() {
         let map = make_map(&[("storage", "S3")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             storage: Some("S3".to_string()),
             ..Default::default()
@@ -515,7 +530,7 @@ mod tests {
             ("compaction.twcs.trigger_file_num", "8"),
             ("compaction.twcs.time_window", "2h"),
         ]);
-        let err = RegionOptions::try_from(&map).unwrap_err();
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
@@ -526,7 +541,7 @@ mod tests {
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
         ]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
@@ -542,7 +557,7 @@ mod tests {
     #[test]
     fn test_with_compaction_override_true_without_compaction_type() {
         let map = make_map(&[(COMPACTION_OVERRIDE, "true")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             compaction_override: true,
             ..Default::default()
@@ -553,7 +568,7 @@ mod tests {
     #[test]
     fn test_with_compaction_override_false_without_compaction_type() {
         let map = make_map(&[(COMPACTION_OVERRIDE, "false")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(RegionOptions::default(), options);
     }
 
@@ -563,14 +578,14 @@ mod tests {
             (COMPACTION_OVERRIDE, "true"),
             ("compaction.twcs.time_window", "2h"),
         ]);
-        let err = RegionOptions::try_from(&map).unwrap_err();
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
     fn test_with_wal_options(wal_options: &WalOptions) -> bool {
         let encoded_wal_options = serde_json::to_string(&wal_options).unwrap();
         let map = make_map(&[(WAL_OPTIONS_KEY, &encoded_wal_options)]);
-        let got = RegionOptions::try_from(&map).unwrap();
+        let got = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             wal_options: wal_options.clone(),
             ..Default::default()
@@ -584,7 +599,7 @@ mod tests {
             ("index.inverted_index.ignore_column_ids", "1,2,3"),
             ("index.inverted_index.segment_row_count", "512"),
         ]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
@@ -612,7 +627,7 @@ mod tests {
     #[test]
     fn test_with_memtable() {
         let map = make_map(&[("memtable.type", "time_series")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             memtable: Some(MemtableOptions::TimeSeries),
             ..Default::default()
@@ -620,7 +635,7 @@ mod tests {
         assert_eq!(expect, options);
 
         let map = make_map(&[("memtable.type", "bulk")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig::default())),
             ..Default::default()
@@ -634,7 +649,7 @@ mod tests {
             ("memtable.bulk.encode_bytes_threshold", "13"),
             ("memtable.bulk.max_merge_groups", "17"),
         ]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig {
                 merge_threshold: 7,
@@ -646,11 +661,13 @@ mod tests {
         };
         assert_eq!(expect, options);
 
-        // Legacy partition_tree memtable falls back to default (None → bulk-equivalent at runtime).
+        // Legacy partition_tree memtable falls back to the default memtable and
+        // overrides the SST format to flat.
         let map = make_map(&[("memtable.type", "partition_tree")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             memtable: None,
+            sst_format: Some(FormatType::Flat),
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -661,9 +678,10 @@ mod tests {
             ("memtable.partition_tree.index_max_keys_per_shard", "2048"),
             ("memtable.partition_tree.fork_dictionary_bytes", "128M"),
         ]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             memtable: None,
+            sst_format: Some(FormatType::Flat),
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -673,7 +691,7 @@ mod tests {
     fn test_primary_key_encoding() {
         // New top-level key.
         let map = make_map(&[("primary_key_encoding", "sparse")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(options.primary_key_encoding(), PrimaryKeyEncoding::Sparse);
         assert_eq!(
             options.primary_key_encoding,
@@ -685,58 +703,72 @@ mod tests {
             ("memtable.type", "partition_tree"),
             ("memtable.partition_tree.primary_key_encoding", "sparse"),
         ]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(options.memtable, None);
+        assert_eq!(options.sst_format, Some(FormatType::Flat));
         assert_eq!(options.primary_key_encoding(), PrimaryKeyEncoding::Sparse);
 
         // Invalid value rejected.
         let map = make_map(&[("primary_key_encoding", "bogus")]);
-        let err = RegionOptions::try_from(&map).unwrap_err();
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_legacy_partition_tree_overrides_sst_format() {
+        // Legacy partition_tree memtable falls back to the default memtable and
+        // overrides the SST format to flat, even when a different format was set.
+        let map = make_map(&[
+            ("memtable.type", "partition_tree"),
+            ("sst_format", "primary_key"),
+        ]);
+        let options = RegionOptions::try_from_options(RegionId::new(1, 1), &map).unwrap();
+        assert_eq!(options.memtable, None);
+        assert_eq!(options.sst_format, Some(FormatType::Flat));
     }
 
     #[test]
     fn test_unknown_memtable_type() {
         let map = make_map(&[("memtable.type", "no_such_memtable")]);
-        let err = RegionOptions::try_from(&map).unwrap_err();
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
     #[test]
     fn test_without_memtable_type() {
         let map = make_map(&[("memtable.partition_tree.index_max_keys_per_shard", "2048")]);
-        let err = RegionOptions::try_from(&map).unwrap_err();
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
 
         let map = make_map(&[("memtable.bulk.merge_threshold", "7")]);
-        let err = RegionOptions::try_from(&map).unwrap_err();
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
     #[test]
     fn test_with_merge_mode() {
         let map = make_map(&[("merge_mode", "last_row")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(MergeMode::LastRow, options.merge_mode());
 
         let map = make_map(&[("merge_mode", "last_non_null")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(MergeMode::LastNonNull, options.merge_mode());
 
         let map = make_map(&[("merge_mode", "unknown")]);
-        let err = RegionOptions::try_from(&map).unwrap_err();
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
     #[test]
     fn test_append_mode_allows_last_row_merge_mode() {
         let map = make_map(&[("append_mode", "true"), ("merge_mode", "last_row")]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert!(options.append_mode);
         assert_eq!(MergeMode::LastRow, options.merge_mode());
 
         let map = make_map(&[("append_mode", "true"), ("merge_mode", "last_non_null")]);
-        let err = RegionOptions::try_from(&map).unwrap_err();
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
@@ -768,7 +800,7 @@ mod tests {
             ("memtable.bulk.max_merge_groups", "17"),
             ("merge_mode", "last_non_null"),
         ]);
-        let options = RegionOptions::try_from(&map).unwrap();
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             compaction: CompactionOptions::Twcs(TwcsOptions {

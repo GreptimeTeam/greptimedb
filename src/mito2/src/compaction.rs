@@ -42,7 +42,7 @@ use datafusion_expr::Expr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::RegionId;
 use task::MAX_PARALLEL_COMPACTION;
 use tokio::sync::mpsc::{self, Sender};
 
@@ -452,7 +452,7 @@ impl CompactionScheduler {
     ) -> Result<Option<ActiveCompaction>> {
         let region_id = request.region_id();
         let (dynamic_compaction_opts, ttl) = find_dynamic_options(
-            region_id.table_id(),
+            region_id,
             &request.current_version.options,
             &request.schema_metadata_manager,
         )
@@ -715,10 +715,11 @@ impl Drop for CompactionScheduler {
 
 /// Finds compaction options and TTL together with a single metadata fetch to reduce RTT.
 async fn find_dynamic_options(
-    table_id: TableId,
+    region_id: RegionId,
     region_options: &crate::region::options::RegionOptions,
     schema_metadata_manager: &SchemaMetadataManagerRef,
 ) -> Result<(crate::region::options::CompactionOptions, TimeToLive)> {
+    let table_id = region_id.table_id();
     if let (true, Some(ttl)) = (region_options.compaction_override, region_options.ttl) {
         debug!(
             "Use region options directly for table {}: compaction={:?}, ttl={:?}",
@@ -765,7 +766,7 @@ async fn find_dynamic_options(
             if map.is_empty() {
                 region_options.compaction.clone()
             } else {
-                crate::region::options::RegionOptions::try_from(&map)
+                crate::region::options::RegionOptions::try_from_options(region_id, &map)
                     .map(|o| o.compaction)
                     .unwrap_or_else(|e| {
                         error!(e; "Failed to create RegionOptions from map");
@@ -1199,7 +1200,7 @@ mod tests {
 
         let version_control = Arc::new(builder.build());
         let region_opts = version_control.current().version.options.clone();
-        let (opts, _) = find_dynamic_options(table_id, &region_opts, &schema_metadata_manager)
+        let (opts, _) = find_dynamic_options(region_id, &region_opts, &schema_metadata_manager)
             .await
             .unwrap();
         match opts {
@@ -1293,7 +1294,8 @@ mod tests {
         for (case_name, schema_value, override_set, table_window, expected_window) in cases {
             let builder = VersionControlBuilder::new();
             let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
-            let table_id = builder.region_id().table_id();
+            let region_id = builder.region_id();
+            let table_id = region_id.table_id();
             schema_metadata_manager
                 .register_region_table_info(
                     table_id,
@@ -1314,7 +1316,7 @@ mod tests {
                 twcs.time_window = Some(window);
             }
 
-            let (opts, _) = find_dynamic_options(table_id, &region_opts, &schema_metadata_manager)
+            let (opts, _) = find_dynamic_options(region_id, &region_opts, &schema_metadata_manager)
                 .await
                 .unwrap();
             match opts {
