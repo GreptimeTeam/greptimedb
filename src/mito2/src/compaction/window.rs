@@ -252,6 +252,7 @@ mod tests {
                 memtable: None,
                 merge_mode: None,
                 sst_format: None,
+                skip_wal: false,
             },
             compaction_time_window: None,
         }

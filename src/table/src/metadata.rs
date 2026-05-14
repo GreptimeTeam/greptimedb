@@ -374,6 +374,9 @@ impl TableMeta {
                         new_options.extra_options.remove(MERGE_MODE_KEY);
                     }
                 }
+                SetRegionOption::SkipWal(value) => {
+                    new_options.skip_wal = *value;
+                }
             }
         }
         let mut builder = self.new_meta_builder();
@@ -1392,6 +1395,7 @@ mod tests {
 
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
+    use datatypes::arrow::ipc::Bool;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{
         ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SchemaBuilder,
@@ -1399,6 +1403,7 @@ mod tests {
 
     use super::*;
     use crate::Error;
+    use crate::requests::SKIP_WAL_KEY;
 
     /// Create a test schema with 3 columns: `[col1 int32, ts timestampmills, col2 int32]`.
     fn new_test_schema() -> Schema {
@@ -1589,6 +1594,66 @@ mod tests {
                 .extra_options
                 .get(MERGE_MODE_KEY)
                 .map(String::as_str)
+        );
+    }
+
+    #[test]
+    fn test_set_skip_wal_true_updates_table_options() {
+        let schema = Arc::new(new_test_schema());
+        let table_options = TableOptions::default();
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .options(table_options)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::SkipWal(true)],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(new_meta.options.skip_wal);
+
+        assert_eq!(
+            Some(&"true".to_string()),
+            HashMap::from(&new_meta.options).get(SKIP_WAL_KEY)
+        );
+    }
+
+    #[test]
+    fn test_set_skip_wal_false_updates_table_options() {
+        let schema = Arc::new(new_test_schema());
+        let table_options = TableOptions::default();
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .options(table_options)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::SkipWal(false)],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(!new_meta.options.skip_wal);
+
+        assert_eq!(
+            Some(&"false".to_string()),
+            HashMap::from(&new_meta.options).get(SKIP_WAL_KEY)
         );
     }
 

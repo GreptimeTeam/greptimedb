@@ -20,6 +20,7 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_wal::options::WalOptions;
 use humantime_serde::re::humantime;
 use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -234,6 +235,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         all_options_altered = false;
                     }
                 }
+                SetRegionOption::SkipWal(skip_wal) => {
+                    // Validates: don't allow no-op regions to enable WAL
+                    if matches!(current_options.wal_options, WalOptions::Noop) {
+                        ensure!(
+                            skip_wal,
+                            store_api::metadata::InvalidRegionRequestSnafu {
+                                region_id: region.region_id,
+                                err: "Cannot enable WAL for regions that were created with WAL disabled (legacy noop WAL)",
+                            }
+                        );
+                    }
+                    if current_options.skip_wal != skip_wal {
+                        current_options.skip_wal = skip_wal;
+                        all_options_altered = false;
+                    }
+                }
             }
         }
         region.version_control.alter_options(current_options);
@@ -273,6 +290,9 @@ fn new_region_options_on_empty_memtable(
 
                 current_options.append_mode = true;
                 current_options.merge_mode = None;
+            }
+            SetRegionOption::SkipWal(skip_wal) => {
+                current_options.skip_wal = *skip_wal;
             }
         }
     }
