@@ -1202,7 +1202,7 @@ impl BulkPartEncoder {
             WriterProperties::builder()
                 .set_key_value_metadata(Some(vec![key_value_meta]))
                 .set_write_batch_size(row_group_size)
-                .set_max_row_group_size(row_group_size)
+                .set_max_row_group_row_count(Some(row_group_size))
                 .set_compression(Compression::ZSTD(ZstdLevel::default()))
                 .set_column_index_truncate_length(None)
                 .set_statistics_truncate_length(None)

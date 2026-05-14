@@ -127,7 +127,10 @@ pub(crate) fn assert_parquet_metadata_equal(x: Arc<ParquetMetaData>, y: Arc<Parq
                     .statistics()
                     .cloned()
                     .map(unset_min_max_backwards_compatible_flag);
-                let mut col_builder = col.into_builder().clear_statistics();
+                let mut col_builder = col
+                    .into_builder()
+                    .clear_statistics()
+                    .clear_page_encoding_stats();
                 if let Some(stats) = stats {
                     col_builder = col_builder.set_statistics(stats);
                 }

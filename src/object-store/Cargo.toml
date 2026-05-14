@@ -43,7 +43,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "1.0"
-arrow_object_store.workspace = true
 common-telemetry.workspace = true
 common-test-util.workspace = true
 object_store_opendal.workspace = true

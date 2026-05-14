@@ -16,10 +16,10 @@ use std::env;
 use std::sync::Arc;
 
 use anyhow::Result;
-use arrow_object_store::path::Path;
-use arrow_object_store::{ObjectStore as ArrowObjectStore, ObjectStoreExt};
 use bytes::Bytes;
 use common_telemetry::info;
+use datafusion_object_store::path::Path;
+use datafusion_object_store::{ObjectStore as ArrowObjectStore, ObjectStoreExt};
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use object_store::services::{Fs, S3};

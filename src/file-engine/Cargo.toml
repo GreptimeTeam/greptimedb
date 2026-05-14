@@ -26,7 +26,6 @@ common-test-util = { workspace = true, optional = true }
 common-time.workspace = true
 datafusion.workspace = true
 datafusion-expr.workspace = true
-datafusion-orc.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 object-store.workspace = true

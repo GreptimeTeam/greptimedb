@@ -15,6 +15,7 @@
 use arrow_schema::Schema;
 use async_trait::async_trait;
 use bytes::Bytes;
+pub use datafusion_orc::OrcSource;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use object_store::ObjectStore;

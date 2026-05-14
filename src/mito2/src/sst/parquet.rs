@@ -590,7 +590,7 @@ mod tests {
             .set_key_value_metadata(Some(vec![key_value_meta]))
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
-            .set_max_row_group_size(write_opts.row_group_size);
+            .set_max_row_group_row_count(Some(write_opts.row_group_size));
 
         let writer_props = props_builder.build();
 
