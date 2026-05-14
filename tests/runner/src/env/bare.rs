@@ -249,6 +249,7 @@ impl Env {
             metasrv_process: None.into(),
             frontend_process: None.into(),
             flownode_process: None.into(),
+            active_bins_dir: Mutex::new(self.bins_dir.lock().unwrap().clone()),
             ctx: GreptimeDBContext {
                 time: 0,
                 datanode_id: Default::default(),
@@ -273,6 +274,22 @@ impl Env {
         db_ctx: &GreptimeDBContext,
         id: usize,
         truncate_log: bool,
+    ) -> Child {
+        let bins_dir = self.bins_dir.lock().unwrap().clone().expect(
+            "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
+        );
+
+        self.start_server_with_bins_dir(mode, db_ctx, id, truncate_log, bins_dir)
+            .await
+    }
+
+    async fn start_server_with_bins_dir(
+        &self,
+        mode: ServerMode,
+        db_ctx: &GreptimeDBContext,
+        id: usize,
+        truncate_log: bool,
+        bins_dir: PathBuf,
     ) -> Child {
         let log_file_name = match mode {
             ServerMode::Datanode { node_id, .. } => {
@@ -310,10 +327,6 @@ impl Env {
 
         let program = PROGRAM;
 
-        let bins_dir = self.bins_dir.lock().unwrap().clone().expect(
-            "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
-        );
-
         let abs_bins_dir = bins_dir
             .canonicalize()
             .expect("Failed to canonicalize bins_dir");
@@ -348,6 +361,10 @@ impl Env {
 
     /// stop and restart the server process
     async fn restart_server(&self, db: &GreptimeDB, is_full_restart: bool) {
+        let bins_dir = db.active_bins_dir.lock().unwrap().clone().expect(
+            "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
+        );
+
         {
             if let Some(server_process) = db.server_processes.clone() {
                 let mut server_processes = server_process.lock().unwrap();
@@ -384,7 +401,9 @@ impl Env {
                 .cloned()
                 .unwrap();
             let server_addr = server_mode.server_addr().unwrap();
-            let new_server_process = self.start_server(server_mode, &db.ctx, db.id, false).await;
+            let new_server_process = self
+                .start_server_with_bins_dir(server_mode, &db.ctx, db.id, false, bins_dir.clone())
+                .await;
 
             let mut client = db.client.lock().await;
             client
@@ -402,7 +421,15 @@ impl Env {
                     .get_server_mode(SERVER_MODE_METASRV_IDX)
                     .cloned()
                     .unwrap();
-                let metasrv = self.start_server(metasrv_mode, &db.ctx, db.id, false).await;
+                let metasrv = self
+                    .start_server_with_bins_dir(
+                        metasrv_mode,
+                        &db.ctx,
+                        db.id,
+                        false,
+                        bins_dir.clone(),
+                    )
+                    .await;
                 db.metasrv_process
                     .lock()
                     .expect("lock poisoned")
@@ -421,7 +448,13 @@ impl Env {
                     .cloned()
                     .unwrap();
                 let new_server_process = self
-                    .start_server(datanode_mode, &db.ctx, db.id, false)
+                    .start_server_with_bins_dir(
+                        datanode_mode,
+                        &db.ctx,
+                        db.id,
+                        false,
+                        bins_dir.clone(),
+                    )
                     .await;
                 processes.push(new_server_process);
             }
@@ -433,7 +466,13 @@ impl Env {
                     .cloned()
                     .unwrap();
                 let frontend = self
-                    .start_server(frontend_mode, &db.ctx, db.id, false)
+                    .start_server_with_bins_dir(
+                        frontend_mode,
+                        &db.ctx,
+                        db.id,
+                        false,
+                        bins_dir.clone(),
+                    )
                     .await;
                 db.frontend_process
                     .lock()
@@ -447,7 +486,7 @@ impl Env {
                 .cloned()
                 .unwrap();
             let flownode = self
-                .start_server(flownode_mode, &db.ctx, db.id, false)
+                .start_server_with_bins_dir(flownode_mode, &db.ctx, db.id, false, bins_dir.clone())
                 .await;
             db.flownode_process
                 .lock()
@@ -556,6 +595,7 @@ pub struct GreptimeDB {
     frontend_process: Mutex<Option<Child>>,
     flownode_process: Mutex<Option<Child>>,
     client: TokioMutex<MultiProtocolClient>,
+    active_bins_dir: Mutex<Option<PathBuf>>,
     ctx: GreptimeDBContext,
     is_standalone: bool,
     env: Env,
@@ -606,16 +646,16 @@ impl Database for GreptimeDB {
                 .cloned();
 
             match version_bin_dir {
-                Some(path) if path.clone().join(PROGRAM).is_file() => {
+                Some(path) if path.join(PROGRAM).is_file() => {
                     // use version in versioned_bins_dirs
-                    *self.env.bins_dir.lock().unwrap() = Some(path.clone());
+                    *self.active_bins_dir.lock().unwrap() = Some(path);
                 }
                 _ => {
                     // use version in dir files
                     maybe_pull_binary(version, self.env.pull_version_on_need).await;
                     let root = get_workspace_root();
                     let new_path = PathBuf::from_iter([&root, version]);
-                    *self.env.bins_dir.lock().unwrap() = Some(new_path);
+                    *self.active_bins_dir.lock().unwrap() = Some(new_path);
                 }
             }
 
