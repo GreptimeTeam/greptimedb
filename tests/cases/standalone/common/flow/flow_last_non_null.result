@@ -185,7 +185,7 @@ Affected Rows: 2
 -- should return error
 ADMIN FLUSH_FLOW('find_approx_rate');
 
-Error: 1002(Unexpected), Failed to execute admin function: Failed to execute admin function flush_flow, error: Execution error: Function execution error: Internal error: 1003: Execution error: Function execution error: Internal error: 1003
+Error: 1002(Unexpected), Failed to execute admin function flush_flow: Execution error: Internal error: 1003
 
 DROP FLOW find_approx_rate;
 

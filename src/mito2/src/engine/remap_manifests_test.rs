@@ -194,9 +194,7 @@ async fn test_remap_manifests_success_with_format(flat_format: bool) {
         engine
             .handle_request(
                 region_id,
-                RegionRequest::Flush(RegionFlushRequest {
-                    row_group_size: None,
-                }),
+                RegionRequest::Flush(RegionFlushRequest::default()),
             )
             .await
             .unwrap();

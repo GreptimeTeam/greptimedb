@@ -728,16 +728,19 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata());
 
         // Creates a source that can return an error to abort the writer.
-        let source = FlatSource::Iter(Box::new(
+        let record_batch = new_record_batch_by_range(&["a", "d"], 0, 60);
+        let schema = record_batch.schema();
+        let iter = Box::new(
             [
-                Ok(new_record_batch_by_range(&["a", "d"], 0, 60)),
+                Ok(record_batch),
                 InvalidBatchSnafu {
                     reason: "Abort the writer",
                 }
                 .fail(),
             ]
             .into_iter(),
-        ));
+        );
+        let source = FlatSource::new_iter(schema, iter);
 
         // Write to local cache and upload sst to mock remote store
         let write_request = SstWriteRequest {

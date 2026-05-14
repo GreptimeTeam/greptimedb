@@ -15,10 +15,13 @@
 use std::collections::BTreeMap;
 
 use api::v1::Rows;
+use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_common::ScalarValue;
+use datafusion_expr::{col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use futures::TryStreamExt;
@@ -27,14 +30,310 @@ use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
 
 use crate::config::MitoConfig;
+use crate::error::Error;
 use crate::read::scan_region::Scanner;
 use crate::test_util;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
+async fn test_incremental_query_stale_error() {
+    let mut env = TestEnv::with_prefix("test_incremental_query_stale_error").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("expect stale incremental error");
+
+    let min_readable_seq = match &err {
+        Error::IncrementalQueryStale {
+            region_id: err_region_id,
+            given_seq,
+            min_readable_seq,
+            ..
+        } => {
+            assert_eq!(*err_region_id, region_id);
+            assert_eq!(*given_seq, 0);
+            assert!(*min_readable_seq > 0);
+            *min_readable_seq
+        }
+        _ => panic!("unexpected err: {err}"),
+    };
+    assert_eq!(StatusCode::RequestOutdated, err.status_code());
+    let err_msg = err.to_string();
+    assert!(err_msg.contains("STALE_CURSOR"));
+    assert!(err_msg.contains(&region_id.to_string()));
+    assert!(err_msg.contains("given_seq: 0"));
+    assert!(err_msg.contains(&format!("min_readable_seq: {min_readable_seq}")));
+
+    let incremental_rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 5),
+    };
+    test_util::put_rows(&engine, region_id, incremental_rows).await;
+
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(min_readable_seq),
+                sst_min_sequence: Some(u64::MAX),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        batches.pretty_print().unwrap(),
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
++-------+---------+---------------------+"
+    );
+}
+
+#[tokio::test]
 async fn test_scan_with_min_sst_sequence() {
     test_scan_with_min_sst_sequence_with_format(false).await;
     test_scan_with_min_sst_sequence_with_format(true).await;
+}
+
+#[tokio::test]
+async fn test_full_snapshot_upper_bound_does_not_constrain_sst_rows() {
+    let mut env =
+        TestEnv::with_prefix("test_full_snapshot_upper_bound_does_not_constrain_sst_rows").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let first_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, first_rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let snapshot_upper_bound = engine.get_committed_sequence(region_id).await.unwrap();
+
+    let second_rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 5),
+    };
+    test_util::put_rows(&engine, region_id, second_rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_max_sequence: Some(snapshot_upper_bound),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let pretty = batches.pretty_print().unwrap();
+
+    assert!(pretty.contains("1970-01-01T00:00:03"));
+    assert!(pretty.contains("1970-01-01T00:00:04"));
+}
+
+#[tokio::test]
+async fn test_snapshot_bound_query_binds_memtable_upper_bound_at_scan_open() {
+    let mut env =
+        TestEnv::with_prefix("test_snapshot_bound_query_binds_memtable_upper_bound_at_scan_open")
+            .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let first_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, first_rows).await;
+
+    let expected_snapshot = engine.get_committed_sequence(region_id).await.unwrap();
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(scanner.snapshot_sequence(), Some(expected_snapshot));
+
+    let second_rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 5),
+    };
+    test_util::put_rows(&engine, region_id, second_rows).await;
+
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        batches.pretty_print().unwrap(),
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+"
+    );
+}
+
+#[tokio::test]
+async fn test_snapshot_bound_query_keeps_open_snapshot_after_late_flush() {
+    let mut env =
+        TestEnv::with_prefix("test_snapshot_bound_query_keeps_open_snapshot_after_late_flush")
+            .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let first_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, first_rows).await;
+
+    let expected_snapshot = engine.get_committed_sequence(region_id).await.unwrap();
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(scanner.snapshot_sequence(), Some(expected_snapshot));
+
+    let second_rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 5),
+    };
+    test_util::put_rows(&engine, region_id, second_rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    assert_eq!(scanner.snapshot_sequence(), Some(expected_snapshot));
+}
+
+#[tokio::test]
+async fn test_snapshot_bound_query_keeps_correct_result_after_late_flush() {
+    let mut env =
+        TestEnv::with_prefix("test_snapshot_bound_query_keeps_correct_result_after_late_flush")
+            .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let first_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, first_rows).await;
+
+    let expected_snapshot = engine.get_committed_sequence(region_id).await.unwrap();
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(scanner.snapshot_sequence(), Some(expected_snapshot));
+
+    let second_rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 5),
+    };
+    test_util::put_rows(&engine, region_id, second_rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    assert_eq!(scanner.snapshot_sequence(), Some(expected_snapshot));
+
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        batches.pretty_print().unwrap(),
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+"
+    );
 }
 
 async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
@@ -402,4 +701,194 @@ fn collect_and_assert_partition_rows(
 
     actual_rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
     actual_rows
+}
+
+/// Tests series scan with multiple partition ranges (each with multiple overlapping sources)
+/// and small semaphore permits (controlled by num_partitions).
+#[tokio::test]
+async fn test_series_scan_flat_small_permits() {
+    let mut env = TestEnv::with_prefix("test_series_scan_small_permits").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.time_window", "1h")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Create overlapping SSTs in each time window so partition ranges have multiple sources.
+    let put_flush_rows = async |start, end| {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(start, end),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    };
+    // Window 0 (0s-999s): 3 overlapping SSTs
+    put_flush_rows(0, 3).await;
+    put_flush_rows(1, 5).await;
+    put_flush_rows(3, 7).await;
+    // Window 1 (3600s-4599s): 2 overlapping SSTs
+    put_flush_rows(3600, 3603).await;
+    put_flush_rows(3601, 3605).await;
+    // Window 2 (7200s-8199s): 2 overlapping SSTs
+    put_flush_rows(7200, 7203).await;
+    put_flush_rows(7201, 7204).await;
+
+    let mut expected_rows = Vec::new();
+    for value in [
+        0_i64, 1, 2, 3, 4, 5, 6, 3600, 3601, 3602, 3603, 3604, 7200, 7201, 7202, 7203,
+    ] {
+        expected_rows.push((value.to_string(), value as f64, value * 1000));
+    }
+    expected_rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
+
+    // Test with different semaphore sizes (num_partitions controls Semaphore::new(num_partitions)).
+    for num_partitions in [1, 2] {
+        let request = ScanRequest {
+            distribution: Some(TimeSeriesDistribution::PerSeries),
+            ..Default::default()
+        };
+        let scanner = engine.scanner(region_id, request).await.unwrap();
+        let Scanner::Series(mut scanner) = scanner else {
+            panic!("Scanner should be series scan");
+        };
+
+        // Collect all partition ranges and redistribute into `num_partitions` partitions.
+        let raw_ranges: Vec<_> = scanner
+            .properties()
+            .partitions
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        assert!(
+            raw_ranges.len() >= 3,
+            "expected at least 3 partition ranges, got {}",
+            raw_ranges.len()
+        );
+
+        let mut new_ranges = vec![vec![]; num_partitions];
+        for (i, range) in raw_ranges.into_iter().enumerate() {
+            new_ranges[i % num_partitions].push(range);
+        }
+        scanner
+            .prepare(PrepareRequest {
+                ranges: Some(new_ranges),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let actual_rows = collect_partition_rows_round_robin(&scanner, num_partitions).await;
+        assert_eq!(
+            expected_rows, actual_rows,
+            "mismatch with num_partitions={num_partitions}"
+        );
+    }
+}
+
+// Regression test: `ts = a OR ts = b` extracts to a `TimestampRange` that
+// `GenericRange::or` widens into `[min(a, b), max(a, b) + 1)`. Two such
+// predicates with different `a` values can both extract to ranges that cover
+// the same partition while selecting different (or no) rows. The previous
+// cover check would strip both predicates from the cache key, letting the
+// second scan return the first scan's cached row.
+#[tokio::test]
+async fn test_range_cache_separates_or_equality_time_filters() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            // Explicitly enable the range result cache: the bug only reproduces
+            // when the second scan can replay the first scan's cached batches.
+            range_result_cache_size: ReadableSize::mb(64),
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Partition rows ts=5..10 (5000ms..9000ms), flushed to SST.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(5, 10),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let ts_lit = |ms: i64| lit(ScalarValue::TimestampMillisecond(Some(ms), None));
+    let tag_filter = || col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("0".to_string()))));
+
+    // First scan: (ts = 5000) OR (ts = 100000) -- extracts to `[5000, 100001)`,
+    // which covers the partition `[5000, 9000]`. Selects ts=5.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                filters: vec![
+                    tag_filter(),
+                    col("ts").eq(ts_lit(5000)).or(col("ts").eq(ts_lit(100000))),
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected_first = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 5     | 5.0     | 1970-01-01T00:00:05 |
++-------+---------+---------------------+";
+    assert_eq!(expected_first, batches.pretty_print().unwrap());
+
+    // Second scan: (ts = 3000) OR (ts = 100000) -- extracts to `[3000, 100001)`,
+    // which also covers the partition. Selects nothing. With the buggy cover
+    // check both scans built the same cache key (tag filter only), so this scan
+    // would replay the first scan's cached row and incorrectly return ts=5.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                filters: vec![
+                    tag_filter(),
+                    col("ts").eq(ts_lit(3000)).or(col("ts").eq(ts_lit(100000))),
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        0,
+        row_count,
+        "expected empty result, got: {}",
+        batches.pretty_print().unwrap()
+    );
 }

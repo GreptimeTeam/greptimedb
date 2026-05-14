@@ -53,7 +53,9 @@ use store_api::metadata::RegionMetadata;
 use store_api::path_utils::WAL_DIR;
 use store_api::region_engine::{PrepareRequest, QueryScanContext, RegionEngine};
 use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
-use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+use store_api::storage::{
+    ProjectionInput, RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
+};
 use tokio::fs;
 
 use crate::datanode::objbench::{build_object_store, parse_config};
@@ -615,9 +617,10 @@ impl ScanbenchCommand {
         let mut total_rows_all = 0u64;
         let mut total_elapsed_all = std::time::Duration::ZERO;
 
+        let projection_input = projection.map(ProjectionInput::new);
         for iteration in 0..self.iterations {
             let request = ScanRequest {
-                projection: projection.clone(),
+                projection_input: projection_input.clone(),
                 filters: filters.clone(),
                 series_row_selector,
                 distribution,

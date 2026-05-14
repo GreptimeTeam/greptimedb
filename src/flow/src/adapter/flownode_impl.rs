@@ -213,7 +213,7 @@ impl FlowDualEngine {
             if !frontend_list.is_empty() {
                 let fe_list = frontend_list
                     .iter()
-                    .map(|(_, info)| &info.peer.addr)
+                    .map(|peer| &peer.addr)
                     .collect::<Vec<_>>();
                 info!("Available frontend found: {:?}", fe_list);
                 return Ok(());

@@ -156,14 +156,14 @@ impl StagingStorage {
 
     /// Returns an iterator of manifests from staging directory.
     pub(crate) async fn manifest_lister(&self) -> Result<Option<Lister>> {
-        self.delta_storage.manifest_lister().await
+        self.delta_storage.manifest_lister(None).await
     }
 
     /// Fetch all staging manifest files and return them as (version, action_list) pairs.
     pub(crate) async fn fetch_manifests(&self) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
         let manifest_entries = self
             .delta_storage
-            .get_paths(|entry| {
+            .get_paths(None, |entry| {
                 let file_name = entry.name();
                 if is_delta_file(file_name) {
                     let version = file_version(file_name);
@@ -191,13 +191,15 @@ impl StagingStorage {
     pub(crate) async fn clear(&self) -> Result<()> {
         self.delta_storage
             .object_store()
-            .remove_all(self.delta_storage.path())
+            .delete_with(self.delta_storage.path())
+            .recursive(true)
             .await
             .context(OpenDalSnafu)?;
 
         self.blob_storage
             .object_store()
-            .remove_all(self.blob_storage.path())
+            .delete_with(self.blob_storage.path())
+            .recursive(true)
             .await
             .context(OpenDalSnafu)?;
 

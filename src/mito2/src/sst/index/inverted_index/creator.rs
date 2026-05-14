@@ -614,9 +614,11 @@ mod tests {
             .build(&[expr])
             .unwrap()
             .unwrap();
+            let sst_metadata = Arc::new(region_metadata.clone());
+            let plan = applier.plan_for_sst(&sst_metadata).unwrap().unwrap();
             Box::pin(async move {
                 applier
-                    .apply(index_id, None, None)
+                    .apply(index_id, None, &plan.index_applier, None)
                     .await
                     .unwrap()
                     .matched_segment_ids

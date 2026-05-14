@@ -89,9 +89,7 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
@@ -122,16 +120,15 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
+            RegionRequest::Flush(RegionFlushRequest::default()),
         )
         .await
         .unwrap();
 
     // Scan data in staging mode - should only see initial 5 rows (staging SST not visible)
+    let projection_input = Some(vec![1].into());
     let request = ScanRequest {
-        projection: Some(vec![1]),
+        projection_input,
         ..Default::default()
     };
     let scanner = engine.scanner(region_id, request).await.unwrap();
@@ -153,8 +150,9 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
     // Scan after exiting staging - the old SST (tag_0 = "0".."4") should have
     // rows filtered by partition expr (tag_0 >= "5"), which means none of them pass.
     // But the staging SST (tag_0 = "5".."10") satisfies the partition expr.
+    let projection_input = Some(vec![1].into());
     let request = ScanRequest {
-        projection: Some(vec![1]),
+        projection_input,
         ..Default::default()
     };
     let scanner = engine.scanner(region_id, request).await.unwrap();

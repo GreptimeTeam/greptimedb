@@ -89,6 +89,10 @@ impl DatabaseClient {
         }
     }
 
+    pub fn addr(&self) -> &str {
+        &self.addr
+    }
+
     pub async fn sql_in_public(&self, sql: &str) -> Result<Option<Vec<Vec<Value>>>> {
         self.sql(sql, DEFAULT_SCHEMA_NAME).await
     }

@@ -12,23 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cell::LazyCell;
-use std::collections::HashMap;
-
 use api::helper::{ColumnDataTypeWrapper, to_grpc_value};
-use api::v1::alter_table_expr::Kind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::region::InsertRequests as RegionInsertRequests;
-use api::v1::{
-    AlterTableExpr, ColumnSchema as GrpcColumnSchema, ModifyColumnType, ModifyColumnTypes, Row,
-    Rows,
-};
+use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows};
 use catalog::CatalogManager;
-use common_telemetry::info;
 use common_time::Timezone;
-use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
-use datatypes::types::JsonType;
 use datatypes::value::Value;
 use partition::manager::PartitionRuleManager;
 use session::context::{QueryContext, QueryContextRef};
@@ -47,7 +37,6 @@ use crate::error::{
 use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::insert::semantic_type;
-use crate::statement::StatementExecutor;
 
 const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
@@ -74,11 +63,10 @@ impl<'a> StatementToRegion<'a> {
         &self,
         stmt: &Insert,
         query_ctx: &QueryContextRef,
-        statement_executor: &StatementExecutor,
     ) -> Result<(InstantAndNormalInsertRequests, TableInfoRef)> {
         let name = stmt.table_name().context(ParseSqlSnafu)?;
         let (catalog, schema, table_name) = self.get_full_name(name)?;
-        let mut table = self.get_table(&catalog, &schema, &table_name).await?;
+        let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
 
         ensure!(
@@ -128,26 +116,9 @@ impl<'a> StatementToRegion<'a> {
                 .collect::<Result<Vec<_>>>()
         }
 
-        let mut insert_columns = find_insert_columns(&table, &column_names)?;
+        let insert_columns = find_insert_columns(&table, &column_names)?;
         let converter = SqlRowConverter::new(&insert_columns, query_ctx);
-
-        // Convert the SQL values to GreptimeDB values, and merge a "largest" JSON types of all
-        // values on the way by `JsonColumnTypeUpdater`.
-        let mut updater = JsonColumnTypeUpdater::new(statement_executor, query_ctx);
-        let value_rows = converter.convert(&mut updater, &sql_rows)?;
-
-        // If the JSON values have a "larger" json type than the one in the table schema, modify
-        // the column's json type first, by executing an "alter table" DDL.
-        if updater
-            .maybe_update_column_type(&catalog, &schema, &table_name, &insert_columns)
-            .await?
-        {
-            // Update with the latest schema, if changed.
-            table = self.get_table(&catalog, &schema, &table_name).await?;
-            insert_columns = find_insert_columns(&table, &column_names)?;
-        }
-
-        // Finally convert GreptimeDB values to GRPC values, ready to do insertion on Datanode.
+        let value_rows = converter.convert(&sql_rows)?;
         for (i, row) in value_rows.into_iter().enumerate() {
             for value in row {
                 let grpc_value = to_grpc_value(value);
@@ -248,11 +219,7 @@ impl<'a, 'b> SqlRowConverter<'a, 'b> {
         }
     }
 
-    fn convert(
-        &self,
-        updater: &mut JsonColumnTypeUpdater<'_, 'a>,
-        sql_rows: &[Vec<SqlValue>],
-    ) -> Result<Vec<Vec<Value>>> {
+    fn convert(&self, sql_rows: &[Vec<SqlValue>]) -> Result<Vec<Vec<Value>>> {
         let timezone = Some(&self.query_context.timezone());
         let auto_string_to_numeric = self.query_context.auto_string_to_numeric();
 
@@ -263,116 +230,11 @@ impl<'a, 'b> SqlRowConverter<'a, 'b> {
             for (insert_column, sql_value) in self.insert_columns.iter().zip(sql_row) {
                 let value =
                     sql_value_to_value(insert_column, sql_value, timezone, auto_string_to_numeric)?;
-
-                updater.merge_types(insert_column, &value)?;
-
                 value_row.push(value);
             }
             value_rows.push(value_row);
         }
         Ok(value_rows)
-    }
-}
-
-struct JsonColumnTypeUpdater<'a, 'b> {
-    statement_executor: &'a StatementExecutor,
-    query_context: &'a QueryContextRef,
-    merged_value_types: LazyCell<HashMap<&'b str, JsonType>>,
-}
-
-impl<'a, 'b> JsonColumnTypeUpdater<'a, 'b> {
-    fn new(statement_executor: &'a StatementExecutor, query_context: &'a QueryContextRef) -> Self {
-        Self {
-            statement_executor,
-            query_context,
-            merged_value_types: LazyCell::new(Default::default),
-        }
-    }
-
-    fn merge_types(&mut self, column_schema: &'b ColumnSchema, value: &Value) -> Result<()> {
-        if !matches!(value, Value::Json(_)) {
-            return Ok(());
-        }
-
-        if let ConcreteDataType::Json(value_type) = value.data_type() {
-            let merged_type = self
-                .merged_value_types
-                .entry(&column_schema.name)
-                .or_insert_with(|| value_type.clone());
-
-            if !merged_type.is_include(&value_type) {
-                merged_type.merge(&value_type).map_err(|e| {
-                    InvalidInsertRequestSnafu {
-                        reason: format!(r#"cannot merge "{value_type}" into "{merged_type}": {e}"#),
-                    }
-                    .build()
-                })?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn maybe_update_column_type(
-        self,
-        catalog: &str,
-        schema: &str,
-        table: &str,
-        insert_columns: &[&ColumnSchema],
-    ) -> Result<bool> {
-        let mut has_update = false;
-        for (column_name, merged_type) in self.merged_value_types.iter() {
-            let Some(column_type) = insert_columns
-                .iter()
-                .find_map(|x| (&x.name == column_name).then(|| x.data_type.as_json()))
-                .flatten()
-            else {
-                continue;
-            };
-            if column_type.is_include(merged_type) {
-                continue;
-            }
-
-            let new_column_type = {
-                let mut x = column_type.clone();
-                x.merge(merged_type)
-                    .map_err(|e| {
-                        InvalidInsertRequestSnafu {
-                            reason: format!(
-                                r#"cannot merge "{merged_type}" into "{column_type}": {e}"#
-                            ),
-                        }
-                        .build()
-                    })
-                    .map(|()| x)
-            }?;
-            info!(
-                "updating table {}.{}.{} column {} json type: {} => {}",
-                catalog, schema, table, column_name, column_type, new_column_type,
-            );
-
-            let (target_type, target_type_extension) =
-                ColumnDataTypeWrapper::try_from(ConcreteDataType::Json(new_column_type))
-                    .context(ColumnDataTypeSnafu)?
-                    .into_parts();
-            let alter_expr = AlterTableExpr {
-                catalog_name: catalog.to_string(),
-                schema_name: schema.to_string(),
-                table_name: table.to_string(),
-                kind: Some(Kind::ModifyColumnTypes(ModifyColumnTypes {
-                    modify_column_types: vec![ModifyColumnType {
-                        column_name: column_name.to_string(),
-                        target_type: target_type as i32,
-                        target_type_extension,
-                    }],
-                })),
-            };
-            self.statement_executor
-                .alter_table_inner(alter_expr, self.query_context.clone())
-                .await?;
-
-            has_update = true;
-        }
-        Ok(has_update)
     }
 }
 

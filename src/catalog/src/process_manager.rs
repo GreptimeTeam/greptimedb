@@ -58,6 +58,8 @@ pub enum QueryStatement {
     Sql(Statement),
     // The optional string is the alias of the PromQL query.
     Promql(EvalStmt, Option<String>),
+    /// Logical plan with original query string
+    Plan(String),
 }
 
 impl Display for QueryStatement {
@@ -71,6 +73,7 @@ impl Display for QueryStatement {
                     write!(f, "{}", eval_stmt)
                 }
             }
+            QueryStatement::Plan(query) => write!(f, "{}", query),
         }
     }
 }
@@ -170,7 +173,7 @@ impl ProcessManager {
         let mut processes = vec![];
         if let Some(remote_frontend_selector) = self.frontend_selector.as_ref() {
             let frontends = remote_frontend_selector
-                .select(|node| node.peer.addr != self.server_addr)
+                .select(|peer| peer.addr != self.server_addr)
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             for mut f in frontends {
@@ -208,7 +211,7 @@ impl ProcessManager {
                 .frontend_selector
                 .as_ref()
                 .context(error::MetaClientMissingSnafu)?
-                .select(|node| node.peer.addr == server_addr)
+                .select(|peer| peer.addr == server_addr)
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             ensure!(
@@ -368,6 +371,9 @@ impl SlowQueryTimer {
             }
             QueryStatement::Sql(stmt) => {
                 slow_query_event.query = stmt.to_string();
+            }
+            QueryStatement::Plan(query) => {
+                slow_query_event.query = query.clone();
             }
         }
 

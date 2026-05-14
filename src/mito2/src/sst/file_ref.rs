@@ -285,6 +285,7 @@ mod tests {
             sequence: NonZeroU64::new(4096),
             partition_expr: None,
             num_series: 0,
+            ..Default::default()
         };
 
         file_ref_mgr.add_file(&file_meta);

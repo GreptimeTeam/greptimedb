@@ -18,6 +18,7 @@ mod tests;
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer};
+use common_meta::datanode::EnvVars;
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
@@ -45,6 +46,7 @@ pub struct HeartbeatTask {
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     start_time_ms: u64,
     resource_stat: ResourceStatRef,
+    env_vars: EnvVars,
 }
 
 impl HeartbeatTask {
@@ -67,6 +69,7 @@ impl HeartbeatTask {
             resp_handler_executor,
             start_time_ms: common_time::util::current_time_millis() as u64,
             resource_stat,
+            env_vars: EnvVars::from_config(&opts.heartbeat_env_vars),
         }
     }
 
@@ -202,9 +205,13 @@ impl HeartbeatTask {
         let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
         let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
         let resource_stat = self.resource_stat.clone();
+        let env_vars = self.env_vars.clone();
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
+
+            let mut extensions = std::collections::HashMap::new();
+            env_vars.into_extensions(&mut extensions);
 
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
@@ -213,6 +220,7 @@ impl HeartbeatTask {
                     total_cpu_millicores,
                     total_memory_bytes,
                 ),
+                extensions,
                 ..Default::default()
             };
 

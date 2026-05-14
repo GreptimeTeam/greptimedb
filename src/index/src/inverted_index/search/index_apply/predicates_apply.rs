@@ -94,15 +94,15 @@ impl IndexApplier for PredicatesIndexApplier {
             .collect::<Vec<_>>();
 
         let mut mapper = ParallelFstValuesMapper::new(reader);
-        let mut bm_vec = mapper.map_values_vec(&value_and_meta_vec, metrics).await?;
+        let bm_vec = mapper.map_values_vec(&value_and_meta_vec, metrics).await?;
 
-        let mut bitmap = bm_vec.pop().unwrap(); // SAFETY: `fst_ranges` is not empty
-        for bm in bm_vec {
-            if bm.count_ones() == 0 {
+        let mut iter = bm_vec.into_iter();
+        let mut bitmap = iter.next().unwrap(); // SAFETY: `fst_ranges` is not empty
+        for bm in iter {
+            bitmap.intersect(bm);
+            if bitmap.count_ones() == 0 {
                 break;
             }
-
-            bitmap.intersect(bm);
         }
 
         output.matched_segment_ids = bitmap;

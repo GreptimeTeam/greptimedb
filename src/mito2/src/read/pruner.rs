@@ -32,7 +32,7 @@ use crate::metrics::PRUNER_ACTIVE_BUILDERS;
 use crate::read::range::{FileRangeBuilder, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{FileScanMetrics, PartitionMetrics};
-use crate::sst::parquet::file_range::FileRange;
+use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
 use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Number of files to pre-fetch ahead of the current position.
@@ -43,6 +43,8 @@ pub struct PartitionPruner {
     pruner: Arc<Pruner>,
     /// Files to prune, in the order to scan.
     file_indices: Vec<usize>,
+    /// Per-file pre-filter mode lookup indexed by file_index.
+    pre_filter_modes: Vec<PreFilterMode>,
     /// Current position for tracking pre-fetch progress.
     current_position: AtomicUsize,
 }
@@ -50,12 +52,15 @@ pub struct PartitionPruner {
 impl PartitionPruner {
     /// Creates a new `PartitionPruner` for the given partition ranges.
     pub fn new(pruner: Arc<Pruner>, partition_ranges: &[PartitionRange]) -> Self {
-        let mut file_indices = Vec::with_capacity(pruner.inner.stream_ctx.input.num_files());
+        let num_files = pruner.inner.stream_ctx.input.num_files();
+        let mut file_indices = Vec::with_capacity(num_files);
+        let mut pre_filter_modes = vec![PreFilterMode::SkipFields; num_files];
         let mut dedup_set = HashSet::with_capacity(pruner.inner.stream_ctx.input.num_files());
 
         let num_memtables = pruner.inner.stream_ctx.input.num_memtables();
         for part_range in partition_ranges {
             let range_meta = &pruner.inner.stream_ctx.ranges[part_range.identifier];
+            let pre_filter_mode = pruner.inner.stream_ctx.range_pre_filter_mode(part_range);
             for row_group_index in &range_meta.row_group_indices {
                 if pruner
                     .inner
@@ -67,6 +72,7 @@ impl PartitionPruner {
                         continue;
                     } else {
                         file_indices.push(file_index);
+                        pre_filter_modes[file_index] = pre_filter_mode;
                         dedup_set.insert(file_index);
                     }
                 }
@@ -76,6 +82,7 @@ impl PartitionPruner {
         Self {
             pruner,
             file_indices,
+            pre_filter_modes,
             current_position: AtomicUsize::new(0),
         }
     }
@@ -91,11 +98,12 @@ impl PartitionPruner {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<SmallVec<[FileRange; 2]>> {
         let file_index = index.index - self.pruner.inner.stream_ctx.input.num_memtables();
+        let pre_filter_mode = self.pre_filter_mode(file_index);
 
         // Delegate to underlying Pruner
         let ranges = self
             .pruner
-            .build_file_ranges(index, partition_metrics, reader_metrics)
+            .build_file_ranges(index, pre_filter_mode, partition_metrics, reader_metrics)
             .await?;
 
         // Find position and trigger pre-fetch for upcoming files
@@ -115,9 +123,21 @@ impl PartitionPruner {
         let end = (start + PREFETCH_COUNT).min(self.file_indices.len());
 
         for i in start..end {
-            self.pruner
-                .get_file_builder_background(self.file_indices[i], Some(partition_metrics.clone()));
+            let file_index = self.file_indices[i];
+            let pre_filter_mode = self.pre_filter_mode(file_index);
+            self.pruner.get_file_builder_background(
+                file_index,
+                pre_filter_mode,
+                Some(partition_metrics.clone()),
+            );
         }
+    }
+
+    fn pre_filter_mode(&self, file_index: usize) -> PreFilterMode {
+        self.pre_filter_modes
+            .get(file_index)
+            .copied()
+            .unwrap_or(PreFilterMode::SkipFields)
     }
 }
 
@@ -152,6 +172,8 @@ struct FileBuilderEntry {
 struct PruneRequest {
     /// Index of the file in ScanInput.files.
     file_index: usize,
+    /// Pre-filter mode to use for the file.
+    pre_filter_mode: PreFilterMode,
     /// Oneshot channel to send back the result.
     response_tx: Option<oneshot::Sender<Result<Arc<FileRangeBuilder>>>>,
     /// Partition metrics for merging reader metrics.
@@ -174,7 +196,6 @@ impl Pruner {
                 })
             })
             .collect();
-
         // Create channels and collect senders
         let mut worker_senders = Vec::with_capacity(num_workers);
         let mut receivers = Vec::with_capacity(num_workers);
@@ -230,6 +251,7 @@ impl Pruner {
     pub async fn build_file_ranges(
         &self,
         index: RowGroupIndex,
+        pre_filter_mode: PreFilterMode,
         partition_metrics: &PartitionMetrics,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<SmallVec<[FileRange; 2]>> {
@@ -237,7 +259,12 @@ impl Pruner {
 
         // Get builder (from cache or by pruning)
         let builder = self
-            .get_file_builder(file_index, partition_metrics, reader_metrics)
+            .get_file_builder(
+                file_index,
+                pre_filter_mode,
+                partition_metrics,
+                reader_metrics,
+            )
             .await?;
 
         // Build ranges
@@ -254,6 +281,7 @@ impl Pruner {
     async fn get_file_builder(
         &self,
         file_index: usize,
+        pre_filter_mode: PreFilterMode,
         partition_metrics: &PartitionMetrics,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<Arc<FileRangeBuilder>> {
@@ -275,6 +303,7 @@ impl Pruner {
         let (response_tx, response_rx) = oneshot::channel();
         let request = PruneRequest {
             file_index,
+            pre_filter_mode,
             response_tx: Some(response_tx),
             partition_metrics: Some(partition_metrics.clone()),
         };
@@ -282,7 +311,8 @@ impl Pruner {
         let result = if self.worker_senders[worker_idx].send(request).await.is_err() {
             common_telemetry::warn!("Worker channel closed, falling back to direct pruning");
             // Worker channel closed, falls back to direct pruning
-            self.prune_file_directly(file_index, reader_metrics).await
+            self.prune_file_directly(file_index, pre_filter_mode, reader_metrics)
+                .await
         } else {
             // Waits for response
             match response_rx.await {
@@ -292,7 +322,8 @@ impl Pruner {
                         "Response channel closed, falling back to direct pruning"
                     );
                     // Channel closed, falls back to direct pruning
-                    self.prune_file_directly(file_index, reader_metrics).await
+                    self.prune_file_directly(file_index, pre_filter_mode, reader_metrics)
+                        .await
                 }
             }
         };
@@ -304,6 +335,7 @@ impl Pruner {
     pub fn get_file_builder_background(
         &self,
         file_index: usize,
+        pre_filter_mode: PreFilterMode,
         partition_metrics: Option<PartitionMetrics>,
     ) {
         // Fast path: checks cache
@@ -320,6 +352,7 @@ impl Pruner {
 
         let request = PruneRequest {
             file_index,
+            pre_filter_mode,
             response_tx: None,
             partition_metrics,
         };
@@ -338,6 +371,7 @@ impl Pruner {
     async fn prune_file_directly(
         &self,
         file_index: usize,
+        pre_filter_mode: PreFilterMode,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<Arc<FileRangeBuilder>> {
         let file = &self.inner.stream_ctx.input.files[file_index];
@@ -345,7 +379,7 @@ impl Pruner {
             .inner
             .stream_ctx
             .input
-            .prune_file(file, reader_metrics)
+            .prune_file(file, pre_filter_mode, reader_metrics)
             .await?;
 
         let arc_builder = Arc::new(builder);
@@ -391,6 +425,7 @@ impl Pruner {
         while let Some(request) = rx.recv().await {
             let PruneRequest {
                 file_index,
+                pre_filter_mode,
                 response_tx,
                 partition_metrics,
             } = request;
@@ -398,7 +433,6 @@ impl Pruner {
             // Check if already cached or in-progress
             {
                 let entry = inner.file_entries[file_index].lock().unwrap();
-
                 if let Some(builder) = &entry.builder {
                     // Cache hit - send immediately
                     if let Some(response_tx) = response_tx {
@@ -414,7 +448,11 @@ impl Pruner {
             let file = &inner.stream_ctx.input.files[file_index];
             pruned_files.push(file.file_id().file_id());
             let mut metrics = ReaderMetrics::default();
-            let result = inner.stream_ctx.input.prune_file(file, &mut metrics).await;
+            let result = inner
+                .stream_ctx
+                .input
+                .prune_file(file, pre_filter_mode, &mut metrics)
+                .await;
 
             // Update state and notify waiters
             let mut entry = inner.file_entries[file_index].lock().unwrap();

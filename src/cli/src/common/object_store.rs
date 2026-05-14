@@ -220,18 +220,8 @@ impl PrefixedAzblobConnection {
             name: "AzBlob",
             required: [
                 (&self.azblob_container, "container"),
-                (&self.azblob_root, "root"),
-                (&self.azblob_account_name, "account name"),
                 (&self.azblob_endpoint, "endpoint"),
-            ],
-            custom_validator: |missing: &mut Vec<&str>| {
-                // account_key is only required if sas_token is not provided
-                if self.azblob_sas_token.is_none()
-                    && self.azblob_account_key.is_empty()
-                {
-                    missing.push("account key (when sas_token is not provided)");
-                }
-            }
+            ]
         )
     }
 }

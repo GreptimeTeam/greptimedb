@@ -131,6 +131,7 @@ async fn test_append_mode_compaction_with_format(flat_format: bool) {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
         .insert_option("append_mode", "true")
         .build();
     let table_dir = request.table_dir.clone();
@@ -199,7 +200,7 @@ async fn test_append_mode_compaction_with_format(flat_format: bool) {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert_eq!(1, scanner.num_files());
+    assert_eq!(2, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
     scanner.set_target_partitions(2);
     let stream = scanner.scan().await.unwrap();

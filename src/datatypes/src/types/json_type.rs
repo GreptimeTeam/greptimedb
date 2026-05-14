@@ -23,9 +23,11 @@ use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
+use crate::Error;
 use crate::data_type::DataType;
 use crate::error::{
     DeserializeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, MergeJsonDatatypeSnafu, Result,
+    UnsupportedArrowTypeSnafu,
 };
 use crate::prelude::ConcreteDataType;
 use crate::scalars::ScalarVectorBuilder;
@@ -36,6 +38,7 @@ use crate::vectors::json::builder::JsonVectorBuilder;
 use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
 pub const JSON_TYPE_NAME: &str = "Json";
+const JSON2_TYPE_NAME: &str = "Json2";
 const JSON_PLAIN_FIELD_NAME: &str = "__json_plain__";
 const JSON_PLAIN_FIELD_METADATA_KEY: &str = "is_plain_json";
 
@@ -48,14 +51,19 @@ pub enum JsonNumberType {
     F64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum JsonNativeType {
+    #[default]
     Null,
     Bool,
     Number(JsonNumberType),
     String,
     Array(Box<JsonNativeType>),
     Object(JsonObjectType),
+    /// A special (not in the JSON official specification) JSON type to indicate the "resolved" or
+    /// "lifted" type of two conflicting JSON types. For example, when merging JSON types of "Bool"
+    /// and "Number".
+    Variant,
 }
 
 impl JsonNativeType {
@@ -73,6 +81,41 @@ impl JsonNativeType {
 
     pub fn f64() -> Self {
         Self::Number(JsonNumberType::F64)
+    }
+
+    /// Merge other [JsonNativeType] into this.
+    /// Conflicting fields will be resolved to the "Variant" type.
+    pub fn merge(&mut self, other: &JsonNativeType) {
+        if self == other {
+            return;
+        }
+
+        fn merge_object(this: &mut JsonObjectType, that: &JsonObjectType) {
+            // merge "that" into "this" directly:
+            for (type_name, that_type) in that {
+                if let Some(this_type) = this.get_mut(type_name) {
+                    this_type.merge(that_type);
+                } else {
+                    this.insert(type_name.clone(), that_type.clone());
+                }
+            }
+        }
+
+        let zelf = std::mem::take(self);
+        *self = match (zelf, other) {
+            (JsonNativeType::Object(mut this), JsonNativeType::Object(that)) => {
+                merge_object(&mut this, that);
+                JsonNativeType::Object(this)
+            }
+            (JsonNativeType::Array(mut this), JsonNativeType::Array(that)) => {
+                this.merge(that);
+                JsonNativeType::Array(this)
+            }
+            (JsonNativeType::Null, that) => that.clone(),
+            (this, JsonNativeType::Null) => this,
+            (this, that) if this == *that => this,
+            _ => JsonNativeType::Variant,
+        };
     }
 }
 
@@ -97,6 +140,7 @@ impl From<&JsonNativeType> for ConcreteDataType {
                     .collect();
                 ConcreteDataType::Struct(StructType::new(Arc::new(fields)))
             }
+            JsonNativeType::Variant => ConcreteDataType::binary_datatype(),
         }
     }
 }
@@ -127,8 +171,59 @@ impl From<&ConcreteDataType> for JsonNativeType {
                     .collect(),
             ),
             ConcreteDataType::Json(json_type) => json_type.native_type().clone(),
+            ConcreteDataType::Binary(_) => JsonNativeType::Variant,
             _ => unreachable!(),
         }
+    }
+}
+
+impl TryFrom<&ArrowDataType> for JsonNativeType {
+    type Error = Error;
+
+    fn try_from(t: &ArrowDataType) -> Result<Self> {
+        let t = match t {
+            ArrowDataType::Null => JsonNativeType::Null,
+            ArrowDataType::Boolean => JsonNativeType::Bool,
+            ArrowDataType::Int8
+            | ArrowDataType::Int16
+            | ArrowDataType::Int32
+            | ArrowDataType::Int64 => JsonNativeType::i64(),
+            ArrowDataType::UInt8
+            | ArrowDataType::UInt16
+            | ArrowDataType::UInt32
+            | ArrowDataType::UInt64 => JsonNativeType::u64(),
+            ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => {
+                JsonNativeType::f64()
+            }
+            ArrowDataType::Binary
+            | ArrowDataType::FixedSizeBinary(_)
+            | ArrowDataType::LargeBinary
+            | ArrowDataType::BinaryView => JsonNativeType::Variant,
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+                JsonNativeType::String
+            }
+            ArrowDataType::List(field)
+            | ArrowDataType::ListView(field)
+            | ArrowDataType::FixedSizeList(field, _)
+            | ArrowDataType::LargeList(field)
+            | ArrowDataType::LargeListView(field) => {
+                JsonNativeType::Array(Box::new(Self::try_from(field.data_type())?))
+            }
+            ArrowDataType::Struct(fields) => {
+                let mut object = JsonObjectType::new();
+                for field in fields {
+                    object.insert(field.name().clone(), Self::try_from(field.data_type())?);
+                }
+                JsonNativeType::Object(object)
+            }
+            t => {
+                return UnsupportedArrowTypeSnafu {
+                    arrow_type: t.clone(),
+                }
+                .fail();
+            }
+        };
+        Ok(t)
     }
 }
 
@@ -155,6 +250,7 @@ impl Display for JsonNativeType {
                         .join(",")
                 )
             }
+            JsonNativeType::Variant => write!(f, r#""<Variant>""#),
         }
     }
 }
@@ -163,7 +259,7 @@ impl Display for JsonNativeType {
 pub enum JsonFormat {
     #[default]
     Jsonb,
-    Native(Box<JsonNativeType>),
+    Json2(Box<JsonNativeType>),
 }
 
 /// JsonType is a data type for JSON data. It is stored as binary data of jsonb format.
@@ -178,26 +274,26 @@ impl JsonType {
         Self { format }
     }
 
-    pub(crate) fn new_native(native: JsonNativeType) -> Self {
+    pub(crate) fn new_json2(native: JsonNativeType) -> Self {
         Self {
-            format: JsonFormat::Native(Box::new(native)),
+            format: JsonFormat::Json2(Box::new(native)),
         }
     }
 
-    pub fn is_native_type(&self) -> bool {
-        matches!(self.format, JsonFormat::Native(_))
+    pub fn is_json2(&self) -> bool {
+        matches!(self.format, JsonFormat::Json2(_))
     }
 
-    pub fn native_type(&self) -> &JsonNativeType {
+    pub(crate) fn native_type(&self) -> &JsonNativeType {
         match &self.format {
             JsonFormat::Jsonb => &JsonNativeType::String,
-            JsonFormat::Native(x) => x.as_ref(),
+            JsonFormat::Json2(x) => x.as_ref(),
         }
     }
 
     pub fn null() -> Self {
         Self {
-            format: JsonFormat::Native(Box::new(JsonNativeType::Null)),
+            format: JsonFormat::Json2(Box::new(JsonNativeType::Null)),
         }
     }
 
@@ -208,7 +304,7 @@ impl JsonType {
     pub(crate) fn as_struct_type(&self) -> StructType {
         match &self.format {
             JsonFormat::Jsonb => StructType::default(),
-            JsonFormat::Native(inner) => match ConcreteDataType::from(inner.as_ref()) {
+            JsonFormat::Json2(inner) => match ConcreteDataType::from(inner.as_ref()) {
                 ConcreteDataType::Struct(t) => t.clone(),
                 x => plain_json_struct_type(x),
             },
@@ -217,11 +313,14 @@ impl JsonType {
 
     /// Try to merge this json type with others, error on datatype conflict.
     pub fn merge(&mut self, other: &JsonType) -> Result<()> {
-        match (&self.format, &other.format) {
+        if self == other {
+            return Ok(());
+        }
+
+        match (&mut self.format, &other.format) {
             (JsonFormat::Jsonb, JsonFormat::Jsonb) => Ok(()),
-            (JsonFormat::Native(this), JsonFormat::Native(that)) => {
-                let merged = merge(this.as_ref(), that.as_ref())?;
-                self.format = JsonFormat::Native(Box::new(merged));
+            (JsonFormat::Json2(this), JsonFormat::Json2(that)) => {
+                this.merge(that);
                 Ok(())
             }
             _ => MergeJsonDatatypeSnafu {
@@ -231,22 +330,11 @@ impl JsonType {
         }
     }
 
-    /// Check if it can merge with `other` json type.
-    pub fn is_mergeable(&self, other: &JsonType) -> bool {
-        match (&self.format, &other.format) {
-            (JsonFormat::Jsonb, JsonFormat::Jsonb) => true,
-            (JsonFormat::Native(this), JsonFormat::Native(that)) => {
-                is_mergeable(this.as_ref(), that.as_ref())
-            }
-            _ => false,
-        }
-    }
-
     /// Check if it includes all fields in `other` json type.
     pub fn is_include(&self, other: &JsonType) -> bool {
         match (&self.format, &other.format) {
             (JsonFormat::Jsonb, JsonFormat::Jsonb) => true,
-            (JsonFormat::Native(this), JsonFormat::Native(that)) => {
+            (JsonFormat::Json2(this), JsonFormat::Json2(that)) => {
                 is_include(this.as_ref(), that.as_ref())
             }
             _ => false,
@@ -288,59 +376,9 @@ pub(crate) fn plain_json_struct_type(item_type: ConcreteDataType) -> StructType 
     StructType::new(Arc::new(vec![field]))
 }
 
-fn is_mergeable(this: &JsonNativeType, that: &JsonNativeType) -> bool {
-    fn is_mergeable_object(this: &JsonObjectType, that: &JsonObjectType) -> bool {
-        for (type_name, that_type) in that {
-            if let Some(this_type) = this.get(type_name)
-                && !is_mergeable(this_type, that_type)
-            {
-                return false;
-            }
-        }
-        true
-    }
-
-    match (this, that) {
-        (this, that) if this == that => true,
-        (JsonNativeType::Array(this), JsonNativeType::Array(that)) => {
-            is_mergeable(this.as_ref(), that.as_ref())
-        }
-        (JsonNativeType::Object(this), JsonNativeType::Object(that)) => {
-            is_mergeable_object(this, that)
-        }
-        (JsonNativeType::Null, _) | (_, JsonNativeType::Null) => true,
-        _ => false,
-    }
-}
-
-fn merge(this: &JsonNativeType, that: &JsonNativeType) -> Result<JsonNativeType> {
-    fn merge_object(this: &JsonObjectType, that: &JsonObjectType) -> Result<JsonObjectType> {
-        let mut this = this.clone();
-        // merge "that" into "this" directly:
-        for (type_name, that_type) in that {
-            if let Some(this_type) = this.get_mut(type_name) {
-                let merged_type = merge(this_type, that_type)?;
-                *this_type = merged_type;
-            } else {
-                this.insert(type_name.clone(), that_type.clone());
-            }
-        }
-        Ok(this)
-    }
-
-    match (this, that) {
-        (this, that) if this == that => Ok(this.clone()),
-        (JsonNativeType::Array(this), JsonNativeType::Array(that)) => {
-            merge(this.as_ref(), that.as_ref()).map(|x| JsonNativeType::Array(Box::new(x)))
-        }
-        (JsonNativeType::Object(this), JsonNativeType::Object(that)) => {
-            merge_object(this, that).map(JsonNativeType::Object)
-        }
-        (JsonNativeType::Null, x) | (x, JsonNativeType::Null) => Ok(x.clone()),
-        _ => MergeJsonDatatypeSnafu {
-            reason: format!("datatypes have conflict, this: {this}, that: {that}"),
-        }
-        .fail(),
+impl From<&ArrowDataType> for JsonType {
+    fn from(t: &ArrowDataType) -> Self {
+        JsonType::new_json2(JsonNativeType::from(&ConcreteDataType::from_arrow_type(t)))
     }
 }
 
@@ -348,7 +386,14 @@ impl DataType for JsonType {
     fn name(&self) -> String {
         match &self.format {
             JsonFormat::Jsonb => JSON_TYPE_NAME.to_string(),
-            JsonFormat::Native(x) => format!("Json<{x}>"),
+            JsonFormat::Json2(x) => format!(
+                "{JSON2_TYPE_NAME}{}",
+                if x.is_null() {
+                    "".to_string()
+                } else {
+                    x.to_string()
+                }
+            ),
         }
     }
 
@@ -363,14 +408,14 @@ impl DataType for JsonType {
     fn as_arrow_type(&self) -> ArrowDataType {
         match self.format {
             JsonFormat::Jsonb => ArrowDataType::Binary,
-            JsonFormat::Native(_) => self.as_struct_type().as_arrow_type(),
+            JsonFormat::Json2(_) => self.as_struct_type().as_arrow_type(),
         }
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         match &self.format {
             JsonFormat::Jsonb => Box::new(BinaryVectorBuilder::with_capacity(capacity)),
-            JsonFormat::Native(x) => Box::new(JsonVectorBuilder::new(*x.clone(), capacity)),
+            JsonFormat::Json2(x) => Box::new(JsonVectorBuilder::new(*x.clone(), capacity)),
         }
     }
 
@@ -742,68 +787,93 @@ mod tests {
             let result = json_type.merge(other);
             match (result, expected) {
                 (Ok(()), Ok(expected)) => {
-                    assert_eq!(json_type.name(), expected);
-                    assert!(json_type.is_mergeable(other));
+                    assert_eq!(json_type.native_type().to_string(), expected);
                 }
                 (Err(err), Err(expected)) => {
                     assert_eq!(err.to_string(), expected);
-                    assert!(!json_type.is_mergeable(other));
                 }
                 _ => unreachable!(),
             }
             Ok(())
         }
 
-        let json_type = &mut JsonType::new_native(JsonNativeType::Null);
+        // Null should be absorbed by a concrete scalar type.
+        test("true", &mut JsonType::null(), Ok(r#""<Bool>""#))?;
 
-        // can merge with json object:
-        let json = r#"{
-            "hello": "world",
-            "list": [1, 2, 3],
-            "object": {"a": 1}
-        }"#;
-        let expected =
-            r#"Json<{"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}>"#;
-        test(json, json_type, Ok(expected))?;
+        // Merging a null value into an existing concrete type should keep the type unchanged.
+        test(
+            "null",
+            &mut JsonType::new_json2(JsonNativeType::Bool),
+            Ok(r#""<Bool>""#),
+        )?;
 
-        // cannot merge with other non-object json values:
-        let jsons = [r#""s""#, "1", "[1]"];
-        let expects = [
-            r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: "<String>""#,
-            r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: "<Number>""#,
-            r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: ["<Number>"]"#,
-        ];
-        for (json, expect) in jsons.into_iter().zip(expects) {
-            test(json, json_type, Err(expect))?;
-        }
+        // Identical number categories should stay as Number.
+        test(
+            "1",
+            &mut JsonType::new_json2(JsonNativeType::i64()),
+            Ok(r#""<Number>""#),
+        )?;
 
-        // cannot merge with other json object with conflict field datatype:
-        let json = r#"{
-            "hello": 1,
-            "float": 0.123,
-            "no": 42
-        }"#;
-        let expected = r#"Failed to merge JSON datatype: datatypes have conflict, this: "<String>", that: "<Number>""#;
-        test(json, json_type, Err(expected))?;
+        // Conflicting number categories should be lifted to Variant.
+        test(
+            "1.5",
+            &mut JsonType::new_json2(JsonNativeType::i64()),
+            Ok(r#""<Variant>""#),
+        )?;
 
-        // can merge with another json object:
-        let json = r#"{
-            "hello": "greptime",
-            "float": 0.123,
-            "int": 42
-        }"#;
-        let expected = r#"Json<{"float":"<Number>","hello":"<String>","int":"<Number>","list":["<Number>"],"object":{"a":"<Number>"}}>"#;
-        test(json, json_type, Ok(expected))?;
+        // Object merge should preserve existing fields and append missing fields.
+        test(
+            r#"{"foo":"x"}"#,
+            &mut JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
+                "bar".to_string(),
+                JsonNativeType::i64(),
+            )]))),
+            Ok(r#"{"bar":"<Number>","foo":"<String>"}"#),
+        )?;
 
-        // can merge with some complex nested json object:
-        let json = r#"{
-            "list": [4],
-            "object": {"foo": "bar", "l": ["x"], "o": {"key": "value"}},
-            "float": 0.456,
-            "int": 0
-        }"#;
-        let expected = r#"Json<{"float":"<Number>","hello":"<String>","int":"<Number>","list":["<Number>"],"object":{"a":"<Number>","foo":"<String>","l":["<String>"],"o":{"key":"<String>"}}}>"#;
-        test(json, json_type, Ok(expected))?;
+        // Conflicting object field types should only lift that field to Variant.
+        test(
+            r#"{"foo":1}"#,
+            &mut JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
+                "foo".to_string(),
+                JsonNativeType::Bool,
+            )]))),
+            Ok(r#"{"foo":"<Variant>"}"#),
+        )?;
+
+        // Nested objects should merge recursively.
+        test(
+            r#"{"nested":{"foo":"bar"}}"#,
+            &mut JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
+                "nested".to_string(),
+                JsonNativeType::Object(JsonObjectType::from([(
+                    "bar".to_string(),
+                    JsonNativeType::Bool,
+                )])),
+            )]))),
+            Ok(r#"{"nested":{"bar":"<Bool>","foo":"<String>"}}"#),
+        )?;
+
+        // Arrays should merge their element types recursively.
+        test(
+            r#"["foo"]"#,
+            &mut JsonType::new_json2(JsonNativeType::Array(Box::new(JsonNativeType::u64()))),
+            Ok(r#"["<Variant>"]"#),
+        )?;
+
+        // Root-level incompatible types should be lifted to Variant.
+        test(
+            r#"{"foo":"bar"}"#,
+            &mut JsonType::new_json2(JsonNativeType::Bool),
+            Ok(r#""<Variant>""#),
+        )?;
+
+        // Jsonb and Json2 should not be mergeable.
+        test(
+            "true",
+            &mut JsonType::new(JsonFormat::Jsonb),
+            Err("Failed to merge JSON datatype: json format not match"),
+        )?;
 
         Ok(())
     }

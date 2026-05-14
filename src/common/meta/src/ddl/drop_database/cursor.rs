@@ -224,6 +224,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         // Ticks
         let (mut state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
@@ -259,6 +260,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         // Ticks
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
@@ -287,6 +289,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         // Ticks
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();

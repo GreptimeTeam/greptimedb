@@ -85,8 +85,8 @@ services:
     command:
       - metasrv
       - start
-      - --rpc-bind-addr=0.0.0.0:3002
-      - --rpc-server-addr=metasrv:3002
+      - --grpc-bind-addr=0.0.0.0:3002
+      - --grpc-server-addr=metasrv:3002
       - --store-addrs=etcd0:2379
       - --http-addr=0.0.0.0:3000
     healthcheck:
@@ -111,8 +111,8 @@ services:
       - start
       - --node-id=0
       - --data-home=/greptimedb_data
-      - --rpc-bind-addr=0.0.0.0:3001
-      - --rpc-server-addr=datanode0:3001
+      - --grpc-bind-addr=0.0.0.0:3001
+      - --grpc-server-addr=datanode0:3001
       - --metasrv-addrs=metasrv:3002
       - --http-addr=0.0.0.0:5000
     volumes:
@@ -141,7 +141,7 @@ services:
       - start
       - --metasrv-addrs=metasrv:3002
       - --http-addr=0.0.0.0:4000
-      - --rpc-bind-addr=0.0.0.0:4001
+      - --grpc-bind-addr=0.0.0.0:4001
       - --mysql-addr=0.0.0.0:4002
       - --postgres-addr=0.0.0.0:4003
     healthcheck:
@@ -166,8 +166,8 @@ services:
       - start
       - --node-id=0
       - --metasrv-addrs=metasrv:3002
-      - --rpc-bind-addr=0.0.0.0:4004
-      - --rpc-server-addr=flownode0:4004
+      - --grpc-bind-addr=0.0.0.0:4004
+      - --grpc-server-addr=flownode0:4004
       - --http-addr=0.0.0.0:4005
     depends_on:
       frontend0:

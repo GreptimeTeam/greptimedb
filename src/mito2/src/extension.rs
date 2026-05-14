@@ -8,13 +8,22 @@ use common_time::range::TimestampRange;
 use store_api::storage::{ScanRequest, SequenceNumber};
 
 use crate::error::Result;
+use crate::read::BoxedRecordBatchStream;
 use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
-use crate::read::{BoxedBatchStream, BoxedRecordBatchStream};
 use crate::region::MitoRegionRef;
+use crate::sst::parquet::file_range::PreFilterMode;
 
 pub type InclusiveTimeRange = (Timestamp, Timestamp);
+
+/// Per-range read options passed to [`ExtensionRange::flat_reader`].
+#[derive(Debug, Clone, Copy)]
+pub struct ExtensionRangeReadOptions {
+    /// How aggressively to pre-filter columns before merging with other sources
+    /// in the same partition range.
+    pub pre_filter_mode: PreFilterMode,
+}
 
 /// [`ExtensionRange`] is used to represent a scannable "range" for mito engine, just like the
 /// memtable range and sst file range, but resides on the outside.
@@ -30,28 +39,15 @@ pub trait ExtensionRange: Debug + Send + Sync {
     /// The row groups number in this range.
     fn num_row_groups(&self) -> u64;
 
-    /// Create the reader for reading this range.
-    fn reader(&self, context: &StreamContext) -> BoxedExtensionRangeReader;
-
     /// Create the flat reader for reading this range in flat format.
-    fn flat_reader(&self, context: &StreamContext) -> BoxedExtensionFlatRangeReader;
+    fn flat_reader(
+        &self,
+        context: &StreamContext,
+        options: ExtensionRangeReadOptions,
+    ) -> BoxedExtensionFlatRangeReader;
 }
 
 pub type BoxedExtensionRange = Box<dyn ExtensionRange>;
-
-/// The reader to read an extension range.
-#[async_trait]
-pub trait ExtensionRangeReader: Send {
-    /// Read the extension range by creating a stream that produces [`Batch`].
-    async fn read(
-        self: Box<Self>,
-        context: Arc<StreamContext>,
-        metrics: PartitionMetrics,
-        index: RowGroupIndex,
-    ) -> Result<BoxedBatchStream, BoxedError>;
-}
-
-pub type BoxedExtensionRangeReader = Box<dyn ExtensionRangeReader>;
 
 /// The reader to read an extension range in flat format (producing [`RecordBatch`]).
 #[async_trait]

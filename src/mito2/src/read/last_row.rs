@@ -20,7 +20,6 @@ use async_trait::async_trait;
 use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::vectors::UInt32Vector;
 use futures::{Stream, TryStreamExt};
 use snafu::ResultExt;
 use store_api::storage::{FileId, TimeSeriesRowSelector};
@@ -35,7 +34,8 @@ use crate::read::{Batch, BatchReader, BoxedBatchReader, BoxedRecordBatchStream};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 use crate::sst::parquet::format::{PrimaryKeyArray, primary_key_offsets};
-use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics, RowGroupReader};
+use crate::sst::parquet::read_columns::ParquetReadColumns;
+use crate::sst::parquet::reader::FlatRowGroupReader;
 
 /// Reader to keep the last row for each time series.
 /// It assumes that batches from the input reader are
@@ -79,183 +79,6 @@ impl BatchReader for LastRowReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         self.next_last_row().await
     }
-}
-
-/// Cached last row reader for specific row group.
-/// If the last rows for current row group are already cached, this reader returns the cached value.
-/// If cache misses, [RowGroupLastRowReader] reads last rows from row group and updates the cache
-/// upon finish.
-pub(crate) enum RowGroupLastRowCachedReader {
-    /// Cache hit, reads last rows from cached value.
-    Hit(LastRowCacheReader),
-    /// Cache miss, reads from row group reader and update cache.
-    Miss(RowGroupLastRowReader),
-}
-
-impl RowGroupLastRowCachedReader {
-    pub(crate) fn new(
-        file_id: FileId,
-        row_group_idx: usize,
-        cache_strategy: CacheStrategy,
-        row_group_reader: RowGroupReader,
-    ) -> Self {
-        let key = SelectorResultKey {
-            file_id,
-            row_group_idx,
-            selector: TimeSeriesRowSelector::LastRow,
-        };
-
-        if let Some(value) = cache_strategy.get_selector_result(&key) {
-            let is_primary_key = matches!(&value.result, SelectorResult::PrimaryKey(_));
-            let schema_matches =
-                value.projection == row_group_reader.read_format().projection_indices();
-            if is_primary_key && schema_matches {
-                // Format and schema match, use cache batches.
-                Self::new_hit(value)
-            } else {
-                Self::new_miss(key, row_group_reader, cache_strategy)
-            }
-        } else {
-            Self::new_miss(key, row_group_reader, cache_strategy)
-        }
-    }
-
-    /// Gets the underlying reader metrics if uncached.
-    pub(crate) fn metrics(&self) -> Option<&ReaderMetrics> {
-        match self {
-            RowGroupLastRowCachedReader::Hit(_) => None,
-            RowGroupLastRowCachedReader::Miss(reader) => Some(reader.metrics()),
-        }
-    }
-
-    /// Creates new Hit variant and updates metrics.
-    fn new_hit(value: Arc<SelectorResultValue>) -> Self {
-        selector_result_cache_hit();
-        Self::Hit(LastRowCacheReader { value, idx: 0 })
-    }
-
-    /// Creates new Miss variant and updates metrics.
-    fn new_miss(
-        key: SelectorResultKey,
-        row_group_reader: RowGroupReader,
-        cache_strategy: CacheStrategy,
-    ) -> Self {
-        selector_result_cache_miss();
-        Self::Miss(RowGroupLastRowReader::new(
-            key,
-            row_group_reader,
-            cache_strategy,
-        ))
-    }
-}
-
-#[async_trait]
-impl BatchReader for RowGroupLastRowCachedReader {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        match self {
-            RowGroupLastRowCachedReader::Hit(r) => r.next_batch().await,
-            RowGroupLastRowCachedReader::Miss(r) => r.next_batch().await,
-        }
-    }
-}
-
-/// Last row reader that returns the cached last rows for row group.
-pub(crate) struct LastRowCacheReader {
-    value: Arc<SelectorResultValue>,
-    idx: usize,
-}
-
-impl LastRowCacheReader {
-    /// Iterates cached last rows.
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        let batches = match &self.value.result {
-            SelectorResult::PrimaryKey(batches) => batches,
-            SelectorResult::Flat(_) => unreachable!(),
-        };
-        if self.idx < batches.len() {
-            let res = Ok(Some(batches[self.idx].clone()));
-            self.idx += 1;
-            res
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-pub(crate) struct RowGroupLastRowReader {
-    key: SelectorResultKey,
-    reader: RowGroupReader,
-    selector: LastRowSelector,
-    yielded_batches: Vec<Batch>,
-    cache_strategy: CacheStrategy,
-    /// Index buffer to take a new batch from the last row.
-    take_index: UInt32Vector,
-}
-
-impl RowGroupLastRowReader {
-    fn new(key: SelectorResultKey, reader: RowGroupReader, cache_strategy: CacheStrategy) -> Self {
-        Self {
-            key,
-            reader,
-            selector: LastRowSelector::default(),
-            yielded_batches: vec![],
-            cache_strategy,
-            take_index: UInt32Vector::from_vec(vec![0]),
-        }
-    }
-
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        while let Some(batch) = self.reader.next_batch().await? {
-            if let Some(yielded) = self.selector.on_next(batch) {
-                push_yielded_batches(yielded.clone(), &self.take_index, &mut self.yielded_batches)?;
-                return Ok(Some(yielded));
-            }
-        }
-        let last_batch = if let Some(last_batch) = self.selector.finish() {
-            push_yielded_batches(
-                last_batch.clone(),
-                &self.take_index,
-                &mut self.yielded_batches,
-            )?;
-            Some(last_batch)
-        } else {
-            None
-        };
-
-        // All last rows in row group are yielded, update cache.
-        self.maybe_update_cache();
-        Ok(last_batch)
-    }
-
-    /// Updates row group's last row cache if cache manager is present.
-    fn maybe_update_cache(&mut self) {
-        if self.yielded_batches.is_empty() {
-            // we always expect that row groups yields batches.
-            return;
-        }
-        let value = Arc::new(SelectorResultValue::new(
-            std::mem::take(&mut self.yielded_batches),
-            self.reader.read_format().projection_indices().to_vec(),
-        ));
-        self.cache_strategy.put_selector_result(self.key, value);
-    }
-
-    fn metrics(&self) -> &ReaderMetrics {
-        self.reader.metrics()
-    }
-}
-
-/// Push last row into `yielded_batches`.
-fn push_yielded_batches(
-    mut batch: Batch,
-    take_index: &UInt32Vector,
-    yielded_batches: &mut Vec<Batch>,
-) -> Result<()> {
-    assert_eq!(1, batch.num_rows());
-    batch.take_in_place(take_index)?;
-    yielded_batches.push(batch);
-
-    Ok(())
 }
 
 /// Common struct that selects only the last row of each time series.
@@ -312,7 +135,7 @@ impl FlatRowGroupLastRowCachedReader {
         file_id: FileId,
         row_group_idx: usize,
         cache_strategy: CacheStrategy,
-        projection: &[usize],
+        read_cols: &ParquetReadColumns,
         reader: FlatRowGroupReader,
     ) -> Self {
         let key = SelectorResultKey {
@@ -323,14 +146,14 @@ impl FlatRowGroupLastRowCachedReader {
 
         if let Some(value) = cache_strategy.get_selector_result(&key) {
             let is_flat = matches!(&value.result, SelectorResult::Flat(_));
-            let schema_matches = value.projection == projection;
+            let schema_matches = value.read_cols == *read_cols;
             if is_flat && schema_matches {
                 Self::new_hit(value)
             } else {
-                Self::new_miss(key, projection, reader, cache_strategy)
+                Self::new_miss(key, read_cols, reader, cache_strategy)
             }
         } else {
-            Self::new_miss(key, projection, reader, cache_strategy)
+            Self::new_miss(key, read_cols, reader, cache_strategy)
         }
     }
 
@@ -349,14 +172,14 @@ impl FlatRowGroupLastRowCachedReader {
 
     fn new_miss(
         key: SelectorResultKey,
-        projection: &[usize],
+        read_cols: &ParquetReadColumns,
         reader: FlatRowGroupReader,
         cache_strategy: CacheStrategy,
     ) -> Self {
         selector_result_cache_miss();
         Self::Miss(FlatRowGroupLastRowReader::new(
             key,
-            projection.to_vec(),
+            read_cols.clone(),
             reader,
             cache_strategy,
         ))
@@ -435,7 +258,7 @@ pub(crate) struct FlatRowGroupLastRowReader {
     selector: FlatLastTimestampSelector,
     yielded_batches: Vec<RecordBatch>,
     cache_strategy: CacheStrategy,
-    projection: Vec<usize>,
+    read_cols: ParquetReadColumns,
     /// Accumulates small selector-output batches before concatenating.
     pending: BatchBuffer,
 }
@@ -443,7 +266,7 @@ pub(crate) struct FlatRowGroupLastRowReader {
 impl FlatRowGroupLastRowReader {
     fn new(
         key: SelectorResultKey,
-        projection: Vec<usize>,
+        read_cols: ParquetReadColumns,
         reader: FlatRowGroupReader,
         cache_strategy: CacheStrategy,
     ) -> Self {
@@ -453,7 +276,7 @@ impl FlatRowGroupLastRowReader {
             selector: FlatLastTimestampSelector::default(),
             yielded_batches: vec![],
             cache_strategy,
-            projection,
+            read_cols,
             pending: BatchBuffer::new(),
         }
     }
@@ -501,7 +324,7 @@ impl FlatRowGroupLastRowReader {
         let batches = std::mem::take(&mut self.yielded_batches);
         let value = Arc::new(SelectorResultValue::new_flat(
             batches,
-            self.projection.clone(),
+            self.read_cols.clone(),
         ));
         self.cache_strategy.put_selector_result(self.key, value);
     }

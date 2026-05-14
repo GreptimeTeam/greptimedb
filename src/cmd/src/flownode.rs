@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
-use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
+use catalog::kvbackend::{
+    CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, new_read_only_meta_kv_backend,
+};
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -46,8 +48,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
-    MissingConfigSnafu, OtherSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
+    BuildCacheRegistrySnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu, MissingConfigSnafu,
+    OtherSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
@@ -139,13 +141,17 @@ struct StartCommand {
     #[clap(long)]
     node_id: Option<u64>,
     /// Bind address for the gRPC server.
-    #[clap(long, alias = "rpc-addr")]
-    rpc_bind_addr: Option<String>,
+    #[clap(long = "grpc-bind-addr", alias = "rpc-bind-addr", alias = "rpc-addr")]
+    grpc_bind_addr: Option<String>,
     /// The address advertised to the metasrv, and used for connections from outside the host.
     /// If left empty or unset, the server will automatically use the IP address of the first network interface
-    /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
-    #[clap(long, alias = "rpc-hostname")]
-    rpc_server_addr: Option<String>,
+    /// on the host, with the same port number as the one specified in `grpc_bind_addr`.
+    #[clap(
+        long = "grpc-server-addr",
+        alias = "rpc-server-addr",
+        alias = "rpc-hostname"
+    )]
+    grpc_server_addr: Option<String>,
     /// Metasrv address list;
     #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addrs: Option<Vec<String>>,
@@ -207,11 +213,11 @@ impl StartCommand {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        if let Some(addr) = &self.rpc_bind_addr {
+        if let Some(addr) = &self.grpc_bind_addr {
             opts.grpc.bind_addr.clone_from(addr);
         }
 
-        if let Some(server_addr) = &self.rpc_server_addr {
+        if let Some(server_addr) = &self.grpc_server_addr {
             opts.grpc.server_addr.clone_from(server_addr);
         }
 
@@ -296,13 +302,14 @@ impl StartCommand {
         let cache_ttl = meta_config.metadata_cache_ttl;
         let cache_tti = meta_config.metadata_cache_tti;
 
+        let readonly_meta_backend = new_read_only_meta_kv_backend(meta_client.clone());
+
         // TODO(discord9): add helper function to ease the creation of cache registry&such
-        let cached_meta_backend =
-            CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone())))
-                .cache_max_capacity(cache_max_capacity)
-                .cache_ttl(cache_ttl)
-                .cache_tti(cache_tti)
-                .build();
+        let cached_meta_backend = CachedKvBackendBuilder::new(readonly_meta_backend.clone())
+            .cache_max_capacity(cache_max_capacity)
+            .cache_ttl(cache_ttl)
+            .cache_tti(cache_tti)
+            .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
 
         // Builds cache registry
@@ -312,7 +319,7 @@ impl StartCommand {
                 .build(),
         );
         let fundamental_cache_registry =
-            build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
+            build_fundamental_cache_registry(readonly_meta_backend.clone());
         let layered_cache_registry = Arc::new(
             with_default_composite_cache_registry(
                 layered_cache_builder.add_cache_registry(fundamental_cache_registry),
@@ -342,10 +349,6 @@ impl StartCommand {
 
         let table_metadata_manager =
             Arc::new(TableMetadataManager::new(cached_meta_backend.clone()));
-        table_metadata_manager
-            .init()
-            .await
-            .context(InitMetadataSnafu)?;
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
@@ -430,5 +433,63 @@ impl StartCommand {
             .await;
 
         Ok(Instance::new(flownode, guard))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    use super::*;
+
+    #[test]
+    fn test_parse_grpc_cli_aliases() {
+        let command = StartCommand::try_parse_from([
+            "flownode",
+            "--grpc-bind-addr",
+            "127.0.0.1:14004",
+            "--grpc-server-addr",
+            "10.0.0.1:14004",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:14004"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.1:14004"));
+
+        let command = StartCommand::try_parse_from([
+            "flownode",
+            "--rpc-bind-addr",
+            "127.0.0.1:24004",
+            "--rpc-server-addr",
+            "10.0.0.2:24004",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:24004"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.2:24004"));
+
+        let command = StartCommand::try_parse_from([
+            "flownode",
+            "--rpc-addr",
+            "127.0.0.1:34004",
+            "--rpc-hostname",
+            "10.0.0.3:34004",
+        ])
+        .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:34004"));
+        assert_eq!(command.grpc_server_addr.as_deref(), Some("10.0.0.3:34004"));
+    }
+
+    #[test]
+    fn test_help_uses_grpc_option_names() {
+        let mut cmd = StartCommand::command();
+        let mut help = Vec::new();
+        cmd.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("--grpc-bind-addr"));
+        assert!(help.contains("--grpc-server-addr"));
+        assert!(!help.contains("--rpc-bind-addr"));
+        assert!(!help.contains("--rpc-server-addr"));
+        assert!(!help.contains("--rpc-addr"));
+        assert!(!help.contains("--rpc-hostname"));
     }
 }

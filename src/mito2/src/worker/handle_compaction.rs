@@ -23,7 +23,8 @@ use crate::error::RegionNotFoundSnafu;
 use crate::metrics::COMPACTION_REQUEST_COUNT;
 use crate::region::MitoRegionRef;
 use crate::request::{
-    BuildIndexRequest, CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx,
+    BuildIndexRequest, CompactionCancelled, CompactionFailed, CompactionFinished, OnFailure,
+    OptionOutputTx,
 };
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
@@ -116,6 +117,28 @@ impl<S> RegionWorkerLoop<S> {
                 self.schema_metadata_manager.clone(),
             )
             .await;
+        self.handle_ddl_requests(&mut pending_ddls).await;
+    }
+
+    pub(crate) async fn handle_compaction_cancelled(
+        &mut self,
+        region_id: RegionId,
+        request: CompactionCancelled,
+    ) where
+        S: LogStore,
+    {
+        request.on_success();
+
+        // Reuse the scheduler's finish path to wake pending DDLs after a cooperative stop.
+        let mut pending_ddls = match self.regions.get_region(region_id) {
+            Some(_) => {
+                self.compaction_scheduler
+                    .on_compaction_cancelled(region_id)
+                    .await
+            }
+            None => Vec::new(),
+        };
+
         self.handle_ddl_requests(&mut pending_ddls).await;
     }
 

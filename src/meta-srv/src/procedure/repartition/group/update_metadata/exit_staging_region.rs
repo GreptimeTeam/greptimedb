@@ -25,7 +25,7 @@ use crate::procedure::repartition::group::{Context, GroupId, region_routes};
 use crate::procedure::repartition::plan::RegionDescriptor;
 
 impl UpdateMetadata {
-    fn exit_staging_region_routes(
+    pub(crate) fn exit_staging_region_routes(
         group_id: GroupId,
         sources: &[RegionDescriptor],
         targets: &[RegionDescriptor],

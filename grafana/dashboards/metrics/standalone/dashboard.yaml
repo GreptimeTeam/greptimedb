@@ -1153,3 +1153,160 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: __auto
+    - title: Hotspot
+      panels:
+        - title: Hotspot Regions
+          type: table
+          queries:
+            - expr: "WITH table_stats AS (\n  SELECT\n    table_id,\n    COUNT(*) AS region_count,\n    SUM(disk_size) AS total_disk_size,\n    SUM(region_rows) as total_region_rows\n  FROM information_schema.region_statistics\n  WHERE region_role = 'Leader'\n  GROUP BY table_id\n  HAVING COUNT(*) > 1\n)\n\nSELECT\n  t.table_schema,\n  t.table_name,\n\n  r.region_id,\n  t.table_id,\n  r.region_number,\n\n  p.partition_description,\n\n\n  ROUND(\n    r.disk_size * 100.0\n      / NULLIF(ts.total_disk_size, 0),\n    2\n  ) AS disk_size_share_percent,\n\n  r.disk_size,\n  \n  ROUND(\n    r.region_rows * 100.0\n      / NULLIF(ts.total_region_rows, 0),\n    2\n  ) AS region_rows_share_percent,\n  r.region_rows\n\nFROM information_schema.region_statistics r\n\nJOIN table_stats ts\n  ON r.table_id = ts.table_id\n\nJOIN information_schema.tables t\n  ON r.table_id = t.table_id\n\nLEFT JOIN information_schema.partitions p\n  ON p.table_schema = t.table_schema\n AND p.table_name = t.table_name\n AND p.greptime_partition_id = r.region_id\n\nWHERE r.region_role = 'Leader'\n\nORDER BY region_rows_share_percent DESC\nLIMIT 100;"
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+        - title: Datanode Load(Write)
+          type: timeseries
+          description: Write load of each datanode over time.
+          unit: binBps
+          queries:
+            - expr: greptime_datanode_history_load
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: datanode-{{datanode_id}}({{instance}})
+        - title: Datanode Load(Write) Distribution
+          type: piechart
+          description: Distribution of write load across datanodes.
+          unit: binBps
+          queries:
+            - expr: greptime_datanode_history_load
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: datanode-{{datanode_id}}({{instance}})
+        - title: Datanode Data Distribution
+          type: piechart
+          description: Distribution of leader regions and data size across datanodes.
+          unit: bytes
+          queries:
+            - expr: |-
+                WITH leader_regions AS (
+                  SELECT
+                    CONCAT(
+                      'datanode-',
+                      p.peer_id,
+                      ' (',
+                      p.peer_addr,
+                      ')'
+                    ) AS datanode,
+                    r.disk_size
+                  FROM information_schema.region_statistics r
+                  JOIN information_schema.region_peers p
+                    ON r.region_id = p.region_id
+                  WHERE r.region_role = 'Leader'
+                    AND p.is_leader = 'Yes'
+                )
+
+                SELECT
+                  datanode,
+                  COUNT(*) AS leader_region_count,
+                  SUM(disk_size) AS data_size
+                FROM leader_regions
+                GROUP BY datanode
+                ORDER BY data_size DESC;
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+    - title: Autopilot
+      panels:
+        - title: Region Balancer Actions
+          type: timeseries
+          description: Region balancer action count
+          unit: short
+          queries:
+            - expr: |-
+                sum by (result) (
+                  changes(greptime_region_balancer_actions_total[$__rate_interval])
+                )
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{result}}'
+        - title: Region Balancer Gate Stops
+          type: timeseries
+          description: Region balancer gate stop count by gate and reason
+          unit: short
+          queries:
+            - expr: sum by (gate, reason) (changes(greptime_region_balancer_gate_stop_total[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{gate}} / {{reason}}'
+        - title: Region Balancer Datanodes
+          type: stat
+          description: Region balancer datanode count by state
+          unit: short
+          queries:
+            - expr: sum by (state) (greptime_region_balancer_datanodes)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{state}}'
+        - title: Region Balancer Regions
+          type: stat
+          description: Region balancer region count by state
+          unit: short
+          queries:
+            - expr: sum by (state) (greptime_region_balancer_regions)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{state}}'
+        - title: Region Balancer Datanode Stability
+          type: stat
+          description: Region balancer datanode stability statistics by state
+          unit: binBps
+          queries:
+            - expr: sum by (state) (greptime_region_balancer_datanode_stability)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{state}}'
+        - title: Auto Repartition Actions
+          type: timeseries
+          description: Auto repartition action count by result
+          unit: short
+          queries:
+            - expr: sum by (result) (changes(greptime_auto_repartition_actions_total[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{result}}'
+        - title: Auto Repartition Gate Stops
+          type: timeseries
+          description: Auto repartition gate stop count by gate and reason
+          unit: short
+          queries:
+            - expr: sum by (gate, reason) (changes(greptime_auto_repartition_gate_stop_total[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{gate}} / {{reason}}'
+        - title: Auto Repartition Sampling P99
+          type: timeseries
+          description: Auto repartition sampling elapsed time by stage
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by (le, stage) (rate(greptime_auto_repartition_sampling_elapsed_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{stage}}'
+        - title: Auto Repartition Executor P99
+          type: timeseries
+          description: Auto repartition executor elapsed time by stage
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by (le, stage) (rate(greptime_auto_repartition_executor_elapsed_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{stage}}'

@@ -82,8 +82,11 @@ macro_rules! sql_tests {
                 test_postgres_datestyle,
                 test_postgres_intervalstyle,
                 test_postgres_parameter_inference,
+                test_postgres_uint64_parameter,
+                test_postgres_explain_bind_parameter,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
+                test_mysql_federated_prepare_stmt,
                 test_declare_fetch_close_cursor,
                 test_alter_update_on,
             );
@@ -1300,6 +1303,116 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_postgres_uint64_parameter(store_type: StorageType) {
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_uint64_parameter").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    let _ = client
+        .simple_query("create table demo_u64(v bigint unsigned, ts timestamp time index)")
+        .await
+        .unwrap();
+
+    let dt = NaiveDate::from_yo_opt(2015, 100)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    let _ = client
+        .execute(
+            "INSERT INTO demo_u64 VALUES($1, $2)",
+            &[&Decimal::from(123456u64), &dt],
+        )
+        .await
+        .unwrap();
+
+    let rows = client
+        .query(
+            "SELECT count(*) FROM demo_u64 WHERE v = $1",
+            &[&Decimal::from(123456u64)],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(1, rows.len());
+    let count: i64 = rows[0].get(0);
+    assert_eq!(count, 1);
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_explain_bind_parameter(store_type: StorageType) {
+    // Regression test for #8029: EXPLAIN / EXPLAIN ANALYZE must accept bind
+    // parameters over the Postgres extended query protocol.
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_explain_bind_parameter").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    let _ = client
+        .simple_query(
+            "create table t (k varchar(36) not null, ts timestamp(3) not null, time index(ts))",
+        )
+        .await
+        .unwrap();
+    let _ = client
+        .simple_query("insert into t (k, ts) values ('a', 1), ('b', 2), ('c', 3)")
+        .await
+        .unwrap();
+
+    // Sanity check: the underlying SELECT with a bind parameter works.
+    let rows = client
+        .query("SELECT k FROM t WHERE k = $1", &[&"a"])
+        .await
+        .unwrap();
+    assert_eq!(1, rows.len());
+
+    // EXPLAIN with a bind parameter must succeed.
+    let rows = client
+        .query("EXPLAIN SELECT k FROM t WHERE k = $1", &[&"a"])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty(), "EXPLAIN should produce at least one row");
+
+    // EXPLAIN ANALYZE with a bind parameter must also succeed.
+    let rows = client
+        .query("EXPLAIN ANALYZE SELECT k FROM t WHERE k = $1", &[&"a"])
+        .await
+        .unwrap();
+    assert!(
+        !rows.is_empty(),
+        "EXPLAIN ANALYZE should produce at least one row"
+    );
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
 pub async fn test_mysql_async_timestamp(store_type: StorageType) {
     use mysql_async::prelude::*;
     use time::PrimitiveDateTime;
@@ -1531,6 +1644,45 @@ pub async fn test_mysql_prepare_stmt_insert_timestamp(store_type: StorageType) {
     assert_eq!(x.to_string(), "2023-12-19 13:20:01.123 UTC");
 
     let _ = server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_mysql_federated_prepare_stmt(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let (mut guard, fe_mysql_server) =
+        setup_mysql_server(store_type, "test_mysql_federated_prepare_stmt").await;
+    let addr = fe_mysql_server.bind_addr().unwrap().to_string();
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    // sqlx::query uses binary prepared statement protocol (COM_STMT_PREPARE + COM_STMT_EXECUTE)
+    // "SELECT @@version_comment" is a federated query matched by federated::check
+    let rows = sqlx::query("SELECT @@version_comment")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let val: String = rows[0].get(0);
+    assert!(val.contains("GreptimeDB"));
+
+    // "SET NAMES utf8" is another federated pattern
+    sqlx::query("SET NAMES utf8").execute(&pool).await.unwrap();
+
+    // "SELECT @@tx_isolation" is a federated variable query
+    let rows = sqlx::query("SELECT @@tx_isolation")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let val: String = rows[0].get(0);
+    assert_eq!(val, "REPEATABLE-READ");
+
+    let _ = fe_mysql_server.shutdown().await;
     guard.remove_all().await;
 }
 

@@ -16,8 +16,6 @@ use std::cmp::min;
 
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
-use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::table_info::TableInfoKey;
@@ -29,8 +27,8 @@ use futures::TryStreamExt;
 
 use crate::Tool;
 use crate::common::StoreConfig;
-use crate::error::InvalidArgumentsSnafu;
-use crate::metadata::control::utils::{decode_key_value, get_table_id_by_name, json_formatter};
+use crate::metadata::control::selector::TableSelector;
+use crate::metadata::control::utils::{decode_key_value, json_formatter};
 
 /// Getting metadata from metadata store.
 #[derive(Subcommand)]
@@ -120,21 +118,8 @@ impl Tool for GetKeyTool {
 /// Get table metadata from the metadata store via table id.
 #[derive(Debug, Default, Parser)]
 pub struct GetTableCommand {
-    /// Get table metadata by table id.
-    #[clap(long)]
-    table_id: Option<u32>,
-
-    /// Get table metadata by table name.
-    #[clap(long)]
-    table_name: Option<String>,
-
-    /// The schema name of the table.
-    #[clap(long, default_value = DEFAULT_SCHEMA_NAME)]
-    schema_name: String,
-
-    /// The catalog name of the table.
-    #[clap(long, default_value = DEFAULT_CATALOG_NAME)]
-    catalog_name: String,
+    #[clap(flatten)]
+    selector: TableSelector,
 
     /// Pretty print the output.
     #[clap(long, default_value = "false")]
@@ -144,29 +129,9 @@ pub struct GetTableCommand {
     store: StoreConfig,
 }
 
-impl GetTableCommand {
-    pub fn validate(&self) -> Result<(), BoxedError> {
-        if matches!(
-            (&self.table_id, &self.table_name),
-            (Some(_), Some(_)) | (None, None)
-        ) {
-            return Err(BoxedError::new(
-                InvalidArgumentsSnafu {
-                    msg: "You must specify either --table-id or --table-name.",
-                }
-                .build(),
-            ));
-        }
-        Ok(())
-    }
-}
-
 struct GetTableTool {
     kvbackend: KvBackendRef,
-    table_id: Option<u32>,
-    table_name: Option<String>,
-    schema_name: String,
-    catalog_name: String,
+    selector: TableSelector,
     pretty: bool,
 }
 
@@ -178,24 +143,9 @@ impl Tool for GetTableTool {
         let table_info_manager = table_metadata_manager.table_info_manager();
         let table_route_manager = table_metadata_manager.table_route_manager();
 
-        let table_id = if let Some(table_name) = &self.table_name {
-            let catalog_name = &self.catalog_name;
-            let schema_name = &self.schema_name;
-
-            let Some(table_id) =
-                get_table_id_by_name(table_name_manager, catalog_name, schema_name, table_name)
-                    .await?
-            else {
-                println!(
-                    "Table({}) not found",
-                    format_full_table_name(catalog_name, schema_name, table_name)
-                );
-                return Ok(());
-            };
-            table_id
-        } else {
-            // Safety: we have validated that table_id or table_name is not None
-            self.table_id.unwrap()
+        let Some(table_id) = self.selector.resolve_table_id(table_name_manager).await? else {
+            println!("Table({}) not found", self.selector.formatted_table_name());
+            return Ok(());
         };
 
         let table_info = table_info_manager
@@ -233,15 +183,94 @@ impl Tool for GetTableTool {
 
 impl GetTableCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        self.validate()?;
+        self.selector.validate()?;
         let kvbackend = self.store.build().await?;
         Ok(Box::new(GetTableTool {
             kvbackend,
-            table_id: self.table_id,
-            table_name: self.table_name.clone(),
-            schema_name: self.schema_name.clone(),
-            catalog_name: self.catalog_name.clone(),
+            selector: self.selector.clone(),
             pretty: self.pretty,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use common_error::ext::ErrorExt;
+
+    use super::GetTableCommand;
+
+    #[tokio::test]
+    async fn test_get_table_selector_requires_single_target() {
+        let command = GetTableCommand::parse_from([
+            "table",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+
+        let err = match command.build().await {
+            Ok(_) => panic!("expected validation failure"),
+            Err(err) => err,
+        };
+        assert!(
+            err.output_msg()
+                .contains("You must specify either --table-id or --table-name.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_table_selector_rejects_both_targets() {
+        let command = GetTableCommand::parse_from([
+            "table",
+            "--table-id",
+            "1024",
+            "--table-name",
+            "my_table",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+
+        let err = match command.build().await {
+            Ok(_) => panic!("expected validation failure"),
+            Err(err) => err,
+        };
+        assert!(
+            err.output_msg()
+                .contains("You must specify either --table-id or --table-name.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_table_command_builds_tool_with_table_id() {
+        let command = GetTableCommand::parse_from([
+            "table",
+            "--table-id",
+            "1024",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+
+        let _tool = command.build().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_table_command_builds_tool_with_table_name() {
+        let command = GetTableCommand::parse_from([
+            "table",
+            "--table-name",
+            "my_table",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+
+        let _tool = command.build().await.unwrap();
     }
 }

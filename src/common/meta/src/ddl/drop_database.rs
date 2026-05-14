@@ -58,6 +58,7 @@ pub(crate) struct DropDatabaseContext {
     schema: String,
     drop_if_exists: bool,
     tables: Option<BoxStream<'static, Result<(String, TableNameValue)>>>,
+    retrying: bool,
 }
 
 #[async_trait::async_trait]
@@ -90,6 +91,7 @@ impl DropDatabaseProcedure {
                 schema,
                 drop_if_exists,
                 tables: None,
+                retrying: false,
             },
             state: Box::new(DropDatabaseStart),
         }
@@ -110,6 +112,7 @@ impl DropDatabaseProcedure {
                 schema,
                 drop_if_exists,
                 tables: None,
+                retrying: false,
             },
             state,
         })
@@ -136,9 +139,10 @@ impl Procedure for DropDatabaseProcedure {
             })
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
+        self.context.retrying = ctx.is_retrying().await.unwrap_or(false);
         let (next, status) = state
             .next(&self.runtime_context, &mut self.context)
             .await

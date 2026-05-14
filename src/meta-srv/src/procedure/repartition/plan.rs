@@ -14,6 +14,7 @@
 
 use std::cmp::Ordering;
 
+use common_meta::rpc::router::RegionRoute;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, RegionNumber, TableId};
@@ -46,7 +47,7 @@ pub struct AllocationPlanEntry {
 
 /// A plan entry for the dispatch phase after region allocation,
 /// with concrete source and target region descriptors.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepartitionPlanEntry {
     /// The group id for this plan entry.
     pub group_id: GroupId,
@@ -61,6 +62,9 @@ pub struct RepartitionPlanEntry {
     /// For each `source_regions[k]`, the corresponding vector contains global
     /// `target_regions` that overlap with it.
     pub transition_map: Vec<Vec<usize>>,
+    /// Pre-staging target routes persisted for parent rollback and recovery.
+    #[serde(default)]
+    pub original_target_routes: Vec<RegionRoute>,
 }
 
 impl RepartitionPlanEntry {
@@ -138,6 +142,7 @@ pub fn convert_allocation_plan_to_repartition_plan(
                 allocated_region_ids,
                 pending_deallocate_region_ids: vec![],
                 transition_map: transition_map.clone(),
+                original_target_routes: vec![],
             }
         }
         Ordering::Equal => {
@@ -157,6 +162,7 @@ pub fn convert_allocation_plan_to_repartition_plan(
                 allocated_region_ids: vec![],
                 pending_deallocate_region_ids: vec![],
                 transition_map: transition_map.clone(),
+                original_target_routes: vec![],
             }
         }
         Ordering::Greater => {
@@ -184,6 +190,7 @@ pub fn convert_allocation_plan_to_repartition_plan(
                 allocated_region_ids: vec![],
                 pending_deallocate_region_ids,
                 transition_map: transition_map.clone(),
+                original_target_routes: vec![],
             }
         }
     }

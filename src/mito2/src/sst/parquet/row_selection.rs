@@ -567,26 +567,6 @@ pub(crate) fn row_selection_from_row_ranges(
     RowSelection::from(selectors)
 }
 
-/// Like [`row_selection_from_row_ranges`] but guarantees the resulting selection
-/// covers exactly `total_row_count` rows by appending a trailing skip if needed.
-///
-/// Required when the result is used as the inner operand of [`RowSelection::and_then`], because
-/// `and_then` expects the inner selection to account for every row selected by the outer one.
-pub(crate) fn row_selection_from_row_ranges_exact(
-    row_ranges: impl Iterator<Item = Range<usize>>,
-    total_row_count: usize,
-) -> RowSelection {
-    let (mut selectors, last_processed_end) =
-        build_selectors_from_row_ranges(row_ranges, total_row_count);
-    if last_processed_end < total_row_count {
-        // Preserve the full logical length of the selection even when the final rows are all
-        // filtered out. Without this trailing skip, `and_then` sees an undersized inner
-        // selection and panics.
-        add_or_merge_selector(&mut selectors, total_row_count - last_processed_end, true);
-    }
-    RowSelection::from(selectors)
-}
-
 fn build_selectors_from_row_ranges(
     row_ranges: impl Iterator<Item = Range<usize>>,
     total_row_count: usize,
@@ -737,56 +717,6 @@ mod tests {
         let selection = row_selection_from_row_ranges(ranges.into_iter(), 5);
         let expected = RowSelection::from(vec![RowSelector::skip(1), RowSelector::select(4)]);
         assert_eq!(selection, expected);
-    }
-
-    #[test]
-    fn test_exact_single_range_with_trailing_skip() {
-        let selection = row_selection_from_row_ranges_exact(Some(0..3).into_iter(), 6);
-        let expected = RowSelection::from(vec![RowSelector::select(3), RowSelector::skip(3)]);
-        assert_eq!(selection, expected);
-        assert_eq!(selection.row_count(), 3);
-    }
-
-    #[test]
-    fn test_exact_non_contiguous_ranges() {
-        let ranges = [1..3, 5..8];
-        let selection = row_selection_from_row_ranges_exact(ranges.iter().cloned(), 10);
-        let expected = RowSelection::from(vec![
-            RowSelector::skip(1),
-            RowSelector::select(2),
-            RowSelector::skip(2),
-            RowSelector::select(3),
-            RowSelector::skip(2),
-        ]);
-        assert_eq!(selection, expected);
-        assert_eq!(selection.row_count(), 5);
-    }
-
-    #[test]
-    fn test_exact_empty_ranges() {
-        let selection = row_selection_from_row_ranges_exact([].iter().cloned(), 10);
-        let expected = RowSelection::from(vec![RowSelector::skip(10)]);
-        assert_eq!(selection, expected);
-        assert_eq!(selection.row_count(), 0);
-    }
-
-    #[test]
-    fn test_exact_range_covers_all_rows() {
-        let selection = row_selection_from_row_ranges_exact(Some(0..10).into_iter(), 10);
-        let expected = RowSelection::from(vec![RowSelector::select(10)]);
-        assert_eq!(selection, expected);
-        assert_eq!(selection.row_count(), 10);
-    }
-
-    #[test]
-    fn test_exact_compatible_with_and_then() {
-        // Outer selects rows 0..6 out of 10.
-        let outer = RowSelection::from(vec![RowSelector::select(6), RowSelector::skip(4)]);
-        // Inner: within those 6 rows, select only rows 0..3.
-        let inner = row_selection_from_row_ranges_exact(Some(0..3).into_iter(), 6);
-        let result = outer.and_then(&inner);
-        let expected = RowSelection::from(vec![RowSelector::select(3), RowSelector::skip(7)]);
-        assert_eq!(result, expected);
     }
 
     #[test]

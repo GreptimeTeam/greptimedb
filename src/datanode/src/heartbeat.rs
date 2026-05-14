@@ -21,7 +21,7 @@ use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
 use common_base::Plugins;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::datanode::REGION_STATISTIC_KEY;
+use common_meta::datanode::{EnvVars, REGION_STATISTIC_KEY};
 use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -66,6 +66,7 @@ pub struct HeartbeatTask {
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     region_alive_keeper: Arc<RegionAliveKeeper>,
     resource_stat: ResourceStatRef,
+    env_vars: EnvVars,
 }
 
 impl Drop for HeartbeatTask {
@@ -114,6 +115,7 @@ impl HeartbeatTask {
             resp_handler_executor,
             region_alive_keeper,
             resource_stat,
+            env_vars: EnvVars::from_config(&opts.heartbeat_env_vars),
         })
     }
 
@@ -148,9 +150,9 @@ impl HeartbeatTask {
                     let mut follower_region_lease_count = 0;
                     for lease in &lease.regions {
                         match lease.role() {
-                            RegionRole::Leader | RegionRole::DowngradingLeader => {
-                                leader_region_lease_count += 1
-                            }
+                            RegionRole::Leader
+                            | RegionRole::StagingLeader
+                            | RegionRole::DowngradingLeader => leader_region_lease_count += 1,
                             RegionRole::Follower => follower_region_lease_count += 1,
                         }
                     }
@@ -258,6 +260,8 @@ impl HeartbeatTask {
             .mito_engine()
             .context(RegionEngineNotFoundSnafu { name: "mito" })?
             .gc_limiter();
+        let mut env_var_extensions = HashMap::new();
+        self.env_vars.into_extensions(&mut env_var_extensions);
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -300,7 +304,7 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
-                                    let mut extensions = heartbeat_request.extensions.clone();
+                                    let mut extensions = env_var_extensions.clone();
                                     let gc_stat = gc_limiter.gc_stat();
                                     gc_stat.into_extensions(&mut extensions);
 
@@ -328,7 +332,7 @@ impl HeartbeatTask {
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
 
-                        let mut extensions = heartbeat_request.extensions.clone();
+                        let mut extensions = env_var_extensions.clone();
                         let gc_stat = gc_limiter.gc_stat();
                         gc_stat.into_extensions(&mut extensions);
 

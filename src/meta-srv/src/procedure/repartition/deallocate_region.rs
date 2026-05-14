@@ -267,6 +267,7 @@ mod tests {
             allocated_region_ids: vec![],
             pending_deallocate_region_ids: vec![RegionId::new(table_id, 1)],
             transition_map: vec![],
+            original_target_routes: vec![],
         }];
 
         let mut state = DeallocateRegion;

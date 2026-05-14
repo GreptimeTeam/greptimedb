@@ -316,14 +316,14 @@ fn build_struct(
                     .#handler
                     .as_ref()
                     .context(#snafu_type)
-                    .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Handler error: {}", e.output_msg())))?;
+                    .map_err(|e| datafusion_common::DataFusionError::Execution(e.output_msg()))?;
 
                 let mut builder = store_api::storage::ConcreteDataType::#ret()
                     .create_mutable_vector(rows_num);
 
                 if columns_num == 0 {
                     let result = #fn_name(handler, query_ctx, &[]).await
-                        .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e.output_msg())))?;
+                        .map_err(|e| datafusion_common::DataFusionError::Execution(e.output_msg()))?;
 
                     builder.push_value_ref(&result.as_value_ref());
                 } else {
@@ -333,7 +333,7 @@ fn build_struct(
                             .collect();
 
                         let result = #fn_name(handler, query_ctx, &args).await
-                            .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e.output_msg())))?;
+                            .map_err(|e| datafusion_common::DataFusionError::Execution(e.output_msg()))?;
 
                         builder.push_value_ref(&result.as_value_ref());
                     }

@@ -25,8 +25,8 @@ use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Deserializer, Serialize};
-use snafu::ResultExt;
-use store_api::storage::{RegionNumber, TableId};
+use snafu::{OptionExt, ResultExt};
+use store_api::storage::{RegionId, RegionNumber, TableId};
 use table::metadata::TableInfo;
 use table::table_reference::TableReference;
 use tokio::time::Instant;
@@ -104,7 +104,8 @@ impl BuildPlan {
             table_id,
             &mut next_region_number,
             &self.plan_entries,
-        );
+            table_route_value.region_routes().unwrap(),
+        )?;
         let plan_count = repartition_plan_entries.len();
         let to_allocate = AllocateRegion::count_regions_to_allocate(&repartition_plan_entries);
         info!(
@@ -258,23 +259,62 @@ impl AllocateRegion {
 
     /// Converts allocation plan entries to repartition plan entries.
     ///
-    /// This method takes the allocation plan entries and converts them to repartition plan entries,
-    /// updating `next_region_number` for each newly allocated region.
+    /// This method converts allocation intents into concrete repartition plans,
+    /// updates `next_region_number` for newly allocated regions, and captures
+    /// each plan's `original_target_routes` from the current table-route view.
+    ///
+    /// This also persists each plan's pre-staging target routes for rollback.
     fn convert_to_repartition_plans(
         table_id: TableId,
         next_region_number: &mut RegionNumber,
         plan_entries: &[AllocationPlanEntry],
-    ) -> Vec<RepartitionPlanEntry> {
+        current_region_routes: &[RegionRoute],
+    ) -> Result<Vec<RepartitionPlanEntry>> {
+        let region_routes_map = current_region_routes
+            .iter()
+            .map(|route| (route.region.id, route))
+            .collect::<HashMap<_, _>>();
+
         plan_entries
             .iter()
             .map(|plan_entry| {
-                convert_allocation_plan_to_repartition_plan(
+                let mut plan = convert_allocation_plan_to_repartition_plan(
                     table_id,
                     next_region_number,
                     plan_entry,
-                )
+                );
+                Self::capture_plan_original_target_routes(&mut plan, &region_routes_map)?;
+                Ok(plan)
             })
             .collect()
+    }
+
+    fn capture_plan_original_target_routes(
+        plan: &mut RepartitionPlanEntry,
+        region_routes_map: &HashMap<RegionId, &RegionRoute>,
+    ) -> Result<()> {
+        // Persist the pre-staging target-route view on the parent plan.
+        // Newly allocated targets are skipped because rollback deletes their
+        // route metadata rather than restoring an original target route.
+        let mut original_target_routes = Vec::with_capacity(plan.target_regions.len());
+        for target in &plan.target_regions {
+            if plan.allocated_region_ids.contains(&target.region_id) {
+                // This target region is to be allocated, so it doesn't exist in current routes.
+                continue;
+            }
+            let route = region_routes_map.get(&target.region_id).context(
+                error::RepartitionTargetRegionMissingSnafu {
+                    group_id: plan.group_id,
+                    region_id: target.region_id,
+                },
+            )?;
+            {
+                original_target_routes.push((*route).clone());
+            }
+        }
+
+        plan.original_target_routes = original_target_routes;
+        Ok(())
     }
 
     /// Collects all regions that need to be allocated from the repartition plan entries.
@@ -357,6 +397,8 @@ impl AllocateRegion {
 
 #[cfg(test)]
 mod tests {
+    use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
     use uuid::Uuid;
 
@@ -405,6 +447,20 @@ mod tests {
         }
     }
 
+    fn create_current_region_routes(table_id: TableId, region_numbers: &[u32]) -> Vec<RegionRoute> {
+        region_numbers
+            .iter()
+            .map(|region_number| RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, *region_number),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            })
+            .collect()
+    }
+
     #[test]
     fn test_convert_to_repartition_plans_no_allocation() {
         let table_id = 1024;
@@ -421,7 +477,9 @@ mod tests {
             table_id,
             &mut next_region_number,
             &plan_entries,
-        );
+            &create_current_region_routes(table_id, &[1, 2]),
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].target_regions.len(), 2);
@@ -446,7 +504,9 @@ mod tests {
             table_id,
             &mut next_region_number,
             &plan_entries,
-        );
+            &create_current_region_routes(table_id, &[1, 2]),
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].target_regions.len(), 4);
@@ -479,7 +539,9 @@ mod tests {
             table_id,
             &mut next_region_number,
             &plan_entries,
-        );
+            &create_current_region_routes(table_id, &[1, 2, 3, 4]),
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].allocated_region_ids.len(), 1);
@@ -504,7 +566,9 @@ mod tests {
             table_id,
             &mut next_region_number,
             &plan_entries,
-        );
+            &create_current_region_routes(table_id, &[1, 2, 3, 4]),
+        )
+        .unwrap();
 
         let count = AllocateRegion::count_regions_to_allocate(&repartition_plans);
         assert_eq!(count, 2);
@@ -524,7 +588,9 @@ mod tests {
             table_id,
             &mut next_region_number,
             &plan_entries,
-        );
+            &create_current_region_routes(table_id, &[1, 2]),
+        )
+        .unwrap();
 
         let allocate_regions = AllocateRegion::collect_allocate_regions(&repartition_plans);
         assert_eq!(allocate_regions.len(), 2);

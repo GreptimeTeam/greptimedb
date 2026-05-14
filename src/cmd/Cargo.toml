@@ -72,7 +72,7 @@ meta-client.workspace = true
 meta-srv.workspace = true
 metric-engine.workspace = true
 mito2.workspace = true
-moka.workspace = true
+moka = { workspace = true, features = ["future"] }
 object-store.workspace = true
 parquet = { workspace = true, features = ["object_store"] }
 plugins.workspace = true

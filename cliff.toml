@@ -12,7 +12,9 @@ footer = ""
 body = """
 # {{ version }}
 
+{% if timestamp -%}
 Release date: {{ timestamp | date(format="%B %d, %Y") }}
+{% endif -%}
 
 {%- set breakings = commits | filter(attribute="breaking", value=true) -%}
 {%- if breakings | length > 0 %}
@@ -118,7 +120,10 @@ filter_commits = false
 # regex for skipping tags
 # skip_tags = ""
 # regex for ignoring tags
-ignore_tags = ".*-nightly-.*"
+# Ignore nightly tags and build-suffixed release tags such as
+# v1.0.0-rc.2-13cdfa9b5-20260325-1774407105 so their commits are merged into
+# the next visible release section instead of creating extra headings.
+ignore_tags = ".*-nightly-.*|^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?-[0-9a-f]{7,}-[0-9]{8}-[0-9]+$"
 # sort the tags topologically
 topo_order = false
 # sort the commits inside sections by oldest/newest order

@@ -14,9 +14,13 @@
 
 use std::assert_matches;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common_datasource::compression::CompressionType;
+use object_store::layers::mock::{
+    Error as MockError, ErrorKind, MockLayerBuilder, OpDelete, Result as MockResult, oio,
+};
 use store_api::storage::{FileId, RegionId};
 use strum::IntoEnumIterator;
 
@@ -26,6 +30,7 @@ use crate::manifest::action::{
 };
 use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::storage::checkpoint::CheckpointMetadata;
+use crate::manifest::storage::is_delta_file;
 use crate::manifest::tests::utils::basic_region_metadata;
 use crate::sst::file::FileMeta;
 use crate::test_util::TestEnv;
@@ -118,7 +123,7 @@ async fn manager_without_checkpoint() {
     let mut paths = manager
         .store()
         .delta_storage()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(None, |e| Some(e.name().to_string()))
         .await
         .unwrap();
     paths.sort_unstable();
@@ -161,7 +166,7 @@ async fn manager_with_checkpoint_distance_1() {
     let mut paths = manager
         .store()
         .delta_storage()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(None, |e| Some(e.name().to_string()))
         .await
         .unwrap();
     paths.sort_unstable();
@@ -257,6 +262,7 @@ async fn checkpoint_with_different_compression_types() {
             sequence: None,
             partition_expr: None,
             num_series: 0,
+            ..Default::default()
         };
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
@@ -323,6 +329,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
             sequence: None,
             partition_expr: None,
             num_series: 0,
+            ..Default::default()
         };
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
@@ -414,7 +421,7 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     let mut paths = manager
         .store()
         .delta_storage()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(None, |e| Some(e.name().to_string()))
         .await
         .unwrap();
 
@@ -488,4 +495,97 @@ async fn test_checkpoint_bypass_in_staging_mode() {
 
     // Checkpoint should include all 16 actions (15 from staging + 1 from writable)
     assert_eq!(last_version, 16);
+}
+
+/// A deleter that fails on `close`, simulating the S3 batch-delete failure
+/// described in issue #7986.
+struct FailingDeleter {
+    inner: oio::Deleter,
+    close_calls: Arc<AtomicUsize>,
+}
+
+impl oio::Delete for FailingDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        self.inner.delete(path, args).await
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        self.close_calls.fetch_add(1, Ordering::Relaxed);
+        Err(MockError::new(
+            ErrorKind::Unexpected,
+            "mock manifest delete close failure",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_advances_and_recovery_works_when_delete_fails() {
+    common_telemetry::init_default_ut_logging();
+
+    let close_calls = Arc::new(AtomicUsize::new(0));
+    let factory_close_calls = close_calls.clone();
+    let mock_layer = MockLayerBuilder::default()
+        .deleter_factory(Arc::new(move |inner| {
+            Box::new(FailingDeleter {
+                inner,
+                close_calls: factory_close_calls.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+
+    let env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, Some(metadata))
+        .await
+        .unwrap()
+        .unwrap();
+
+    for _ in 0..10 {
+        manager.update(nop_action(), false).await.unwrap();
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // The checkpointer must have attempted to delete stale files at least once.
+    assert!(close_calls.load(Ordering::Relaxed) > 0);
+
+    // Despite delete failures, the in-memory checkpoint marker advances so
+    // subsequent `maybe_do_checkpoint` calls compute correct ranges.
+    assert_eq!(manager.checkpointer().last_checkpoint_version(), 10);
+
+    // And the durable `_last_checkpoint` metadata reflects the latest version.
+    let (last_version, _) = manager
+        .store()
+        .load_last_checkpoint()
+        .await
+        .unwrap()
+        .expect("checkpoint should be durable");
+    assert_eq!(last_version, 10);
+
+    // Stale deltas below the checkpoint version must still be present because
+    // the mocked deleter refused them.
+    let file_names: Vec<String> = manager
+        .store()
+        .delta_storage()
+        .get_paths(None, |e| Some(e.name().to_string()))
+        .await
+        .unwrap();
+    let stale_delta_count = file_names.iter().filter(|name| is_delta_file(name)).count();
+    assert!(
+        stale_delta_count > 0,
+        "expected leftover delta files after failed delete, got {:?}",
+        file_names,
+    );
+
+    // Recovery must succeed despite the leftover deltas.
+    manager.stop().await;
+    let reopened = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, None)
+        .await
+        .unwrap()
+        .expect("manifest should be recoverable");
+    assert_eq!(reopened.manifest().manifest_version, 10);
 }

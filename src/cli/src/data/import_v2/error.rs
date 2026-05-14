@@ -19,6 +19,8 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
+use crate::data::export_v2::manifest::ChunkStatus;
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -45,12 +47,44 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Incomplete snapshot: chunk {} has status {:?}", chunk_id, status))]
+    IncompleteSnapshot {
+        chunk_id: u32,
+        status: ChunkStatus,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
-        "Importing data from full snapshots is not implemented yet (snapshot has {} chunk(s))",
-        chunk_count
+        "Snapshot is inconsistent: chunk {} is marked completed but its file manifest is empty",
+        chunk_id
     ))]
-    FullSnapshotImportNotSupported {
-        chunk_count: usize,
+    EmptyChunkManifest {
+        chunk_id: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Snapshot is inconsistent: chunk {} for schema '{}' is marked completed but no files were found under '{}'",
+        chunk_id,
+        schema,
+        path
+    ))]
+    MissingChunkData {
+        chunk_id: u32,
+        schema: String,
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Chunk {} import failed for schema '{}'", chunk_id, schema))]
+    ChunkImportFailed {
+        chunk_id: u32,
+        schema: String,
+        #[snafu(source)]
+        error: crate::data::export_v2::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -70,6 +104,83 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to parse import state file"))]
+    ImportStateParse {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Import state I/O failed at '{}': {}", path, error))]
+    ImportStateIo {
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Import state is already locked at '{}'", path))]
+    ImportStateLocked {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to determine import state path for snapshot '{}'. Set HOME, USERPROFILE, or run from a valid current directory.",
+        snapshot_id
+    ))]
+    ImportStatePathUnavailable {
+        snapshot_id: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Import state at '{}' does not match current import: {}. Either rerun with matching import arguments, or delete the state file to start over (DDL will be re-executed).",
+        path,
+        reason
+    ))]
+    ImportStateMismatch {
+        path: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(test)]
+    #[snafu(display("Test task failed: {}", message))]
+    TestTaskFailed {
+        message: String,
+        retryable: bool,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Import state references unknown task: chunk {}, schema '{}'",
+        chunk_id,
+        schema
+    ))]
+    ImportStateUnknownTask {
+        chunk_id: u32,
+        schema: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Import state at '{}' is not ready for data import: DDL has not been marked completed",
+        path
+    ))]
+    ImportStateDdlIncomplete {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -80,9 +191,28 @@ impl ErrorExt for Error {
             Error::SnapshotNotFound { .. }
             | Error::SchemaNotInSnapshot { .. }
             | Error::ManifestVersionMismatch { .. }
-            | Error::FullSnapshotImportNotSupported { .. } => StatusCode::InvalidArguments,
+            | Error::IncompleteSnapshot { .. }
+            | Error::EmptyChunkManifest { .. }
+            | Error::MissingChunkData { .. } => StatusCode::InvalidArguments,
+            Error::ImportStatePathUnavailable { .. }
+            | Error::ImportStateUnknownTask { .. }
+            | Error::ImportStateDdlIncomplete { .. } => StatusCode::Unexpected,
+            Error::ImportStateMismatch { .. } => StatusCode::InvalidArguments,
+            #[cfg(test)]
+            Error::TestTaskFailed { retryable, .. } => {
+                if *retryable {
+                    StatusCode::StorageUnavailable
+                } else {
+                    StatusCode::InvalidArguments
+                }
+            }
             Error::Database { error, .. } => error.status_code(),
-            Error::SnapshotStorage { error, .. } => error.status_code(),
+            Error::SnapshotStorage { error, .. } | Error::ChunkImportFailed { error, .. } => {
+                error.status_code()
+            }
+            Error::ImportStateParse { .. } => StatusCode::Internal,
+            Error::ImportStateIo { .. } => StatusCode::StorageUnavailable,
+            Error::ImportStateLocked { .. } => StatusCode::IllegalState,
         }
     }
 

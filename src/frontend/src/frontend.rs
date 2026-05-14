@@ -72,6 +72,8 @@ pub struct FrontendOptions {
     pub memory: MemoryOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
+    /// Environment variable keys to read and report in heartbeat messages.
+    pub heartbeat_env_vars: Vec<String>,
 }
 
 impl Default for FrontendOptions {
@@ -101,13 +103,14 @@ impl Default for FrontendOptions {
             slow_query: SlowQueryOptions::default(),
             memory: MemoryOptions::default(),
             event_recorder: EventRecorderOptions::default(),
+            heartbeat_env_vars: vec![],
         }
     }
 }
 
 impl Configurable for FrontendOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["meta_client.metasrv_addrs"])
+        Some(&["heartbeat_env_vars", "meta_client.metasrv_addrs"])
     }
 }
 

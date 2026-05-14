@@ -22,7 +22,10 @@ use object_store::ObjectStore;
 use parquet::arrow::async_reader::MetadataFetch;
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader};
+use parquet::file::statistics::Statistics;
 use snafu::{IntoError as _, ResultExt};
+use store_api::metadata::RegionMetadata;
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
 use crate::error::{self, Result};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
@@ -115,6 +118,44 @@ fn unbox_external_error(e: ParquetError) -> StdResult<object_store::Error, Parqu
     }
 }
 
+pub(crate) fn extract_primary_key_range(
+    parquet_meta: &ParquetMetaData,
+    region_metadata: &RegionMetadata,
+) -> Option<(Bytes, Bytes)> {
+    if region_metadata.primary_key.is_empty() {
+        return None;
+    }
+
+    let pk_column_idx = parquet_meta
+        .file_metadata()
+        .schema_descr()
+        .columns()
+        .iter()
+        .position(|column| column.name() == PRIMARY_KEY_COLUMN_NAME)?;
+
+    let mut min: Option<Bytes> = None;
+    let mut max: Option<Bytes> = None;
+
+    for row_group in parquet_meta.row_groups() {
+        let Statistics::ByteArray(stats) = row_group.column(pk_column_idx).statistics()? else {
+            return None;
+        };
+
+        let row_group_min = Bytes::copy_from_slice(stats.min_bytes_opt()?);
+        let row_group_max = Bytes::copy_from_slice(stats.max_bytes_opt()?);
+        min = Some(match min {
+            Some(current) => current.min(row_group_min),
+            None => row_group_min,
+        });
+        max = Some(match max {
+            Some(current) => current.max(row_group_max),
+            None => row_group_max,
+        });
+    }
+
+    min.zip(max)
+}
+
 struct ObjectStoreFetch<'a> {
     object_store: &'a ObjectStore,
     file_path: &'a str,
@@ -137,5 +178,122 @@ impl MetadataFetch for ObjectStoreFetch<'_> {
             Ok(data.to_bytes())
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryArray, DictionaryArray, Int64Array, UInt32Array,
+    };
+    use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    use datatypes::arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::file::metadata::{KeyValue, ParquetMetaData};
+    use parquet::file::properties::{EnabledStatistics, WriterProperties};
+
+    use super::*;
+    use crate::sst::parquet::PARQUET_METADATA_KEY;
+    use crate::test_util::sst_util::sst_region_metadata;
+
+    fn build_test_metadata(
+        include_primary_key: bool,
+        primary_keys: &[&[u8]],
+        row_group_sizes: &[usize],
+        stats_enabled: EnabledStatistics,
+    ) -> ParquetMetaData {
+        let total_rows = row_group_sizes.iter().sum::<usize>();
+        let mut fields = vec![Field::new("field", ArrowDataType::Int64, true)];
+        let mut columns: Vec<ArrayRef> =
+            vec![Arc::new(Int64Array::from_iter_values(0..total_rows as i64))];
+        if include_primary_key {
+            assert_eq!(total_rows, primary_keys.len());
+            fields.push(Field::new(
+                "__primary_key",
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Binary),
+                ),
+                false,
+            ));
+            let values = Arc::new(BinaryArray::from_iter_values(primary_keys.iter().copied()));
+            let keys = UInt32Array::from_iter_values(0..primary_keys.len() as u32);
+            columns.push(Arc::new(DictionaryArray::new(keys, values)));
+        }
+
+        let schema = Arc::new(Schema::new(fields));
+        let region_metadata = Arc::new(sst_region_metadata());
+        let key_value = KeyValue::new(
+            PARQUET_METADATA_KEY.to_string(),
+            region_metadata.to_json().unwrap(),
+        );
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![key_value]))
+            .set_statistics_enabled(stats_enabled)
+            .build();
+
+        let mut parquet_bytes = Vec::new();
+        let mut writer =
+            ArrowWriter::try_new(&mut parquet_bytes, schema.clone(), Some(props)).unwrap();
+        let mut offset = 0;
+        for row_group_size in row_group_sizes {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                columns
+                    .iter()
+                    .map(|column| column.slice(offset, *row_group_size))
+                    .collect(),
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+            offset += row_group_size;
+        }
+        writer.close().unwrap();
+
+        ParquetRecordBatchReaderBuilder::try_new(Bytes::from(parquet_bytes))
+            .unwrap()
+            .metadata()
+            .as_ref()
+            .clone()
+    }
+
+    #[test]
+    fn test_extract_primary_key_range_returns_none_when_column_absent() {
+        let metadata = build_test_metadata(false, &[], &[1], EnabledStatistics::Page);
+        let region_metadata = sst_region_metadata();
+
+        assert_eq!(None, extract_primary_key_range(&metadata, &region_metadata));
+    }
+
+    #[test]
+    fn test_extract_primary_key_range_folds_row_group_stats() {
+        let metadata = build_test_metadata(
+            true,
+            &[b"bbb", b"ccc", b"aaa", b"zzz"],
+            &[2, 2],
+            EnabledStatistics::Page,
+        );
+        let region_metadata = sst_region_metadata();
+
+        assert_eq!(
+            Some((Bytes::from_static(b"aaa"), Bytes::from_static(b"zzz"))),
+            extract_primary_key_range(&metadata, &region_metadata)
+        );
+    }
+
+    #[test]
+    fn test_extract_primary_key_range_returns_none_when_any_rg_stats_missing() {
+        let metadata = build_test_metadata(
+            true,
+            &[b"bbb", b"ccc", b"aaa", b"zzz"],
+            &[2, 2],
+            EnabledStatistics::None,
+        );
+        let region_metadata = sst_region_metadata();
+
+        assert_eq!(None, extract_primary_key_range(&metadata, &region_metadata));
     }
 }

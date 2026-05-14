@@ -19,6 +19,7 @@ fn main() {
 
 #[cfg(feature = "dashboard")]
 fn fetch_dashboard_assets() {
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
 
     let message = "Failed to fetch dashboard assets";
@@ -30,7 +31,16 @@ or it's a network error, just try again or enable/disable some proxy."#;
     let mut dir = std::env::current_dir().unwrap();
     dir.pop();
     dir.pop();
-    dir.push("scripts");
+    let scripts_dir = dir.join("scripts");
+    let dashboard_dist = dir.join(PathBuf::from("src/servers/dashboard/dist"));
+
+    if dashboard_dist.join("index.html").exists() {
+        println!("cargo:rerun-if-changed=dashboard/VERSION");
+        println!("cargo:rerun-if-changed=dashboard/dist");
+        return;
+    }
+
+    dir = scripts_dir;
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
 

@@ -20,11 +20,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use bytes::Bytes;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
+use store_api::region_request::RegionFlushReason;
 use store_api::storage::{RegionId, SequenceNumber};
 use strum::IntoStaticStr;
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -57,6 +59,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
+use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
 };
@@ -219,12 +222,28 @@ pub enum FlushReason {
     EnterStaging,
     /// Flush when region is closing.
     Closing,
+    /// Flush triggered before region migration.
+    RegionMigration,
+    /// Flush triggered by repartition procedure.
+    Repartition,
+    /// Flush triggered by remote WAL pruning.
+    RemoteWalPrune,
 }
 
 impl FlushReason {
     /// Get flush reason as static str.
     fn as_str(&self) -> &'static str {
         self.into()
+    }
+}
+
+impl From<RegionFlushReason> for FlushReason {
+    fn from(reason: RegionFlushReason) -> Self {
+        match reason {
+            RegionFlushReason::RegionMigration => FlushReason::RegionMigration,
+            RegionFlushReason::Repartition => FlushReason::Repartition,
+            RegionFlushReason::RemoteWalPrune => FlushReason::RemoteWalPrune,
+        }
     }
 }
 
@@ -504,15 +523,20 @@ impl RegionFlushTask {
 
                 flush_metrics = flush_metrics.merge(metrics);
 
-                file_metas.extend(ssts_written.into_iter().map(|sst_info| {
+                for sst_info in ssts_written {
                     flushed_bytes += sst_info.file_size;
-                    Self::new_file_meta(
+                    let pk_range = sst_info
+                        .file_metadata
+                        .as_ref()
+                        .and_then(|meta| extract_primary_key_range(meta, &version.metadata));
+                    file_metas.push(Self::new_file_meta(
                         self.region_id,
                         max_sequence,
                         sst_info,
                         partition_expr.clone(),
-                    )
-                }));
+                        pk_range,
+                    ));
+                }
             }
 
             common_telemetry::debug!(
@@ -604,7 +628,12 @@ impl RegionFlushTask {
         max_sequence: u64,
         sst_info: SstInfo,
         partition_expr: Option<PartitionExpr>,
+        primary_key_range: Option<(Bytes, Bytes)>,
     ) -> FileMeta {
+        let (primary_key_min, primary_key_max) = match primary_key_range {
+            Some((min, max)) => (Some(min), Some(max)),
+            None => (None, None),
+        };
         FileMeta {
             region_id,
             file_id: sst_info.file_id,
@@ -621,6 +650,8 @@ impl RegionFlushTask {
             sequence: NonZeroU64::new(max_sequence),
             partition_expr,
             num_series: sst_info.num_series,
+            primary_key_min,
+            primary_key_max,
         }
     }
 
@@ -730,7 +761,7 @@ fn memtable_flat_sources(
             );
             flat_sources
                 .sources
-                .push((FlatSource::Iter(iter), max_sequence));
+                .push((FlatSource::new_iter(schema, iter), max_sequence));
         };
     } else {
         let min_flush_rows = *ENCODE_ROW_THRESHOLD;
@@ -793,9 +824,10 @@ fn memtable_flat_sources(
                     std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
                 )?;
 
-                flat_sources
-                    .sources
-                    .push((FlatSource::Iter(maybe_dedup), max_sequence));
+                flat_sources.sources.push((
+                    FlatSource::new_iter(schema.clone(), maybe_dedup),
+                    max_sequence,
+                ));
                 last_iter_rows = 0;
                 current_ranges.clear();
             }
@@ -826,7 +858,7 @@ fn memtable_flat_sources(
 
             flat_sources
                 .sources
-                .push((FlatSource::Iter(maybe_dedup), max_sequence));
+                .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
         }
     }
 
@@ -1499,14 +1531,10 @@ mod tests {
             // Consume the iterator and count rows
             let mut total_rows = 0usize;
             for (source, _sequence) in flat_sources.sources {
-                match source {
-                    crate::read::FlatSource::Iter(iter) => {
-                        for rb in iter {
-                            total_rows += rb.unwrap().num_rows();
-                        }
-                    }
-                    crate::read::FlatSource::Stream(_) => unreachable!(),
-                }
+                total_rows += source
+                    .take_iter()
+                    .map(|x| x.unwrap().num_rows())
+                    .sum::<usize>();
             }
             assert_eq!(1, total_rows, "dedup should keep a single row");
         }
@@ -1529,14 +1557,10 @@ mod tests {
 
             let mut total_rows = 0usize;
             for (source, _sequence) in flat_sources.sources {
-                match source {
-                    crate::read::FlatSource::Iter(iter) => {
-                        for rb in iter {
-                            total_rows += rb.unwrap().num_rows();
-                        }
-                    }
-                    crate::read::FlatSource::Stream(_) => unreachable!(),
-                }
+                total_rows += source
+                    .take_iter()
+                    .map(|x| x.unwrap().num_rows())
+                    .sum::<usize>();
             }
             assert_eq!(2, total_rows, "append_mode should preserve duplicates");
         }

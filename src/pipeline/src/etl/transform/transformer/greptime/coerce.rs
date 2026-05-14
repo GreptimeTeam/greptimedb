@@ -18,17 +18,18 @@ use api::v1::{ColumnDataTypeExtension, ColumnOptions, JsonTypeExtension};
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use vrl::value::Value as VrlValue;
 
 use crate::error::{
     CoerceIncompatibleTypesSnafu, CoerceJsonTypeToSnafu, CoerceStringToTypeSnafu,
     CoerceTypeToJsonSnafu, CoerceUnsupportedEpochTypeSnafu, ColumnOptionsSnafu,
-    InvalidTimestampSnafu, Result, UnsupportedTypeInPipelineSnafu, VrlRegexValueSnafu,
+    InvalidTimestampSnafu, Result, TransformIndexStateMismatchSnafu,
+    UnsupportedTypeInPipelineSnafu, VrlRegexValueSnafu,
 };
 use crate::etl::transform::index::Index;
 use crate::etl::transform::transformer::greptime::vrl_value_to_jsonb_value;
-use crate::etl::transform::{OnFailure, Transform};
+use crate::etl::transform::{OnFailure, Transform, TransformIndexOptions};
 
 pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>> {
     let mut columns = Vec::new();
@@ -73,15 +74,68 @@ fn coerce_semantic_type(transform: &Transform) -> SemanticType {
     }
 }
 
-fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
-    match transform.index {
-        Some(Index::Fulltext) => options_from_fulltext(&FulltextOptions {
+fn transform_index_label(index: Option<Index>) -> String {
+    index
+        .map(|index| index.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn validate_transform_index_state(transform: &Transform) -> Result<()> {
+    let Some(index_options) = transform.index_options.as_ref() else {
+        return Ok(());
+    };
+
+    let options_index = index_options.index();
+    let index = transform.index;
+    ensure!(
+        index == Some(options_index),
+        TransformIndexStateMismatchSnafu {
+            index: transform_index_label(index),
+            options: options_index.to_string(),
+        }
+    );
+
+    Ok(())
+}
+
+fn build_fulltext_index_options(transform: &Transform) -> Result<FulltextOptions> {
+    match transform.index_options.as_ref() {
+        None => Ok(FulltextOptions {
             enable: true,
             ..Default::default()
-        })
-        .context(ColumnOptionsSnafu),
+        }),
+        Some(TransformIndexOptions::Fulltext(options)) => Ok(options.clone()),
+        Some(options) => TransformIndexStateMismatchSnafu {
+            index: Index::Fulltext.to_string(),
+            options: options.index().to_string(),
+        }
+        .fail(),
+    }
+}
+
+fn build_skipping_index_options(transform: &Transform) -> Result<SkippingIndexOptions> {
+    match transform.index_options.as_ref() {
+        None => Ok(SkippingIndexOptions::default()),
+        Some(TransformIndexOptions::Skipping(options)) => Ok(options.clone()),
+        Some(options) => TransformIndexStateMismatchSnafu {
+            index: Index::Skipping.to_string(),
+            options: options.index().to_string(),
+        }
+        .fail(),
+    }
+}
+
+fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
+    validate_transform_index_state(transform)?;
+
+    match transform.index {
+        Some(Index::Fulltext) => {
+            let options = build_fulltext_index_options(transform)?;
+            options_from_fulltext(&options).context(ColumnOptionsSnafu)
+        }
         Some(Index::Skipping) => {
-            options_from_skipping(&SkippingIndexOptions::default()).context(ColumnOptionsSnafu)
+            let options = build_skipping_index_options(transform)?;
+            options_from_skipping(&options).context(ColumnOptionsSnafu)
         }
         Some(Index::Inverted) => Ok(Some(options_from_inverted())),
         _ => Ok(None),
@@ -382,6 +436,7 @@ fn coerce_json_value(v: &VrlValue, transform: &Transform) -> Result<Option<Value
 #[cfg(test)]
 mod tests {
 
+    use datatypes::schema::{FulltextAnalyzer, FulltextBackend, SkippingIndexType};
     use vrl::prelude::Bytes;
 
     use super::*;
@@ -394,6 +449,7 @@ mod tests {
             type_: ColumnDataType::Int32,
             default: None,
             index: None,
+            index_options: None,
             on_failure: None,
             tag: false,
         };
@@ -420,6 +476,7 @@ mod tests {
             type_: ColumnDataType::Int32,
             default: None,
             index: None,
+            index_options: None,
             on_failure: Some(OnFailure::Ignore),
             tag: false,
         };
@@ -436,6 +493,7 @@ mod tests {
             type_: ColumnDataType::Int32,
             default: None,
             index: None,
+            index_options: None,
             on_failure: Some(OnFailure::Default),
             tag: false,
         };
@@ -454,5 +512,100 @@ mod tests {
             let result = coerce_value(&val, &transform).unwrap();
             assert_eq!(result, Some(ValueData::I32Value(42)));
         }
+    }
+
+    #[test]
+    fn test_coerce_fulltext_options_with_custom_values() {
+        let transform = Transform {
+            fields: Fields::default(),
+            type_: ColumnDataType::String,
+            default: None,
+            index: Some(Index::Fulltext),
+            index_options: Some(TransformIndexOptions::Fulltext(
+                FulltextOptions::new_unchecked(
+                    true,
+                    FulltextAnalyzer::Chinese,
+                    true,
+                    FulltextBackend::Tantivy,
+                    10240,
+                    0.01,
+                ),
+            )),
+            on_failure: None,
+            tag: false,
+        };
+
+        let options = coerce_options(&transform).unwrap().unwrap();
+        let fulltext: FulltextOptions =
+            serde_json::from_str(options.options.get("fulltext").unwrap()).unwrap();
+
+        assert!(fulltext.enable);
+        assert_eq!(fulltext.analyzer.to_string(), "Chinese");
+        assert!(fulltext.case_sensitive);
+        assert_eq!(fulltext.backend.to_string(), "tantivy");
+    }
+
+    #[test]
+    fn test_coerce_skipping_options_with_custom_values() {
+        let transform = Transform {
+            fields: Fields::default(),
+            type_: ColumnDataType::Int64,
+            default: None,
+            index: Some(Index::Skipping),
+            index_options: Some(TransformIndexOptions::Skipping(
+                SkippingIndexOptions::new_unchecked(2048, 0.02, SkippingIndexType::BloomFilter),
+            )),
+            on_failure: None,
+            tag: false,
+        };
+
+        let options = coerce_options(&transform).unwrap().unwrap();
+        let skipping: SkippingIndexOptions =
+            serde_json::from_str(options.options.get("skipping_index").unwrap()).unwrap();
+
+        assert_eq!(skipping.granularity, 2048);
+        assert_eq!(skipping.false_positive_rate(), 0.02);
+        assert_eq!(skipping.index_type.to_string(), "BLOOM");
+    }
+
+    #[test]
+    fn test_coerce_rejects_mismatched_index_options() {
+        let transform = Transform {
+            fields: Fields::default(),
+            type_: ColumnDataType::String,
+            default: None,
+            index: Some(Index::Fulltext),
+            index_options: Some(TransformIndexOptions::Skipping(
+                SkippingIndexOptions::new_unchecked(2048, 0.02, SkippingIndexType::BloomFilter),
+            )),
+            on_failure: None,
+            tag: false,
+        };
+
+        assert!(coerce_options(&transform).is_err());
+    }
+
+    #[test]
+    fn test_coerce_rejects_index_options_without_index() {
+        let transform = Transform {
+            fields: Fields::default(),
+            type_: ColumnDataType::String,
+            default: None,
+            index: None,
+            index_options: Some(TransformIndexOptions::Fulltext(
+                FulltextOptions::new_unchecked(
+                    true,
+                    FulltextAnalyzer::Chinese,
+                    true,
+                    FulltextBackend::Tantivy,
+                    10240,
+                    0.01,
+                ),
+            )),
+            on_failure: None,
+            tag: false,
+        };
+
+        assert!(coerce_options(&transform).is_err());
     }
 }

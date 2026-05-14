@@ -29,7 +29,7 @@ use crate::memtable::bulk::part::EncodedBulkPart;
 use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
 use crate::memtable::{MemScanMetrics, MemScanMetricsData};
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
-use crate::sst::parquet::file_range::{PreFilterMode, TagDecodeState};
+use crate::sst::parquet::file_range::TagDecodeState;
 use crate::sst::parquet::flat_format::{primary_key_column_index, sequence_column_index};
 use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, prefilter_flat_batch_by_primary_key};
 
@@ -60,16 +60,17 @@ impl EncodedBulkPartIter {
         sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> error::Result<Self> {
-        assert!(context.read_format().as_flat().is_some());
-
         let parquet_meta = encoded_part.metadata().parquet_metadata.clone();
         let data = encoded_part.data().clone();
         let series_count = encoded_part.metadata().num_series as usize;
 
-        let projection_mask = ProjectionMask::roots(
-            parquet_meta.file_metadata().schema_descr(),
-            context.read_format().projection_indices().iter().copied(),
-        );
+        // TODO(fys): Nested projection pushdown to the memtable layer is not supported yet.
+        let root_indices = context
+            .read_format()
+            .parquet_read_columns()
+            .root_indices_iter();
+        let projection_mask =
+            ProjectionMask::roots(parquet_meta.file_metadata().schema_descr(), root_indices);
         let builder =
             MemtableRowGroupReaderBuilder::try_new(&context, projection_mask, parquet_meta, data)?;
 
@@ -78,7 +79,7 @@ impl EncodedBulkPartIter {
 
         let (init_reader, current_skip_fields) = match row_groups_to_read.pop_front() {
             Some(first_row_group) => {
-                let skip_fields = builder.compute_skip_fields(&context, first_row_group);
+                let skip_fields = context.pre_filter_mode().skip_fields();
                 let reader = builder.build_row_group_reader(first_row_group, None)?;
                 (Some(reader), skip_fields)
             }
@@ -140,9 +141,7 @@ impl EncodedBulkPartIter {
         // Previous row group exhausted, read next row group
         while let Some(next_row_group) = self.row_groups_to_read.pop_front() {
             // Compute skip_fields for this row group
-            self.current_skip_fields = self
-                .builder
-                .compute_skip_fields(&self.context, next_row_group);
+            self.current_skip_fields = self.context.pre_filter_mode().skip_fields();
 
             let next_reader = self.builder.build_row_group_reader(next_row_group, None)?;
             let current = self.current_reader.insert(next_reader);
@@ -240,8 +239,6 @@ impl BulkPartBatchIter {
         series_count: usize,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Self {
-        assert!(context.read_format().as_flat().is_some());
-
         let pk_filter = context.build_pk_filter();
 
         Self {
@@ -282,7 +279,11 @@ impl BulkPartBatchIter {
 
     /// Applies projection to the RecordBatch if needed.
     fn apply_projection(&self, record_batch: RecordBatch) -> error::Result<RecordBatch> {
-        let projection_indices = self.context.read_format().projection_indices();
+        let projection_indices = self
+            .context
+            .read_format()
+            .parquet_read_columns()
+            .root_indices();
         if projection_indices.len() == record_batch.num_columns() {
             return Ok(record_batch);
         }
@@ -299,11 +300,7 @@ impl BulkPartBatchIter {
         let projected_batch = self.apply_projection(record_batch)?;
 
         // Apply combined filtering (both predicate and sequence filters)
-        let skip_fields = match self.context.pre_filter_mode() {
-            PreFilterMode::All => false,
-            PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => true,
-        };
+        let skip_fields = self.context.pre_filter_mode().skip_fields();
 
         let Some(filtered_batch) = apply_combined_filters(
             &self.context,
@@ -390,7 +387,6 @@ fn apply_combined_filters(
     metrics: &mut MemScanMetricsData,
 ) -> error::Result<Option<RecordBatch>> {
     // Apply PK prefilter on raw batch before convert_batch to reduce conversion overhead.
-    let has_pk_prefilter = pk_filter.is_some();
     let record_batch = if let Some(pk_filter) = pk_filter {
         let rows_before = record_batch.num_rows();
         let prefilter_start = Instant::now();
@@ -412,8 +408,7 @@ fn apply_combined_filters(
     };
 
     // Converts the format to the flat format.
-    let format = context.read_format().as_flat().unwrap();
-    let record_batch = format.convert_batch(record_batch, None)?;
+    let record_batch = context.read_format().convert_batch(record_batch, None)?;
 
     let num_rows = record_batch.num_rows();
     let mut combined_filter = None;
@@ -424,7 +419,6 @@ fn apply_combined_filters(
         let predicate_mask = context.base.compute_filter_mask_flat(
             &record_batch,
             skip_fields,
-            has_pk_prefilter,
             &mut tag_decode_state,
         )?;
         // If predicate filters out the entire batch, return None early

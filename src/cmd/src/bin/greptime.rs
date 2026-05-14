@@ -22,7 +22,7 @@ use cmd::options::GlobalOptions;
 use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone};
 use common_base::Plugins;
 use common_version::{product_name, verbose_version, version};
-use servers::install_ring_crypto_provider;
+use servers::install_default_crypto_provider;
 
 #[derive(Parser)]
 #[command(name = product_name(), author, version, long_version = verbose_version(), about)]
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
 
 async fn main_body() -> Result<()> {
     setup_human_panic();
-    install_ring_crypto_provider().map_err(|msg| InitTlsProviderSnafu { msg }.build())?;
+    install_default_crypto_provider().map_err(|msg| InitTlsProviderSnafu { msg }.build())?;
     start(Command::parse()).await
 }
 

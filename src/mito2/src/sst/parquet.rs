@@ -31,6 +31,7 @@ pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
 pub mod prefilter;
+pub mod read_columns;
 pub mod reader;
 pub mod row_group;
 pub mod row_selection;
@@ -41,9 +42,17 @@ pub mod writer;
 pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
 
 /// Default batch size to read parquet files.
-pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 1024;
+///
+/// This is a runtime-only scan granularity, so we align it with DataFusion's
+/// default execution batch size to reduce rebatching and concatenation in the
+/// query pipeline.
+pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 8 * 1024;
 /// Default row group size for parquet files.
-pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * DEFAULT_READ_BATCH_SIZE;
+///
+/// Keep the existing persisted/on-disk default stable. It intentionally stays
+/// decoupled from [`DEFAULT_READ_BATCH_SIZE`] so we can tune runtime scan
+/// batching without changing the row group layout of newly written SSTs.
+pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
 
 /// Parquet write options.
 #[derive(Debug, Clone)]
@@ -823,6 +832,7 @@ mod tests {
                     None => None,
                 },
                 num_series: 0,
+                ..Default::default()
             },
             Arc::new(NoopFilePurger),
         );
@@ -919,11 +929,14 @@ mod tests {
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 3);
         assert_eq!(metrics.filter_metrics.rg_inverted_filtered, 0);
         assert_eq!(metrics.filter_metrics.rows_inverted_filtered, 30);
+        let plan = inverted_index_applier
+            .as_ref()
+            .unwrap()
+            .plan_for_sst(&metadata)
+            .unwrap()
+            .unwrap();
         let cached = index_result_cache
-            .get(
-                inverted_index_applier.unwrap().predicate_key(),
-                handle.file_id().file_id(),
-            )
+            .get(&plan.predicate_key, handle.file_id().file_id())
             .unwrap();
         // inverted index will search all row groups
         assert!(cached.contains_row_group(0));
@@ -1276,6 +1289,7 @@ mod tests {
                     None => None,
                 },
                 num_series: 0,
+                ..Default::default()
             },
             Arc::new(NoopFilePurger),
         )

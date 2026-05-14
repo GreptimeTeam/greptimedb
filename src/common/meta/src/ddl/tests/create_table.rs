@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::region::RegionResponse;
@@ -30,6 +30,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
+use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
@@ -42,7 +43,7 @@ use crate::ddl::test_util::datanode_handler::{
     DatanodeWatcher, NaiveDatanodeHandler, RetryErrorDatanodeHandler,
     UnexpectedErrorDatanodeHandler,
 };
-use crate::ddl::test_util::{assert_column_name, get_raw_table_info};
+use crate::ddl::test_util::{assert_column_name, get_raw_table_info, put_datanode_address};
 use crate::error::{Error, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
@@ -245,6 +246,27 @@ async fn test_on_datanode_create_regions_should_not_retry() {
 }
 
 #[tokio::test]
+async fn test_on_datanode_create_regions_remaps_addresses_when_retrying() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let datanode_handler = DatanodeWatcher::new(tx).with_handler(create_request_handler);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let ddl_context = new_ddl_context(node_manager);
+    let task = test_create_table_task("foo");
+    let mut procedure = CreateTableProcedure::new(task, ddl_context.clone()).unwrap();
+    procedure.on_prepare().await.unwrap();
+
+    let table_route = procedure.data.table_route.as_mut().unwrap();
+    let leader = table_route.region_routes[0].leader_peer.as_mut().unwrap();
+    leader.addr = "old-addr".to_string();
+    put_datanode_address(&ddl_context, leader.id, "new-addr").await;
+
+    procedure.on_datanode_create_regions(true).await.unwrap();
+
+    let (peer, _) = rx.try_recv().unwrap();
+    assert_eq!(peer.addr, "new-addr");
+}
+
+#[tokio::test]
 async fn test_on_create_metadata_error() {
     common_telemetry::init_default_ut_logging();
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -330,6 +352,10 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
             .memory_region_keeper
             .contains(datanode_id, region_id)
     );
+    let roles = ddl_context
+        .memory_region_keeper
+        .extract_operating_region_roles(datanode_id, &HashSet::from([region_id]));
+    assert_eq!(roles.get(&region_id), Some(&RegionRole::Leader));
 
     execute_procedure_until_done(&mut procedure).await;
 
