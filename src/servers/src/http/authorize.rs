@@ -388,6 +388,19 @@ mod tests {
     }
 
     #[test]
+    fn test_inner_auth_assigns_remote_query_id() {
+        let req =
+            mock_http_request(None, Some("http://127.0.0.1/v1/sql?db=greptime-public")).unwrap();
+        let req = futures::executor::block_on(inner_auth::<()>(None, req)).unwrap();
+        let query_ctx = req
+            .extensions()
+            .get::<session::context::QueryContext>()
+            .unwrap();
+
+        assert!(query_ctx.remote_query_id().is_some());
+    }
+
+    #[test]
     fn test_auth_header() {
         let header_value = basic_auth("username", "password");
         let req = mock_http_request(Some(&header_value), None).unwrap();

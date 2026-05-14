@@ -60,6 +60,12 @@ SELECT min(val) RANGE '5s' FILL PREV FROM host;
 
 Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: ALIGN argument cannot be omitted in the range select query
 
+SELECT tmp.ts, tmp.host, min(tmp.val) RANGE '5s'
+FROM (SELECT ts, host, val FROM host) AS tmp
+ALIGN '5s';
+
+Error: 2000(InvalidSyntax), Range Query: Cannot infer default BY columns from derived range query input
+
 -- 2.3 type mismatch
 SELECT covar(ceil(val), floor(val)) RANGE '20s' FROM host ALIGN '10s';
 

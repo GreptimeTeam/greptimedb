@@ -34,7 +34,7 @@ use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
-use session::hints::READ_PREFERENCE_HINT;
+use session::hints::{READ_PREFERENCE_HINT, is_reserved_extension_key};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -231,6 +231,13 @@ pub(crate) fn create_query_context(
     }
 
     for (key, value) in extensions {
+        if is_reserved_extension_key(&key) {
+            debug!(
+                key = key.as_str(),
+                "Ignoring reserved external query context extension key"
+            );
+            continue;
+        }
         ctx_builder = ctx_builder.set_extension(key, value);
     }
     Ok(ctx_builder.build().into())
@@ -279,6 +286,7 @@ impl Drop for RequestTimer {
 mod tests {
     use chrono::FixedOffset;
     use common_time::Timezone;
+    use session::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
 
     use super::*;
 
@@ -308,9 +316,35 @@ mod tests {
             query_context.read_preference(),
             ReadPreference::Leader
         ));
+        let mut extensions = query_context.extensions().into_iter().collect::<Vec<_>>();
+        extensions.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
-            query_context.extensions().into_iter().collect::<Vec<_>>(),
-            vec![("auto_create_table".to_string(), "true".to_string())]
+            extensions[0],
+            ("auto_create_table".to_string(), "true".to_string())
+        );
+        assert_eq!(extensions[1].0, REMOTE_QUERY_ID_EXTENSION_KEY.to_string());
+        assert_eq!(
+            query_context.remote_query_id(),
+            Some(extensions[1].1.as_str())
+        );
+    }
+
+    #[test]
+    fn test_create_query_context_ignores_remote_query_id_extension() {
+        let query_context = create_query_context(
+            Channel::Grpc,
+            None,
+            vec![(
+                REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                "spoofed-query-id".to_string(),
+            )],
+        )
+        .unwrap();
+
+        assert_ne!(query_context.remote_query_id(), Some("spoofed-query-id"));
+        assert_eq!(
+            query_context.extension(REMOTE_QUERY_ID_EXTENSION_KEY),
+            query_context.remote_query_id()
         );
     }
 }
