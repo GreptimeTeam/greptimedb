@@ -1022,6 +1022,14 @@ impl ManifestContext {
     /// such as `edit_region()`. Allowing compaction to publish in `Editing` is still
     /// safe because publication happens under the manifest write lock and compaction
     /// rechecks that its input files are still valid before committing.
+    ///
+    /// This intentionally writes to the normal manifest path (`is_staging = false`).
+    /// Entering staging cancels or waits for active compactions before switching the
+    /// region to `Staging`, so a compaction that started before staging still finishes
+    /// against the normal manifest. Even if a manual compaction is requested while the
+    /// region is already staging, compaction only sees SSTs in the normal visible
+    /// region version; SSTs from staging manifests are not applied to region version
+    /// control until staging exits successfully.
     pub(crate) async fn update_manifest_for_compaction(
         &self,
         action_list: RegionMetaActionList,
