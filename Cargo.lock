@@ -2664,6 +2664,7 @@ version = "1.0.0"
 dependencies = [
  "api",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "common-base",
  "common-error",
@@ -2673,10 +2674,13 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-proto",
  "datatypes",
  "futures-util",
  "once_cell",
+ "prost 0.14.1",
  "serde",
+ "serde_json",
  "snafu 0.8.6",
  "sqlparser",
  "sqlparser_derive 0.1.1",
@@ -4185,6 +4189,43 @@ dependencies = [
  "parking_lot 0.12.4",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "datafusion-proto"
+version = "53.1.0"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=9c1ed8d9242408aad0a6d444c7c339bcb62f9be4#9c1ed8d9242408aad0a6d444c7c339bcb62f9be4"
+dependencies = [
+ "arrow 58.3.0",
+ "chrono",
+ "datafusion-catalog",
+ "datafusion-catalog-listing",
+ "datafusion-common",
+ "datafusion-datasource",
+ "datafusion-datasource-arrow",
+ "datafusion-datasource-csv",
+ "datafusion-datasource-json",
+ "datafusion-datasource-parquet",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-functions-table",
+ "datafusion-physical-expr",
+ "datafusion-physical-expr-common",
+ "datafusion-physical-plan",
+ "datafusion-proto-common",
+ "object_store",
+ "prost 0.14.1",
+ "rand 0.9.1",
+]
+
+[[package]]
+name = "datafusion-proto-common"
+version = "53.1.0"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=9c1ed8d9242408aad0a6d444c7c339bcb62f9be4#9c1ed8d9242408aad0a6d444c7c339bcb62f9be4"
+dependencies = [
+ "arrow 58.3.0",
+ "datafusion-common",
+ "prost 0.14.1",
 ]
 
 [[package]]
@@ -5765,7 +5806,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=0de5437582920c8b30d6c34212f161db71d95c50#0de5437582920c8b30d6c34212f161db71d95c50"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=dfd2a6d7d3d9c718cb159fcf9abae144b74fc503#dfd2a6d7d3d9c718cb159fcf9abae144b74fc503"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -12730,6 +12771,7 @@ dependencies = [
  "derive_more",
  "snafu 0.8.6",
  "sql",
+ "uuid",
 ]
 
 [[package]]

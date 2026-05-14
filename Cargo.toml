@@ -140,6 +140,7 @@ datafusion-orc = { git = "https://github.com/datafusion-contrib/datafusion-orc.g
 datafusion-pg-catalog = "0.16"
 datafusion-physical-expr = "=53.1.0"
 datafusion-physical-plan = "=53.1.0"
+datafusion-proto = "=53.1.0"
 datafusion-sql = "=53.1.0"
 datafusion-substrait = "=53.1.0"
 datafusion_object_store = { package = "object_store", version = "0.13.2" }
@@ -157,7 +158,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "0de5437582920c8b30d6c34212f161db71d95c50" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "dfd2a6d7d3d9c718cb159fcf9abae144b74fc503" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -257,7 +258,7 @@ tracing-appender = "0.2"
 tracing-opentelemetry = "0.31.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
-uuid = { version = "1.17", features = ["serde", "v4", "fast-rng"] }
+uuid = { version = "1.17", features = ["serde", "v4", "v7", "fast-rng"] }
 vrl = "0.25"
 zstd = "0.13"
 # DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
@@ -349,6 +350,7 @@ datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git",
 datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
 datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
 datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
+datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "2aefa08a8d69c96eec2d6d6703598a009bba6e4c" }                           # on branch v0.61.x
