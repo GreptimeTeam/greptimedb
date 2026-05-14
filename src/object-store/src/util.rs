@@ -14,15 +14,14 @@
 
 use std::fmt::Display;
 use std::path;
-use std::time::Duration;
 
 use common_error::root_source;
 use common_telemetry::{debug, error, info, warn};
 use opendal::layers::{
-    LoggingInterceptor, LoggingLayer, RetryInterceptor, RetryLayer, TracingLayer,
+    LoggingInterceptor, LoggingLayer, RetryEvent, RetryInterceptor, RetryLayer, TracingLayer,
 };
 use opendal::raw::{AccessorInfo, HttpClient, Operation};
-use opendal::{Error, ErrorKind};
+use opendal::ErrorKind;
 use snafu::ResultExt;
 
 use crate::config::HttpClientConfig;
@@ -239,8 +238,12 @@ pub struct PrintDetailedError;
 
 // PrintDetailedError is a retry interceptor that prints error in Debug format in retrying.
 impl RetryInterceptor for PrintDetailedError {
-    fn intercept(&self, err: &Error, dur: Duration) {
-        warn!("Retry after {}s, error: {:#?}", dur.as_secs_f64(), err);
+    fn intercept(&self, event: RetryEvent<'_>) {
+        warn!(
+            "Retry after {}s, error: {:#?}",
+            event.retry_after.as_secs_f64(),
+            event.err
+        );
     }
 }
 
