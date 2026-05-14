@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use common_telemetry::warn;
-use common_time::range::TimestampRange;
 use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
@@ -36,7 +35,6 @@ use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::region::options::MergeMode;
-use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 const RANGE_CACHE_COMPACT_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;
@@ -141,6 +139,7 @@ impl ScanRequestFingerprint {
             .unwrap_or(&[])
     }
 
+    #[allow(dead_code)]
     pub(crate) fn without_time_filters(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -293,33 +292,23 @@ pub(crate) fn build_range_cache_key(
         return None;
     }
 
-    let range_meta = &stream_ctx.ranges[part_range.identifier];
-    let scan = if query_time_range_covers_partition_range(
-        stream_ctx.input.time_range.as_ref(),
-        range_meta.time_range,
-    ) {
-        fingerprint.without_time_filters()
-    } else {
-        fingerprint.clone()
-    };
+    // TODO(yingwen): We used to call `fingerprint.without_time_filters()` when the query's
+    // `TimestampRange` fully covered the partition's `FileTimeRange`, so different queries that
+    // all enclosed the same partition could share a cache entry. The cover check turned out to
+    // be too coarse: it returned true in cases where the dropped time predicates would still
+    // have excluded rows, so the cache served results that should have been filtered. Reviving
+    // the optimization needs a per-predicate implication check that walks each time-only `Expr`
+    // (recursing through AND/OR/NOT) and proves the predicate is satisfied for every timestamp
+    // inside the partition's `FileTimeRange` — not the looser "does `extract_time_range_from_expr`
+    // return a range that covers the partition" used previously. Until then, always carry the
+    // full fingerprint so cache reuse stays correct.
+    let scan = fingerprint.clone();
 
     Some(RangeScanCacheKey {
         region_id: stream_ctx.input.region_metadata().region_id,
         row_groups: rg.row_groups,
         scan,
     })
-}
-
-fn query_time_range_covers_partition_range(
-    query_time_range: Option<&TimestampRange>,
-    partition_time_range: FileTimeRange,
-) -> bool {
-    let Some(query_time_range) = query_time_range else {
-        return true;
-    };
-
-    let (part_start, part_end) = partition_time_range;
-    query_time_range.contains(&part_start) && query_time_range.contains(&part_end)
 }
 
 /// Returns a stream that replays cached record batches.
@@ -636,6 +625,7 @@ mod tests {
     use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::range::{RangeMeta, RowGroupIndex, SourceIndex};
     use crate::read::scan_region::{PredicateGroup, ScanInput};
+    use crate::sst::file::FileTimeRange;
     use crate::test_util::memtable_util::metadata_with_primary_key;
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::sst_util::sst_file_handle_with_file_id;
@@ -780,7 +770,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strips_time_only_filters_when_query_covers_partition_range() {
+    async fn preserves_time_filters_when_query_covers_partition_range() {
         assert_range_cache_filters(
             vec![
                 col("ts").gt_eq(ts_lit(1000)),
@@ -794,7 +784,7 @@ mod tests {
                 Timestamp::new_millisecond(2000),
             ),
             vec![col("k0").eq(lit("foo")), col("ts").is_not_null()],
-            vec![],
+            vec![col("ts").gt_eq(ts_lit(1000)), col("ts").lt(ts_lit(2001))],
         )
         .await;
     }
@@ -815,7 +805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strips_time_only_filters_when_query_has_no_time_range_limit() {
+    async fn preserves_time_filters_when_query_has_no_time_range_limit() {
         assert_range_cache_filters(
             vec![
                 col("ts").gt_eq(ts_lit(1000)),
@@ -828,7 +818,7 @@ mod tests {
                 Timestamp::new_millisecond(2000),
             ),
             vec![col("k0").eq(lit("foo")), col("ts").is_not_null()],
-            vec![],
+            vec![col("ts").gt_eq(ts_lit(1000))],
         )
         .await;
     }

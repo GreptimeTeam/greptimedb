@@ -184,6 +184,10 @@ impl RegionRequest {
                 reason: "ListMetadata request should be handled separately by RegionServer",
             }
             .fail(),
+            region_request::Body::RemoteDynFilter(_) => UnexpectedSnafu {
+                reason: "RemoteDynFilter request should be handled separately by RegionServer",
+            }
+            .fail(),
             region_request::Body::ApplyStagingManifest(apply) => {
                 make_region_apply_staging_manifest(apply)
             }

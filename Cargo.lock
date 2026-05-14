@@ -2662,6 +2662,7 @@ version = "1.0.0"
 dependencies = [
  "api",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "common-base",
  "common-error",
@@ -2671,10 +2672,13 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-proto",
  "datatypes",
  "futures-util",
  "once_cell",
+ "prost 0.14.1",
  "serde",
+ "serde_json",
  "snafu 0.8.6",
  "sqlparser",
  "sqlparser_derive 0.1.1",
@@ -4182,6 +4186,43 @@ dependencies = [
  "parking_lot 0.12.4",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "datafusion-proto"
+version = "52.1.0"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=02b82535e0160c4545667f36a03e1ff9d1d2e51f#02b82535e0160c4545667f36a03e1ff9d1d2e51f"
+dependencies = [
+ "arrow 57.3.0",
+ "chrono",
+ "datafusion-catalog",
+ "datafusion-catalog-listing",
+ "datafusion-common",
+ "datafusion-datasource",
+ "datafusion-datasource-arrow",
+ "datafusion-datasource-csv",
+ "datafusion-datasource-json",
+ "datafusion-datasource-parquet",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-functions-table",
+ "datafusion-physical-expr",
+ "datafusion-physical-expr-common",
+ "datafusion-physical-plan",
+ "datafusion-proto-common",
+ "object_store 0.12.5",
+ "prost 0.14.1",
+ "rand 0.9.1",
+]
+
+[[package]]
+name = "datafusion-proto-common"
+version = "52.1.0"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=02b82535e0160c4545667f36a03e1ff9d1d2e51f#02b82535e0160c4545667f36a03e1ff9d1d2e51f"
+dependencies = [
+ "arrow 57.3.0",
+ "datafusion-common",
+ "prost 0.14.1",
 ]
 
 [[package]]
@@ -5763,7 +5804,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=0de5437582920c8b30d6c34212f161db71d95c50#0de5437582920c8b30d6c34212f161db71d95c50"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=dfd2a6d7d3d9c718cb159fcf9abae144b74fc503#dfd2a6d7d3d9c718cb159fcf9abae144b74fc503"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -10745,7 +10786,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -10765,8 +10806,8 @@ version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
 dependencies = [
- "heck 0.4.1",
- "itertools 0.14.0",
+ "heck 0.5.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -10814,7 +10855,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10827,7 +10868,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -12746,6 +12787,7 @@ dependencies = [
  "derive_more",
  "snafu 0.8.6",
  "sql",
+ "uuid",
 ]
 
 [[package]]
@@ -12983,7 +13025,7 @@ version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1961e2ef424c1424204d3a5d6975f934f56b6d50ff5732382d84ebf460e147f7"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
