@@ -137,12 +137,13 @@ impl BareCommand {
             || self.setup_etcd
             || self.setup_pg.is_some()
             || self.setup_mysql.is_some()
+            || matches!(self.wal, Wal::Kafka)
             || self.kafka_wal_broker_endpoints.is_some()
             || self.config.test_filter != ".*"
         {
             self.jobs = 1;
             println!(
-                "Normalizing parallelism to 1 due to server addresses, etcd/pg/mysql setup, or test filter usage"
+                "Normalizing parallelism to 1 due to server addresses, etcd/pg/mysql/kafka setup, or test filter usage"
             );
         }
 
@@ -154,6 +155,7 @@ impl BareCommand {
             .env_config_file(self.config.env_config_file)
             .interceptor_registry(interceptor_registry)
             .parallelism(self.jobs)
+            .env_parallelism(self.jobs)
             .build()
             .unwrap();
 
