@@ -493,6 +493,7 @@ pub mod test_data {
             memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
             leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+            soft_drop_enabled: false,
         }
     }
 }

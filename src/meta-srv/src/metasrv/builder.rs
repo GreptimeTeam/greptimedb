@@ -401,6 +401,7 @@ impl MetasrvBuilder {
             flow_metadata_manager: flow_metadata_manager.clone(),
             flow_metadata_allocator: flow_metadata_allocator.clone(),
             region_failure_detector_controller,
+            soft_drop_enabled: ddl_soft_drop_enabled(&options),
         };
         let procedure_manager_c = procedure_manager.clone();
         let repartition_procedure_factory = Arc::new(DefaultRepartitionProcedureFactory::new(
@@ -644,6 +645,13 @@ fn build_procedure_manager(
         Some(runtime_switch_manager.clone()),
         Some(event_recorder),
     ))
+}
+
+/// Resolves if soft-drop is enabled from metasrv options.
+fn ddl_soft_drop_enabled(_options: &MetasrvOptions) -> bool {
+    // TODO(hl): add a dedicated soft-drop cluster config
+    // when wiring the user-facing option.
+    false
 }
 
 impl Default for MetasrvBuilder {

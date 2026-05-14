@@ -42,7 +42,9 @@ use crate::ddl::drop_database::DropDatabaseProcedure;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::drop_view::DropViewProcedure;
+use crate::ddl::purge_dropped_table::PurgeDroppedTableProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
+use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DdlContext, utils};
 use crate::error::{
     self, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu, ProcedureOutputSnafu,
@@ -61,7 +63,7 @@ use crate::rpc::ddl::DdlTask::DropTrigger;
 use crate::rpc::ddl::DdlTask::{
     AlterDatabase, AlterLogicalTables, AlterTable, CommentOn, CreateDatabase, CreateFlow,
     CreateLogicalTables, CreateTable, CreateView, DropDatabase, DropFlow, DropLogicalTables,
-    DropTable, DropView, TruncateTable,
+    DropTable, DropView, PurgeDroppedTable, TruncateTable, UndropTable,
 };
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::trigger::CreateTriggerTask;
@@ -70,7 +72,8 @@ use crate::rpc::ddl::trigger::DropTriggerTask;
 use crate::rpc::ddl::{
     AlterDatabaseTask, AlterTableTask, CommentOnTask, CreateDatabaseTask, CreateFlowTask,
     CreateTableTask, CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask,
-    QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
+    PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
+    TruncateTableTask, UndropTableTask,
 };
 
 /// A configurator that customizes or enhances a [`DdlManager`].
@@ -236,6 +239,8 @@ impl DdlManager {
             AlterLogicalTablesProcedure,
             AlterDatabaseProcedure,
             DropTableProcedure,
+            UndropTableProcedure,
+            PurgeDroppedTableProcedure,
             DropFlowProcedure,
             TruncateTableProcedure,
             CreateDatabaseProcedure,
@@ -427,6 +432,32 @@ impl DdlManager {
         self.execute_procedure_and_wait(procedure_with_id).await
     }
 
+    /// Submits and executes an undrop table task.
+    #[tracing::instrument(skip_all)]
+    pub async fn submit_undrop_table_task(
+        &self,
+        undrop_table_task: UndropTableTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = UndropTableProcedure::new(undrop_table_task, context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.execute_procedure_and_wait(procedure_with_id).await
+    }
+
+    /// Submits and executes a purge dropped table task.
+    #[tracing::instrument(skip_all)]
+    pub async fn submit_purge_dropped_table_task(
+        &self,
+        purge_dropped_table_task: PurgeDroppedTableTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = PurgeDroppedTableProcedure::new(purge_dropped_table_task, context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.execute_procedure_and_wait(procedure_with_id).await
+    }
+
     /// Submits and executes a create database task.
     #[tracing::instrument(skip_all)]
     pub async fn submit_create_database(
@@ -596,6 +627,12 @@ impl DdlManager {
                     handle_create_table_task(self, create_table_task).await
                 }
                 DropTable(drop_table_task) => handle_drop_table_task(self, drop_table_task).await,
+                UndropTable(undrop_table_task) => {
+                    handle_undrop_table_task(self, undrop_table_task).await
+                }
+                PurgeDroppedTable(purge_dropped_table_task) => {
+                    handle_purge_dropped_table_task(self, purge_dropped_table_task).await
+                }
                 AlterTable(alter_table_task) => {
                     handle_alter_table_task(self, alter_table_task, ddl_options).await
                 }
@@ -736,6 +773,39 @@ async fn handle_drop_table_task(
     let (id, _) = ddl_manager.submit_drop_table_task(drop_table_task).await?;
 
     info!("Table: {table_id} is dropped via procedure_id {id:?}");
+
+    Ok(SubmitDdlTaskResponse {
+        key: id.to_string().into(),
+        ..Default::default()
+    })
+}
+
+async fn handle_undrop_table_task(
+    ddl_manager: &DdlManager,
+    undrop_table_task: UndropTableTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let table_id = undrop_table_task.table_id;
+    let (id, _) = ddl_manager
+        .submit_undrop_table_task(undrop_table_task)
+        .await?;
+
+    info!("Table: {table_id} is undropped via procedure_id {id:?}");
+
+    Ok(SubmitDdlTaskResponse {
+        key: id.to_string().into(),
+        ..Default::default()
+    })
+}
+
+async fn handle_purge_dropped_table_task(
+    ddl_manager: &DdlManager,
+    purge_dropped_table_task: PurgeDroppedTableTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, _) = ddl_manager
+        .submit_purge_dropped_table_task(purge_dropped_table_task)
+        .await?;
+
+    info!("Dropped table is purged via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),
@@ -1190,6 +1260,7 @@ mod tests {
                 memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
                 leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
                 region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+                soft_drop_enabled: false,
             },
             procedure_manager.clone(),
             Arc::new(DummyRepartitionProcedureFactory),

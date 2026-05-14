@@ -206,6 +206,7 @@ pub fn new_ddl_context_with_kv_backend(
         flow_metadata_allocator,
         flow_metadata_manager,
         region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+        soft_drop_enabled: false,
     }
 }
 

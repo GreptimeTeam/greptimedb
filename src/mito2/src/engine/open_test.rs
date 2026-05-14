@@ -134,13 +134,31 @@ async fn test_engine_reopen_region_with_format(flat_format: bool) {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
     let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 2),
+        },
+    )
+    .await;
 
     reopen_region(&engine, region_id, table_dir, false, Default::default()).await;
     assert!(engine.is_region_exists(region_id));
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(2, batches.iter().map(|b| b.num_rows()).sum::<usize>());
 }
 
 #[tokio::test]

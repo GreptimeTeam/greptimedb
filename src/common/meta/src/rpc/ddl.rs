@@ -31,7 +31,8 @@ use api::v1::meta::{
     DdlTaskResponse as PbDdlTaskResponse, DropDatabaseTask as PbDropDatabaseTask,
     DropFlowTask as PbDropFlowTask, DropTableTask as PbDropTableTask,
     DropTableTasks as PbDropTableTasks, DropViewTask as PbDropViewTask, Partition, ProcedureId,
-    TruncateTableTask as PbTruncateTableTask,
+    PurgeDroppedTableTask as PbPurgeDroppedTableTask, TruncateTableTask as PbTruncateTableTask,
+    UndropTableTask as PbUndropTableTask,
 };
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CommentObjectType as PbCommentObjectType, CommentOnExpr,
@@ -63,6 +64,8 @@ use crate::key::FlowId;
 pub enum DdlTask {
     CreateTable(CreateTableTask),
     DropTable(DropTableTask),
+    UndropTable(UndropTableTask),
+    PurgeDroppedTable(PurgeDroppedTableTask),
     AlterTable(AlterTableTask),
     TruncateTable(TruncateTableTask),
     CreateLogicalTables(Vec<CreateTableTask>),
@@ -144,6 +147,36 @@ impl DdlTask {
         })
     }
 
+    /// Creates a [`DdlTask`] to undrop a table.
+    pub fn new_undrop_table(
+        catalog: String,
+        schema: String,
+        table: String,
+        table_id: TableId,
+    ) -> Self {
+        DdlTask::UndropTable(UndropTableTask {
+            catalog,
+            schema,
+            table,
+            table_id,
+        })
+    }
+
+    /// Creates a [`DdlTask`] to purge a dropped table.
+    pub fn new_purge_dropped_table(
+        catalog: String,
+        schema: String,
+        table: String,
+        table_id: Option<TableId>,
+    ) -> Self {
+        DdlTask::PurgeDroppedTable(PurgeDroppedTableTask {
+            catalog,
+            schema,
+            table,
+            table_id,
+        })
+    }
+
     /// Creates a [`DdlTask`] to create a database.
     pub fn new_create_database(
         catalog: String,
@@ -217,6 +250,12 @@ impl TryFrom<Task> for DdlTask {
                 Ok(DdlTask::CreateTable(create_table.try_into()?))
             }
             Task::DropTableTask(drop_table) => Ok(DdlTask::DropTable(drop_table.try_into()?)),
+            Task::UndropTableTask(undrop_table) => {
+                Ok(DdlTask::UndropTable(undrop_table.try_into()?))
+            }
+            Task::PurgeDroppedTableTask(purge_dropped_table) => {
+                Ok(DdlTask::PurgeDroppedTable(purge_dropped_table.into()))
+            }
             Task::AlterTableTask(alter_table) => Ok(DdlTask::AlterTable(alter_table.try_into()?)),
             Task::TruncateTableTask(truncate_table) => {
                 Ok(DdlTask::TruncateTable(truncate_table.try_into()?))
@@ -327,6 +366,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
         let task = match request.task {
             DdlTask::CreateTable(task) => Task::CreateTableTask(task.try_into()?),
             DdlTask::DropTable(task) => Task::DropTableTask(task.into()),
+            DdlTask::UndropTable(task) => Task::UndropTableTask(task.into()),
+            DdlTask::PurgeDroppedTable(task) => Task::PurgeDroppedTableTask(task.into()),
             DdlTask::AlterTable(task) => Task::AlterTableTask(task.try_into()?),
             DdlTask::TruncateTable(task) => Task::TruncateTableTask(task.try_into()?),
             DdlTask::CreateLogicalTables(tasks) => {
@@ -586,6 +627,109 @@ pub struct DropTableTask {
     pub table_id: TableId,
     #[serde(default)]
     pub drop_if_exists: bool,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct UndropTableTask {
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    pub table_id: TableId,
+}
+
+impl UndropTableTask {
+    pub fn table_ref(&self) -> TableReference<'_> {
+        TableReference {
+            catalog: &self.catalog,
+            schema: &self.schema,
+            table: &self.table,
+        }
+    }
+
+    pub fn table_name(&self) -> TableName {
+        TableName {
+            catalog_name: self.catalog.clone(),
+            schema_name: self.schema.clone(),
+            table_name: self.table.clone(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct PurgeDroppedTableTask {
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    pub table_id: Option<TableId>,
+}
+
+impl PurgeDroppedTableTask {
+    pub fn table_ref(&self) -> TableReference<'_> {
+        TableReference {
+            catalog: &self.catalog,
+            schema: &self.schema,
+            table: &self.table,
+        }
+    }
+
+    pub fn table_name(&self) -> TableName {
+        TableName {
+            catalog_name: self.catalog.clone(),
+            schema_name: self.schema.clone(),
+            table_name: self.table.clone(),
+        }
+    }
+}
+
+impl TryFrom<PbUndropTableTask> for UndropTableTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbUndropTableTask) -> Result<Self> {
+        Ok(Self {
+            catalog: pb.catalog_name,
+            schema: pb.schema_name,
+            table: pb.table_name,
+            table_id: pb
+                .table_id
+                .context(error::InvalidProtoMsgSnafu {
+                    err_msg: "expected table_id",
+                })?
+                .id,
+        })
+    }
+}
+
+impl From<UndropTableTask> for PbUndropTableTask {
+    fn from(task: UndropTableTask) -> Self {
+        Self {
+            catalog_name: task.catalog,
+            schema_name: task.schema,
+            table_name: task.table,
+            table_id: Some(api::v1::TableId { id: task.table_id }),
+        }
+    }
+}
+
+impl From<PbPurgeDroppedTableTask> for PurgeDroppedTableTask {
+    fn from(pb: PbPurgeDroppedTableTask) -> Self {
+        Self {
+            catalog: pb.catalog_name,
+            schema: pb.schema_name,
+            table: pb.table_name,
+            table_id: pb.table_id.map(|table_id| table_id.id),
+        }
+    }
+}
+
+impl From<PurgeDroppedTableTask> for PbPurgeDroppedTableTask {
+    fn from(task: PurgeDroppedTableTask) -> Self {
+        Self {
+            catalog_name: task.catalog,
+            schema_name: task.schema,
+            table_name: task.table,
+            table_id: task.table_id.map(|id| api::v1::TableId { id }),
+        }
+    }
 }
 
 impl DropTableTask {
@@ -1661,6 +1805,46 @@ mod tests {
 
         let de = serde_json::from_slice(&output).unwrap();
         assert_eq!(task, de);
+    }
+
+    #[test]
+    fn test_undrop_table_task_pb_roundtrip() {
+        let expected = UndropTableTask {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table: "foo".to_string(),
+            table_id: 1024,
+        };
+        let request = SubmitDdlTaskRequest::new(
+            QueryContext::default(),
+            DdlTask::UndropTable(expected.clone()),
+        );
+
+        let pb = PbDdlTaskRequest::try_from(request).unwrap();
+        let pb_task = pb.task.unwrap();
+        let de = DdlTask::try_from(pb_task).unwrap();
+
+        assert!(matches!(de, DdlTask::UndropTable(task) if task == expected));
+    }
+
+    #[test]
+    fn test_purge_dropped_table_task_pb_roundtrip() {
+        let expected = PurgeDroppedTableTask {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table: "foo".to_string(),
+            table_id: Some(1024),
+        };
+        let request = SubmitDdlTaskRequest::new(
+            QueryContext::default(),
+            DdlTask::PurgeDroppedTable(expected.clone()),
+        );
+
+        let pb = PbDdlTaskRequest::try_from(request).unwrap();
+        let pb_task = pb.task.unwrap();
+        let de = DdlTask::try_from(pb_task).unwrap();
+
+        assert!(matches!(de, DdlTask::PurgeDroppedTable(task) if task == expected));
     }
 
     #[test]
