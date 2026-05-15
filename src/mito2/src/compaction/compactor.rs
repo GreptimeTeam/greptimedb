@@ -620,7 +620,7 @@ where
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
         compaction_region
             .manifest_ctx
-            .update_manifest(RegionLeaderState::Writable, action_list, false)
+            .update_manifest_for_compaction(action_list)
             .await?;
 
         Ok(edit)

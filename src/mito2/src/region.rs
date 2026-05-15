@@ -978,6 +978,87 @@ impl ManifestContext {
         action_list: RegionMetaActionList,
         is_staging: bool,
     ) -> Result<ManifestVersion> {
+        self.update_manifest_with_state_check(action_list, is_staging, |current_state, region_id| {
+            // If expect_state is not downgrading, the current state must be either `expect_state` or downgrading.
+            //
+            // A downgrading leader rejects user writes but still allows
+            // flushing the memtable and updating the manifest.
+            if expect_state != RegionLeaderState::Downgrading {
+                if current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading) {
+                    info!(
+                        "Region {} is in downgrading leader state, updating manifest. Expect state is {:?}",
+                        region_id, expect_state
+                    );
+                }
+                ensure!(
+                    current_state == RegionRoleState::Leader(expect_state)
+                        || current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading),
+                    UpdateManifestSnafu {
+                        region_id,
+                        state: current_state,
+                    }
+                );
+            } else {
+                ensure!(
+                    current_state == RegionRoleState::Leader(expect_state),
+                    RegionStateSnafu {
+                        region_id,
+                        state: current_state,
+                        expect: RegionRoleState::Leader(expect_state),
+                    }
+                );
+            }
+
+            Ok(())
+        })
+        .await
+    }
+
+    /// Updates the manifest for compaction.
+    ///
+    /// Compaction may finish while a direct external region edit is in the transient
+    /// `Editing` state. Direct external edits can remove files both when followers
+    /// apply sync-region metadata and when a writable leader performs a direct edit
+    /// such as `edit_region()`. Allowing compaction to publish in `Editing` is still
+    /// safe because publication happens under the manifest write lock and compaction
+    /// rechecks that its input files are still valid before committing.
+    ///
+    /// This intentionally writes to the normal manifest path (`is_staging = false`).
+    /// Entering staging cancels or waits for active compactions before switching the
+    /// region to `Staging`, so a compaction that started before staging still finishes
+    /// against the normal manifest. Even if a manual compaction is requested while the
+    /// region is already staging, compaction only sees SSTs in the normal visible
+    /// region version; SSTs from staging manifests are not applied to region version
+    /// control until staging exits successfully.
+    pub(crate) async fn update_manifest_for_compaction(
+        &self,
+        action_list: RegionMetaActionList,
+    ) -> Result<ManifestVersion> {
+        self.update_manifest_with_state_check(action_list, false, |current_state, region_id| {
+            ensure!(
+                matches!(
+                    current_state,
+                    RegionRoleState::Leader(RegionLeaderState::Writable)
+                        | RegionRoleState::Leader(RegionLeaderState::Editing)
+                        | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+                ),
+                UpdateManifestSnafu {
+                    region_id,
+                    state: current_state,
+                }
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    async fn update_manifest_with_state_check(
+        &self,
+        action_list: RegionMetaActionList,
+        is_staging: bool,
+        check_state: impl FnOnce(RegionRoleState, RegionId) -> Result<()>,
+    ) -> Result<ManifestVersion> {
         // Acquires the write lock of the manifest manager.
         let mut manager = self.manifest_manager.write().await;
         // Gets current manifest.
@@ -985,36 +1066,7 @@ impl ManifestContext {
         // Checks state inside the lock. This is to ensure that we won't update the manifest
         // after `set_readonly_gracefully()` is called.
         let current_state = self.state.load();
-
-        // If expect_state is not downgrading, the current state must be either `expect_state` or downgrading.
-        //
-        // A downgrading leader rejects user writes but still allows
-        // flushing the memtable and updating the manifest.
-        if expect_state != RegionLeaderState::Downgrading {
-            if current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading) {
-                info!(
-                    "Region {} is in downgrading leader state, updating manifest. state is {:?}",
-                    manifest.metadata.region_id, expect_state
-                );
-            }
-            ensure!(
-                current_state == RegionRoleState::Leader(expect_state)
-                    || current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading),
-                UpdateManifestSnafu {
-                    region_id: manifest.metadata.region_id,
-                    state: current_state,
-                }
-            );
-        } else {
-            ensure!(
-                current_state == RegionRoleState::Leader(expect_state),
-                RegionStateSnafu {
-                    region_id: manifest.metadata.region_id,
-                    state: current_state,
-                    expect: RegionRoleState::Leader(expect_state),
-                }
-            );
-        }
+        check_state(current_state, manifest.metadata.region_id)?;
 
         for action in &action_list.actions {
             // Checks whether the edit is still applicable.
@@ -1562,7 +1614,7 @@ mod tests {
     use store_api::logstore::provider::Provider;
     use store_api::region_engine::RegionRole;
     use store_api::region_request::PathType;
-    use store_api::storage::RegionId;
+    use store_api::storage::{FileId, RegionId};
 
     use crate::access_layer::AccessLayer;
     use crate::error::Error;
@@ -1638,6 +1690,44 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_compaction_update_manifest_allows_editing_state() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        region.set_editing(RegionLeaderState::Writable).unwrap();
+
+        let file_id = FileId::random();
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+            files_to_add: vec![crate::sst::file::FileMeta {
+                region_id: region.region_id,
+                file_id,
+                level: 1,
+                ..Default::default()
+            }],
+            files_to_remove: Vec::new(),
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+        }));
+
+        region
+            .manifest_ctx
+            .update_manifest_for_compaction(action_list)
+            .await
+            .unwrap();
+
+        assert!(
+            region
+                .manifest_ctx
+                .manifest()
+                .await
+                .files
+                .contains_key(&file_id)
+        );
     }
 
     #[tokio::test]

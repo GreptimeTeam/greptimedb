@@ -1466,7 +1466,19 @@ mod tests {
         };
         assert!(!is_valid_region_edit(&edit));
 
-        // Valid: "files_to_remove" is not empty
+        // Valid: has only "files_to_remove"
+        let edit = RegionEdit {
+            files_to_add: vec![],
+            files_to_remove: vec![FileMeta::default()],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+        };
+        assert!(is_valid_region_edit(&edit));
+
+        // Valid: both "files_to_add" and "files_to_remove" are not empty
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![FileMeta::default()],
