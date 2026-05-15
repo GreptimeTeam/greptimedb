@@ -1,0 +1,33 @@
+src/mito2/src/region.rs
+  s_313f6d000e4ee5::t_2263f235fde30e 165-166,282,305
+  s_313f6d000e4ee5::t_75fbf805e72863 2449
+  s_313f6d000e4ee5::t_b7f7001c7246e7 2275
+  s_313f6d000e4ee5::t_3bc30d9adfaead 588,593,610,615,620,642
+  s_313f6d000e4ee5::t_d5834ee9cb600b 2448
+  s_313f6d000e4ee5::t_4671a582ee2239 289-304,306-322,359-369,371-415,419-440
+  s_313f6d000e4ee5::t_a6db206023b669 2283
+  s_313f6d000e4ee5::t_f7ee9381b38316 269,284,2371,2389
+  s_313f6d000e4ee5::t_50739190506629 370,416-418
+  s_313f6d000e4ee5::t_024a66fd06da16 2317-2370,2372-2388,2390-2447,2450-2462
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "38fd68667458500a9b29de1021364a68e9c4d959",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_313f6d000e4ee5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1d5844c5dffevvF9sjoMiB3h71",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
