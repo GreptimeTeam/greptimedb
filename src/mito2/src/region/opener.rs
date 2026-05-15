@@ -616,18 +616,24 @@ pub(crate) fn version_builder_from_manifest(
 
 /// Updates region options by persistent options.
 pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut RegionOptions) {
-    let option_format = options.sst_format.unwrap_or_default();
-    if option_format != manifest.sst_format {
-        common_telemetry::warn!(
-            "Overriding SST format from {:?} to {:?} for region {}",
-            option_format,
-            manifest.sst_format,
-            manifest.metadata.region_id,
-        );
+    // The caller-supplied options win when they specify an explicit `sst_format`,
+    // so re-parsed options (e.g. bulk memtable forcing flat format) take effect on
+    // the running region instead of being clobbered by the persisted manifest value.
+    // Fall back to the manifest only when the caller did not provide a value.
+    match options.sst_format {
+        Some(format) if format != manifest.sst_format => {
+            common_telemetry::warn!(
+                "Overriding SST format from {:?} (manifest) to {:?} (options) for region {}",
+                manifest.sst_format,
+                format,
+                manifest.metadata.region_id,
+            );
+        }
+        Some(_) => {}
+        None => {
+            options.sst_format = Some(manifest.sst_format);
+        }
     }
-    // Always set sst_format from manifest to ensure it's explicitly stored,
-    // even when the default matches the manifest value.
-    options.sst_format = Some(manifest.sst_format);
     if let Some(manifest_append_mode) = manifest.append_mode
         && options.append_mode != manifest_append_mode
     {
@@ -1157,6 +1163,7 @@ fn can_load_cache(state: RegionRoleState) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use common_base::readable_size::ReadableSize;
@@ -1172,14 +1179,59 @@ mod tests {
     use store_api::region_request::PathType;
     use store_api::storage::{FileId, RegionId};
 
-    use super::preload_parquet_meta_cache_for_files;
+    use super::{preload_parquet_meta_cache_for_files, sanitize_region_options};
     use crate::cache::CacheManager;
     use crate::cache::file_cache::{FileType, IndexKey};
+    use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
+    use crate::region::options::RegionOptions;
+    use crate::sst::FormatType;
     use crate::sst::file::{FileHandle, FileMeta};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::parquet::PARQUET_METADATA_KEY;
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::sst_region_metadata;
+
+    fn build_test_manifest(sst_format: FormatType) -> RegionManifest {
+        RegionManifest {
+            metadata: Arc::new(sst_region_metadata()),
+            files: HashMap::new(),
+            removed_files: RemovedFilesRecord::default(),
+            flushed_entry_id: 0,
+            flushed_sequence: 0,
+            committed_sequence: None,
+            manifest_version: 0,
+            truncated_entry_id: None,
+            compaction_time_window: None,
+            sst_format,
+            append_mode: None,
+        }
+    }
+
+    #[test]
+    fn test_sanitize_region_options_options_format_wins() {
+        // Manifest persisted PrimaryKey, but the re-parsed options now request Flat
+        // (e.g., bulk memtable). The options' value must win.
+        let manifest = build_test_manifest(FormatType::PrimaryKey);
+        let mut options = RegionOptions {
+            sst_format: Some(FormatType::Flat),
+            ..Default::default()
+        };
+        sanitize_region_options(&manifest, &mut options);
+        assert_eq!(options.sst_format, Some(FormatType::Flat));
+    }
+
+    #[test]
+    fn test_sanitize_region_options_fills_from_manifest_when_unset() {
+        // When the caller didn't specify sst_format, fall back to the manifest value
+        // so downstream code always sees a concrete format.
+        let manifest = build_test_manifest(FormatType::Flat);
+        let mut options = RegionOptions {
+            sst_format: None,
+            ..Default::default()
+        };
+        sanitize_region_options(&manifest, &mut options);
+        assert_eq!(options.sst_format, Some(FormatType::Flat));
+    }
 
     fn sst_parquet_bytes(batch: &RecordBatch) -> Vec<u8> {
         let key_value_meta = KeyValue::new(

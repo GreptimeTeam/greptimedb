@@ -194,6 +194,20 @@ impl RegionOptions {
             sst_format = Some(FormatType::Flat);
         }
 
+        // Bulk memtable produces flat-encoded ranges and flushes them through
+        // `put_sst()`, so the SST format must be flat to match.
+        if matches!(memtable, Some(MemtableOptions::Bulk(_))) {
+            if let Some(format) = sst_format
+                && format != FormatType::Flat
+            {
+                info!(
+                    "Region {} uses bulk memtable; overriding sst_format from {:?} to flat",
+                    region_id, format
+                );
+            }
+            sst_format = Some(FormatType::Flat);
+        }
+
         let compaction_override_flag = options_map
             .get(COMPACTION_OVERRIDE)
             .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
@@ -638,6 +652,7 @@ mod tests {
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig::default())),
+            sst_format: Some(FormatType::Flat),
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -657,6 +672,7 @@ mod tests {
                 encode_bytes_threshold: 13,
                 max_merge_groups: 17,
             })),
+            sst_format: Some(FormatType::Flat),
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -724,6 +740,20 @@ mod tests {
         ]);
         let options = RegionOptions::try_from_options(RegionId::new(1, 1), &map).unwrap();
         assert_eq!(options.memtable, None);
+        assert_eq!(options.sst_format, Some(FormatType::Flat));
+    }
+
+    #[test]
+    fn test_bulk_memtable_overrides_sst_format() {
+        // Bulk memtable produces flat-encoded ranges, so an explicit
+        // `sst_format=primary_key` must be overridden to flat to keep the
+        // in-memory and on-disk encodings in sync.
+        let map = make_map(&[("memtable.type", "bulk"), ("sst_format", "primary_key")]);
+        let options = RegionOptions::try_from_options(RegionId::new(1, 1), &map).unwrap();
+        assert_eq!(
+            options.memtable,
+            Some(MemtableOptions::Bulk(BulkMemtableConfig::default()))
+        );
         assert_eq!(options.sst_format, Some(FormatType::Flat));
     }
 
@@ -827,7 +857,7 @@ mod tests {
                 max_merge_groups: 17,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
-            sst_format: None,
+            sst_format: Some(FormatType::Flat),
             primary_key_encoding: None,
         };
         assert_eq!(expect, options);

@@ -77,8 +77,10 @@ pub fn set_data_region_options(
     let legacy_encoding = options.remove(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING);
     options.retain(|k, _| !k.starts_with(LEGACY_PARTITION_TREE_OPTION_PREFIX));
 
-    // Set memtable options for the data region.
+    // Set memtable options for the data region. Bulk memtable produces
+    // flat-encoded ranges, so the SST format must be flat to match.
     options.insert("memtable.type".to_string(), "bulk".to_string());
+    options.insert("sst_format".to_string(), "flat".to_string());
 
     // Decide the top-level primary key encoding: caller-supplied top-level key wins,
     // then extracted legacy value, then the `sparse` default if requested.
@@ -228,6 +230,7 @@ mod tests {
         set_data_region_options(&mut options, false);
 
         assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
+        assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
         assert_eq!(
             options.get(COMPACTION_TYPE),
             Some(&COMPACTION_TYPE_TWCS.to_string())
@@ -241,6 +244,7 @@ mod tests {
         set_data_region_options(&mut options, true);
 
         assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
+        assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
         assert_eq!(
             options.get(PRIMARY_KEY_ENCODING),
             Some(&"sparse".to_string())
@@ -263,6 +267,7 @@ mod tests {
         set_data_region_options(&mut options, false);
 
         assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
+        assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
         assert_eq!(
             options.get(PRIMARY_KEY_ENCODING),
             Some(&"sparse".to_string())
