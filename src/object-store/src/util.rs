@@ -17,11 +17,11 @@ use std::path;
 
 use common_error::root_source;
 use common_telemetry::{debug, error, info, warn};
+use opendal::ErrorKind;
 use opendal::layers::{
     LoggingInterceptor, LoggingLayer, RetryEvent, RetryInterceptor, RetryLayer, TracingLayer,
 };
 use opendal::raw::{AccessorInfo, HttpClient, Operation};
-use opendal::ErrorKind;
 use snafu::ResultExt;
 
 use crate::config::HttpClientConfig;
