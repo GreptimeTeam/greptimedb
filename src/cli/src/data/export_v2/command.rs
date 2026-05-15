@@ -37,7 +37,7 @@ use crate::data::export_v2::manifest::{
     ChunkMeta, ChunkStatus, DataFormat, MANIFEST_FILE, MANIFEST_VERSION, Manifest, TimeRange,
 };
 use crate::data::export_v2::schema::{DDL_DIR, SCHEMA_DIR, SCHEMAS_FILE};
-use crate::data::path::ddl_path_for_schema;
+use crate::data::path::{data_dir_for_schema_chunk, ddl_path_for_schema};
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::data::sql::{escape_sql_identifier, escape_sql_literal};
 use crate::database::{DatabaseClient, parse_proxy_opts};
@@ -1042,9 +1042,15 @@ async fn verify_chunks_and_data_files(
                     });
                     continue;
                 }
+                let allowed_prefixes = report
+                    .manifest
+                    .schemas
+                    .iter()
+                    .map(|schema| data_dir_for_schema_chunk(schema, chunk.id))
+                    .collect::<Vec<_>>();
                 for file in &chunk.files {
                     data_files_total += 1;
-                    let Some(path) = valid_manifest_data_file_path(file) else {
+                    let Some(path) = valid_manifest_data_file_path(file, &allowed_prefixes) else {
                         problems.push(VerifyProblem {
                             severity: VerifySeverity::Error,
                             message: format!(
@@ -1105,7 +1111,10 @@ async fn verify_chunks_and_data_files(
     Ok(())
 }
 
-fn valid_manifest_data_file_path(path: &str) -> Option<&str> {
+fn valid_manifest_data_file_path<'a>(
+    path: &'a str,
+    allowed_prefixes: &[String],
+) -> Option<&'a str> {
     if path.is_empty() || path.starts_with('/') || !path.starts_with("data/") {
         return None;
     }
@@ -1113,6 +1122,13 @@ fn valid_manifest_data_file_path(path: &str) -> Option<&str> {
     if path
         .split('/')
         .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return None;
+    }
+
+    if !allowed_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
     {
         return None;
     }
@@ -1529,7 +1545,7 @@ mod tests {
         write_root_manifest(dir.path(), manifest);
         write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
         write_default_ddl_files(dir.path());
-        write_snapshot_file(dir.path(), "data/public/chunk_1/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
 
         let storage = file_storage_for_dir(dir.path());
         let report = verify_snapshot(&storage).await.unwrap();
@@ -1581,7 +1597,7 @@ mod tests {
         );
         write_root_manifest(dir.path(), manifest);
         write_default_ddl_files(dir.path());
-        write_snapshot_file(dir.path(), "data/public/chunk_1/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
 
         let storage = file_storage_for_dir(dir.path());
         let report = verify_snapshot(&storage).await.unwrap();
@@ -1605,12 +1621,12 @@ mod tests {
             true,
         );
         let mut chunk = ChunkMeta::new(1, TimeRange::unbounded());
-        chunk.mark_completed(vec!["data/public/chunk_1/file.parquet".to_string()], None);
+        chunk.mark_completed(vec!["data/public/1/file.parquet".to_string()], None);
         manifest.chunks.push(chunk);
         write_root_manifest(dir.path(), manifest);
         write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
         write_default_ddl_files(dir.path());
-        write_snapshot_file(dir.path(), "data/public/chunk_1/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
 
         let storage = file_storage_for_dir(dir.path());
         let report = verify_snapshot(&storage).await.unwrap();
@@ -1663,7 +1679,7 @@ mod tests {
         );
         write_root_manifest(dir.path(), manifest);
         write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
-        write_snapshot_file(dir.path(), "data/public/chunk_1/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
 
         let storage = file_storage_for_dir(dir.path());
         let report = verify_snapshot(&storage).await.unwrap();
@@ -1695,7 +1711,7 @@ mod tests {
         write_root_manifest(dir.path(), manifest);
         write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
         write_default_ddl_files(dir.path());
-        write_snapshot_file(dir.path(), "data/public/chunk_1/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
 
         let storage = file_storage_for_dir(dir.path());
         let report = verify_snapshot(&storage).await.unwrap();
@@ -1717,11 +1733,11 @@ mod tests {
             false,
             true,
         );
-        manifest.chunks[0].files = vec!["/data/public/chunk_1/file.parquet".to_string()];
+        manifest.chunks[0].files = vec!["/data/public/1/file.parquet".to_string()];
         write_root_manifest(dir.path(), manifest);
         write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
         write_default_ddl_files(dir.path());
-        write_snapshot_file(dir.path(), "data/public/chunk_1/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
 
         let storage = file_storage_for_dir(dir.path());
         let report = verify_snapshot(&storage).await.unwrap();
@@ -1734,6 +1750,37 @@ mod tests {
                 .any(|problem| problem.message.contains("invalid data file path"))
         );
         assert_eq!(report.data_files_verified, 0);
+    }
+
+    #[tokio::test]
+    async fn test_verify_snapshot_rejects_data_files_under_wrong_chunk_or_schema() {
+        let dir = tempdir().unwrap();
+        let mut manifest = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            false,
+            true,
+        );
+        manifest.chunks[0].files = vec![
+            "data/public/2/file.parquet".to_string(),
+            "data/metrics/1/file.parquet".to_string(),
+        ];
+        write_root_manifest(dir.path(), manifest);
+        write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
+        write_default_ddl_files(dir.path());
+        write_snapshot_file(dir.path(), "data/public/2/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/metrics/1/file.parquet", b"data");
+
+        let storage = file_storage_for_dir(dir.path());
+        let report = verify_snapshot(&storage).await.unwrap();
+
+        assert_eq!(report.error_count(), 2);
+        assert_eq!(report.data_files_verified, 0);
+        assert!(
+            report
+                .problems
+                .iter()
+                .all(|problem| problem.message.contains("invalid data file path"))
+        );
     }
 
     fn write_test_manifest(root: &std::path::Path, dir: &str, manifest: Manifest) {
@@ -1797,7 +1844,7 @@ mod tests {
         if !schema_only {
             manifest.chunks.clear();
             let mut first = ChunkMeta::new(1, TimeRange::unbounded());
-            first.mark_completed(vec!["data/public/chunk_1/file.parquet".to_string()], None);
+            first.mark_completed(vec!["data/public/1/file.parquet".to_string()], None);
             manifest.chunks.push(first);
 
             if complete {
