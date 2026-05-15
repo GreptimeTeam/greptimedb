@@ -741,6 +741,7 @@ impl ParquetReaderBuilder {
         }
 
         self.prune_row_groups_by_bloom_filter(
+            read_format.metadata(),
             row_group_size,
             parquet_meta,
             &mut output,
@@ -935,6 +936,7 @@ impl ParquetReaderBuilder {
 
     async fn prune_row_groups_by_bloom_filter(
         &self,
+        sst_metadata: &RegionMetadataRef,
         row_group_size: usize,
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
@@ -953,12 +955,14 @@ impl ParquetReaderBuilder {
             &self.bloom_filter_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
-            let predicate_key = index_applier.predicate_key();
+            let Some(plan) = index_applier.plan_for_sst(sst_metadata) else {
+                continue;
+            };
             // Fast path: return early if the result is in the cache.
-            let cached = self
-                .cache_strategy
-                .index_result_cache()
-                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+            let cached = self.cache_strategy.index_result_cache().and_then(|cache| {
+                let file_id = self.file_handle.file_id().file_id();
+                cache.get(&plan.predicate_key, file_id)
+            });
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
             {
@@ -986,6 +990,7 @@ impl ParquetReaderBuilder {
                 .apply(
                     self.file_handle.index_id(),
                     Some(file_size_hint),
+                    &plan.predicates,
                     rgs,
                     metrics.bloom_filter_apply_metrics.as_mut(),
                 )
@@ -1006,7 +1011,7 @@ impl ParquetReaderBuilder {
             }
 
             self.apply_index_result_and_update_cache(
-                predicate_key,
+                &plan.predicate_key,
                 self.file_handle.file_id().file_id(),
                 selection,
                 output,

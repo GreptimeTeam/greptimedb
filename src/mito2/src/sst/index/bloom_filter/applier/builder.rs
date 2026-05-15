@@ -101,12 +101,14 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             return Ok(None);
         }
 
+        let expected_predicate_column_types = self.expected_predicate_column_types();
         let applier = BloomFilterIndexApplier::new(
             self.table_dir,
             self.path_type,
             self.object_store,
             self.puffin_manager_factory,
             self.predicates,
+            expected_predicate_column_types,
         )
         .with_file_cache(self.file_cache)
         .with_puffin_metadata_cache(self.puffin_metadata_cache)
@@ -135,6 +137,17 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         if let Err(err) = res {
             warn!(err; "Failed to collect bloom filter predicates, ignore it. expr: {expr}");
         }
+    }
+
+    /// Returns `(column_id, data_type)` pairs for predicate columns.
+    fn expected_predicate_column_types(&self) -> BTreeMap<ColumnId, ConcreteDataType> {
+        self.predicates
+            .keys()
+            .filter_map(|col_id| {
+                let col = self.metadata.column_by_id(*col_id)?;
+                Some((*col_id, col.column_schema.data_type.clone()))
+            })
+            .collect()
     }
 
     /// Helper function to get the column id and type

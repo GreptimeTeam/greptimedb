@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use common_base::range_read::RangeReader;
 use common_telemetry::{tracing, warn};
+use datatypes::data_type::ConcreteDataType;
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{
     BloomFilterReadMetrics, BloomFilterReader, BloomFilterReaderImpl,
@@ -30,6 +31,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
@@ -133,10 +135,19 @@ pub struct BloomFilterIndexApplier {
 
     /// Bloom filter predicates.
     /// For each column, the value will be retained only if it contains __all__ predicates.
-    predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
+    predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
 
-    /// Predicate key. Used to identify the predicate and fetch result from cache.
-    predicate_key: PredicateKey,
+    /// Default apply plan built from all collected predicates.
+    default_plan: SstApplyPlan,
+
+    /// Expected predicate column types from the latest region metadata.
+    expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SstApplyPlan {
+    pub predicate_key: PredicateKey,
+    pub predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
 }
 
 impl BloomFilterIndexApplier {
@@ -149,8 +160,9 @@ impl BloomFilterIndexApplier {
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
         predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
+        expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
     ) -> Self {
-        let predicates = Arc::new(predicates);
+        let default_plan = Self::build_apply_plan(predicates.clone());
         Self {
             table_dir,
             path_type,
@@ -159,8 +171,9 @@ impl BloomFilterIndexApplier {
             puffin_manager_factory,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
-            predicate_key: PredicateKey::new_bloom(predicates.clone()),
+            default_plan,
             predicates,
+            expected_predicate_col_types,
         }
     }
 
@@ -207,6 +220,7 @@ impl BloomFilterIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
+        predicates: &BTreeMap<ColumnId, Vec<InListPredicate>>,
         row_groups: impl Iterator<Item = (usize, bool)>,
         mut metrics: Option<&mut BloomFilterIndexApplyMetrics>,
     ) -> Result<Vec<(usize, Vec<Range<usize>>)>> {
@@ -230,7 +244,7 @@ impl BloomFilterIndexApplier {
             .map(|(i, range)| (*i, vec![range.clone()]))
             .collect::<Vec<_>>();
 
-        for (column_id, predicates) in self.predicates.iter() {
+        for (column_id, predicates) in predicates {
             let blob = match self
                 .blob_reader(file_id, *column_id, file_size_hint, metrics.as_deref_mut())
                 .await?
@@ -439,8 +453,43 @@ impl BloomFilterIndexApplier {
     }
 
     /// Returns the predicate key.
-    pub fn predicate_key(&self) -> &PredicateKey {
-        &self.predicate_key
+    pub fn plan_for_sst(&self, sst_metadata: &RegionMetadataRef) -> Option<SstApplyPlan> {
+        let mut compatible_predicates = BTreeMap::new();
+        let mut has_type_mismatch = false;
+
+        for (col_id, expected) in &self.expected_predicate_col_types {
+            if let Some(sst_col) = sst_metadata.column_by_id(*col_id)
+                && sst_col.column_schema.data_type != *expected
+            {
+                has_type_mismatch = true;
+                continue;
+            }
+
+            if let Some(predicates) = self.predicates.get(col_id) {
+                compatible_predicates.insert(*col_id, predicates.clone());
+            }
+        }
+
+        if compatible_predicates.is_empty() {
+            return None;
+        }
+
+        if !has_type_mismatch {
+            return Some(self.default_plan.clone());
+        }
+
+        Some(Self::build_apply_plan(compatible_predicates))
+    }
+
+    fn build_apply_plan(
+        predicates_by_col: BTreeMap<ColumnId, Vec<InListPredicate>>,
+    ) -> SstApplyPlan {
+        let predicates = Arc::new(predicates_by_col);
+        let predicate_key = PredicateKey::new_bloom(predicates.clone());
+        SstApplyPlan {
+            predicate_key,
+            predicates,
+        }
     }
 }
 
@@ -496,8 +545,15 @@ mod tests {
                 );
 
                 let applier = builder.build(&exprs).unwrap().unwrap();
+                let plan = applier.plan_for_sst(&Arc::new(metadata.clone())).unwrap();
                 applier
-                    .apply(file_id, None, row_groups.into_iter(), None)
+                    .apply(
+                        file_id,
+                        None,
+                        &plan.predicates,
+                        row_groups.into_iter(),
+                        None,
+                    )
                     .await
                     .unwrap()
                     .into_iter()

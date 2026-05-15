@@ -1,0 +1,46 @@
+-- Regression test for skip index with column type change.
+CREATE TABLE monitoring_data_skip (
+    host STRING SKIPPING INDEX,
+    `region` STRING,
+    cpu_usage DOUBLE SKIPPING INDEX,
+    `timestamp` TIMESTAMP TIME INDEX
+) WITH ('append_mode'='true');
+
+Affected Rows: 0
+
+INSERT INTO monitoring_data_skip (host, region, cpu_usage, `timestamp`) VALUES
+('web-01', 'us-east', 12.5, '2026-05-06 10:00:00'),
+('web-01', 'us-east', 15.2, '2026-05-06 10:01:00'),
+('web-02', 'us-east', 23.7, '2026-05-06 10:01:00'),
+('db-01', 'us-east', 45.0, '2026-05-06 10:02:00'),
+('db-02', 'us-west', 82.2, '2026-05-06 10:02:00'),
+('cache-01', 'eu-central', 55.4, '2026-05-06 10:02:00'),
+('queue-01', 'ap-south', 99.1, '2026-05-06 10:02:00');
+
+Affected Rows: 7
+
+ADMIN FLUSH_TABLE('monitoring_data_skip');
+
++-------------------------------------------+
+| ADMIN FLUSH_TABLE('monitoring_data_skip') |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+ALTER TABLE monitoring_data_skip
+MODIFY COLUMN cpu_usage STRING;
+
+Affected Rows: 0
+
+SELECT host, region, cpu_usage, `timestamp` FROM monitoring_data_skip
+WHERE cpu_usage = '23.7';
+
++--------+---------+-----------+---------------------+
+| host   | region  | cpu_usage | timestamp           |
++--------+---------+-----------+---------------------+
+| web-02 | us-east | 23.7      | 2026-05-06 10:01:00 |
++--------+---------+-----------+---------------------+
+
+DROP TABLE monitoring_data_skip;
+
+Affected Rows: 0
