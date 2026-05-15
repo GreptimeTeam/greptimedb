@@ -106,7 +106,7 @@ impl WalPruneProcedure {
     ///
     /// Retry:
     /// - Kafka client errors that have exhausted rskafka's internal retry.
-    /// - Failed to delete records.
+    /// - Failed to update the pruned entry id in the table metadata manager.
     pub async fn on_prune(&mut self) -> Result<Status> {
         let partition_client = get_partition_client(&self.context.client, &self.data.topic).await?;
         let (earliest_offset, latest_offset) =

@@ -1144,13 +1144,10 @@ impl Error {
             Error::DeallocateRegions { source, .. } if source.is_retry_later()
         ) || matches!(
             self,
-            Error::DeleteRecords {  error, .. } if Self::is_retryable_kafka_client_error(error)
-        ) || matches!(
-            self,
-            Error::BuildPartitionClient {  error, .. } if Self::is_retryable_kafka_client_error(error)
-        ) || matches!(
-            self,
-            Error::GetOffset {  error, .. } if Self::is_retryable_kafka_client_error(error)
+            Error::DeleteRecords { error, .. }
+                | Error::BuildPartitionClient { error, .. }
+                | Error::GetOffset { error, .. }
+                if Self::is_retryable_kafka_client_error(error)
         )
     }
 
