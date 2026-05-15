@@ -153,11 +153,12 @@ pub fn analyze_incremental_aggregate_plan(
                     let alias_name = alias.name.clone();
                     let mut col_names = Vec::new();
                     find_column_names(&alias.expr, &mut col_names);
-                    if col_names.len() == 1 {
-                        if let Some(col_name) = col_names.into_iter().next() {
-                            output_aliases.entry(col_name).or_insert(alias_name);
-                        }
+                    if col_names.len() == 1
+                        && let Some(col_name) = col_names.into_iter().next()
+                    {
+                        output_aliases.entry(col_name).or_insert(alias_name);
                     }
+
                     // If >1 column references detected (e.g., COALESCE(sum(x), sum(y))),
                     // intentionally skip alias mapping — the merge semantics are ambiguous.
                 }
