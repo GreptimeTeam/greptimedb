@@ -1,0 +1,14 @@
+src/mito2/src/region.rs
+  ai_agent 100-310,1837-1838,2080-2210
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "af214cead0d3497fa57ca12c0447ec40cc2ccb14",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
