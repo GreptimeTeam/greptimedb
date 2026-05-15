@@ -28,7 +28,6 @@ use mito2::memtable::bulk::context::BulkIterContext;
 use mito2::memtable::bulk::part::BulkPartConverter;
 use mito2::memtable::bulk::part_reader::BulkPartBatchIter;
 use mito2::memtable::bulk::{BulkMemtable, BulkMemtableConfig};
-use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{IterBuilder, Memtable, RangesOptions};
 use mito2::read::flat_merge::FlatMergeIterator;
@@ -45,21 +44,6 @@ fn write_rows(c: &mut Criterion) {
 
     // Note that this test only generate one time series.
     let mut group = c.benchmark_group("write");
-    group.bench_function("partition_tree", |b| {
-        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
-        let memtable = PartitionTreeMemtable::new(
-            1,
-            codec,
-            metadata.clone(),
-            None,
-            &PartitionTreeConfig::default(),
-        );
-        let kvs =
-            memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
-        b.iter(|| {
-            memtable.write(&kvs).unwrap();
-        });
-    });
     group.bench_function("time_series", |b| {
         let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None, true, MergeMode::LastRow);
         let kvs =
@@ -73,26 +57,11 @@ fn write_rows(c: &mut Criterion) {
 /// Scans all rows.
 fn full_scan(c: &mut Criterion) {
     let metadata = Arc::new(cpu_metadata());
-    let config = PartitionTreeConfig::default();
     let start_sec = 1710043200;
     let generator = CpuDataGenerator::new(metadata.clone(), 4000, start_sec, start_sec + 3600 * 2);
 
     let mut group = c.benchmark_group("full_scan");
     group.sample_size(10);
-    group.bench_function("partition_tree", |b| {
-        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
-        let memtable = PartitionTreeMemtable::new(1, codec, metadata.clone(), None, &config);
-        for kvs in generator.iter() {
-            memtable.write(&kvs).unwrap();
-        }
-
-        b.iter(|| {
-            let iter = memtable.iter(None, None, None).unwrap();
-            for batch in iter {
-                let _batch = batch.unwrap();
-            }
-        });
-    });
     group.bench_function("time_series", |b| {
         let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None, true, MergeMode::LastRow);
         for kvs in generator.iter() {
@@ -115,27 +84,11 @@ fn full_scan(c: &mut Criterion) {
 /// Filters 1 host.
 fn filter_1_host(c: &mut Criterion) {
     let metadata = Arc::new(cpu_metadata());
-    let config = PartitionTreeConfig::default();
     let start_sec = 1710043200;
     let generator = CpuDataGenerator::new(metadata.clone(), 4000, start_sec, start_sec + 3600 * 2);
 
     let mut group = c.benchmark_group("filter_1_host");
     group.sample_size(10);
-    group.bench_function("partition_tree", |b| {
-        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
-        let memtable = PartitionTreeMemtable::new(1, codec, metadata.clone(), None, &config);
-        for kvs in generator.iter() {
-            memtable.write(&kvs).unwrap();
-        }
-        let predicate = generator.random_host_filter();
-
-        b.iter(|| {
-            let iter = memtable.iter(None, Some(predicate.clone()), None).unwrap();
-            for batch in iter {
-                let _batch = batch.unwrap();
-            }
-        });
-    });
     group.bench_function("time_series", |b| {
         let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None, true, MergeMode::LastRow);
         for kvs in generator.iter() {

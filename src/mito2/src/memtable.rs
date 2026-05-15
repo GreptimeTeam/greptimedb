@@ -27,8 +27,8 @@ use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
-use serde::{Deserialize, Serialize};
 use snafu::ensure;
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
@@ -36,7 +36,6 @@ use crate::config::MitoConfig;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::{BulkMemtableBuilder, CompactDispatcher};
-use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
@@ -51,7 +50,6 @@ use crate::sst::parquet::file_range::PreFilterMode;
 
 mod builder;
 pub mod bulk;
-pub mod partition_tree;
 pub mod simple_bulk_memtable;
 mod stats;
 pub mod time_partition;
@@ -69,15 +67,6 @@ pub use time_partition::filter_record_batch;
 ///
 /// Should be unique under the same region.
 pub type MemtableId = u32;
-
-/// Config for memtables.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum MemtableConfig {
-    PartitionTree(PartitionTreeConfig),
-    #[default]
-    TimeSeries,
-}
 
 /// Options for querying ranges from a memtable.
 #[derive(Clone)]
@@ -418,48 +407,68 @@ impl MemtableBuilderProvider {
     pub(crate) fn builder_for_options(&self, options: &RegionOptions) -> MemtableBuilderRef {
         let dedup = options.need_dedup();
         let merge_mode = options.merge_mode();
+        let primary_key_encoding = options.primary_key_encoding();
         let flat_format = options
             .sst_format
             .map(|format| format == FormatType::Flat)
             .unwrap_or(self.config.default_flat_format);
         if flat_format {
-            if options.memtable.is_some() {
+            if options.memtable.is_some()
+                && !matches!(&options.memtable, Some(MemtableOptions::Bulk(_)))
+            {
                 common_telemetry::info!(
                     "Overriding memtable config, use BulkMemtable under flat format"
                 );
             }
 
-            return Arc::new(
-                BulkMemtableBuilder::new(
-                    self.write_buffer_manager.clone(),
-                    !dedup, // append_mode: true if not dedup, false if dedup
-                    merge_mode,
-                )
-                .with_compact_dispatcher(self.compact_dispatcher.clone()),
-            );
+            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options));
+        }
+
+        if primary_key_encoding == PrimaryKeyEncoding::Sparse {
+            if options.memtable.is_some()
+                && !matches!(&options.memtable, Some(MemtableOptions::Bulk(_)))
+            {
+                common_telemetry::info!(
+                    "Overriding memtable config, use BulkMemtable for sparse primary key encoding"
+                );
+            }
+            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options));
         }
 
         // The format is not flat.
         match &options.memtable {
+            Some(MemtableOptions::Bulk(config)) => Arc::new(
+                BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
+                    .with_config(config.clone())
+                    .with_compact_dispatcher(self.compact_dispatcher.clone()),
+            ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
                 dedup,
                 merge_mode,
             )),
-            Some(MemtableOptions::PartitionTree(opts)) => {
-                Arc::new(PartitionTreeMemtableBuilder::new(
-                    PartitionTreeConfig {
-                        index_max_keys_per_shard: opts.index_max_keys_per_shard,
-                        data_freeze_threshold: opts.data_freeze_threshold,
-                        fork_dictionary_bytes: opts.fork_dictionary_bytes,
-                        dedup,
-                        merge_mode,
-                    },
-                    self.write_buffer_manager.clone(),
-                ))
-            }
             None => self.default_primary_key_memtable_builder(dedup, merge_mode),
         }
+    }
+
+    fn bulk_memtable_builder(
+        &self,
+        dedup: bool,
+        merge_mode: MergeMode,
+        options: &RegionOptions,
+    ) -> BulkMemtableBuilder {
+        let mut builder = BulkMemtableBuilder::new(
+            self.write_buffer_manager.clone(),
+            !dedup, // append_mode: true if not dedup, false if dedup
+            merge_mode,
+        )
+        .with_compact_dispatcher(self.compact_dispatcher.clone());
+
+        if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
+            builder = builder.with_config(config.clone());
+        }
+
+        builder
     }
 
     fn default_primary_key_memtable_builder(
@@ -467,21 +476,11 @@ impl MemtableBuilderProvider {
         dedup: bool,
         merge_mode: MergeMode,
     ) -> MemtableBuilderRef {
-        match &self.config.memtable {
-            MemtableConfig::PartitionTree(config) => {
-                let mut config = config.clone();
-                config.dedup = dedup;
-                Arc::new(PartitionTreeMemtableBuilder::new(
-                    config,
-                    self.write_buffer_manager.clone(),
-                ))
-            }
-            MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(
-                self.write_buffer_manager.clone(),
-                dedup,
-                merge_mode,
-            )),
-        }
+        Arc::new(TimeSeriesMemtableBuilder::new(
+            self.write_buffer_manager.clone(),
+            dedup,
+            merge_mode,
+        ))
     }
 }
 
@@ -749,29 +748,9 @@ impl MemtableRange {
 mod tests {
     use std::sync::Arc;
 
-    use common_base::readable_size::ReadableSize;
-
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
-
-    #[test]
-    fn test_deserialize_memtable_config() {
-        let s = r#"
-type = "partition_tree"
-index_max_keys_per_shard = 8192
-data_freeze_threshold = 1024
-dedup = true
-fork_dictionary_bytes = "512MiB"
-"#;
-        let config: MemtableConfig = toml::from_str(s).unwrap();
-        let MemtableConfig::PartitionTree(memtable_config) = config else {
-            unreachable!()
-        };
-        assert!(memtable_config.dedup);
-        assert_eq!(8192, memtable_config.index_max_keys_per_shard);
-        assert_eq!(1024, memtable_config.data_freeze_threshold);
-        assert_eq!(ReadableSize::mb(512), memtable_config.fork_dictionary_bytes);
-    }
+    use crate::memtable::bulk::BulkMemtableConfig;
 
     #[test]
     fn test_alloc_tracker_without_manager() {
@@ -823,5 +802,26 @@ fork_dictionary_bytes = "512MiB"
 
         assert_eq!(0, manager.memory_usage());
         assert_eq!(0, manager.mutable_usage());
+    }
+
+    #[test]
+    fn test_forced_bulk_memtable_preserves_bulk_config() {
+        let provider = MemtableBuilderProvider::new(None, Arc::new(MitoConfig::default()));
+        let config = BulkMemtableConfig {
+            merge_threshold: 7,
+            encode_row_threshold: 11,
+            encode_bytes_threshold: 13,
+            max_merge_groups: 17,
+        };
+        let options = RegionOptions {
+            memtable: Some(MemtableOptions::Bulk(config.clone())),
+            primary_key_encoding: Some(PrimaryKeyEncoding::Sparse),
+            ..Default::default()
+        };
+
+        let builder =
+            provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
+
+        assert_eq!(&config, builder.config());
     }
 }

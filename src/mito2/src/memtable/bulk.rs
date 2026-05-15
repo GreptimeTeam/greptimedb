@@ -37,6 +37,8 @@ use common_time::Timestamp;
 use datatypes::arrow::datatypes::SchemaRef;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use serde_with::{DisplayFromStr, serde_as};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceRange};
 use tokio::sync::Semaphore;
@@ -98,15 +100,21 @@ static ENCODE_BYTES_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
 });
 
 /// Configuration for bulk memtable.
-#[derive(Debug, Clone)]
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct BulkMemtableConfig {
     /// Threshold for triggering merge of parts.
+    #[serde_as(as = "DisplayFromStr")]
     pub merge_threshold: usize,
     /// Row threshold for encoding parts.
+    #[serde_as(as = "DisplayFromStr")]
     pub encode_row_threshold: usize,
     /// Bytes threshold for encoding parts.
+    #[serde_as(as = "DisplayFromStr")]
     pub encode_bytes_threshold: usize,
     /// Maximum number of groups for parallel merging.
+    #[serde_as(as = "DisplayFromStr")]
     pub max_merge_groups: usize,
 }
 
@@ -118,6 +126,16 @@ impl Default for BulkMemtableConfig {
             encode_bytes_threshold: *ENCODE_BYTES_THRESHOLD,
             max_merge_groups: *MAX_MERGE_GROUPS,
         }
+        .sanitize()
+    }
+}
+
+impl BulkMemtableConfig {
+    fn sanitize(mut self) -> Self {
+        if self.merge_threshold == 0 {
+            self.merge_threshold = DEFAULT_MERGE_THRESHOLD;
+        }
+        self
     }
 }
 
@@ -666,6 +684,7 @@ impl BulkMemtable {
         append_mode: bool,
         merge_mode: MergeMode,
     ) -> Self {
+        let config = config.sanitize();
         let flat_arrow_schema = to_flat_sst_arrow_schema(
             &metadata,
             &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
@@ -1349,10 +1368,21 @@ impl BulkMemtableBuilder {
         }
     }
 
+    /// Sets the bulk memtable config.
+    pub fn with_config(mut self, config: BulkMemtableConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     /// Sets the compact dispatcher.
     pub fn with_compact_dispatcher(mut self, compact_dispatcher: Arc<CompactDispatcher>) -> Self {
         self.compact_dispatcher = Some(compact_dispatcher);
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn config(&self) -> &BulkMemtableConfig {
+        &self.config
     }
 }
 
@@ -1413,6 +1443,24 @@ mod tests {
 
         converter.append_key_values(&key_values)?;
         converter.convert()
+    }
+
+    #[test]
+    fn test_bulk_memtable_sanitizes_zero_merge_threshold() {
+        let metadata = metadata_for_test();
+        let config = BulkMemtableConfig {
+            merge_threshold: 0,
+            ..Default::default()
+        };
+
+        let memtable =
+            BulkMemtable::new(999, config, metadata, None, None, false, MergeMode::LastRow);
+
+        assert_eq!(DEFAULT_MERGE_THRESHOLD, memtable.config.merge_threshold);
+        assert_eq!(
+            DEFAULT_MERGE_THRESHOLD,
+            memtable.compactor.lock().unwrap().config.merge_threshold
+        );
     }
 
     #[test]

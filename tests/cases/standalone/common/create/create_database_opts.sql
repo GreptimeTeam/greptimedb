@@ -19,7 +19,7 @@ DROP DATABASE mydb;
 ---test more options----
 CREATE DATABASE mydb WITH (
        ttl = '1h',
-       'memtable.type'='partition_tree',
+       'memtable.type'='bulk',
        'append_mode'='false',
        'merge_mode'='last_non_null',
        'compaction.type' = 'twcs',

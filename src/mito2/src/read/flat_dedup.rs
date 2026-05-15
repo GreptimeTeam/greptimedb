@@ -38,9 +38,9 @@ use futures::{Stream, TryStreamExt};
 use snafu::ResultExt;
 
 use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, Result};
-use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
 use crate::metrics::MERGE_FILTER_ROWS_TOTAL;
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
+use crate::read::timestamp_array_to_i64_slice;
 use crate::sst::parquet::flat_format::{
     op_type_column_index, primary_key_column_index, time_index_column_index,
 };

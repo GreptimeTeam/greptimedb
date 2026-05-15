@@ -564,9 +564,8 @@ pub async fn test_repartition_metric(
         ) ENGINE = metric 
         WITH (
         "physical_metric_table" = "",
-        "memtable.type" = "partition_tree",
         'sst_format' = '{sst_format}',
-        "memtable.partition_tree.primary_key_encoding" = "{primary_key_encoding}",
+        "primary_key_encoding" = "{primary_key_encoding}",
         "index.type" = "inverted",
     );
     "#

@@ -646,24 +646,6 @@ apply_on_query = "auto"
 ## - `[size]` e.g. `64MB`: fixed memory threshold
 mem_threshold_on_create = "auto"
 
-[region_engine.mito.memtable]
-## Memtable type.
-## - `time_series`: time-series memtable
-## - `partition_tree`: partition tree memtable (experimental)
-type = "time_series"
-
-## The max number of keys in one shard.
-## Only available for `partition_tree` memtable.
-index_max_keys_per_shard = 8192
-
-## The max rows of data inside the actively writing buffer in one shard.
-## Only available for `partition_tree` memtable.
-data_freeze_threshold = 32768
-
-## Max dictionary bytes.
-## Only available for `partition_tree` memtable.
-fork_dictionary_bytes = "1GiB"
-
 [region_engine.mito.gc]
 ## Whether GC is enabled. Need to be the same with metasrv's `gc.enable` or unexpected behavior will occur
 enable = false

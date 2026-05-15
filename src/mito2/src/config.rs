@@ -29,7 +29,6 @@ use serde_with::serde_as;
 use crate::cache::file_cache::DEFAULT_INDEX_CACHE_PERCENT;
 use crate::error::Result;
 use crate::gc::GcConfig;
-use crate::memtable::MemtableConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
@@ -167,9 +166,6 @@ pub struct MitoConfig {
     #[cfg(feature = "vector_index")]
     pub vector_index: VectorIndexConfig,
 
-    /// Memtable config
-    pub memtable: MemtableConfig,
-
     /// Minimum time interval between two compactions.
     /// To align with the old behavior, the default value is 0 (no restrictions).
     #[serde(with = "humantime_serde")]
@@ -225,7 +221,6 @@ impl Default for MitoConfig {
             bloom_filter_index: BloomFilterConfig::default(),
             #[cfg(feature = "vector_index")]
             vector_index: VectorIndexConfig::default(),
-            memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
             default_flat_format: true,
             gc: GcConfig::default(),
@@ -699,26 +694,4 @@ fn divide_num_cpus(divisor: usize) -> usize {
     debug_assert!(cores > 0);
 
     cores.div_ceil(divisor)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_deserialize_config() {
-        let s = r#"
-[memtable]
-type = "partition_tree"
-index_max_keys_per_shard = 8192
-data_freeze_threshold = 1024
-dedup = true
-fork_dictionary_bytes = "512MiB"
-"#;
-        let config: MitoConfig = toml::from_str(s).unwrap();
-        let MemtableConfig::PartitionTree(config) = &config.memtable else {
-            unreachable!()
-        };
-        assert_eq!(1024, config.data_freeze_threshold);
-    }
 }

@@ -29,8 +29,9 @@ use crate::cache::{
     selector_result_cache_hit, selector_result_cache_miss,
 };
 use crate::error::{ComputeArrowSnafu, Result};
-use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
-use crate::read::{Batch, BatchReader, BoxedBatchReader, BoxedRecordBatchStream};
+use crate::read::{
+    Batch, BatchReader, BoxedBatchReader, BoxedRecordBatchStream, timestamp_array_to_i64_slice,
+};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 use crate::sst::parquet::format::{PrimaryKeyArray, primary_key_offsets};

@@ -825,7 +825,6 @@ mod tests {
     use store_api::storage::SequenceNumber;
 
     use super::*;
-    use crate::memtable::partition_tree::PartitionTreeMemtableBuilder;
     use crate::memtable::time_series::TimeSeriesMemtableBuilder;
     use crate::memtable::{IterBuilder, RangesOptions};
     use crate::test_util::memtable_util::{self, collect_iter_timestamps};
@@ -833,7 +832,7 @@ mod tests {
     #[test]
     fn test_no_duration() {
         let metadata = memtable_util::metadata_for_test();
-        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
+        let builder = Arc::new(TimeSeriesMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder, 0, None);
         assert_eq!(0, partitions.num_partitions());
         assert!(partitions.is_empty());
@@ -865,7 +864,7 @@ mod tests {
     #[test]
     fn test_write_single_part() {
         let metadata = memtable_util::metadata_for_test();
-        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
+        let builder = Arc::new(TimeSeriesMemtableBuilder::default());
         let partitions =
             TimePartitions::new(metadata.clone(), builder, 0, Some(Duration::from_secs(10)));
         assert_eq!(0, partitions.num_partitions());
@@ -915,7 +914,7 @@ mod tests {
 
     #[cfg(test)]
     fn new_multi_partitions(metadata: &RegionMetadataRef) -> TimePartitions {
-        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
+        let builder = Arc::new(TimeSeriesMemtableBuilder::default());
         let partitions =
             TimePartitions::new(metadata.clone(), builder, 0, Some(Duration::from_secs(5)));
         assert_eq!(0, partitions.num_partitions());
@@ -991,7 +990,7 @@ mod tests {
     #[test]
     fn test_new_with_part_duration() {
         let metadata = memtable_util::metadata_for_test();
-        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
+        let builder = Arc::new(TimeSeriesMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder.clone(), 0, None);
 
         let new_parts = partitions.new_with_part_duration(Some(Duration::from_secs(5)), None);
@@ -1009,7 +1008,7 @@ mod tests {
         // Don't need to create new memtables.
         assert_eq!(0, new_parts.next_memtable_id());
 
-        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
+        let builder = Arc::new(TimeSeriesMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder.clone(), 0, None);
         // Need to build a new memtable as duration is still None.
         let new_parts = partitions.new_with_part_duration(None, None);
@@ -1020,7 +1019,7 @@ mod tests {
     #[test]
     fn test_fork_empty() {
         let metadata = memtable_util::metadata_for_test();
-        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
+        let builder = Arc::new(TimeSeriesMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder, 0, None);
         partitions.freeze().unwrap();
         let new_parts = partitions.fork(&metadata, None);
@@ -1072,7 +1071,7 @@ mod tests {
     #[test]
     fn test_find_partitions_by_time_range() {
         let metadata = memtable_util::metadata_for_test();
-        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
+        let builder = Arc::new(TimeSeriesMemtableBuilder::default());
 
         // Case 1: No time range partitioning
         let partitions = TimePartitions::new(metadata.clone(), builder.clone(), 0, None);

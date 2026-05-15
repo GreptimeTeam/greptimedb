@@ -252,6 +252,7 @@ mod tests {
                 memtable: None,
                 merge_mode: None,
                 sst_format: None,
+                primary_key_encoding: None,
             },
             compaction_time_window: None,
         }

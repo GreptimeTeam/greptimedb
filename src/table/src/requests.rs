@@ -36,7 +36,9 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY, is_metric_engine_option_key,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_TYPE, MERGE_MODE_KEY, SST_FORMAT_KEY,
+    APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD,
+    MEMTABLE_BULK_ENCODE_ROW_THRESHOLD, MEMTABLE_BULK_MAX_MERGE_GROUPS,
+    MEMTABLE_BULK_MERGE_THRESHOLD, MEMTABLE_TYPE, MERGE_MODE_KEY, SST_FORMAT_KEY,
     TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
     is_mito_engine_option_key,
 };
@@ -88,6 +90,10 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     set.insert(TTL_KEY);
     set.insert(STORAGE_KEY);
     set.insert(MEMTABLE_TYPE);
+    set.insert(MEMTABLE_BULK_MERGE_THRESHOLD);
+    set.insert(MEMTABLE_BULK_ENCODE_ROW_THRESHOLD);
+    set.insert(MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD);
+    set.insert(MEMTABLE_BULK_MAX_MERGE_GROUPS);
     set.insert(APPEND_MODE_KEY);
     set.insert(MERGE_MODE_KEY);
     set.insert(SKIP_WAL_KEY);
@@ -482,7 +488,20 @@ mod tests {
         assert!(validate_table_option(TTL_KEY));
         assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
         assert!(validate_table_option(STORAGE_KEY));
+        assert!(validate_table_option(MEMTABLE_BULK_MERGE_THRESHOLD));
         assert!(!validate_table_option("foo"));
+    }
+
+    #[test]
+    fn test_validate_database_option() {
+        assert!(validate_database_option(MEMTABLE_TYPE));
+        assert!(validate_database_option(MEMTABLE_BULK_MERGE_THRESHOLD));
+        assert!(validate_database_option(MEMTABLE_BULK_ENCODE_ROW_THRESHOLD));
+        assert!(validate_database_option(
+            MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD
+        ));
+        assert!(validate_database_option(MEMTABLE_BULK_MAX_MERGE_GROUPS));
+        assert!(!validate_database_option("foo"));
     }
 
     #[test]

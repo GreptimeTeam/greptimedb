@@ -44,8 +44,8 @@ CREATE TABLE phy (
     val double
 ) engine = metric with (
     "physical_metric_table" = "",
-    "memtable.type" = "partition_tree",
-    "memtable.partition_tree.primary_key_encoding" = "sparse"
+    "memtable.type" = "bulk",
+    "primary_key_encoding" = "sparse"
 );
 
 CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");

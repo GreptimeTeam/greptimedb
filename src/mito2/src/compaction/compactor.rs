@@ -204,19 +204,16 @@ pub async fn open_compaction_region(
         Either::Left(ttl) => ttl,
         // Get the ttl from the schema metadata manager.
         Either::Right(schema_metadata_manager) => {
-            let (_, ttl) = find_dynamic_options(
-                req.region_id.table_id(),
-                &req.region_options,
-                &schema_metadata_manager,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-                (
-                    crate::region::options::CompactionOptions::default(),
-                    TimeToLive::default(),
-                )
-            });
+            let (_, ttl) =
+                find_dynamic_options(req.region_id, &req.region_options, &schema_metadata_manager)
+                    .await
+                    .unwrap_or_else(|e| {
+                        warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+                        (
+                            crate::region::options::CompactionOptions::default(),
+                            TimeToLive::default(),
+                        )
+                    });
             ttl
         }
     };

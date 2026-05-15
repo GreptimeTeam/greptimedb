@@ -709,8 +709,7 @@ mod tests {
     use partition::expr::col;
     use store_api::metadata::ColumnMetadata;
     use store_api::metric_engine_consts::{
-        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
-        MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, PRIMARY_KEY_ENCODING,
     };
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
@@ -1282,10 +1281,7 @@ mod tests {
         run_batch_write_with_schema_variants(
             &env,
             physical_region_id,
-            vec![(
-                MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING.to_string(),
-                "sparse".to_string(),
-            )],
+            vec![(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string())],
             true,
         )
         .await;
@@ -1299,10 +1295,7 @@ mod tests {
         run_batch_write_with_schema_variants(
             &env,
             physical_region_id,
-            vec![(
-                MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING.to_string(),
-                "dense".to_string(),
-            )],
+            vec![(PRIMARY_KEY_ENCODING.to_string(), "dense".to_string())],
             false,
         )
         .await;

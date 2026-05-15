@@ -14,20 +14,14 @@
 
 use std::collections::HashSet;
 
-use api::v1::{ArrowIpc, ColumnDataType, SemanticType};
+use api::v1::{ArrowIpc, SemanticType};
 use bytes::Bytes;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
-use common_query::prelude::{greptime_timestamp, greptime_value};
-use datatypes::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::record_batch::RecordBatch;
 use snafu::{OptionExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_request::{
-    AffectedRows, RegionBulkInsertsRequest, RegionPutRequest, RegionRequest,
-};
+use store_api::region_request::{AffectedRows, RegionBulkInsertsRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::batch_modifier::{TagColumnInfo, modify_batch_sparse};
@@ -42,8 +36,7 @@ impl MetricEngineInner {
     /// **Logical region path:** The request payload is a logical `RecordBatch`
     /// (timestamp, value and tag columns). It is transformed to physical format
     /// via `modify_batch_sparse`, encoded to Arrow IPC, and forwarded as a
-    /// `BulkInserts` request to the data region. If mito reports
-    /// `StatusCode::Unsupported`, the request is transparently retried as a `Put`.
+    /// `BulkInserts` request to the data region.
     ///
     /// **Physical region path:** The request payload is already in physical format
     /// (produced by the batcher's `flush_batch_physical`). It is forwarded directly
@@ -134,27 +127,9 @@ impl MetricEngineInner {
             },
             partition_expr_version,
         };
-        match self
-            .data_region
+        self.data_region
             .write_data(data_region_id, RegionRequest::BulkInserts(request))
             .await
-        {
-            Ok(affected_rows) => Ok(affected_rows),
-            Err(err) if err.status_code() == StatusCode::Unsupported => {
-                // todo(hl): fallback path for PartitionTreeMemtable, remove this once we remove it
-                let rows = record_batch_to_rows(&batch, region_id)?;
-                self.put_region(
-                    region_id,
-                    RegionPutRequest {
-                        rows,
-                        hint: None,
-                        partition_expr_version,
-                    },
-                )
-                .await
-            }
-            Err(err) => Err(err),
-        }
     }
 
     fn resolve_tag_columns_from_metadata(
@@ -214,174 +189,6 @@ impl MetricEngineInner {
     }
 }
 
-fn record_batch_to_rows(batch: &RecordBatch, logical_region_id: RegionId) -> Result<api::v1::Rows> {
-    let schema_ref = batch.schema();
-    let fields = schema_ref.fields();
-
-    let mut ts_idx = None;
-    let mut val_idx = None;
-    let mut tag_indices = Vec::new();
-
-    for (idx, field) in fields.iter().enumerate() {
-        if field.name() == greptime_timestamp() {
-            ts_idx = Some(idx);
-            if !matches!(
-                field.data_type(),
-                datatypes::arrow::datatypes::DataType::Timestamp(
-                    datatypes::arrow::datatypes::TimeUnit::Millisecond,
-                    _
-                )
-            ) {
-                return error::UnexpectedRequestSnafu {
-                    reason: format!(
-                        "Timestamp column '{}' in region {:?} has incompatible type: {:?}",
-                        field.name(),
-                        logical_region_id,
-                        field.data_type()
-                    ),
-                }
-                .fail();
-            }
-        } else if field.name() == greptime_value() {
-            val_idx = Some(idx);
-            if !matches!(
-                field.data_type(),
-                datatypes::arrow::datatypes::DataType::Float64
-            ) {
-                return error::UnexpectedRequestSnafu {
-                    reason: format!(
-                        "Value column '{}' in region {:?} has incompatible type: {:?}",
-                        field.name(),
-                        logical_region_id,
-                        field.data_type()
-                    ),
-                }
-                .fail();
-            }
-        } else {
-            if !matches!(
-                field.data_type(),
-                datatypes::arrow::datatypes::DataType::Utf8
-            ) {
-                return error::UnexpectedRequestSnafu {
-                    reason: format!(
-                        "Tag column '{}' in region {:?} must be Utf8, found: {:?}",
-                        field.name(),
-                        logical_region_id,
-                        field.data_type()
-                    ),
-                }
-                .fail();
-            }
-            tag_indices.push(idx);
-        }
-    }
-
-    let ts_idx = ts_idx.with_context(|| error::UnexpectedRequestSnafu {
-        reason: format!(
-            "Timestamp column '{}' not found in RecordBatch for region {:?}",
-            greptime_timestamp(),
-            logical_region_id
-        ),
-    })?;
-    let val_idx = val_idx.with_context(|| error::UnexpectedRequestSnafu {
-        reason: format!(
-            "Value column '{}' not found in RecordBatch for region {:?}",
-            greptime_value(),
-            logical_region_id
-        ),
-    })?;
-
-    let mut schema = Vec::with_capacity(2 + tag_indices.len());
-    schema.push(api::v1::ColumnSchema {
-        column_name: greptime_timestamp().to_string(),
-        datatype: ColumnDataType::TimestampMillisecond as i32,
-        semantic_type: SemanticType::Timestamp as i32,
-        datatype_extension: None,
-        options: None,
-    });
-    schema.push(api::v1::ColumnSchema {
-        column_name: greptime_value().to_string(),
-        datatype: ColumnDataType::Float64 as i32,
-        semantic_type: SemanticType::Field as i32,
-        datatype_extension: None,
-        options: None,
-    });
-    for &idx in &tag_indices {
-        let field = &fields[idx];
-        schema.push(api::v1::ColumnSchema {
-            column_name: field.name().clone(),
-            datatype: ColumnDataType::String as i32,
-            semantic_type: SemanticType::Tag as i32,
-            datatype_extension: None,
-            options: None,
-        });
-    }
-
-    let ts_array = batch
-        .column(ts_idx)
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>()
-        .expect("validated as TimestampMillisecond");
-    let val_array = batch
-        .column(val_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("validated as Float64");
-    let tag_arrays: Vec<&StringArray> = tag_indices
-        .iter()
-        .map(|&idx| {
-            batch
-                .column(idx)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("validated as Utf8")
-        })
-        .collect();
-
-    let num_rows = batch.num_rows();
-    let mut rows = Vec::with_capacity(num_rows);
-    for row_idx in 0..num_rows {
-        let mut values = Vec::with_capacity(2 + tag_arrays.len());
-
-        if ts_array.is_null(row_idx) {
-            values.push(api::v1::Value { value_data: None });
-        } else {
-            values.push(api::v1::Value {
-                value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(
-                    ts_array.value(row_idx),
-                )),
-            });
-        }
-
-        if val_array.is_null(row_idx) {
-            values.push(api::v1::Value { value_data: None });
-        } else {
-            values.push(api::v1::Value {
-                value_data: Some(api::v1::value::ValueData::F64Value(
-                    val_array.value(row_idx),
-                )),
-            });
-        }
-
-        for arr in &tag_arrays {
-            if arr.is_null(row_idx) {
-                values.push(api::v1::Value { value_data: None });
-            } else {
-                values.push(api::v1::Value {
-                    value_data: Some(api::v1::value::ValueData::StringValue(
-                        arr.value(row_idx).to_string(),
-                    )),
-                });
-            }
-        }
-
-        rows.push(api::v1::Row { values });
-    }
-
-    Ok(api::v1::Rows { schema, rows })
-}
-
 fn record_batch_to_ipc(record_batch: &RecordBatch) -> Result<(Bytes, Bytes, Bytes)> {
     let mut encoder = FlightEncoder::default();
     let schema = encoder.encode_schema(record_batch.schema().as_ref());
@@ -422,7 +229,7 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
     use datatypes::arrow::record_batch::RecordBatch;
     use mito2::config::MitoConfig;
-    use store_api::metric_engine_consts::MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING;
+    use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{RegionBulkInsertsRequest, RegionPutRequest, RegionRequest};
@@ -483,10 +290,7 @@ mod tests {
         env.create_physical_region(
             physical_region_id,
             &TestEnv::default_table_dir(),
-            vec![(
-                MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING.to_string(),
-                "dense".to_string(),
-            )],
+            vec![(PRIMARY_KEY_ENCODING.to_string(), "dense".to_string())],
         )
         .await;
 
@@ -809,66 +613,5 @@ mod tests {
         let bulk_output = bulk_batches.pretty_print().unwrap();
 
         assert_eq!(put_output, bulk_output);
-    }
-
-    #[test]
-    fn test_record_batch_to_rows_with_null_values() {
-        use datatypes::arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
-        use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
-        use datatypes::arrow::record_batch::RecordBatch;
-        use store_api::storage::RegionId;
-
-        use crate::engine::bulk_insert::record_batch_to_rows;
-
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                greptime_timestamp(),
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                true,
-            ),
-            Field::new(greptime_value(), DataType::Float64, true),
-            Field::new("job", DataType::Utf8, true),
-            Field::new("host", DataType::Utf8, true),
-        ]));
-
-        let ts_array = TimestampMillisecondArray::from(vec![Some(1000), None, Some(3000)]);
-        let val_array = Float64Array::from(vec![Some(1.0), Some(2.0), None]);
-        let job_array = StringArray::from(vec![Some("job1"), None, Some("job3")]);
-        let host_array = StringArray::from(vec![None, Some("host2"), Some("host3")]);
-
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(ts_array),
-                Arc::new(val_array),
-                Arc::new(job_array),
-                Arc::new(host_array),
-            ],
-        )
-        .unwrap();
-
-        let region_id = RegionId::new(1, 1);
-        let rows = record_batch_to_rows(&batch, region_id).unwrap();
-
-        assert_eq!(rows.rows.len(), 3);
-        assert_eq!(rows.schema.len(), 4);
-
-        // Row 0: all non-null except host
-        assert!(rows.rows[0].values[0].value_data.is_some());
-        assert!(rows.rows[0].values[1].value_data.is_some());
-        assert!(rows.rows[0].values[2].value_data.is_some());
-        assert!(rows.rows[0].values[3].value_data.is_none());
-
-        // Row 1: null timestamp, null job
-        assert!(rows.rows[1].values[0].value_data.is_none());
-        assert!(rows.rows[1].values[1].value_data.is_some());
-        assert!(rows.rows[1].values[2].value_data.is_none());
-        assert!(rows.rows[1].values[3].value_data.is_some());
-
-        // Row 2: null value
-        assert!(rows.rows[2].values[0].value_data.is_some());
-        assert!(rows.rows[2].values[1].value_data.is_none());
-        assert!(rows.rows[2].values[2].value_data.is_some());
-        assert!(rows.rows[2].values[3].value_data.is_some());
     }
 }

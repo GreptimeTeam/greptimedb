@@ -130,7 +130,11 @@ pub const METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION_DEFAULT: u32 = 1
 /// Default false positive rate for the skipping index in the metric engine.
 pub const METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION_DEFAULT: f64 = 0.01;
 
-/// Option key for memtable partition tree primary key encoding.
+/// Top-level region option key for primary key encoding. Metric-engine internal use.
+pub const PRIMARY_KEY_ENCODING: &str = "primary_key_encoding";
+
+/// Deprecated. Kept for backward compatibility: parsing still accepts this key
+/// and migrates the value to [`PRIMARY_KEY_ENCODING`].
 pub const MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING: &str =
     "memtable.partition_tree.primary_key_encoding";
 
@@ -143,6 +147,7 @@ pub fn is_metric_engine_option_key(key: &str) -> bool {
         METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION,
         METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION,
         // Only allow setting primary key encoding by metric engine.
+        PRIMARY_KEY_ENCODING,
         MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
     ]
     .contains(&key)

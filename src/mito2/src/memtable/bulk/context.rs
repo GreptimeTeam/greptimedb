@@ -143,11 +143,10 @@ impl BulkIterContext {
     pub(crate) fn build_pk_filter(&self) -> Option<CachedPrimaryKeyFilter> {
         let pk_filters = self.pk_filters.as_ref()?;
         let metadata = self.base.read_format.metadata();
-        // Parquet PK prefilter always supports the partition column.
         let inner = self
             .base
             .codec
-            .primary_key_filter(metadata, Arc::clone(pk_filters), false);
+            .primary_key_filter(metadata, Arc::clone(pk_filters));
         Some(CachedPrimaryKeyFilter::new(inner))
     }
 

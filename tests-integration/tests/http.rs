@@ -1658,10 +1658,7 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-{vector_index_config}[region_engine.mito.memtable]
-type = "time_series"
-
-[region_engine.mito.gc]
+{vector_index_config}[region_engine.mito.gc]
 enable = false
 lingering_time = "1m"
 unknown_file_lingering_time = "1h"
