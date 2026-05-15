@@ -45,7 +45,7 @@ use common_meta::error::{
 };
 use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::peer::{Peer, PeerDiscovery};
+use common_meta::peer::PeerDiscovery;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::KeyValue;
@@ -590,7 +590,7 @@ impl ClusterInfo for MetaClient {
 // maybe we need to use the timestamp from metasrv in the future.
 #[async_trait::async_trait]
 impl PeerDiscovery for MetaClient {
-    async fn active_frontends(&self) -> MetaResult<Vec<Peer>> {
+    async fn active_frontends(&self) -> MetaResult<Vec<NodeInfo>> {
         let nodes = self
             .list_nodes(Some(ClusterRole::Frontend))
             .await
@@ -608,7 +608,7 @@ impl PeerDiscovery for MetaClient {
     async fn active_datanodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-    ) -> MetaResult<Vec<Peer>> {
+    ) -> MetaResult<Vec<NodeInfo>> {
         let nodes = self
             .list_nodes(Some(ClusterRole::Datanode))
             .await
@@ -625,7 +625,7 @@ impl PeerDiscovery for MetaClient {
     async fn active_flownodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-    ) -> MetaResult<Vec<Peer>> {
+    ) -> MetaResult<Vec<NodeInfo>> {
         let nodes = self
             .list_nodes(Some(ClusterRole::Flownode))
             .await

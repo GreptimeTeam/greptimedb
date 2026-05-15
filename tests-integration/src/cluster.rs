@@ -401,7 +401,7 @@ impl GreptimeDbClusterBuilder {
         expected_datanodes: usize,
     ) {
         for _ in 0..100 {
-            let alive_datanodes = discovery::utils::alive_datanodes(
+            let alive_datanodes = discovery::utils::alive_datanode_infos(
                 &DefaultSystemTimer,
                 meta_peer_client.as_ref(),
                 Duration::from_secs(u64::MAX),

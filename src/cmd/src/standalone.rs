@@ -600,6 +600,7 @@ impl StartCommand {
             layered_cache_registry.clone(),
             procedure_executor,
             node_manager.clone(),
+            fe_instance.frontend_peer_addr().to_string(),
         )
         .await
         .context(StartFlownodeSnafu)?;

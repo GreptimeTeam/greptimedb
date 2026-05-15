@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use api::v1::meta::Peer;
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 
+use crate::cluster::NodeInfo;
 use crate::error::Error;
 use crate::{DatanodeId, FlownodeId};
 
@@ -48,7 +50,7 @@ pub trait PeerDiscovery: Send + Sync {
     ///
     /// A frontend is considered active if it has reported a heartbeat within the most recent heartbeat interval,
     /// as determined by the in-memory backend.
-    async fn active_frontends(&self) -> Result<Vec<Peer>, Error>;
+    async fn active_frontends(&self) -> Result<Vec<NodeInfo>, Error>;
 
     /// Returns all currently active datanodes, optionally filtered by a predicate on their workloads.
     ///
@@ -58,7 +60,7 @@ pub trait PeerDiscovery: Send + Sync {
     async fn active_datanodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-    ) -> Result<Vec<Peer>, Error>;
+    ) -> Result<Vec<NodeInfo>, Error>;
 
     /// Returns all currently active flownodes, optionally filtered by a predicate on their workloads.
     ///
@@ -68,23 +70,28 @@ pub trait PeerDiscovery: Send + Sync {
     async fn active_flownodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-    ) -> Result<Vec<Peer>, Error>;
+    ) -> Result<Vec<NodeInfo>, Error>;
 }
 
 pub type PeerDiscoveryRef = Arc<dyn PeerDiscovery>;
 
+#[derive(Debug, Clone, Default)]
+pub struct PeerAllocContext {
+    pub extensions: HashMap<String, String>,
+}
+
 /// [`PeerAllocator`] allocates [`Peer`]s for creating region or flow.
 #[async_trait::async_trait]
 pub trait PeerAllocator: Send + Sync {
-    async fn alloc(&self, num: usize) -> Result<Vec<Peer>, Error>;
+    async fn alloc(&self, num: usize, ctx: &PeerAllocContext) -> Result<Vec<Peer>, Error>;
 }
 
 pub type PeerAllocatorRef = Arc<dyn PeerAllocator>;
 
 #[async_trait::async_trait]
 impl<T: PeerAllocator + ?Sized> PeerAllocator for Arc<T> {
-    async fn alloc(&self, num: usize) -> Result<Vec<Peer>, Error> {
-        T::alloc(self, num).await
+    async fn alloc(&self, num: usize, ctx: &PeerAllocContext) -> Result<Vec<Peer>, Error> {
+        T::alloc(self, num, ctx).await
     }
 }
 
@@ -92,7 +99,7 @@ pub struct NoopPeerAllocator;
 
 #[async_trait::async_trait]
 impl PeerAllocator for NoopPeerAllocator {
-    async fn alloc(&self, num: usize) -> Result<Vec<Peer>, Error> {
+    async fn alloc(&self, num: usize, _ctx: &PeerAllocContext) -> Result<Vec<Peer>, Error> {
         Ok(vec![Peer::default(); num])
     }
 }

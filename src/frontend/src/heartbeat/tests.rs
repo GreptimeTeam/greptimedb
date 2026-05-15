@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use api::v1::meta::HeartbeatResponse;
+use api::v1::meta::{HeartbeatResponse, Role};
 use common_meta::cache_invalidator::KvCacheInvalidator;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::{
@@ -26,8 +26,13 @@ use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::MetadataKey;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::table_info::TableInfoKey;
+use common_stat::ResourceStatImpl;
 use common_telemetry::tracing_context::TracingContext;
+use meta_client::client::MetaClient;
 use tokio::sync::mpsc;
+
+use super::HeartbeatTask;
+use crate::frontend::FrontendOptions;
 
 #[derive(Default)]
 pub struct MockKvCacheInvalidator {
@@ -150,4 +155,22 @@ async fn test_invalidate_schema_key_handler() {
         Instruction::InvalidateCaches(vec![CacheIdent::SchemaName(valid_key)]),
     )
     .await;
+}
+
+#[test]
+fn test_heartbeat_task_uses_resolved_peer_addr() {
+    let options = FrontendOptions::default();
+    let meta_client = Arc::new(MetaClient::new(0, Role::Frontend));
+    let executor = Arc::new(HandlerGroupExecutor::new(vec![]));
+    let stat = Arc::new(ResourceStatImpl::default());
+
+    let task = HeartbeatTask::new(
+        "10.0.0.1:4001".to_string(),
+        &options,
+        meta_client,
+        executor,
+        stat,
+    );
+
+    assert_eq!(task.peer_addr, "10.0.0.1:4001");
 }

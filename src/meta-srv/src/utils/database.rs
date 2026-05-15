@@ -105,7 +105,7 @@ impl DatabaseOperator {
 
         let urls = frontends
             .into_iter()
-            .map(|peer| peer.addr)
+            .map(|node| node.peer.addr)
             .collect::<Vec<_>>();
 
         debug!("Available frontend addresses: {:?}", urls);

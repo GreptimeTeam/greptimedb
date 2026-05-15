@@ -208,6 +208,7 @@ impl FrontendClient {
         meta_client
             .active_frontends()
             .await
+            .map(|nodes| nodes.into_iter().map(|node| node.peer).collect())
             .map_err(BoxedError::new)
             .context(ExternalSnafu)
     }

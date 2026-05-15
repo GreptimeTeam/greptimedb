@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use api::v1::meta::DatanodeWorkloads;
 use api::v1::meta::heartbeat_request::NodeWorkloads;
+use common_meta::cluster::{DatanodeStatus, NodeInfo, NodeInfoKey, NodeStatus, Role};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
@@ -57,6 +58,7 @@ pub(crate) fn create_meta_peer_client() -> MetaPeerClientRef {
 pub(crate) async fn put_datanodes(meta_peer_client: &MetaPeerClientRef, datanodes: Vec<Peer>) {
     let backend = meta_peer_client.memory_backend();
     for datanode in datanodes {
+        let peer = datanode.clone();
         let lease_key = DatanodeLeaseKey {
             node_id: datanode.id,
         };
@@ -69,9 +71,45 @@ pub(crate) async fn put_datanodes(meta_peer_client: &MetaPeerClientRef, datanode
         };
         let lease_key_bytes: Vec<u8> = lease_key.try_into().unwrap();
         let lease_value_bytes: Vec<u8> = lease_value.try_into().unwrap();
+        backend
+            .put(common_meta::rpc::store::PutRequest {
+                key: lease_key_bytes,
+                value: lease_value_bytes,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let workloads = DatanodeWorkloads {
+            types: vec![DatanodeWorkloadType::Hybrid.to_i32()],
+        };
+        let node_info = NodeInfo {
+            peer,
+            last_activity_ts: time_util::current_time_millis(),
+            status: NodeStatus::Datanode(DatanodeStatus {
+                rcus: 0,
+                wcus: 0,
+                leader_regions: 0,
+                follower_regions: 0,
+                workloads,
+            }),
+            version: String::new(),
+            git_commit: String::new(),
+            start_time_ms: 0,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            hostname: String::new(),
+            env_vars: Default::default(),
+        };
+        let node_info_key = NodeInfoKey {
+            role: Role::Datanode,
+            node_id: datanode.id,
+        };
         let put_request = common_meta::rpc::store::PutRequest {
-            key: lease_key_bytes,
-            value: lease_value_bytes,
+            key: (&node_info_key).into(),
+            value: node_info.try_into().unwrap(),
             ..Default::default()
         };
         backend.put(put_request).await.unwrap();

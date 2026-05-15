@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_meta::error::{ExternalSnafu, Result as MetaResult};
-use common_meta::peer::{Peer, PeerAllocator};
+use common_meta::peer::{Peer, PeerAllocContext, PeerAllocator};
 use snafu::{ResultExt, ensure};
 
 use crate::discovery::utils::accept_ingest_workload;
@@ -55,7 +55,11 @@ impl MetasrvPeerAllocator {
     /// This method is mainly a wrapper around the [`SelectorRef`]::`select` method. There is
     /// no guarantee that how the returned peers are used, like whether they are from the same
     /// table or not. So this method isn't idempotent.
-    async fn alloc(&self, min_required_items: usize) -> Result<Vec<Peer>> {
+    async fn alloc(
+        &self,
+        min_required_items: usize,
+        alloc_context: &PeerAllocContext,
+    ) -> Result<Vec<Peer>> {
         if let Some(max_items) = self.max_items {
             ensure!(
                 min_required_items <= max_items as usize,
@@ -71,6 +75,7 @@ impl MetasrvPeerAllocator {
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
                     workload_filter: Some(accept_ingest_workload),
+                    extensions: alloc_context.extensions.clone(),
                 },
             )
             .await
@@ -79,8 +84,8 @@ impl MetasrvPeerAllocator {
 
 #[async_trait]
 impl PeerAllocator for MetasrvPeerAllocator {
-    async fn alloc(&self, regions: usize) -> MetaResult<Vec<Peer>> {
-        self.alloc(regions)
+    async fn alloc(&self, regions: usize, ctx: &PeerAllocContext) -> MetaResult<Vec<Peer>> {
+        self.alloc(regions, ctx)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)

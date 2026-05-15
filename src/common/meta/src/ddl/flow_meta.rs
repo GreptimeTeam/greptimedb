@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::key::FlowId;
-use crate::peer::{NoopPeerAllocator, Peer, PeerAllocatorRef};
+use crate::peer::{NoopPeerAllocator, Peer, PeerAllocContext, PeerAllocatorRef};
 use crate::sequence::SequenceRef;
 
 /// The reference of [FlowMetadataAllocator].
@@ -59,7 +59,10 @@ impl FlowMetadataAllocator {
     /// Allocates the [FlowId] and [Peer]s.
     pub async fn create(&self, partitions: usize) -> Result<(FlowId, Vec<Peer>)> {
         let flow_id = self.allocate_flow_id().await?;
-        let peers = self.peer_allocator.alloc(partitions).await?;
+        let peers = self
+            .peer_allocator
+            .alloc(partitions, &PeerAllocContext::default())
+            .await?;
 
         Ok((flow_id, peers))
     }

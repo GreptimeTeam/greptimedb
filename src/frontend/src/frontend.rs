@@ -326,6 +326,7 @@ mod tests {
             Arc::new(SuspendHandler::new(instance.suspend_state())),
         ]));
         let heartbeat_task = Some(HeartbeatTask::new(
+            instance.frontend_peer_addr().to_string(),
             options,
             meta_client,
             executor,

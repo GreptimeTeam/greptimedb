@@ -21,6 +21,7 @@ use common_meta::ddl::create_table::template::{
 };
 use common_meta::lock_key::TableLock;
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::peer::PeerAllocContext;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{debug, info};
@@ -156,6 +157,7 @@ impl ExecutePlan {
                     .iter()
                     .map(|(n, p)| (*n, p.as_str()))
                     .collect::<Vec<_>>(),
+                &PeerAllocContext::default(),
             )
             .await
             .context(error::AllocateRegionRoutesSnafu { table_id })?;

@@ -48,6 +48,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{self, ExternalSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
+use crate::heartbeat::frontend_peer_addr;
 use crate::instance::Instance;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 
@@ -223,6 +224,7 @@ impl FrontendBuilder {
         )
         .query_engine();
 
+        let frontend_peer_addr = frontend_peer_addr(&self.options);
         let statement_executor = StatementExecutor::new(
             self.catalog_manager.clone(),
             query_engine.clone(),
@@ -232,6 +234,7 @@ impl FrontendBuilder {
             inserter.clone(),
             partition_manager,
             Some(process_manager.clone()),
+            frontend_peer_addr.clone(),
         );
 
         let statement_executor =
@@ -265,6 +268,7 @@ impl FrontendBuilder {
         ))));
 
         Ok(Instance {
+            frontend_peer_addr,
             catalog_manager: self.catalog_manager,
             pipeline_operator,
             statement_executor,

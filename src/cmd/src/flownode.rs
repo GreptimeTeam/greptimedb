@@ -43,6 +43,7 @@ use flow::{
 };
 use meta_client::{MetaClientOptions, MetaClientType};
 use plugins::flownode::context::GrpcConfigureContext;
+use servers::addrs;
 use servers::configurator::GrpcBuilderConfiguratorRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -422,6 +423,7 @@ impl StartCommand {
             layered_cache_registry.clone(),
             meta_client.clone(),
             client,
+            addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
         )
         .await
         .context(StartFlownodeSnafu)?;

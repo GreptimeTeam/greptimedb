@@ -86,7 +86,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use common_meta::peer::Peer;
 
@@ -140,6 +140,7 @@ mod tests {
                 allow_duplication: false,
                 exclude_peer_ids: HashSet::new(),
                 workload_filter: None,
+                extensions: HashMap::new(),
             };
 
             let selected_peers: HashSet<_> =
@@ -156,6 +157,7 @@ mod tests {
             allow_duplication: false,
             exclude_peer_ids: HashSet::new(),
             workload_filter: None,
+            extensions: HashMap::new(),
         };
 
         let selected_result =
@@ -168,6 +170,7 @@ mod tests {
                 allow_duplication: true,
                 exclude_peer_ids: HashSet::new(),
                 workload_filter: None,
+                extensions: HashMap::new(),
             };
 
             let selected_peers =

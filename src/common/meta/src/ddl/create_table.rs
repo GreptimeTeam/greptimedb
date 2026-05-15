@@ -43,8 +43,9 @@ use crate::error::{self, Result};
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::metrics;
+use crate::peer::PeerAllocContext;
 use crate::region_keeper::OperatingRegionGuard;
-use crate::rpc::ddl::CreateTableTask;
+use crate::rpc::ddl::{CreateTableTask, QueryContext};
 use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
 pub struct CreateTableProcedure {
@@ -76,11 +77,19 @@ impl CreateTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
     pub fn new(task: CreateTableTask, context: DdlContext) -> Result<Self> {
+        Self::new_with_query_context(task, QueryContext::default(), context)
+    }
+
+    pub fn new_with_query_context(
+        task: CreateTableTask,
+        query_context: QueryContext,
+        context: DdlContext,
+    ) -> Result<Self> {
         let executor = build_executor_from_create_table_data(&task.create_table)?;
 
         Ok(Self {
             context,
-            data: CreateTableData::new(task),
+            data: CreateTableData::new(task, query_context),
             opening_regions: vec![],
             executor,
         })
@@ -154,7 +163,12 @@ impl CreateTableProcedure {
         } = self
             .context
             .table_metadata_allocator
-            .create(&self.data.task)
+            .create_with_context(
+                &self.data.task,
+                &PeerAllocContext {
+                    extensions: self.data.query_context.extensions.clone(),
+                },
+            )
             .await?;
         self.set_allocated_metadata(table_id, table_route, region_wal_options);
 
@@ -356,6 +370,8 @@ pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
     #[serde(default)]
+    pub query_context: QueryContext,
+    #[serde(default)]
     pub column_metadatas: Vec<ColumnMetadata>,
     /// None stands for not allocated yet.
     pub(crate) table_route: Option<PhysicalTableRouteValue>,
@@ -364,11 +380,12 @@ pub struct CreateTableData {
 }
 
 impl CreateTableData {
-    pub fn new(task: CreateTableTask) -> Self {
+    pub fn new(task: CreateTableTask, query_context: QueryContext) -> Self {
         CreateTableData {
             state: CreateTableState::Prepare,
             column_metadatas: vec![],
             task,
+            query_context,
             table_route: None,
             region_wal_options: None,
         }

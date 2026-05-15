@@ -18,6 +18,7 @@ pub mod utils;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_error::ext::BoxedError;
+use common_meta::cluster::NodeInfo;
 use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::error::Result;
 use common_meta::peer::{Peer, PeerDiscovery, PeerResolver};
@@ -30,8 +31,8 @@ use crate::discovery::lease::{LeaseValueAccessor, LeaseValueType};
 
 #[async_trait::async_trait]
 impl PeerDiscovery for MetaPeerClient {
-    async fn active_frontends(&self) -> Result<Vec<Peer>> {
-        utils::alive_frontends(
+    async fn active_frontends(&self) -> Result<Vec<NodeInfo>> {
+        utils::alive_frontend_infos(
             &DefaultSystemTimer,
             self,
             default_distributed_time_constants().frontend_heartbeat_interval,
@@ -44,8 +45,8 @@ impl PeerDiscovery for MetaPeerClient {
     async fn active_datanodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-    ) -> Result<Vec<Peer>> {
-        utils::alive_datanodes(
+    ) -> Result<Vec<NodeInfo>> {
+        utils::alive_datanode_infos(
             &DefaultSystemTimer,
             self,
             default_distributed_time_constants().datanode_lease,
@@ -59,8 +60,8 @@ impl PeerDiscovery for MetaPeerClient {
     async fn active_flownodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-    ) -> Result<Vec<Peer>> {
-        utils::alive_flownodes(
+    ) -> Result<Vec<NodeInfo>> {
+        utils::alive_flownode_infos(
             &DefaultSystemTimer,
             self,
             default_distributed_time_constants().flownode_lease,

@@ -65,6 +65,7 @@ impl RoundRobinSelector {
                 // 2. filter out excluded datanodes.
                 alive_datanodes
                     .into_iter()
+                    .map(|node| node.peer)
                     .filter(|p| !opts.exclude_peer_ids.contains(&p.id))
                     .collect::<Vec<_>>()
             }
@@ -72,7 +73,10 @@ impl RoundRobinSelector {
                 .peer_discovery
                 .active_flownodes(opts.workload_filter)
                 .await
-                .context(ListActiveFlownodesSnafu)?,
+                .context(ListActiveFlownodesSnafu)?
+                .into_iter()
+                .map(|node| node.peer)
+                .collect::<Vec<_>>(),
         };
 
         ensure!(
@@ -150,6 +154,7 @@ mod test {
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
                     workload_filter: None,
+                    extensions: Default::default(),
                 },
             )
             .await
@@ -168,6 +173,7 @@ mod test {
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
                     workload_filter: None,
+                    extensions: Default::default(),
                 },
             )
             .await
@@ -210,6 +216,7 @@ mod test {
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::from([2, 5]),
                     workload_filter: None,
+                    extensions: Default::default(),
                 },
             )
             .await

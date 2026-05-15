@@ -110,6 +110,7 @@ lazy_static! {
 /// [`servers::query_handler::sql::SqlQueryHandler`], etc.
 #[derive(Clone)]
 pub struct Instance {
+    frontend_peer_addr: String,
     catalog_manager: CatalogManagerRef,
     pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
@@ -131,6 +132,10 @@ pub struct Instance {
 }
 
 impl Instance {
+    pub fn frontend_peer_addr(&self) -> &str {
+        &self.frontend_peer_addr
+    }
+
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
