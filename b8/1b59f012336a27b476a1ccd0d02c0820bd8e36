@@ -1,0 +1,29 @@
+src/meta-srv/src/procedure/wal_prune.rs
+  h_623774b620da8e 108,128
+src/meta-srv/src/error.rs
+  s_555d1220ebe216::t_6612c03f7801d7 1156-1157,1160
+  s_555d1220ebe216::t_9a0a398dca93a5 1358-1360
+  h_623774b620da8e 1145-1153,1158-1159,1398,1424
+  s_555d1220ebe216::t_a2797e7200fd03 1350-1351,1354-1355,1362-1367,1391-1397,1399-1423,1425-1441
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "b81b59f012336a27b476a1ccd0d02c0820bd8e36",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_555d1220ebe216": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1d659bf0dffesZnD4GIwHtICdx",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
