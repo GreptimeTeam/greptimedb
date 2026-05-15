@@ -36,7 +36,7 @@ use crate::data::export_v2::extractor::SchemaExtractor;
 use crate::data::export_v2::manifest::{
     ChunkMeta, ChunkStatus, DataFormat, MANIFEST_FILE, MANIFEST_VERSION, Manifest, TimeRange,
 };
-use crate::data::export_v2::schema::{SCHEMA_DIR, SCHEMAS_FILE};
+use crate::data::export_v2::schema::{DDL_DIR, SCHEMA_DIR, SCHEMAS_FILE};
 use crate::data::path::ddl_path_for_schema;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::data::sql::{escape_sql_identifier, escape_sql_literal};
@@ -949,9 +949,10 @@ impl VerifyReport {
 async fn verify_snapshot(storage: &OpenDalStorage) -> Result<VerifyReport> {
     let manifest = storage.read_manifest().await?;
     let schema_index_path = format!("{}/{}", SCHEMA_DIR, SCHEMAS_FILE);
+    let ddl_prefix = format!("{}/{}/", SCHEMA_DIR, DDL_DIR);
     let schema_index_exists = storage.file_exists(&schema_index_path).await?;
     let ddl_files: HashSet<_> = storage
-        .list_files_recursive("schema/ddl/")
+        .list_files_recursive(&ddl_prefix)
         .await?
         .into_iter()
         .collect();
@@ -992,7 +993,15 @@ async fn verify_snapshot(storage: &OpenDalStorage) -> Result<VerifyReport> {
     }
 
     report.chunk_summary = summarize_chunks(&report.manifest);
-    if !report.manifest.schema_only {
+    if report.manifest.schema_only {
+        let chunk_count = report.manifest.chunks.len();
+        if chunk_count > 0 {
+            report.push_error(format!(
+                "Schema-only snapshot should not contain data chunks (found {})",
+                chunk_count
+            ));
+        }
+    } else {
         verify_chunks_and_data_files(storage, &mut report).await?;
     }
 
@@ -1584,6 +1593,35 @@ mod tests {
                 .problems
                 .iter()
                 .any(|problem| problem.message.contains("Missing schema index"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_snapshot_rejects_schema_only_snapshot_with_chunks() {
+        let dir = tempdir().unwrap();
+        let mut manifest = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            true,
+            true,
+        );
+        let mut chunk = ChunkMeta::new(1, TimeRange::unbounded());
+        chunk.mark_completed(vec!["data/public/chunk_1/file.parquet".to_string()], None);
+        manifest.chunks.push(chunk);
+        write_root_manifest(dir.path(), manifest);
+        write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
+        write_default_ddl_files(dir.path());
+        write_snapshot_file(dir.path(), "data/public/chunk_1/file.parquet", b"data");
+
+        let storage = file_storage_for_dir(dir.path());
+        let report = verify_snapshot(&storage).await.unwrap();
+
+        assert_eq!(report.error_count(), 1);
+        assert_eq!(report.data_files_total, 0);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("should not contain data chunks"))
         );
     }
 
