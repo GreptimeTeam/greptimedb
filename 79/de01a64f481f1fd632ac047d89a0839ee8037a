@@ -1,0 +1,16 @@
+src/meta-srv/src/error.rs
+  h_623774b620da8e 1148-1149
+src/meta-srv/src/procedure/wal_prune.rs
+  h_623774b620da8e 109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "79de01a64f481f1fd632ac047d89a0839ee8037a",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
