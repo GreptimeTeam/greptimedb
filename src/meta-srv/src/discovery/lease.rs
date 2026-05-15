@@ -96,9 +96,6 @@ impl LeaseValueAccessor for MetaPeerClient {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicI64, Ordering};
-    use std::time::Duration;
 
     use api::v1::meta::heartbeat_request::NodeWorkloads;
     use api::v1::meta::{DatanodeWorkloads, FlownodeWorkloads};
@@ -109,31 +106,16 @@ mod tests {
     use common_meta::kv_backend::ResettableKvBackendRef;
     use common_meta::peer::{Peer, PeerDiscovery};
     use common_meta::rpc::store::PutRequest;
-    use common_time::util::{DefaultSystemTimer, SystemTimer, current_time_millis};
+    use common_time::util::current_time_millis;
     use common_workload::DatanodeWorkloadType;
 
-    use crate::discovery::utils::{self, accept_ingest_workload};
-    use crate::key::{DatanodeLeaseKey, FlownodeLeaseKey, LeaseValue};
+    use crate::discovery::utils::accept_ingest_workload;
+    use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::test_util::create_meta_peer_client;
 
     async fn put_lease_value(
         kv_backend: &ResettableKvBackendRef,
         key: DatanodeLeaseKey,
-        value: LeaseValue,
-    ) {
-        kv_backend
-            .put(PutRequest {
-                key: key.try_into().unwrap(),
-                value: value.try_into().unwrap(),
-                prev_kv: false,
-            })
-            .await
-            .unwrap();
-    }
-
-    async fn put_flownode_lease_value(
-        kv_backend: &ResettableKvBackendRef,
-        key: FlownodeLeaseKey,
         value: LeaseValue,
     ) {
         kv_backend
@@ -155,20 +137,6 @@ mod tests {
             })
             .await
             .unwrap();
-    }
-
-    struct MockTimer {
-        current: Arc<AtomicI64>,
-    }
-
-    impl SystemTimer for MockTimer {
-        fn current_time_millis(&self) -> i64 {
-            self.current.fetch_add(1, Ordering::Relaxed)
-        }
-
-        fn current_time_rfc3339(&self) -> String {
-            unimplemented!()
-        }
     }
 
     #[tokio::test]
@@ -335,185 +303,6 @@ mod tests {
 
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].peer.id, 11);
-    }
-
-    #[tokio::test]
-    async fn test_alive_flownodes() {
-        let client = create_meta_peer_client();
-        let in_memory = client.memory_backend();
-        let lease_secs = 10;
-        let timer = DefaultSystemTimer;
-
-        // put a stale lease value for node 1
-        let key = FlownodeLeaseKey { node_id: 1 };
-        let value = LeaseValue {
-            // 20s ago
-            timestamp_millis: timer.current_time_millis() - lease_secs * 2 * 1000,
-            node_addr: "127.0.0.1:20201".to_string(),
-            workloads: NodeWorkloads::Flownode(FlownodeWorkloads { types: vec![] }),
-        };
-        put_flownode_lease_value(&in_memory, key, value).await;
-
-        // put a fresh lease value for node 2
-        let key = FlownodeLeaseKey { node_id: 2 };
-        let value = LeaseValue {
-            timestamp_millis: timer.current_time_millis(),
-            node_addr: "127.0.0.1:20202".to_string(),
-            workloads: NodeWorkloads::Flownode(FlownodeWorkloads { types: vec![] }),
-        };
-        put_flownode_lease_value(&in_memory, key.clone(), value.clone()).await;
-        let peers = utils::alive_flownodes(
-            &timer,
-            client.as_ref(),
-            Duration::from_secs(lease_secs as u64),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(peers.len(), 1);
-        assert_eq!(peers, vec![Peer::new(2, "127.0.0.1:20202".to_string())]);
-    }
-
-    #[tokio::test]
-    async fn test_alive_flownodes_with_timer() {
-        let client = create_meta_peer_client();
-        let in_memory = client.memory_backend();
-        let lease_secs = 10;
-        let timer = MockTimer {
-            current: Arc::new(AtomicI64::new(current_time_millis())),
-        };
-
-        let key = FlownodeLeaseKey { node_id: 2 };
-        let value = LeaseValue {
-            timestamp_millis: timer.current_time_millis(),
-            node_addr: "127.0.0.1:20202".to_string(),
-            workloads: NodeWorkloads::Flownode(FlownodeWorkloads { types: vec![] }),
-        };
-        put_flownode_lease_value(&in_memory, key.clone(), value.clone()).await;
-        let peers = utils::alive_flownodes(
-            &timer,
-            client.as_ref(),
-            Duration::from_secs(lease_secs as u64),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(peers.len(), 1);
-        assert_eq!(peers, vec![Peer::new(2, "127.0.0.1:20202".to_string())]);
-    }
-
-    #[tokio::test]
-    async fn test_lookup_frontends() {
-        let client = create_meta_peer_client();
-        let in_memory = client.memory_backend();
-        let lease_secs = 10;
-        let timer = DefaultSystemTimer;
-
-        let active_frontend_node = NodeInfo {
-            peer: Peer {
-                id: 0,
-                addr: "127.0.0.1:20201".to_string(),
-            },
-            last_activity_ts: timer.current_time_millis(),
-            status: NodeStatus::Frontend(FrontendStatus {}),
-            version: "1.0.0".to_string(),
-            git_commit: "1234567890".to_string(),
-            start_time_ms: current_time_millis() as u64,
-            total_cpu_millicores: 0,
-            total_memory_bytes: 0,
-            cpu_usage_millicores: 0,
-            memory_usage_bytes: 0,
-            hostname: "test_hostname".to_string(),
-            env_vars: Default::default(),
-        };
-
-        let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
-
-        in_memory
-            .put(PutRequest {
-                key: format!("{}{}", key_prefix, "0").into(),
-                value: active_frontend_node.try_into().unwrap(),
-                prev_kv: false,
-            })
-            .await
-            .unwrap();
-
-        let inactive_frontend_node = NodeInfo {
-            peer: Peer {
-                id: 1,
-                addr: "127.0.0.1:20201".to_string(),
-            },
-            last_activity_ts: timer.current_time_millis() - 20 * 1000,
-            status: NodeStatus::Frontend(FrontendStatus {}),
-            version: "1.0.0".to_string(),
-            git_commit: "1234567890".to_string(),
-            start_time_ms: current_time_millis() as u64,
-            total_cpu_millicores: 0,
-            total_memory_bytes: 0,
-            cpu_usage_millicores: 0,
-            memory_usage_bytes: 0,
-            hostname: "test_hostname".to_string(),
-            env_vars: Default::default(),
-        };
-
-        in_memory
-            .put(PutRequest {
-                key: format!("{}{}", key_prefix, "1").into(),
-                value: inactive_frontend_node.try_into().unwrap(),
-                prev_kv: false,
-            })
-            .await
-            .unwrap();
-
-        let peers =
-            utils::alive_frontends(&timer, client.as_ref(), Duration::from_secs(lease_secs))
-                .await
-                .unwrap();
-        assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].id, 0);
-    }
-
-    #[tokio::test]
-    async fn test_lookup_frontends_with_timer() {
-        let client = create_meta_peer_client();
-        let in_memory = client.memory_backend();
-        let lease_secs = 10;
-        let timer = MockTimer {
-            current: Arc::new(AtomicI64::new(current_time_millis())),
-        };
-
-        let active_frontend_node = NodeInfo {
-            peer: Peer {
-                id: 0,
-                addr: "127.0.0.1:20201".to_string(),
-            },
-            last_activity_ts: timer.current_time_millis(),
-            status: NodeStatus::Frontend(FrontendStatus {}),
-            version: "1.0.0".to_string(),
-            git_commit: "1234567890".to_string(),
-            start_time_ms: current_time_millis() as u64,
-            total_cpu_millicores: 0,
-            total_memory_bytes: 0,
-            cpu_usage_millicores: 0,
-            memory_usage_bytes: 0,
-            hostname: "test_hostname".to_string(),
-            env_vars: Default::default(),
-        };
-        let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
-        in_memory
-            .put(PutRequest {
-                key: format!("{}{}", key_prefix, "0").into(),
-                value: active_frontend_node.try_into().unwrap(),
-                prev_kv: false,
-            })
-            .await
-            .unwrap();
-        let peers =
-            utils::alive_frontends(&timer, client.as_ref(), Duration::from_secs(lease_secs))
-                .await
-                .unwrap();
-        assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].id, 0);
     }
 
     #[tokio::test]

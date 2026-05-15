@@ -58,50 +58,6 @@ pub fn build_active_filter<T: LastActiveTs>(active_duration: Duration) -> impl F
     }
 }
 
-/// Returns the alive flownodes.
-pub async fn alive_flownodes(
-    timer: &impl SystemTimer,
-    accessor: &impl LeaseValueAccessor,
-    active_duration: Duration,
-    condition: Option<fn(&NodeWorkloads) -> bool>,
-) -> Result<Vec<Peer>> {
-    let active_filter = build_active_filter(active_duration);
-    let condition = condition.unwrap_or(|_| true);
-    let lease_values = accessor.lease_values(LeaseValueType::Flownode).await?;
-    let now = timer.current_time_millis();
-    Ok(lease_values
-        .into_iter()
-        .filter_map(|(peer_id, lease_value)| {
-            if active_filter(now, &lease_value) && condition(&lease_value.workloads) {
-                Some(Peer::new(peer_id, lease_value.node_addr))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>())
-}
-
-/// Returns the alive frontends.
-pub async fn alive_frontends(
-    timer: &impl SystemTimer,
-    lister: &impl NodeInfoAccessor,
-    active_duration: Duration,
-) -> Result<Vec<Peer>> {
-    let active_filter = build_active_filter(active_duration);
-    let node_infos = lister.node_infos(NodeInfoType::Frontend).await?;
-    let now = timer.current_time_millis();
-    Ok(node_infos
-        .into_iter()
-        .filter_map(|(_, node_info)| {
-            if active_filter(now, &node_info) {
-                Some(node_info.peer)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>())
-}
-
 /// Returns the alive frontend node infos.
 pub async fn alive_frontend_infos(
     timer: &impl SystemTimer,
