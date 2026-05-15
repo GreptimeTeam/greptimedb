@@ -19,7 +19,7 @@ use common_meta::cluster::{
     DatanodeStatus, FlownodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus,
 };
 use common_meta::datanode::EnvVars;
-use common_meta::heartbeat::utils::get_flownode_workloads;
+use common_meta::heartbeat::utils::{get_flownode_workloads, get_frontend_workloads};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::PutRequest;
 use common_telemetry::warn;
@@ -50,10 +50,14 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             return Ok(HandleControl::Continue);
         };
 
+        let frontend_workloads = get_frontend_workloads(req.node_workloads.as_ref());
+
         let value = NodeInfo {
             peer,
             last_activity_ts: common_time::util::current_time_millis(),
-            status: NodeStatus::Frontend(FrontendStatus {}),
+            status: NodeStatus::Frontend(FrontendStatus {
+                workloads: frontend_workloads,
+            }),
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
