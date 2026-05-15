@@ -22,13 +22,9 @@ use datatypes::arrow::datatypes::{DataType, FieldRef, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
 use futures::stream::BoxStream;
-use parquet::arrow::async_reader::ParquetRecordBatchStream;
-use snafu::{IntoError, ResultExt, ensure};
+use snafu::{ResultExt, ensure};
 
-use crate::error::{
-    CastColumnSnafu, NewRecordBatchSnafu, ReadParquetSnafu, Result, UnexpectedSnafu,
-};
-use crate::sst::parquet::async_reader::SstAsyncFileReader;
+use crate::error::{CastColumnSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu};
 
 /// Aligns projected batches to the expected output schema for nested projections.
 ///
@@ -206,37 +202,6 @@ fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
     }
 
     cast_column(array, field.as_ref(), &DEFAULT_CAST_OPTIONS).context(CastColumnSnafu)
-}
-
-/// Maps parquet stream errors into mito errors before batches enter the filler.
-pub(crate) struct ParquetErrorAdapter {
-    inner: ParquetRecordBatchStream<SstAsyncFileReader>,
-    path: String,
-}
-
-impl ParquetErrorAdapter {
-    pub(crate) fn new(inner: ParquetRecordBatchStream<SstAsyncFileReader>, path: String) -> Self {
-        Self { inner, path }
-    }
-}
-
-impl Stream for ParquetErrorAdapter {
-    type Item = Result<RecordBatch>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(rb))) => Poll::Ready(Some(Ok(rb))),
-            Poll::Ready(Some(Err(err))) => {
-                Poll::Ready(Some(Err(
-                    ReadParquetSnafu { path: &this.path }.into_error(err)
-                )))
-            }
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -39,7 +39,6 @@ use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, RowSelection};
-use parquet::arrow::async_reader::{ParquetRecordBatchStream, ParquetRecordBatchStreamBuilder};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use partition::expr::PartitionExpr;
 use snafu::ResultExt;
@@ -49,12 +48,12 @@ use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
-use self::stream::{NestedSchemaAligner, ParquetErrorAdapter, ProjectedRecordBatchStream};
+use self::stream::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
-use crate::error::{ReadDataPartSnafu, ReadParquetSnafu, Result, SerializePartitionExprSnafu};
+use crate::error::{ReadDataPartSnafu, Result, SerializePartitionExprSnafu};
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
@@ -75,7 +74,6 @@ use crate::sst::index::inverted_index::applier::{
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
-use crate::sst::parquet::async_reader::SstAsyncFileReader;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
@@ -84,6 +82,9 @@ use crate::sst::parquet::format::need_override_sequence;
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
+};
+use crate::sst::parquet::push_decoder::{
+    SstParquetRangeFetcher, build_sst_parquet_record_batch_stream,
 };
 use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_plan};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
@@ -1615,7 +1616,7 @@ impl ReaderMetrics {
     }
 }
 
-/// Builder to build a [ParquetRecordBatchStream] for a row group.
+/// Builder to build a parquet record batch stream for a row group.
 pub(crate) struct RowGroupReaderBuilder {
     /// SST file to read.
     ///
@@ -1675,7 +1676,7 @@ impl RowGroupReaderBuilder {
         self.prefilter_builder.is_some()
     }
 
-    /// Builds a [ParquetRecordBatchStream] to read the row group at `row_group_idx`.
+    /// Builds a parquet record batch stream to read the row group at `row_group_idx`.
     ///
     /// If prefiltering is applicable (based on `build_ctx`), this performs a two-phase read:
     /// 1. Reads only the prefilter columns (e.g. PK column), applies filters to get a refined row selection
@@ -1735,11 +1736,10 @@ impl RowGroupReaderBuilder {
 
     fn make_projected_stream(
         &self,
-        stream: ParquetRecordBatchStream<SstAsyncFileReader>,
+        stream: ProjectedRecordBatchStream,
     ) -> Result<ProjectedRecordBatchStream> {
-        let stream = ParquetErrorAdapter::new(stream, self.file_path.clone());
         if !self.has_nested_projection {
-            return Ok(stream.boxed());
+            return Ok(stream);
         }
 
         Ok(NestedSchemaAligner::new(
@@ -1750,44 +1750,31 @@ impl RowGroupReaderBuilder {
         .boxed())
     }
 
-    /// Builds a [ParquetRecordBatchStream] with a custom projection mask.
+    /// Builds a parquet record batch stream with a custom projection mask.
     pub(crate) async fn build_with_projection(
         &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
         projection: ProjectionMask,
         fetch_metrics: Option<&ParquetFetchMetrics>,
-    ) -> Result<ParquetRecordBatchStream<SstAsyncFileReader>> {
-        // Create async file reader with caching support.
-        let async_reader = SstAsyncFileReader::new(
+    ) -> Result<ProjectedRecordBatchStream> {
+        let range_fetcher = SstParquetRangeFetcher::new(
             self.file_handle.file_id(),
             self.file_path.clone(),
             self.object_store.clone(),
             self.cache_strategy.clone(),
-            self.parquet_meta.clone(),
             row_group_idx,
-        )
-        .with_fetch_metrics(fetch_metrics.cloned());
-
-        // Build the async stream using ArrowReaderBuilder API.
-        let mut builder = ParquetRecordBatchStreamBuilder::new_with_metadata(
-            async_reader,
-            self.arrow_metadata.clone(),
+            fetch_metrics.cloned(),
         );
-        builder = builder
-            .with_row_groups(vec![row_group_idx])
-            .with_projection(projection)
-            .with_batch_size(DEFAULT_READ_BATCH_SIZE);
 
-        if let Some(selection) = row_selection {
-            builder = builder.with_row_selection(selection);
-        }
-
-        let stream = builder.build().context(ReadParquetSnafu {
-            path: &self.file_path,
-        })?;
-
-        Ok(stream)
+        build_sst_parquet_record_batch_stream(
+            self.arrow_metadata.clone(),
+            row_group_idx,
+            row_selection,
+            projection,
+            range_fetcher,
+            self.file_path.clone(),
+        )
     }
 }
 
