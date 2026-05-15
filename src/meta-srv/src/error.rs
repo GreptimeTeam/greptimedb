@@ -1142,7 +1142,21 @@ impl Error {
         ) || matches!(
             self,
             Error::DeallocateRegions { source, .. } if source.is_retry_later()
+        ) || matches!(
+            self,
+            Error::DeleteRecords {  error, .. } if Self::is_retryable_kafka_client_error(error)
+        ) || matches!(
+            self,
+            Error::BuildPartitionClient {  error, .. } if Self::is_retryable_kafka_client_error(error)
+        ) || matches!(
+            self,
+            Error::GetOffset {  error, .. } if Self::is_retryable_kafka_client_error(error)
         )
+    }
+
+    /// Returns `true` if the Kafka client has exhausted its internal retry.
+    fn is_retryable_kafka_client_error(err: &rskafka::client::error::Error) -> bool {
+        matches!(err, rskafka::client::error::Error::RetryFailed(_))
     }
 }
 
@@ -1333,11 +1347,24 @@ pub(crate) fn match_for_io_error(err_status: &tonic::Status) -> Option<&std::io:
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
+    use rskafka::BackoffError;
+    use rskafka::client::error::Error as KafkaClientError;
     use snafu::ResultExt;
 
-    use super::DeallocateRegionsSnafu;
+    use super::{
+        BuildPartitionClientSnafu, DeallocateRegionsSnafu, DeleteRecordsSnafu, GetOffsetSnafu,
+    };
+
+    fn retry_failed_kafka_error() -> KafkaClientError {
+        KafkaClientError::RetryFailed(BackoffError::DeadlineExceded {
+            deadline: Duration::from_secs(1),
+            source: Box::new(std::io::Error::other("retry failed")),
+        })
+    }
 
     #[test]
     fn test_deallocate_regions_is_retryable_when_source_is_retry_later() {
@@ -1360,5 +1387,57 @@ mod tests {
             .unwrap_err();
 
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_kafka_retry_failed_errors_are_retryable() {
+        let delete_records_err = Err::<(), _>(retry_failed_kafka_error())
+            .context(DeleteRecordsSnafu {
+                topic: "test_topic",
+                partition: 0,
+                offset: 1024u64,
+            })
+            .unwrap_err();
+        let build_partition_client_err = Err::<(), _>(retry_failed_kafka_error())
+            .context(BuildPartitionClientSnafu {
+                topic: "test_topic",
+                partition: 0,
+            })
+            .unwrap_err();
+        let get_offset_err = Err::<(), _>(retry_failed_kafka_error())
+            .context(GetOffsetSnafu {
+                topic: "test_topic",
+            })
+            .unwrap_err();
+
+        assert!(delete_records_err.is_retryable());
+        assert!(build_partition_client_err.is_retryable());
+        assert!(get_offset_err.is_retryable());
+    }
+
+    #[test]
+    fn test_kafka_non_retry_failed_errors_are_not_retryable() {
+        let delete_records_err = Err::<(), _>(KafkaClientError::Timeout)
+            .context(DeleteRecordsSnafu {
+                topic: "test_topic",
+                partition: 0,
+                offset: 1024u64,
+            })
+            .unwrap_err();
+        let build_partition_client_err = Err::<(), _>(KafkaClientError::Timeout)
+            .context(BuildPartitionClientSnafu {
+                topic: "test_topic",
+                partition: 0,
+            })
+            .unwrap_err();
+        let get_offset_err = Err::<(), _>(KafkaClientError::Timeout)
+            .context(GetOffsetSnafu {
+                topic: "test_topic",
+            })
+            .unwrap_err();
+
+        assert!(!delete_records_err.is_retryable());
+        assert!(!build_partition_client_err.is_retryable());
+        assert!(!get_offset_err.is_retryable());
     }
 }

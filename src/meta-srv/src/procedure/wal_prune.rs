@@ -105,7 +105,7 @@ impl WalPruneProcedure {
     /// Prune the WAL and persist the minimum prunable entry id.
     ///
     /// Retry:
-    /// - Failed to update the minimum prunable entry id in kvbackend.
+    /// - Kafka client errors that have exhausted rskafka's internal retry.
     /// - Failed to delete records.
     pub async fn on_prune(&mut self) -> Result<Status> {
         let partition_client = get_partition_client(&self.context.client, &self.data.topic).await?;
@@ -125,14 +125,7 @@ impl WalPruneProcedure {
             &self.data.topic,
             self.data.prunable_entry_id,
         )
-        .await
-        .map_err(BoxedError::new)
-        .with_context(|_| error::RetryLaterWithSourceSnafu {
-            reason: format!(
-                "Failed to delete records for topic: {}, prunable entry id: {}, latest offset: {}",
-                self.data.topic, self.data.prunable_entry_id, latest_offset
-            ),
-        })?;
+        .await?;
 
         // Update the pruned entry id for the topic.
         update_pruned_entry_id(
