@@ -1,0 +1,48 @@
+src/mito2/src/region.rs
+  h_623774b620da8e 1063,1315
+src/datanode/src/heartbeat/handler/downgrade_region.rs
+  h_623774b620da8e 22,116-119
+src/mito2/src/gc.rs
+  h_623774b620da8e 289
+src/mito2/src/manifest/manager.rs
+  s_313f6d000e4ee5::t_64cae35463d8d3 42,733
+src/mito2/src/worker/handle_compaction.rs
+  h_623774b620da8e 43-50
+src/mito2/src/compaction.rs
+  s_313f6d000e4ee5::t_53914f12d1d82c 66
+  h_623774b620da8e 157-158
+  s_313f6d000e4ee5::t_480a7af5568dea 1146
+src/mito2/src/flush.rs
+  h_623774b620da8e 246-247
+src/mito2/src/worker/handle_flush.rs
+  h_623774b620da8e 180-183,185
+src/store-api/src/region_request.rs
+  h_623774b620da8e 1417-1420
+src/mito2/src/worker/handle_write.rs
+  h_623774b620da8e 451-453,467,472,479
+src/mito2/src/worker/handle_close.rs
+  h_623774b620da8e 20,52-55
+src/mito2/src/worker.rs
+  h_623774b620da8e 1156
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "0ff08317af12cae7222ede8d9509150387dc915a",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_313f6d000e4ee5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1d5844c5dffevvF9sjoMiB3h71",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
