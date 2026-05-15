@@ -8,6 +8,9 @@ typs = "typs"
 unqualifed = "unqualifed"
 excluder = "excluder"
 consts = "consts"
+# Upstream crate rskafka defines a `DeadlineExceded` error variant, but it is misspelled. 
+# We need to extend the word list to avoid typos in our codebase.
+Exceded = "Exceded"
 
 [files]
 extend-exclude = [
