@@ -39,7 +39,7 @@ use table::predicate::Predicate;
 
 use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu,
-    ReadParquetSnafu, RecordBatchSnafu, Result, UnexpectedSnafu,
+    RecordBatchSnafu, Result, UnexpectedSnafu,
 };
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::flat_format::FlatReadFormat;
@@ -582,9 +582,7 @@ pub(crate) async fn execute_prefilter(
     let mut rows_selected = 0usize;
 
     while let Some(batch_result) = stream.next().await {
-        let batch = batch_result.context(ReadParquetSnafu {
-            path: reader_builder.file_path(),
-        })?;
+        let batch = batch_result?;
         let num_rows = batch.num_rows();
         if num_rows == 0 {
             continue;

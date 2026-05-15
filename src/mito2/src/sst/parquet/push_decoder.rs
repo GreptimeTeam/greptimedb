@@ -12,31 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Async file reader implementation for SST parquet files.
+//! Push decoder stream implementation for SST parquet files.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::FutureExt;
-use futures::future::BoxFuture;
+use datatypes::arrow::record_batch::RecordBatch;
+use futures::StreamExt;
+use futures::stream::BoxStream;
 use object_store::ObjectStore;
-use parquet::arrow::async_reader::AsyncFileReader;
-use parquet::errors::{ParquetError, Result as ParquetResult};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::DecodeResult;
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, RowSelection};
+use parquet::arrow::push_decoder::ParquetPushDecoderBuilder;
+use snafu::ResultExt;
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheStrategy, PageKey, PageValue};
+use crate::error::{OpenDalSnafu, ReadParquetSnafu, Result};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::file::RegionFileId;
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::row_group::{ParquetFetchMetrics, compute_total_range_size};
 
-/// An [AsyncFileReader] implementation for SST parquet files.
+/// Fetches parquet byte ranges through Greptime's cache hierarchy.
 ///
-/// This reader provides async byte access to parquet data in object storage,
-/// with caching support (page cache and write cache).
-pub struct SstAsyncFileReader {
+/// The push decoder decides which ranges are required for decoding, while this
+/// fetcher keeps cache lookup, local write-cache reads, and remote I/O explicit
+/// in Greptime code.
+pub(crate) struct SstParquetRangeFetcher {
     /// Region file ID for cache key.
     region_file_id: RegionFileId,
     /// Path to the parquet file in object storage.
@@ -45,43 +51,34 @@ pub struct SstAsyncFileReader {
     object_store: ObjectStore,
     /// Cache strategy for reading pages.
     cache_strategy: CacheStrategy,
-    /// Cached parquet metadata.
-    metadata: Arc<ParquetMetaData>,
     /// Row group index for cache key.
     row_group_idx: usize,
     /// Optional metrics for tracking fetch operations.
     fetch_metrics: Option<ParquetFetchMetrics>,
 }
 
-impl SstAsyncFileReader {
-    /// Creates a new [SstAsyncFileReader].
-    pub fn new(
+impl SstParquetRangeFetcher {
+    /// Creates a new [SstParquetRangeFetcher].
+    pub(crate) fn new(
         region_file_id: RegionFileId,
         file_path: String,
         object_store: ObjectStore,
         cache_strategy: CacheStrategy,
-        metadata: Arc<ParquetMetaData>,
         row_group_idx: usize,
+        fetch_metrics: Option<ParquetFetchMetrics>,
     ) -> Self {
         Self {
             region_file_id,
             file_path,
             object_store,
             cache_strategy,
-            metadata,
             row_group_idx,
-            fetch_metrics: None,
+            fetch_metrics,
         }
     }
 
-    /// Sets the fetch metrics.
-    pub fn with_fetch_metrics(mut self, metrics: Option<ParquetFetchMetrics>) -> Self {
-        self.fetch_metrics = metrics;
-        self
-    }
-
     /// Fetches byte ranges from page cache, write cache, or object store.
-    async fn fetch_bytes_with_cache(&self, ranges: Vec<Range<u64>>) -> ParquetResult<Vec<Bytes>> {
+    async fn fetch_bytes_with_cache(&self, ranges: Vec<Range<u64>>) -> Result<Vec<Bytes>> {
         let fetch_start = self
             .fetch_metrics
             .as_ref()
@@ -123,7 +120,10 @@ impl SstAsyncFileReader {
             .fetch_metrics
             .as_ref()
             .map(|_| std::time::Instant::now());
-        let write_cache_result = self.fetch_ranges_from_write_cache(key, &ranges).await;
+        let write_cache_result = match self.cache_strategy.write_cache() {
+            Some(cache) => cache.file_cache().read_ranges(key, &ranges).await,
+            None => None,
+        };
 
         let pages = match write_cache_result {
             Some(data) => {
@@ -153,7 +153,7 @@ impl SstAsyncFileReader {
                     .map(|_| std::time::Instant::now());
                 let data = fetch_byte_ranges(&self.file_path, self.object_store.clone(), &ranges)
                     .await
-                    .map_err(|e| ParquetError::External(Box::new(e)))?;
+                    .context(OpenDalSnafu)?;
 
                 if let Some(metrics) = &self.fetch_metrics {
                     let elapsed = start.map(|start| start.elapsed()).unwrap_or_default();
@@ -180,42 +180,43 @@ impl SstAsyncFileReader {
 
         Ok(pages)
     }
-
-    /// Fetches data from write cache.
-    /// Returns `None` if the data is not in the cache.
-    async fn fetch_ranges_from_write_cache(
-        &self,
-        key: IndexKey,
-        ranges: &[Range<u64>],
-    ) -> Option<Vec<Bytes>> {
-        if let Some(cache) = self.cache_strategy.write_cache() {
-            return cache.file_cache().read_ranges(key, ranges).await;
-        }
-        None
-    }
 }
 
-impl AsyncFileReader for SstAsyncFileReader {
-    fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, ParquetResult<Bytes>> {
-        async move {
-            let mut result = self.fetch_bytes_with_cache(vec![range]).await?;
-            Ok(result.pop().unwrap_or_default())
+/// Builds a parquet record batch stream driven directly by [ParquetPushDecoderBuilder].
+pub(crate) fn build_sst_parquet_record_batch_stream(
+    arrow_metadata: ArrowReaderMetadata,
+    row_group_idx: usize,
+    row_selection: Option<RowSelection>,
+    projection: ProjectionMask,
+    fetcher: SstParquetRangeFetcher,
+    file_path: String,
+) -> Result<BoxStream<'static, Result<RecordBatch>>> {
+    let mut builder = ParquetPushDecoderBuilder::new_with_metadata(arrow_metadata)
+        .with_row_groups(vec![row_group_idx])
+        .with_projection(projection)
+        .with_batch_size(DEFAULT_READ_BATCH_SIZE);
+
+    if let Some(selection) = row_selection {
+        builder = builder.with_row_selection(selection);
+    }
+
+    let mut decoder = builder
+        .build()
+        .context(ReadParquetSnafu { path: &file_path })?;
+
+    Ok(async_stream::try_stream! {
+        loop {
+            match decoder.try_decode().context(ReadParquetSnafu { path: &file_path })? {
+                DecodeResult::NeedsData(ranges) => {
+                    let data = fetcher.fetch_bytes_with_cache(ranges.clone()).await?;
+                    decoder
+                        .push_ranges(ranges, data)
+                        .context(ReadParquetSnafu { path: &file_path })?;
+                }
+                DecodeResult::Data(batch) => yield batch,
+                DecodeResult::Finished => break,
+            }
         }
-        .boxed()
     }
-
-    fn get_byte_ranges(
-        &mut self,
-        ranges: Vec<Range<u64>>,
-    ) -> BoxFuture<'_, ParquetResult<Vec<Bytes>>> {
-        async move { self.fetch_bytes_with_cache(ranges).await }.boxed()
-    }
-
-    fn get_metadata(
-        &mut self,
-        _options: Option<&parquet::arrow::arrow_reader::ArrowReaderOptions>,
-    ) -> BoxFuture<'_, ParquetResult<Arc<ParquetMetaData>>> {
-        // Metadata is already cached, return it immediately.
-        std::future::ready(Ok(self.metadata.clone())).boxed()
-    }
+    .boxed())
 }
