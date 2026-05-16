@@ -1245,7 +1245,10 @@ impl PageRangeCache {
                     .inc();
 
                 let group_key = key.group_key();
-                if let Some(group) = eviction_index.get(&group_key).map(|group| group.clone()) {
+                if let Some(group) = eviction_index
+                    .get(&group_key)
+                    .map(|group| Arc::clone(group.value()))
+                {
                     let mut ranges = group.write().unwrap();
                     ranges.remove(&(key.start, key.end));
                     if ranges.is_empty() {
@@ -1274,7 +1277,10 @@ impl PageRangeCache {
             row_group_idx,
         };
 
-        let group = self.index.get(&group_key);
+        let group = self
+            .index
+            .get(&group_key)
+            .map(|group| Arc::clone(group.value()));
         for range in ranges {
             if range.start >= range.end {
                 cached_parts.push(Vec::new());
@@ -1282,7 +1288,7 @@ impl PageRangeCache {
             }
 
             let mut parts = Vec::new();
-            if let Some(group) = group.as_ref() {
+            if let Some(group) = &group {
                 let index = group.read().unwrap();
                 // A simple first-stage interval lookup: inspect fragments whose start is before
                 // the requested end and keep those that overlap the requested range.
