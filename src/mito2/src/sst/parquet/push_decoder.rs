@@ -15,9 +15,8 @@
 //! Push decoder stream implementation for SST parquet files.
 
 use std::ops::Range;
-use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -26,11 +25,11 @@ use parquet::DecodeResult;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, RowSelection};
 use parquet::arrow::push_decoder::ParquetPushDecoderBuilder;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 
 use crate::cache::file_cache::{FileType, IndexKey};
-use crate::cache::{CacheStrategy, PageKey, PageValue};
-use crate::error::{OpenDalSnafu, ReadParquetSnafu, Result};
+use crate::cache::{CacheStrategy, PageRangePart};
+use crate::error::{OpenDalSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::file::RegionFileId;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
@@ -85,30 +84,44 @@ impl SstParquetRangeFetcher {
             .map(|_| std::time::Instant::now());
         let _timer = READ_STAGE_FETCH_PAGES.start_timer();
 
-        let page_key = PageKey::new(
+        let mut page_lookup = self.cache_strategy.get_page_ranges(
             self.region_file_id.file_id(),
             self.row_group_idx,
-            ranges.clone(),
+            &ranges,
         );
-
-        // Check page cache first.
-        if let Some(pages) = self.cache_strategy.get_pages(&page_key) {
-            if let Some(metrics) = &self.fetch_metrics {
-                let total_size: u64 = ranges.iter().map(|r| r.end - r.start).sum();
-                let mut metrics_data = metrics.data.lock().unwrap();
-                metrics_data.page_cache_hit += 1;
-                metrics_data.pages_to_fetch_mem += ranges.len();
-                metrics_data.page_size_to_fetch_mem += total_size;
-                metrics_data.page_size_needed += total_size;
-                if let Some(start) = fetch_start {
-                    metrics_data.total_fetch_elapsed += start.elapsed();
-                }
-            }
-            return Ok(pages.compressed.clone());
+        if let Some(lookup) = &page_lookup
+            && lookup.cached_bytes > 0
+            && let Some(metrics) = &self.fetch_metrics
+        {
+            let mut metrics_data = metrics.data.lock().unwrap();
+            metrics_data.page_cache_hit += 1;
+            metrics_data.pages_to_fetch_mem += lookup.cached_range_count;
+            metrics_data.page_size_to_fetch_mem += lookup.cached_bytes;
+            metrics_data.page_size_needed += lookup.cached_bytes;
         }
 
+        // Fast path: all requested ranges can be assembled from cached fragments.
+        if page_lookup
+            .as_ref()
+            .map(|lookup| lookup.is_fully_cached())
+            .unwrap_or(false)
+        {
+            let lookup = page_lookup.take().unwrap();
+            if let Some(metrics) = &self.fetch_metrics
+                && let Some(start) = fetch_start
+            {
+                metrics.data.lock().unwrap().total_fetch_elapsed += start.elapsed();
+            }
+            return assemble_ranges(&ranges, lookup.cached_parts, &[]);
+        }
+
+        let missing_ranges = page_lookup
+            .as_ref()
+            .map(|lookup| lookup.missing_ranges.clone())
+            .unwrap_or_else(|| ranges.clone());
+
         // Calculate total range size for metrics.
-        let (total_range_size, unaligned_size) = compute_total_range_size(&ranges);
+        let (_, unaligned_size) = compute_total_range_size(&missing_ranges);
 
         // Check write cache.
         let key = IndexKey::new(
@@ -121,21 +134,22 @@ impl SstParquetRangeFetcher {
             .as_ref()
             .map(|_| std::time::Instant::now());
         let write_cache_result = match self.cache_strategy.write_cache() {
-            Some(cache) => cache.file_cache().read_ranges(key, &ranges).await,
+            Some(cache) => cache.file_cache().read_ranges(key, &missing_ranges).await,
             None => None,
         };
 
-        let pages = match write_cache_result {
+        let fetched_pages = match write_cache_result {
             Some(data) => {
                 if let Some(metrics) = &self.fetch_metrics {
                     let elapsed = fetch_write_cache_start
                         .map(|start| start.elapsed())
                         .unwrap_or_default();
-                    let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+                    let range_size_needed: u64 =
+                        missing_ranges.iter().map(|r| r.end - r.start).sum();
                     let mut metrics_data = metrics.data.lock().unwrap();
                     metrics_data.write_cache_fetch_elapsed += elapsed;
                     metrics_data.write_cache_hit += 1;
-                    metrics_data.pages_to_fetch_write_cache += ranges.len();
+                    metrics_data.pages_to_fetch_write_cache += missing_ranges.len();
                     metrics_data.page_size_to_fetch_write_cache += unaligned_size;
                     metrics_data.page_size_needed += range_size_needed;
                 }
@@ -151,17 +165,19 @@ impl SstParquetRangeFetcher {
                     .fetch_metrics
                     .as_ref()
                     .map(|_| std::time::Instant::now());
-                let data = fetch_byte_ranges(&self.file_path, self.object_store.clone(), &ranges)
-                    .await
-                    .context(OpenDalSnafu)?;
+                let data =
+                    fetch_byte_ranges(&self.file_path, self.object_store.clone(), &missing_ranges)
+                        .await
+                        .context(OpenDalSnafu)?;
 
                 if let Some(metrics) = &self.fetch_metrics {
                     let elapsed = start.map(|start| start.elapsed()).unwrap_or_default();
-                    let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+                    let range_size_needed: u64 =
+                        missing_ranges.iter().map(|r| r.end - r.start).sum();
                     let mut metrics_data = metrics.data.lock().unwrap();
                     metrics_data.store_fetch_elapsed += elapsed;
                     metrics_data.cache_miss += 1;
-                    metrics_data.pages_to_fetch_store += ranges.len();
+                    metrics_data.pages_to_fetch_store += missing_ranges.len();
                     metrics_data.page_size_to_fetch_store += unaligned_size;
                     metrics_data.page_size_needed += range_size_needed;
                 }
@@ -169,17 +185,120 @@ impl SstParquetRangeFetcher {
             }
         };
 
-        // Put pages back to the cache.
-        let page_value = PageValue::new(pages.clone(), total_range_size);
-        self.cache_strategy
-            .put_pages(page_key, Arc::new(page_value));
+        self.cache_strategy.put_page_ranges(
+            self.region_file_id.file_id(),
+            self.row_group_idx,
+            &missing_ranges,
+            &fetched_pages,
+        );
 
         if let (Some(metrics), Some(start)) = (&self.fetch_metrics, fetch_start) {
             metrics.data.lock().unwrap().total_fetch_elapsed += start.elapsed();
         }
 
-        Ok(pages)
+        if let Some(lookup) = page_lookup {
+            let fetched_parts = missing_ranges
+                .into_iter()
+                .zip(fetched_pages)
+                .map(|(range, bytes)| PageRangePart { range, bytes })
+                .collect::<Vec<_>>();
+            return assemble_ranges(&ranges, lookup.cached_parts, &fetched_parts);
+        }
+
+        Ok(fetched_pages)
     }
+}
+
+fn assemble_ranges(
+    ranges: &[Range<u64>],
+    cached_parts: Vec<Vec<PageRangePart>>,
+    fetched_parts: &[PageRangePart],
+) -> Result<Vec<Bytes>> {
+    ensure!(
+        ranges.len() == cached_parts.len(),
+        UnexpectedSnafu {
+            reason: format!(
+                "Invalid parquet range assembly: {} requested ranges but {} cached part groups",
+                ranges.len(),
+                cached_parts.len()
+            ),
+        }
+    );
+
+    ranges
+        .iter()
+        .zip(cached_parts)
+        .map(|(range, mut parts)| {
+            parts.extend(
+                fetched_parts
+                    .iter()
+                    .filter_map(|part| overlapping_part(range, part)),
+            );
+            assemble_range(range, parts)
+        })
+        .collect()
+}
+
+fn overlapping_part(range: &Range<u64>, part: &PageRangePart) -> Option<PageRangePart> {
+    let start = range.start.max(part.range.start);
+    let end = range.end.min(part.range.end);
+    if start >= end {
+        return None;
+    }
+
+    let slice_start = (start - part.range.start) as usize;
+    let slice_end = (end - part.range.start) as usize;
+    Some(PageRangePart {
+        range: start..end,
+        bytes: part.bytes.slice(slice_start..slice_end),
+    })
+}
+
+fn assemble_range(range: &Range<u64>, mut parts: Vec<PageRangePart>) -> Result<Bytes> {
+    if range.start >= range.end {
+        return Ok(Bytes::new());
+    }
+
+    parts.sort_unstable_by_key(|part| part.range.start);
+    if parts.len() == 1 && parts[0].range == *range {
+        return Ok(parts.pop().unwrap().bytes);
+    }
+
+    let mut cursor = range.start;
+    let mut output = BytesMut::with_capacity((range.end - range.start) as usize);
+    for part in parts {
+        ensure!(
+            part.range.start <= cursor,
+            UnexpectedSnafu {
+                reason: format!(
+                    "Missing cached parquet bytes for range {}..{}, next part starts at {}",
+                    range.start, range.end, part.range.start
+                ),
+            }
+        );
+        if part.range.end <= cursor {
+            continue;
+        }
+
+        let slice_start = (cursor - part.range.start) as usize;
+        output.extend_from_slice(&part.bytes.slice(slice_start..));
+        cursor = part.range.end.min(range.end);
+        if cursor >= range.end {
+            break;
+        }
+    }
+
+    ensure!(
+        cursor == range.end,
+        UnexpectedSnafu {
+            reason: format!(
+                "Missing cached parquet bytes for range {}..{}, assembled through {}",
+                range.start, range.end, cursor
+            ),
+        }
+    );
+
+    Ok(output.freeze())
 }
 
 /// Builds a parquet record batch stream driven directly by [ParquetPushDecoderBuilder].
@@ -219,4 +338,45 @@ pub(crate) fn build_sst_parquet_record_batch_stream(
         }
     }
     .boxed())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_assemble_range_from_cached_subrange_and_fetched_tail() {
+        let cached_parts = vec![vec![PageRangePart {
+            range: 400..500,
+            bytes: Bytes::from(vec![1; 100]),
+        }]];
+        let fetched_parts = vec![PageRangePart {
+            range: 500..600,
+            bytes: Bytes::from(vec![2; 100]),
+        }];
+
+        let requested = 400..600;
+        let output = assemble_ranges(
+            std::slice::from_ref(&requested),
+            cached_parts,
+            &fetched_parts,
+        )
+        .unwrap();
+        assert_eq!(1, output.len());
+        assert_eq!(vec![1; 100].as_slice(), &output[0][..100]);
+        assert_eq!(vec![2; 100].as_slice(), &output[0][100..]);
+    }
+
+    #[test]
+    fn test_assemble_range_returns_single_covering_part_without_copy() {
+        let bytes = Bytes::from_static(b"abcdef");
+        let cached_parts = vec![vec![PageRangePart {
+            range: 10..16,
+            bytes: bytes.clone(),
+        }]];
+
+        let requested = 10..16;
+        let output = assemble_ranges(std::slice::from_ref(&requested), cached_parts, &[]).unwrap();
+        assert_eq!(bytes, output[0]);
+    }
 }
