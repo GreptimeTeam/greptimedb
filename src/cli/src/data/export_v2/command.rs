@@ -1058,6 +1058,7 @@ async fn verify_chunks_and_data_files(
                     .iter()
                     .map(|schema| data_dir_for_schema_chunk(schema, chunk.id))
                     .collect::<Vec<_>>();
+                let mut listed_files = HashSet::new();
                 for file in &chunk.files {
                     data_files_total += 1;
                     let Some(path) = valid_manifest_data_file_path(file, &allowed_prefixes) else {
@@ -1071,12 +1072,25 @@ async fn verify_chunks_and_data_files(
                         continue;
                     };
 
+                    listed_files.insert(path.to_string());
                     if existing_files.contains(path) {
                         data_files_verified += 1;
                     } else {
                         problems.push(VerifyProblem {
                             severity: VerifySeverity::Error,
                             message: format!("Chunk {}: missing file '{}'", chunk.id, path),
+                        });
+                    }
+                }
+                for path in existing_files.iter().filter(|path| {
+                    allowed_prefixes
+                        .iter()
+                        .any(|prefix| path.starts_with(prefix))
+                }) {
+                    if !listed_files.contains(path) {
+                        problems.push(VerifyProblem {
+                            severity: VerifySeverity::Error,
+                            message: format!("Chunk {}: unlisted data file '{}'", chunk.id, path),
                         });
                     }
                 }
@@ -1144,11 +1158,12 @@ fn valid_manifest_data_file_path<'a>(
     path: &'a str,
     allowed_prefixes: &[String],
 ) -> Option<&'a str> {
-    if path.is_empty() || path.starts_with('/') || !path.starts_with("data/") {
+    let normalized = path.trim_start_matches('/');
+    if normalized.is_empty() || !normalized.starts_with("data/") {
         return None;
     }
 
-    if path
+    if normalized
         .split('/')
         .any(|segment| segment.is_empty() || segment == "." || segment == "..")
     {
@@ -1157,12 +1172,12 @@ fn valid_manifest_data_file_path<'a>(
 
     if !allowed_prefixes
         .iter()
-        .any(|prefix| path.starts_with(prefix))
+        .any(|prefix| normalized.starts_with(prefix))
     {
         return None;
     }
 
-    Some(path)
+    Some(normalized)
 }
 
 fn print_verify_report(snapshot: &str, report: &VerifyReport) {
@@ -1730,13 +1745,12 @@ mod tests {
             true,
         );
         let mut duplicate = ChunkMeta::new(1, TimeRange::unbounded());
-        duplicate.mark_completed(vec!["data/analytics/1/file.parquet".to_string()], None);
+        duplicate.mark_completed(vec!["data/public/1/file.parquet".to_string()], None);
         manifest.chunks.push(duplicate);
         write_root_manifest(dir.path(), manifest);
         write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
         write_default_ddl_files(dir.path());
         write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
-        write_snapshot_file(dir.path(), "data/analytics/1/file.parquet", b"data");
 
         let storage = file_storage_for_dir(dir.path());
         let report = verify_snapshot(&storage).await.unwrap();
@@ -1842,11 +1856,10 @@ mod tests {
             false,
             true,
         );
-        manifest.chunks[0].files = vec!["/data/public/1/file.parquet".to_string()];
+        manifest.chunks[0].files = vec!["data/public/1/../file.parquet".to_string()];
         write_root_manifest(dir.path(), manifest);
         write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
         write_default_ddl_files(dir.path());
-        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
 
         let storage = file_storage_for_dir(dir.path());
         let report = verify_snapshot(&storage).await.unwrap();
@@ -1859,6 +1872,54 @@ mod tests {
                 .any(|problem| problem.message.contains("invalid data file path"))
         );
         assert_eq!(report.data_files_verified, 0);
+    }
+
+    #[tokio::test]
+    async fn test_verify_snapshot_accepts_leading_slash_manifest_data_paths() {
+        let dir = tempdir().unwrap();
+        let mut manifest = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            false,
+            true,
+        );
+        manifest.chunks[0].files = vec!["/data/public/1/file.parquet".to_string()];
+        write_root_manifest(dir.path(), manifest);
+        write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
+        write_default_ddl_files(dir.path());
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
+
+        let storage = file_storage_for_dir(dir.path());
+        let report = verify_snapshot(&storage).await.unwrap();
+
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(report.data_files_verified, 1);
+    }
+
+    #[tokio::test]
+    async fn test_verify_snapshot_rejects_unlisted_files_under_completed_chunk_prefix() {
+        let dir = tempdir().unwrap();
+        let manifest = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            false,
+            true,
+        );
+        write_root_manifest(dir.path(), manifest);
+        write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
+        write_default_ddl_files(dir.path());
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/public/1/extra.parquet", b"data");
+
+        let storage = file_storage_for_dir(dir.path());
+        let report = verify_snapshot(&storage).await.unwrap();
+
+        assert_eq!(report.error_count(), 1);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("unlisted data file"))
+        );
+        assert_eq!(report.data_files_verified, 1);
     }
 
     #[tokio::test]
