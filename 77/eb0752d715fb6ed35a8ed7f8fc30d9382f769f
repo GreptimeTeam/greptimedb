@@ -1,0 +1,13 @@
+src/common/meta/src/region_keeper.rs
+  766f83437f082beb 15,18,28,54,63-67,85,88-91,93-94,102-103,126,128,145-147,160-161,163-166,168-174
+src/common/meta/src/ddl/drop_database/executor.rs
+  766f83437f082beb 32,72,74,77
+src/meta-srv/src/procedure/repartition.rs
+  766f83437f082beb 45,420,422
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "77eb0752d715fb6ed35a8ed7f8fc30d9382f769f",
+  "prompts": {}
+}

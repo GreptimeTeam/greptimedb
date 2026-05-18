@@ -1,0 +1,31 @@
+src/meta-srv/src/region/lease_keeper.rs
+  766f83437f082beb 392,397-401,503,508,513,522,793,800,816
+src/common/meta/src/rpc/router.rs
+  766f83437f082beb 26,103-109,360-370
+  cd18af3a85d37a1a 607-618,782-840
+src/common/meta/src/region_keeper.rs
+  766f83437f082beb 16,19,29,55,64-68,88,91-94,96-97,104-105,128,130,147-149,161-162,164-167,169-175
+src/common/meta/src/ddl/drop_database/executor.rs
+  766f83437f082beb 32,72,74,77
+src/meta-srv/src/procedure/repartition.rs
+  766f83437f082beb 45,420,422
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "557a0d22f157456cdbc3a12ba746c4bc1cfde4da",
+  "prompts": {
+    "766f83437f082beb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_26fda9c9affez3errKHJkwOiJK",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 9,
+      "overriden_lines": 0
+    }
+  }
+}

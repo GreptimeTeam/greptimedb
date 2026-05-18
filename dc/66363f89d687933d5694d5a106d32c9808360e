@@ -1,0 +1,9 @@
+src/common/meta/src/region_keeper.rs
+  766f83437f082beb 16,19,29,55,64-68,88,91-94,96-97,105-106,129,131,148-150,163-164,166-169,171-177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "dc66363f89d687933d5694d5a106d32c9808360e",
+  "prompts": {}
+}

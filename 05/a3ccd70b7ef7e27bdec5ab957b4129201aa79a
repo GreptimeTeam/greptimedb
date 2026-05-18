@@ -1,0 +1,30 @@
+src/meta-srv/src/procedure/region_migration/open_candidate_region.rs
+  766f83437f082beb 28,133,300
+src/meta-srv/src/procedure/region_migration/update_metadata/upgrade_candidate_region.rs
+  766f83437f082beb 234,471
+src/meta-srv/src/handler/region_lease_handler.rs
+  766f83437f082beb 284
+src/common/meta/src/region_keeper.rs
+  766f83437f082beb 15,18,28,54,63-67,85,100-103,105-106,118-119,142,144,161-163,176-177,179-182,184-190
+src/meta-srv/src/region/lease_keeper.rs
+  766f83437f082beb 379,384-388,488
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "05a3ccd70b7ef7e27bdec5ab957b4129201aa79a",
+  "prompts": {
+    "766f83437f082beb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_26fda9c9affez3errKHJkwOiJK",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "total_additions": 65,
+      "total_deletions": 22,
+      "accepted_lines": 19,
+      "overriden_lines": 0
+    }
+  }
+}
