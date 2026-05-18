@@ -1001,6 +1001,8 @@ async fn verify_snapshot(storage: &OpenDalStorage) -> Result<VerifyReport> {
                 chunk_count
             ));
         }
+    } else if report.manifest.chunks.is_empty() {
+        report.push_error("Full snapshot should contain at least one data chunk");
     } else {
         verify_chunks_and_data_files(storage, &mut report).await?;
     }
@@ -1638,6 +1640,32 @@ mod tests {
                 .problems
                 .iter()
                 .any(|problem| problem.message.contains("should not contain data chunks"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_snapshot_rejects_full_snapshot_without_chunks() {
+        let dir = tempdir().unwrap();
+        let mut manifest = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            false,
+            true,
+        );
+        manifest.chunks.clear();
+        write_root_manifest(dir.path(), manifest);
+        write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
+        write_default_ddl_files(dir.path());
+
+        let storage = file_storage_for_dir(dir.path());
+        let report = verify_snapshot(&storage).await.unwrap();
+
+        assert_eq!(report.error_count(), 1);
+        assert_eq!(report.data_files_total, 0);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("at least one data chunk"))
         );
     }
 
