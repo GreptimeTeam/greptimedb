@@ -97,7 +97,6 @@ impl LeaseValueAccessor for MetaPeerClient {
 mod tests {
     use std::collections::HashMap;
 
-    use api::v1::meta::heartbeat_request::NodeWorkloads;
     use api::v1::meta::{DatanodeWorkloads, FlownodeWorkloads, FrontendWorkloads};
     use common_meta::cluster::{
         DatanodeStatus, FlownodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus, Role,
@@ -110,23 +109,7 @@ mod tests {
     use common_workload::DatanodeWorkloadType;
 
     use crate::discovery::utils::accept_ingest_workload;
-    use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::test_util::create_meta_peer_client;
-
-    async fn put_lease_value(
-        kv_backend: &ResettableKvBackendRef,
-        key: DatanodeLeaseKey,
-        value: LeaseValue,
-    ) {
-        kv_backend
-            .put(PutRequest {
-                key: key.try_into().unwrap(),
-                value: value.try_into().unwrap(),
-                prev_kv: false,
-            })
-            .await
-            .unwrap();
-    }
 
     async fn put_node_info(kv_backend: &ResettableKvBackendRef, key: NodeInfoKey, value: NodeInfo) {
         kv_backend
