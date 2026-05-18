@@ -1041,6 +1041,7 @@ async fn verify_chunks_and_data_files(
     let mut data_files_verified = 0;
     let mut problems = Vec::new();
     let mut seen_chunk_ids = HashSet::new();
+    let mut claimed_data_files = HashSet::new();
 
     for chunk in &report.manifest.chunks {
         if !seen_chunk_ids.insert(chunk.id) {
@@ -1048,6 +1049,11 @@ async fn verify_chunks_and_data_files(
                 severity: VerifySeverity::Error,
                 message: format!("Chunk {}: duplicate chunk id", chunk.id),
             });
+        }
+        for file in &chunk.files {
+            if let Some(path) = safe_manifest_data_file_path(file) {
+                claimed_data_files.insert(path.to_string());
+            }
         }
 
         match chunk.status {
@@ -1065,7 +1071,6 @@ async fn verify_chunks_and_data_files(
                     .iter()
                     .map(|schema| data_dir_for_schema_chunk(schema, chunk.id))
                     .collect::<Vec<_>>();
-                let mut listed_files = HashSet::new();
                 for file in &chunk.files {
                     data_files_total += 1;
                     let Some(path) = valid_manifest_data_file_path(file, &allowed_prefixes) else {
@@ -1079,25 +1084,12 @@ async fn verify_chunks_and_data_files(
                         continue;
                     };
 
-                    listed_files.insert(path.to_string());
                     if existing_files.contains(path) {
                         data_files_verified += 1;
                     } else {
                         problems.push(VerifyProblem {
                             severity: VerifySeverity::Error,
                             message: format!("Chunk {}: missing file '{}'", chunk.id, path),
-                        });
-                    }
-                }
-                for path in existing_files.iter().filter(|path| {
-                    allowed_prefixes
-                        .iter()
-                        .any(|prefix| path.starts_with(prefix))
-                }) {
-                    if !listed_files.contains(path) {
-                        problems.push(VerifyProblem {
-                            severity: VerifySeverity::Error,
-                            message: format!("Chunk {}: unlisted data file '{}'", chunk.id, path),
                         });
                     }
                 }
@@ -1109,25 +1101,6 @@ async fn verify_chunks_and_data_files(
                         message: format!(
                             "Chunk {}: skipped chunk should not list data files",
                             chunk.id
-                        ),
-                    });
-                }
-                let skipped_prefixes = report
-                    .manifest
-                    .schemas
-                    .iter()
-                    .map(|schema| data_dir_for_schema_chunk(schema, chunk.id))
-                    .collect::<Vec<_>>();
-                if let Some(path) = existing_files.iter().find(|path| {
-                    skipped_prefixes
-                        .iter()
-                        .any(|prefix| path.starts_with(prefix))
-                }) {
-                    problems.push(VerifyProblem {
-                        severity: VerifySeverity::Error,
-                        message: format!(
-                            "Chunk {}: skipped chunk should not have data file '{}'",
-                            chunk.id, path
                         ),
                     });
                 }
@@ -1154,6 +1127,15 @@ async fn verify_chunks_and_data_files(
         }
     }
 
+    for path in &existing_files {
+        if !claimed_data_files.contains(path) {
+            problems.push(VerifyProblem {
+                severity: VerifySeverity::Error,
+                message: format!("Unexpected data file '{}' is not listed in manifest", path),
+            });
+        }
+    }
+
     report.data_files_total = data_files_total;
     report.data_files_verified = data_files_verified;
     report.problems.extend(problems);
@@ -1165,6 +1147,19 @@ fn valid_manifest_data_file_path<'a>(
     path: &'a str,
     allowed_prefixes: &[String],
 ) -> Option<&'a str> {
+    let normalized = safe_manifest_data_file_path(path)?;
+
+    if !allowed_prefixes
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+    {
+        return None;
+    }
+
+    Some(normalized)
+}
+
+fn safe_manifest_data_file_path(path: &str) -> Option<&str> {
     let normalized = path.trim_start_matches('/');
     if normalized.is_empty() || !normalized.starts_with("data/") {
         return None;
@@ -1173,13 +1168,6 @@ fn valid_manifest_data_file_path<'a>(
     if normalized
         .split('/')
         .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return None;
-    }
-
-    if !allowed_prefixes
-        .iter()
-        .any(|prefix| normalized.starts_with(prefix))
     {
         return None;
     }
@@ -1761,11 +1749,12 @@ mod tests {
         let report = verify_snapshot(&storage).await.unwrap();
 
         assert_eq!(report.error_count(), 1);
-        assert!(report.problems.iter().any(|problem| {
-            problem
-                .message
-                .contains("skipped chunk should not have data file")
-        }));
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| { problem.message.contains("Unexpected data file") })
+        );
     }
 
     #[tokio::test]
@@ -1949,7 +1938,34 @@ mod tests {
             report
                 .problems
                 .iter()
-                .any(|problem| problem.message.contains("unlisted data file"))
+                .any(|problem| problem.message.contains("Unexpected data file"))
+        );
+        assert_eq!(report.data_files_verified, 1);
+    }
+
+    #[tokio::test]
+    async fn test_verify_snapshot_rejects_orphan_data_files_outside_known_chunk_prefixes() {
+        let dir = tempdir().unwrap();
+        let manifest = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            false,
+            true,
+        );
+        write_root_manifest(dir.path(), manifest);
+        write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
+        write_default_ddl_files(dir.path());
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/public/99/file.parquet", b"data");
+
+        let storage = file_storage_for_dir(dir.path());
+        let report = verify_snapshot(&storage).await.unwrap();
+
+        assert_eq!(report.error_count(), 1);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("Unexpected data file"))
         );
         assert_eq!(report.data_files_verified, 1);
     }
