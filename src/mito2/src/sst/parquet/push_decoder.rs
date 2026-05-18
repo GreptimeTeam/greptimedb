@@ -184,6 +184,16 @@ impl SstParquetRangeFetcher {
                 data
             }
         };
+        ensure!(
+            fetched_pages.len() == missing_ranges.len(),
+            UnexpectedSnafu {
+                reason: format!(
+                    "Invalid parquet range fetch: {} missing ranges but {} fetched byte ranges",
+                    missing_ranges.len(),
+                    fetched_pages.len()
+                ),
+            }
+        );
 
         self.cache_strategy.put_page_ranges(
             self.region_file_id.file_id(),
@@ -281,7 +291,8 @@ fn assemble_range(range: &Range<u64>, mut parts: Vec<PageRangePart>) -> Result<B
         }
 
         let slice_start = (cursor - part.range.start) as usize;
-        output.extend_from_slice(&part.bytes.slice(slice_start..));
+        let slice_end = (part.range.end.min(range.end) - part.range.start) as usize;
+        output.extend_from_slice(&part.bytes.slice(slice_start..slice_end));
         cursor = part.range.end.min(range.end);
         if cursor >= range.end {
             break;
@@ -378,5 +389,16 @@ mod tests {
         let requested = 10..16;
         let output = assemble_ranges(std::slice::from_ref(&requested), cached_parts, &[]).unwrap();
         assert_eq!(bytes, output[0]);
+    }
+
+    #[test]
+    fn test_assemble_range_clamps_overlapping_part_to_requested_end() {
+        let parts = vec![PageRangePart {
+            range: 0..10,
+            bytes: Bytes::from_static(b"0123456789"),
+        }];
+
+        let output = assemble_range(&(2..5), parts).unwrap();
+        assert_eq!(Bytes::from_static(b"234"), output);
     }
 }

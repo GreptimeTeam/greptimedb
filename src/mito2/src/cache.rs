@@ -26,7 +26,7 @@ pub(crate) mod write_cache;
 use std::collections::BTreeMap;
 use std::mem;
 use std::ops::Range;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
@@ -1232,34 +1232,34 @@ pub struct PageRangeCache {
 impl PageRangeCache {
     fn new(capacity: u64) -> Arc<PageRangeCache> {
         let index: Arc<PageFragmentIndex> = Arc::new(DashMap::new());
-        let eviction_index = index.clone();
-        let cache = Cache::builder()
-            .max_capacity(capacity)
-            .weigher(page_cache_weight)
-            .eviction_listener(move |k: Arc<PageFragmentKey>, v: Bytes, cause| {
-                let key = *k;
-                let size = page_cache_weight(&key, &v);
-                CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
-                CACHE_EVICTION
-                    .with_label_values(&[PAGE_TYPE, removal_cause_to_str(cause)])
-                    .inc();
-
-                let group_key = key.group_key();
-                if let Some(group) = eviction_index
-                    .get(&group_key)
-                    .map(|group| Arc::clone(group.value()))
-                {
-                    let mut ranges = group.write().unwrap();
-                    ranges.remove(&(key.start, key.end));
-                    if ranges.is_empty() {
-                        eviction_index
-                            .remove_if(&group_key, |_, current| Arc::ptr_eq(current, &group));
+        Arc::new_cyclic(|cache_ref: &Weak<PageRangeCache>| {
+            let index_for_listener = Arc::clone(&index);
+            let cache_ref = Weak::clone(cache_ref);
+            let cache = Cache::builder()
+                .max_capacity(capacity)
+                .weigher(page_cache_weight)
+                .eviction_listener(move |k: Arc<PageFragmentKey>, v: Bytes, cause| {
+                    let key = *k;
+                    let size = page_cache_weight(&key, &v);
+                    CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[PAGE_TYPE, removal_cause_to_str(cause)])
+                        .inc();
+                    if cause != RemovalCause::Replaced
+                        && !cache_ref
+                            .upgrade()
+                            .is_some_and(|cache| cache.cache.contains_key(&key))
+                    {
+                        remove_page_fragment_index_entry(&index_for_listener, key);
                     }
-                }
-            })
-            .build();
+                })
+                .build();
 
-        Arc::new(PageRangeCache { cache, index })
+            PageRangeCache {
+                cache,
+                index: Arc::clone(&index),
+            }
+        })
     }
 
     fn lookup(
@@ -1288,29 +1288,38 @@ impl PageRangeCache {
             }
 
             let mut parts = Vec::new();
-            if let Some(group) = &group {
+            let mut stale_keys = Vec::new();
+            let candidates = if let Some(group) = &group {
                 let index = group.read().unwrap();
                 // A simple first-stage interval lookup: inspect fragments whose start is before
                 // the requested end and keep those that overlap the requested range.
-                for (_, fragment_key) in index.range(..(range.end, 0)) {
-                    if fragment_key.end <= range.start {
-                        continue;
-                    }
+                index
+                    .range(..(range.end, 0))
+                    .filter_map(|(_, fragment_key)| {
+                        (fragment_key.end > range.start).then_some(*fragment_key)
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
 
-                    if let Some(bytes) = self.cache.get(fragment_key) {
-                        let start = range.start.max(fragment_key.start);
-                        let end = range.end.min(fragment_key.end);
-                        if start < end {
-                            let slice_start = (start - fragment_key.start) as usize;
-                            let slice_end = (end - fragment_key.start) as usize;
-                            parts.push(PageRangePart {
-                                range: start..end,
-                                bytes: bytes.slice(slice_start..slice_end),
-                            });
-                        }
+            for fragment_key in candidates {
+                if let Some(bytes) = self.cache.get(&fragment_key) {
+                    let start = range.start.max(fragment_key.start);
+                    let end = range.end.min(fragment_key.end);
+                    if start < end {
+                        let slice_start = (start - fragment_key.start) as usize;
+                        let slice_end = (end - fragment_key.start) as usize;
+                        parts.push(PageRangePart {
+                            range: start..end,
+                            bytes: bytes.slice(slice_start..slice_end),
+                        });
                     }
+                } else {
+                    stale_keys.push(fragment_key);
                 }
             }
+            self.remove_stale_index_entries(stale_keys);
 
             parts.sort_unstable_by_key(|part| part.range.start);
             let mut cursor = range.start;
@@ -1374,7 +1383,6 @@ impl PageRangeCache {
             let size = page_cache_weight(&key, &bytes);
             CACHE_BYTES.with_label_values(&[PAGE_TYPE]).add(size.into());
             self.cache.insert(key, bytes);
-
             self.insert_index_entry(key);
         }
     }
@@ -1387,17 +1395,60 @@ impl PageRangeCache {
                 .entry(group_key)
                 .or_insert_with(|| Arc::new(PageFragmentRangeMap::new(BTreeMap::new())))
                 .clone();
-            let mut ranges = group.write().unwrap();
+            {
+                let mut ranges = group.write().unwrap();
+                ranges.insert((key.start, key.end), key);
+            }
             if self
                 .index
                 .get(&group_key)
                 .is_some_and(|current| Arc::ptr_eq(current.value(), &group))
             {
-                ranges.insert((key.start, key.end), key);
                 return;
             }
         }
     }
+
+    fn remove_stale_index_entries(&self, keys: Vec<PageFragmentKey>) {
+        for key in keys {
+            if self.cache.contains_key(&key) {
+                continue;
+            }
+
+            if remove_page_fragment_index_entry(&self.index, key) && self.cache.contains_key(&key) {
+                self.insert_index_entry(key);
+            }
+        }
+    }
+}
+
+fn remove_page_fragment_index_entry(index: &PageFragmentIndex, key: PageFragmentKey) -> bool {
+    let group_key = key.group_key();
+    let Some(group) = index.get(&group_key).map(|group| Arc::clone(group.value())) else {
+        return false;
+    };
+
+    let (removed, is_empty) = {
+        let mut ranges = group.write().unwrap();
+        let removed = if ranges
+            .get(&(key.start, key.end))
+            .is_some_and(|current| current == &key)
+        {
+            ranges.remove(&(key.start, key.end));
+            true
+        } else {
+            false
+        };
+        (removed, ranges.is_empty())
+    };
+
+    if is_empty {
+        index.remove_if(&group_key, |_, current| {
+            Arc::ptr_eq(current, &group) && current.read().unwrap().is_empty()
+        });
+    }
+
+    removed
 }
 
 /// Cache key for time series row selector result.
@@ -1693,7 +1744,7 @@ mod tests {
     }
 
     #[test]
-    fn test_page_cache_removes_empty_index_group_on_cache_removal() {
+    fn test_page_cache_removes_empty_index_group_on_lookup_cleanup() {
         let cache = PageRangeCache::new(1000);
         let file_id = FileId::random();
         let group_key = PageFragmentGroupKey {
@@ -1708,7 +1759,7 @@ mod tests {
         cache.insert_ranges(
             file_id,
             0,
-            &[range1, range2],
+            &[range1.clone(), range2.clone()],
             &[Bytes::from(vec![1; 10]), Bytes::from(vec![2; 10])],
         );
         assert_eq!(
@@ -1718,6 +1769,8 @@ mod tests {
 
         cache.cache.invalidate(&key1);
         cache.cache.run_pending_tasks();
+        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range1));
+        assert!(!lookup.is_fully_cached());
         assert_eq!(
             1,
             cache.index.get(&group_key).unwrap().read().unwrap().len()
@@ -1725,6 +1778,117 @@ mod tests {
 
         cache.cache.invalidate(&key2);
         cache.cache.run_pending_tasks();
+        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range2));
+        assert!(!lookup.is_fully_cached());
+        assert!(!cache.index.contains_key(&group_key));
+    }
+
+    #[test]
+    fn test_page_cache_replaced_fragment_keeps_index_entry() {
+        let cache = PageRangeCache::new(1000);
+        let file_id = FileId::random();
+        let group_key = PageFragmentGroupKey {
+            file_id,
+            row_group_idx: 0,
+        };
+        let range = 0..10;
+
+        cache.insert_ranges(
+            file_id,
+            0,
+            std::slice::from_ref(&range),
+            &[Bytes::from(vec![1; 10])],
+        );
+        cache.insert_ranges(
+            file_id,
+            0,
+            std::slice::from_ref(&range),
+            &[Bytes::from(vec![2; 10])],
+        );
+        cache.cache.run_pending_tasks();
+
+        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
+        assert!(lookup.is_fully_cached());
+        assert_eq!(&vec![2; 10][..], &lookup.cached_parts[0][0].bytes[..]);
+        assert_eq!(
+            1,
+            cache.index.get(&group_key).unwrap().read().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn test_page_cache_eviction_removes_index_entries_without_lookup() {
+        let file_id = FileId::random();
+        let first_range = 0..10;
+        let first_key = PageFragmentKey::new(file_id, 0, &first_range);
+        let page = Bytes::from(vec![1; 10]);
+        let cache = PageRangeCache::new(page_cache_weight(&first_key, &page) as u64);
+        let group_key = PageFragmentGroupKey {
+            file_id,
+            row_group_idx: 0,
+        };
+        let ranges = (0..8)
+            .map(|idx| idx * 10..idx * 10 + 10)
+            .collect::<Vec<_>>();
+        let pages = (0..ranges.len())
+            .map(|idx| Bytes::from(vec![idx as u8; 10]))
+            .collect::<Vec<_>>();
+
+        cache.insert_ranges(file_id, 0, &ranges, &pages);
+        cache.cache.run_pending_tasks();
+
+        let indexed_keys = cache
+            .index
+            .get(&group_key)
+            .map(|group| group.read().unwrap().values().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(indexed_keys.len() < ranges.len());
+        for key in indexed_keys {
+            assert!(cache.cache.contains_key(&key));
+        }
+    }
+
+    #[test]
+    fn test_page_cache_drop_releases_listener_index_cycle() {
+        let cache = PageRangeCache::new(1000);
+        let index = Arc::downgrade(&cache.index);
+        let file_id = FileId::random();
+        let range = 0..10;
+
+        cache.insert_ranges(
+            file_id,
+            0,
+            std::slice::from_ref(&range),
+            &[Bytes::from(vec![1; 10])],
+        );
+
+        drop(cache);
+
+        assert!(index.upgrade().is_none());
+    }
+
+    #[test]
+    fn test_page_cache_removes_index_entry_when_fragment_is_rejected() {
+        let cache = PageRangeCache::new(1);
+        let file_id = FileId::random();
+        let group_key = PageFragmentGroupKey {
+            file_id,
+            row_group_idx: 0,
+        };
+        let range = 0..10;
+
+        cache.insert_ranges(
+            file_id,
+            0,
+            std::slice::from_ref(&range),
+            &[Bytes::from(vec![1; 10])],
+        );
+        cache.cache.run_pending_tasks();
+
+        assert!(!cache.index.contains_key(&group_key));
+        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
+        assert!(!lookup.is_fully_cached());
+        assert_eq!(vec![0..10], lookup.missing_ranges);
         assert!(!cache.index.contains_key(&group_key));
     }
 
