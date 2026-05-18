@@ -1805,6 +1805,8 @@ impl MaybeFilter {
 pub(crate) struct SimpleFilterContext {
     /// Filter to evaluate.
     filter: MaybeFilter,
+    /// Debug string of the original logical expression.
+    expr_str: String,
     /// Id of the column to evaluate.
     column_id: ColumnId,
     /// Semantic type of the column.
@@ -1822,6 +1824,7 @@ impl SimpleFilterContext {
         expr: &Expr,
     ) -> Option<Self> {
         let filter = SimpleFilterEvaluator::try_new(expr)?;
+        let expr_str = format!("{expr:?}");
         let (column_metadata, maybe_filter) = match expected_meta {
             Some(meta) => {
                 // Gets the column metadata from the expected metadata.
@@ -1867,6 +1870,7 @@ impl SimpleFilterContext {
 
         Some(Self {
             filter: maybe_filter,
+            expr_str,
             column_id: column_metadata.column_id,
             semantic_type: column_metadata.semantic_type,
         })
@@ -1875,6 +1879,11 @@ impl SimpleFilterContext {
     /// Returns the filter to evaluate.
     pub(crate) fn filter(&self) -> &MaybeFilter {
         &self.filter
+    }
+
+    /// Returns the original logical expression string.
+    pub(crate) fn expr_str(&self) -> &str {
+        &self.expr_str
     }
 
     /// Returns the column id.
@@ -1893,6 +1902,8 @@ impl SimpleFilterContext {
 pub(crate) struct PhysicalFilterContext {
     /// Filter to evaluate.
     filter: Arc<dyn PhysicalExpr>,
+    /// Debug string of the original logical expression.
+    expr_str: String,
     /// Id of the column to evaluate.
     column_id: ColumnId,
     /// Name of the column to evaluate.
@@ -1919,6 +1930,7 @@ impl PhysicalFilterContext {
         if !Self::is_prefilter_candidate(expr) {
             return None;
         }
+        let expr_str = format!("{expr:?}");
         let column_name = Self::single_column_name(expr)?;
         let column_metadata = match expected_meta {
             Some(meta) => {
@@ -1947,6 +1959,7 @@ impl PhysicalFilterContext {
 
         Some(Self {
             filter: physical_expr,
+            expr_str,
             column_id: column_metadata.column_id,
             column_name,
             semantic_type: column_metadata.semantic_type,
@@ -1980,6 +1993,11 @@ impl PhysicalFilterContext {
     /// Returns the filter to evaluate.
     pub(crate) fn filter(&self) -> &Arc<dyn PhysicalExpr> {
         &self.filter
+    }
+
+    /// Returns the original logical expression string.
+    pub(crate) fn expr_str(&self) -> &str {
+        &self.expr_str
     }
 
     /// Returns the column id.

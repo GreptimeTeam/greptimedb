@@ -30,6 +30,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::warn;
+use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
@@ -41,6 +42,7 @@ use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
 use parquet::file::metadata::{FileMetaData, PageIndexPolicy, ParquetMetaData};
 use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
+use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
@@ -251,42 +253,8 @@ fn removal_cause_str(cause: RemovalCause) -> &'static str {
     }
 }
 
-/// Per-file static portion of the prefilter result cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct PrefilterKeyParts {
-    exprs: Arc<Vec<String>>,
-    schema_version: u64,
-    skip_fields: bool,
-    projected_columns: Arc<Vec<usize>>,
-    parts_mem_usage: usize,
-}
-
-impl PrefilterKeyParts {
-    pub(crate) fn new(
-        exprs: Arc<Vec<String>>,
-        schema_version: u64,
-        skip_fields: bool,
-        projected_columns: Arc<Vec<usize>>,
-    ) -> Self {
-        let parts_mem_usage = mem::size_of::<Self>()
-            + mem::size_of::<Vec<String>>()
-            + exprs.capacity() * mem::size_of::<String>()
-            + exprs.iter().map(|s| s.capacity()).sum::<usize>()
-            + mem::size_of::<Vec<usize>>()
-            + projected_columns.capacity() * mem::size_of::<usize>();
-
-        Self {
-            exprs,
-            schema_version,
-            skip_fields,
-            projected_columns,
-            parts_mem_usage,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct PrefilterRowSelector {
+pub(crate) struct PrefilterRowSelector {
     row_count: usize,
     skip: bool,
 }
@@ -310,46 +278,53 @@ pub(crate) struct PrefilterKey {
     file_id: FileId,
     row_group_idx: u32,
     row_selection: Option<Arc<Vec<PrefilterRowSelector>>>,
-    exprs: Arc<Vec<String>>,
     schema_version: u64,
-    skip_fields: bool,
-    projected_columns: Arc<Vec<usize>>,
+    filter_exprs: SmallVec<[String; 1]>,
     mem_usage: usize,
 }
 
 impl PrefilterKey {
-    pub(crate) fn from_parts(
-        parts: &PrefilterKeyParts,
-        file_id: FileId,
-        row_group_idx: u32,
+    pub(crate) fn row_selection_snapshot(
         row_selection: Option<&RowSelection>,
-    ) -> Self {
-        let row_selection = row_selection.map(|selection| {
+    ) -> Option<Arc<Vec<PrefilterRowSelector>>> {
+        row_selection.map(|selection| {
             Arc::new(
                 selection
                     .iter()
                     .map(PrefilterRowSelector::from)
                     .collect::<Vec<_>>(),
             )
-        });
+        })
+    }
+
+    pub(crate) fn new(
+        file_id: FileId,
+        row_group_idx: u32,
+        row_selection: Option<Arc<Vec<PrefilterRowSelector>>>,
+        schema_version: u64,
+        filter_exprs: SmallVec<[String; 1]>,
+    ) -> Self {
         let row_selection_bytes = row_selection
             .as_ref()
             .map(|selection| selection.len() * mem::size_of::<PrefilterRowSelector>())
             .unwrap_or(0);
+        let spilled_expr_bytes = if filter_exprs.spilled() {
+            filter_exprs.capacity() * mem::size_of::<String>()
+        } else {
+            0
+        };
+        let expr_bytes = filter_exprs.iter().map(|s| s.capacity()).sum::<usize>();
 
         Self {
             file_id,
             row_group_idx,
             row_selection,
-            exprs: parts.exprs.clone(),
-            schema_version: parts.schema_version,
-            skip_fields: parts.skip_fields,
-            projected_columns: parts.projected_columns.clone(),
-            mem_usage: parts.parts_mem_usage
-                + mem::size_of::<FileId>()
-                + mem::size_of::<u32>()
-                + mem::size_of::<Option<Arc<Vec<PrefilterRowSelector>>>>()
-                + row_selection_bytes,
+            schema_version,
+            filter_exprs,
+            mem_usage: mem::size_of::<Self>()
+                + row_selection_bytes
+                + spilled_expr_bytes
+                + expr_bytes,
         }
     }
 
@@ -358,7 +333,7 @@ impl PrefilterKey {
     }
 }
 
-type PrefilterResultCache = Cache<PrefilterKey, Arc<RowSelection>>;
+type PrefilterResultCache = Cache<PrefilterKey, Arc<BooleanBuffer>>;
 
 fn new_prefilter_result_cache(capacity: u64) -> PrefilterResultCache {
     Cache::builder()
@@ -376,12 +351,8 @@ fn new_prefilter_result_cache(capacity: u64) -> PrefilterResultCache {
         .build()
 }
 
-fn prefilter_result_cache_weight(k: &PrefilterKey, v: &Arc<RowSelection>) -> u32 {
-    (k.mem_usage() + row_selection_mem_usage(v)) as u32
-}
-
-fn row_selection_mem_usage(selection: &RowSelection) -> usize {
-    mem::size_of::<RowSelection>() + selection.iter().count() * mem::size_of::<RowSelector>()
+fn prefilter_result_cache_weight(k: &PrefilterKey, v: &Arc<BooleanBuffer>) -> u32 {
+    (k.mem_usage() + mem::size_of::<BooleanBuffer>() + v.values().len()) as u32
 }
 
 /// Cache strategies that may only enable a subset of caches.
@@ -469,7 +440,7 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::get_prefilter_result()].
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
-    pub(crate) fn get_prefilter_result(&self, key: &PrefilterKey) -> Option<Arc<RowSelection>> {
+    pub(crate) fn get_prefilter_result(&self, key: &PrefilterKey) -> Option<Arc<BooleanBuffer>> {
         match self {
             CacheStrategy::EnableAll(cache_manager) => cache_manager.get_prefilter_result(key),
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
@@ -478,7 +449,7 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::put_prefilter_result()].
     /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
-    pub(crate) fn put_prefilter_result(&self, key: PrefilterKey, result: Arc<RowSelection>) {
+    pub(crate) fn put_prefilter_result(&self, key: PrefilterKey, result: Arc<BooleanBuffer>) {
         if let CacheStrategy::EnableAll(cache_manager) = self {
             cache_manager.put_prefilter_result(key, result);
         }
@@ -1034,13 +1005,13 @@ impl CacheManager {
         self.index_result_cache.as_ref()
     }
 
-    pub(crate) fn get_prefilter_result(&self, key: &PrefilterKey) -> Option<Arc<RowSelection>> {
+    pub(crate) fn get_prefilter_result(&self, key: &PrefilterKey) -> Option<Arc<BooleanBuffer>> {
         self.prefilter_result_cache
             .as_ref()
             .and_then(|cache| update_hit_miss(cache.get(key), PREFILTER_RESULT_TYPE))
     }
 
-    pub(crate) fn put_prefilter_result(&self, key: PrefilterKey, result: Arc<RowSelection>) {
+    pub(crate) fn put_prefilter_result(&self, key: PrefilterKey, result: Arc<BooleanBuffer>) {
         if let Some(cache) = &self.prefilter_result_cache {
             CACHE_BYTES
                 .with_label_values(&[PREFILTER_RESULT_TYPE])
@@ -1638,18 +1609,15 @@ mod tests {
     #[test]
     fn test_prefilter_result_cache() {
         let disabled = CacheManager::builder().build();
-        let parts = PrefilterKeyParts::new(
-            Arc::new(vec!["tag_0 IN ([a])".to_string()]),
-            1,
-            false,
-            Arc::new(vec![0, 2, 3]),
-        );
         let file_id = FileId::random();
-        let key = PrefilterKey::from_parts(&parts, file_id, 0, None);
-        let selection = Arc::new(RowSelection::from(vec![
-            RowSelector::skip(2),
-            RowSelector::select(3),
-        ]));
+        let key = PrefilterKey::new(
+            file_id,
+            0,
+            None,
+            1,
+            SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()]),
+        );
+        let selection = Arc::new(BooleanBuffer::new_set(3));
 
         disabled.put_prefilter_result(key.clone(), selection.clone());
         assert!(disabled.get_prefilter_result(&key).is_none());
@@ -1682,54 +1650,81 @@ mod tests {
 
     #[test]
     fn test_prefilter_key_distinguishes_dimensions() {
-        let exprs = Arc::new(vec!["tag_0 IN ([a])".to_string()]);
-        let projected_columns = Arc::new(vec![0, 2, 3]);
-        let parts = PrefilterKeyParts::new(exprs.clone(), 1, false, projected_columns.clone());
-        let other_exprs = PrefilterKeyParts::new(
-            Arc::new(vec!["tag_0 IN ([b])".to_string()]),
-            1,
-            false,
-            projected_columns.clone(),
-        );
-        let other_schema =
-            PrefilterKeyParts::new(exprs.clone(), 2, false, projected_columns.clone());
-        let other_mode = PrefilterKeyParts::new(exprs.clone(), 1, true, projected_columns.clone());
-        let other_projection = PrefilterKeyParts::new(exprs, 1, false, Arc::new(vec![0, 3]));
-
         let file_id = FileId::random();
         let row_selection = RowSelection::from(vec![RowSelector::skip(1), RowSelector::select(3)]);
         let other_row_selection =
             RowSelection::from(vec![RowSelector::skip(2), RowSelector::select(2)]);
-        let base = PrefilterKey::from_parts(&parts, file_id, 0, Some(&row_selection));
+        let row_selection = PrefilterKey::row_selection_snapshot(Some(&row_selection));
+        let other_row_selection = PrefilterKey::row_selection_snapshot(Some(&other_row_selection));
+        let base = PrefilterKey::new(
+            file_id,
+            0,
+            row_selection.clone(),
+            1,
+            SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()]),
+        );
 
         assert_ne!(
             base,
-            PrefilterKey::from_parts(&parts, FileId::random(), 0, Some(&row_selection))
+            PrefilterKey::new(
+                FileId::random(),
+                0,
+                row_selection.clone(),
+                1,
+                SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()])
+            )
         );
         assert_ne!(
             base,
-            PrefilterKey::from_parts(&parts, file_id, 1, Some(&row_selection))
+            PrefilterKey::new(
+                file_id,
+                1,
+                row_selection.clone(),
+                1,
+                SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()])
+            )
         );
         assert_ne!(
             base,
-            PrefilterKey::from_parts(&parts, file_id, 0, Some(&other_row_selection))
+            PrefilterKey::new(
+                file_id,
+                0,
+                other_row_selection,
+                1,
+                SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()])
+            )
         );
         assert_ne!(
             base,
-            PrefilterKey::from_parts(&other_exprs, file_id, 0, Some(&row_selection))
+            PrefilterKey::new(
+                file_id,
+                0,
+                row_selection.clone(),
+                1,
+                SmallVec::from_vec(vec!["tag_0 IN ([b])".to_string()])
+            )
         );
         assert_ne!(
             base,
-            PrefilterKey::from_parts(&other_schema, file_id, 0, Some(&row_selection))
+            PrefilterKey::new(
+                file_id,
+                0,
+                row_selection.clone(),
+                2,
+                SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()])
+            )
         );
-        assert_ne!(
-            base,
-            PrefilterKey::from_parts(&other_mode, file_id, 0, Some(&row_selection))
+        let pk_group = PrefilterKey::new(
+            file_id,
+            0,
+            row_selection,
+            1,
+            SmallVec::from_vec(vec![
+                "tag_0 IN ([a])".to_string(),
+                "tag_1 IN ([x])".to_string(),
+            ]),
         );
-        assert_ne!(
-            base,
-            PrefilterKey::from_parts(&other_projection, file_id, 0, Some(&row_selection))
-        );
+        assert_ne!(base, pk_group);
     }
 
     #[test]
