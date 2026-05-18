@@ -193,7 +193,6 @@ impl Display for ParseFilterIdError {
 /// NOTE(remote-dyn-filter): This id is generated once on the source side and then propagated.
 /// Consumers should reuse the propagated `FilterId` instead of independently recomputing it from
 /// local state.
-#[allow(unused)]
 pub(crate) fn build_remote_dyn_filter_id(
     region_id: RegionId,
     producer_scope_id: ProducerScopeId,
