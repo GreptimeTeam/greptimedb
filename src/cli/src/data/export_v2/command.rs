@@ -1033,8 +1033,16 @@ async fn verify_chunks_and_data_files(
     let mut data_files_total = 0;
     let mut data_files_verified = 0;
     let mut problems = Vec::new();
+    let mut seen_chunk_ids = HashSet::new();
 
     for chunk in &report.manifest.chunks {
+        if !seen_chunk_ids.insert(chunk.id) {
+            problems.push(VerifyProblem {
+                severity: VerifySeverity::Error,
+                message: format!("Chunk {}: duplicate chunk id", chunk.id),
+            });
+        }
+
         match chunk.status {
             ChunkStatus::Completed => {
                 if chunk.files.is_empty() {
@@ -1080,6 +1088,25 @@ async fn verify_chunks_and_data_files(
                         message: format!(
                             "Chunk {}: skipped chunk should not list data files",
                             chunk.id
+                        ),
+                    });
+                }
+                let skipped_prefixes = report
+                    .manifest
+                    .schemas
+                    .iter()
+                    .map(|schema| data_dir_for_schema_chunk(schema, chunk.id))
+                    .collect::<Vec<_>>();
+                if let Some(path) = existing_files.iter().find(|path| {
+                    skipped_prefixes
+                        .iter()
+                        .any(|prefix| path.starts_with(prefix))
+                }) {
+                    problems.push(VerifyProblem {
+                        severity: VerifySeverity::Error,
+                        message: format!(
+                            "Chunk {}: skipped chunk should not have data file '{}'",
+                            chunk.id, path
                         ),
                     });
                 }
@@ -1670,6 +1697,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_verify_snapshot_rejects_skipped_chunk_data_files() {
+        let dir = tempdir().unwrap();
+        let manifest = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            false,
+            true,
+        );
+        write_root_manifest(dir.path(), manifest);
+        write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
+        write_default_ddl_files(dir.path());
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/public/2/file.parquet", b"data");
+
+        let storage = file_storage_for_dir(dir.path());
+        let report = verify_snapshot(&storage).await.unwrap();
+
+        assert_eq!(report.error_count(), 1);
+        assert!(report.problems.iter().any(|problem| {
+            problem
+                .message
+                .contains("skipped chunk should not have data file")
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_verify_snapshot_rejects_duplicate_chunk_ids() {
+        let dir = tempdir().unwrap();
+        let mut manifest = test_manifest(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            false,
+            true,
+        );
+        let mut duplicate = ChunkMeta::new(1, TimeRange::unbounded());
+        duplicate.mark_completed(vec!["data/analytics/1/file.parquet".to_string()], None);
+        manifest.chunks.push(duplicate);
+        write_root_manifest(dir.path(), manifest);
+        write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
+        write_default_ddl_files(dir.path());
+        write_snapshot_file(dir.path(), "data/public/1/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/analytics/1/file.parquet", b"data");
+
+        let storage = file_storage_for_dir(dir.path());
+        let report = verify_snapshot(&storage).await.unwrap();
+
+        assert_eq!(report.error_count(), 1);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("duplicate chunk id"))
+        );
+    }
+
+    #[tokio::test]
     async fn test_verify_snapshot_requires_all_schema_ddl() {
         let dir = tempdir().unwrap();
         let manifest = test_manifest(
@@ -1789,13 +1870,13 @@ mod tests {
             true,
         );
         manifest.chunks[0].files = vec![
-            "data/public/2/file.parquet".to_string(),
+            "data/public/99/file.parquet".to_string(),
             "data/metrics/1/file.parquet".to_string(),
         ];
         write_root_manifest(dir.path(), manifest);
         write_snapshot_file(dir.path(), "schema/schemas.json", b"[]");
         write_default_ddl_files(dir.path());
-        write_snapshot_file(dir.path(), "data/public/2/file.parquet", b"data");
+        write_snapshot_file(dir.path(), "data/public/99/file.parquet", b"data");
         write_snapshot_file(dir.path(), "data/metrics/1/file.parquet", b"data");
 
         let storage = file_storage_for_dir(dir.path());
