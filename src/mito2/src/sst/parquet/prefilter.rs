@@ -375,8 +375,6 @@ pub(crate) fn build_reader_filter_plan(
         }
     }
 
-    let pk_filter_exprs =
-        (!primary_key_filters.is_empty()).then_some(Arc::new(primary_key_filters));
     let pk_filter_expr_strs = (!pk_filter_contexts.is_empty()).then(|| {
         let mut expr_strs = pk_filter_contexts
             .iter()
@@ -385,6 +383,8 @@ pub(crate) fn build_reader_filter_plan(
         expr_strs.sort();
         SmallVec::from_vec(expr_strs)
     });
+    let pk_filter_exprs =
+        (!primary_key_filters.is_empty()).then_some(Arc::new(primary_key_filters));
     let schema_version = expected_metadata
         .map(|metadata| metadata.schema_version)
         .unwrap_or_else(|| read_format.metadata().schema_version);
@@ -456,6 +456,7 @@ impl PrefilterContextBuilder {
     /// - The read format doesn't use flat layout
     /// - No prefilter columns are selected
     /// - Prefilter would read the full projection without any PK filter
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         read_format: &FlatReadFormat,
         codec: &Arc<dyn PrimaryKeyCodec>,
@@ -472,6 +473,10 @@ impl PrefilterContextBuilder {
             .then_some(primary_key_filters)
             .flatten()
             .filter(|filters| !filters.is_empty());
+        let pk_filter_expr_strs = pk_filters
+            .is_some()
+            .then_some(primary_key_filter_expr_strs)
+            .flatten();
 
         let mut prefilter_column_names = HashSet::new();
         for filter_ctx in &filters {
@@ -512,7 +517,7 @@ impl PrefilterContextBuilder {
 
         Some(Self {
             pk_filters,
-            pk_filter_expr_strs: primary_key_filter_expr_strs,
+            pk_filter_expr_strs,
             filters,
             physical_filters,
             codec: Arc::clone(codec),
@@ -857,9 +862,6 @@ fn build_prefilter_cache_entries(
     let mut entries = Vec::new();
 
     for (idx, filter_ctx) in prefilter_ctx.filters.iter().enumerate() {
-        if !matches!(filter_ctx.filter(), MaybeFilter::Filter(_)) {
-            continue;
-        }
         entries.push(PrefilterEntry {
             kind: PrefilterEntryKind::Simple(idx),
             key: PrefilterKey::new(
@@ -945,7 +947,6 @@ fn eval_entry_mask(
     match kind {
         PrefilterEntryKind::Simple(idx) => {
             eval_simple_filter_mask(batch, &prefilter_ctx.filters[idx], file_path)
-                .map(|mask| mask.unwrap_or_else(|| BooleanBuffer::new_unset(batch.num_rows())))
         }
         PrefilterEntryKind::Physical(idx) => {
             eval_physical_filter_mask(batch, &prefilter_ctx.physical_filters[idx], file_path)
@@ -984,11 +985,11 @@ fn eval_simple_filter_mask(
     batch: &RecordBatch,
     filter_ctx: &SimpleFilterContext,
     file_path: &str,
-) -> Result<Option<BooleanBuffer>> {
+) -> Result<BooleanBuffer> {
     let filter = match filter_ctx.filter() {
         MaybeFilter::Filter(filter) => filter,
-        MaybeFilter::Matched => return Ok(Some(BooleanBuffer::new_set(batch.num_rows()))),
-        MaybeFilter::Pruned => return Ok(None),
+        MaybeFilter::Matched => return Ok(BooleanBuffer::new_set(batch.num_rows())),
+        MaybeFilter::Pruned => return Ok(BooleanBuffer::new_unset(batch.num_rows())),
     };
 
     let (idx, _) = batch
@@ -1003,10 +1004,7 @@ fn eval_simple_filter_mask(
             ),
         })?;
     let column = batch.column(idx).clone();
-    filter
-        .evaluate_array(&column)
-        .map(Some)
-        .context(RecordBatchSnafu)
+    filter.evaluate_array(&column).context(RecordBatchSnafu)
 }
 
 fn eval_physical_filter_mask(
@@ -1545,9 +1543,7 @@ mod tests {
         let filters = new_simple_filter_contexts(&metadata, &[col("tag_0").eq(lit("a"))]);
         let batch = new_record_batch_with_custom_sequence(&["a", "x"], 0, 4, 1);
 
-        let mask = eval_simple_filter_mask(&batch, &filters[0], "test")
-            .unwrap()
-            .unwrap();
+        let mask = eval_simple_filter_mask(&batch, &filters[0], "test").unwrap();
         assert_eq!(mask.count_set_bits(), 4);
     }
 
