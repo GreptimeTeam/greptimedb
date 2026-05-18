@@ -561,7 +561,7 @@ fn compute_projection_mask(
 ) -> ProjectionMask {
     ProjectionMask::roots(
         parquet_schema,
-        projection_indices(column_names, arrow_schema).into_iter(),
+        projection_indices(column_names, arrow_schema),
     )
 }
 
@@ -627,10 +627,12 @@ async fn execute_prefilter_with_result_cache(
     let mut hit_mask: Option<BooleanBuffer> = None;
     let mut misses = Vec::new();
     for entry in entries {
-        if let Some(mask) = reader_builder
-            .cache_strategy()
-            .get_prefilter_result(&entry.key)
-        {
+        let Some(key) = &entry.key else {
+            misses.push(entry);
+            continue;
+        };
+
+        if let Some(mask) = reader_builder.cache_strategy().get_prefilter_result(key) {
             hit_mask = Some(match hit_mask {
                 Some(hit_mask) => hit_mask.bitand(mask.as_ref()),
                 None => mask.as_ref().clone(),
@@ -652,21 +654,15 @@ async fn execute_prefilter_with_result_cache(
         });
     }
 
-    let uncached_entries = uncached_prefilter_entries(&misses, &non_cacheable_physical);
-    let (miss_masks, uncached_mask, read_rows) = build_prefilter_masks(
-        prefilter_ctx,
-        reader_builder,
-        build_ctx,
-        &uncached_entries,
-        misses.len(),
-    )
-    .await?;
-
-    for (entry, mask) in misses.into_iter().zip(miss_masks) {
-        reader_builder
-            .cache_strategy()
-            .put_prefilter_result(entry.key, Arc::new(mask.clone()));
-    }
+    let mut uncached_entries = misses;
+    uncached_entries.extend(
+        non_cacheable_physical
+            .iter()
+            .copied()
+            .map(|idx| PrefilterEntry::without_cache(PrefilterEntryKind::Physical(idx))),
+    );
+    let (uncached_mask, read_rows) =
+        build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &uncached_entries).await?;
 
     let final_mask = match (hit_mask, uncached_mask) {
         (Some(hit_mask), Some(uncached_mask)) => hit_mask.bitand(&uncached_mask),
@@ -694,29 +690,12 @@ fn non_cacheable_physical_filters(prefilter_ctx: &PrefilterContext) -> Vec<usize
         .collect()
 }
 
-fn uncached_prefilter_entries(
-    misses: &[PrefilterEntry],
-    non_cacheable_physical: &[usize],
-) -> Vec<PrefilterEntryKind> {
-    misses
-        .iter()
-        .map(|entry| entry.kind)
-        .chain(
-            non_cacheable_physical
-                .iter()
-                .copied()
-                .map(PrefilterEntryKind::Physical),
-        )
-        .collect()
-}
-
 async fn build_prefilter_masks(
     prefilter_ctx: &mut PrefilterContext,
     reader_builder: &RowGroupReaderBuilder,
     build_ctx: &RowGroupBuildContext<'_>,
-    entries: &[PrefilterEntryKind],
-    cached_entry_count: usize,
-) -> Result<(Vec<BooleanBuffer>, Option<BooleanBuffer>, usize)> {
+    entries: &[PrefilterEntry],
+) -> Result<(Option<BooleanBuffer>, usize)> {
     let prefilter_column_names = prefilter_column_names_for_entries(prefilter_ctx, entries);
     let parquet_schema = reader_builder
         .parquet_metadata()
@@ -739,8 +718,7 @@ async fn build_prefilter_masks(
 
     let mut cache_builders = entries
         .iter()
-        .take(cached_entry_count)
-        .map(|_| BooleanBufferBuilder::new(0))
+        .map(|entry| entry.key.is_some().then(|| BooleanBufferBuilder::new(0)))
         .collect::<Vec<_>>();
     let mut combined_builder = (!entries.is_empty()).then(|| BooleanBufferBuilder::new(0));
     let mut rows_before_filter = 0usize;
@@ -755,9 +733,14 @@ async fn build_prefilter_masks(
 
         let mut batch_mask = BooleanBuffer::new_set(num_rows);
         for (idx, entry) in entries.iter().enumerate() {
-            let mask = eval_entry_mask(&batch, prefilter_ctx, *entry, reader_builder.file_path())?;
+            let mask = eval_entry_mask(
+                &batch,
+                prefilter_ctx,
+                entry.kind,
+                reader_builder.file_path(),
+            )?;
             batch_mask = batch_mask.bitand(&mask);
-            if let Some(builder) = cache_builders.get_mut(idx) {
+            if let Some(Some(builder)) = cache_builders.get_mut(idx) {
                 builder.append_buffer(&mask);
             }
         }
@@ -766,11 +749,15 @@ async fn build_prefilter_masks(
         }
     }
 
+    for (entry, builder) in entries.iter().zip(cache_builders) {
+        if let (Some(key), Some(mut builder)) = (&entry.key, builder) {
+            reader_builder
+                .cache_strategy()
+                .put_prefilter_result(key.clone(), Arc::new(builder.finish()));
+        }
+    }
+
     Ok((
-        cache_builders
-            .into_iter()
-            .map(|mut builder| builder.finish())
-            .collect(),
         combined_builder.map(|mut builder| builder.finish()),
         rows_before_filter,
     ))
@@ -778,19 +765,19 @@ async fn build_prefilter_masks(
 
 fn prefilter_column_names_for_entries(
     prefilter_ctx: &PrefilterContext,
-    entries: &[PrefilterEntryKind],
+    entries: &[PrefilterEntry],
 ) -> HashSet<String> {
     let mut prefilter_column_names = HashSet::new();
     for entry in entries {
-        match entry {
+        match entry.kind {
             PrefilterEntryKind::Simple(idx) => {
-                if let MaybeFilter::Filter(filter) = prefilter_ctx.filters[*idx].filter() {
+                if let MaybeFilter::Filter(filter) = prefilter_ctx.filters[idx].filter() {
                     prefilter_column_names.insert(filter.column_name().to_string());
                 }
             }
             PrefilterEntryKind::Physical(idx) => {
                 prefilter_column_names.insert(
-                    prefilter_ctx.physical_filters[*idx]
+                    prefilter_ctx.physical_filters[idx]
                         .column_name()
                         .to_string(),
                 );
@@ -809,8 +796,8 @@ async fn execute_prefilter_by_reading_columns(
     build_ctx: &RowGroupBuildContext<'_>,
 ) -> Result<PrefilterResult> {
     let entries = all_prefilter_entries(prefilter_ctx);
-    let (_, mask, rows_before_filter) =
-        build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &entries, 0).await?;
+    let (mask, rows_before_filter) =
+        build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &entries).await?;
 
     let final_mask = mask.unwrap_or_else(|| BooleanBuffer::new_set(rows_before_filter));
     let rows_selected = final_mask.count_set_bits();
@@ -823,24 +810,24 @@ async fn execute_prefilter_by_reading_columns(
     })
 }
 
-fn all_prefilter_entries(prefilter_ctx: &PrefilterContext) -> Vec<PrefilterEntryKind> {
+fn all_prefilter_entries(prefilter_ctx: &PrefilterContext) -> Vec<PrefilterEntry> {
     let mut entries = Vec::new();
     if prefilter_ctx.pk_filter.is_some() {
-        entries.push(PrefilterEntryKind::PkGroup);
+        entries.push(PrefilterEntry::without_cache(PrefilterEntryKind::PkGroup));
     }
     entries.extend(
         prefilter_ctx
             .filters
             .iter()
             .enumerate()
-            .map(|(idx, _)| PrefilterEntryKind::Simple(idx)),
+            .map(|(idx, _)| PrefilterEntry::without_cache(PrefilterEntryKind::Simple(idx))),
     );
     entries.extend(
         prefilter_ctx
             .physical_filters
             .iter()
             .enumerate()
-            .map(|(idx, _)| PrefilterEntryKind::Physical(idx)),
+            .map(|(idx, _)| PrefilterEntry::without_cache(PrefilterEntryKind::Physical(idx))),
     );
     entries
 }
@@ -854,7 +841,13 @@ enum PrefilterEntryKind {
 
 struct PrefilterEntry {
     kind: PrefilterEntryKind,
-    key: PrefilterKey,
+    key: Option<PrefilterKey>,
+}
+
+impl PrefilterEntry {
+    fn without_cache(kind: PrefilterEntryKind) -> Self {
+        Self { kind, key: None }
+    }
 }
 
 fn build_prefilter_cache_entries(
@@ -870,13 +863,13 @@ fn build_prefilter_cache_entries(
     for (idx, filter_ctx) in prefilter_ctx.filters.iter().enumerate() {
         entries.push(PrefilterEntry {
             kind: PrefilterEntryKind::Simple(idx),
-            key: PrefilterKey::new(
+            key: Some(PrefilterKey::new(
                 file_id,
                 row_group_idx,
                 row_selection.clone(),
                 prefilter_ctx.schema_version,
                 smallvec![filter_ctx.expr_str().to_string()],
-            ),
+            )),
         });
     }
 
@@ -886,13 +879,13 @@ fn build_prefilter_cache_entries(
         }
         entries.push(PrefilterEntry {
             kind: PrefilterEntryKind::Physical(idx),
-            key: PrefilterKey::new(
+            key: Some(PrefilterKey::new(
                 file_id,
                 row_group_idx,
                 row_selection.clone(),
                 prefilter_ctx.schema_version,
                 smallvec![filter_ctx.expr_str().to_string()],
-            ),
+            )),
         });
     }
 
@@ -901,13 +894,13 @@ fn build_prefilter_cache_entries(
     {
         entries.push(PrefilterEntry {
             kind: PrefilterEntryKind::PkGroup,
-            key: PrefilterKey::new(
+            key: Some(PrefilterKey::new(
                 file_id,
                 row_group_idx,
                 row_selection,
                 prefilter_ctx.schema_version,
                 exprs.clone(),
-            ),
+            )),
         });
     }
 
