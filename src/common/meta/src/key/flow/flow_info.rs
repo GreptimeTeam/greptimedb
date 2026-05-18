@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use futures::TryStreamExt;
+use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -27,11 +29,23 @@ use crate::FlownodeId;
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
+use crate::key::{
+    BytesAdapter, DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue,
+};
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
+use crate::rpc::KeyValue;
+use crate::rpc::store::RangeRequest;
 
 pub const FLOW_INFO_KEY_PREFIX: &str = "info";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum FlowStatus {
+    PendingSources,
+    #[default]
+    Active,
+}
 
 lazy_static! {
     static ref FLOW_INFO_KEY_PATTERN: Regex =
@@ -114,7 +128,12 @@ impl<'a> MetadataKey<'a, FlowInfoKeyInner> for FlowInfoKeyInner {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlowInfoValue {
     /// The source tables used by the flow.
+    #[serde(default)]
     pub source_table_ids: Vec<TableId>,
+    #[serde(default)]
+    pub all_source_table_names: Vec<TableName>,
+    #[serde(default)]
+    pub unresolved_source_table_names: Vec<TableName>,
     /// The sink table used by the flow.
     pub sink_table_name: TableName,
     /// Which flow nodes this flow is running on.
@@ -145,6 +164,10 @@ pub struct FlowInfoValue {
     pub comment: String,
     /// The options.
     pub options: HashMap<String, String>,
+    #[serde(default)]
+    pub status: FlowStatus,
+    #[serde(default)]
+    pub last_activation_error: Option<String>,
     /// The created time
     #[serde(default)]
     pub created_time: DateTime<Utc>,
@@ -154,6 +177,14 @@ pub struct FlowInfoValue {
 }
 
 impl FlowInfoValue {
+    pub fn is_pending(&self) -> bool {
+        self.status == FlowStatus::PendingSources
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.status == FlowStatus::Active
+    }
+
     /// Returns the `flownode_id`.
     pub fn flownode_ids(&self) -> &BTreeMap<FlowPartitionId, FlownodeId> {
         &self.flownode_ids
@@ -171,6 +202,14 @@ impl FlowInfoValue {
     /// Returns the `source_table`.
     pub fn source_table_ids(&self) -> &[TableId] {
         &self.source_table_ids
+    }
+
+    pub fn all_source_table_names(&self) -> &[TableName] {
+        &self.all_source_table_names
+    }
+
+    pub fn unresolved_source_table_names(&self) -> &[TableName] {
+        &self.unresolved_source_table_names
     }
 
     pub fn catalog_name(&self) -> &String {
@@ -209,6 +248,14 @@ impl FlowInfoValue {
         &self.options
     }
 
+    pub fn status(&self) -> &FlowStatus {
+        &self.status
+    }
+
+    pub fn last_activation_error(&self) -> &Option<String> {
+        &self.last_activation_error
+    }
+
     pub fn created_time(&self) -> &DateTime<Utc> {
         &self.created_time
     }
@@ -223,6 +270,12 @@ pub type FlowInfoManagerRef = Arc<FlowInfoManager>;
 /// The manager of [FlowInfoKey].
 pub struct FlowInfoManager {
     kv_backend: KvBackendRef,
+}
+
+pub fn flow_info_decoder(kv: KeyValue) -> Result<(FlowInfoKey, FlowInfoValue)> {
+    let key = FlowInfoKey::from_bytes(&kv.key)?;
+    let value = FlowInfoValue::try_from_raw_value(&kv.value)?;
+    Ok((key, value))
 }
 
 impl FlowInfoManager {
@@ -252,6 +305,23 @@ impl FlowInfoManager {
             .await?
             .map(|x| DeserializedValueWithBytes::from_inner_slice(&x.value))
             .transpose()
+    }
+
+    pub fn flow_infos(&self) -> BoxStream<'static, Result<(FlowId, FlowInfoValue)>> {
+        let start_key = FlowScoped::new(BytesAdapter::from(
+            format!("{FLOW_INFO_KEY_PREFIX}/").into_bytes(),
+        ))
+        .to_bytes();
+        let req = RangeRequest::new().with_prefix(start_key);
+        let stream = PaginationStream::new(
+            self.kv_backend.clone(),
+            req,
+            DEFAULT_PAGE_SIZE,
+            flow_info_decoder,
+        )
+        .into_stream();
+
+        Box::pin(stream.map_ok(|(key, value)| (key.flow_id(), value)))
     }
 
     /// Builds a create flow transaction.

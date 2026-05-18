@@ -459,6 +459,7 @@ mod tests {
 
     use super::*;
     use crate::FlownodeId;
+    use crate::key::flow::flow_info::FlowStatus;
     use crate::key::flow::table_flow::TableFlowKey;
     use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
     use crate::key::{FlowPartitionId, MetadataValue};
@@ -522,6 +523,8 @@ mod tests {
             query_context: None,
             flow_name: flow_name.to_string(),
             source_table_ids,
+            all_source_table_names: vec![],
+            unresolved_source_table_names: vec![],
             sink_table_name,
             flownode_ids,
             raw_sql: "raw".to_string(),
@@ -529,6 +532,8 @@ mod tests {
             eval_interval_secs: None,
             comment: "hi".to_string(),
             options: Default::default(),
+            status: FlowStatus::Active,
+            last_activation_error: None,
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
         }
@@ -774,6 +779,8 @@ mod tests {
             query_context: None,
             flow_name: "flow".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
+            all_source_table_names: vec![],
+            unresolved_source_table_names: vec![],
             sink_table_name: another_sink_table_name,
             flownode_ids: [(0, 1u64)].into(),
             raw_sql: "raw".to_string(),
@@ -781,6 +788,8 @@ mod tests {
             eval_interval_secs: None,
             comment: "hi".to_string(),
             options: Default::default(),
+            status: FlowStatus::Active,
+            last_activation_error: None,
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
         };
@@ -1151,6 +1160,8 @@ mod tests {
             query_context: None,
             flow_name: "flow".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
+            all_source_table_names: vec![],
+            unresolved_source_table_names: vec![],
             sink_table_name: another_sink_table_name,
             flownode_ids: [(0, 1u64)].into(),
             raw_sql: "raw".to_string(),
@@ -1158,6 +1169,8 @@ mod tests {
             eval_interval_secs: None,
             comment: "hi".to_string(),
             options: Default::default(),
+            status: FlowStatus::Active,
+            last_activation_error: None,
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
         };

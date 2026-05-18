@@ -14,12 +14,12 @@
 
 mod metadata;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use api::v1::ExpireAfter;
 use api::v1::flow::flow_request::Body as PbFlowRequest;
-use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
+use api::v1::flow::{CreateRequest, DropRequest, FlowRequest, FlowRequestHeader, flow_request};
 use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -34,13 +34,14 @@ use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
 use strum::AsRefStr;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{self, Result, UnexpectedSnafu};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
-use crate::key::flow::flow_info::FlowInfoValue;
+use crate::key::flow::flow_info::{FlowInfoValue, FlowStatus};
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
@@ -67,11 +68,14 @@ impl CreateFlowProcedure {
                 flow_id: None,
                 peers: vec![],
                 source_table_ids: vec![],
+                unresolved_source_table_names: vec![],
                 flow_context: query_context.into(), // Convert to FlowQueryContext
                 state: CreateFlowState::Prepare,
                 prev_flow_info_value: None,
+                prev_peers: vec![],
                 did_replace: false,
                 flow_type: None,
+                last_activation_error: None,
             },
         }
     }
@@ -129,7 +133,8 @@ impl CreateFlowProcedure {
                 .map(|(_, value)| value.peer)
                 .collect::<Vec<_>>();
             self.data.flow_id = Some(flow_id);
-            self.data.peers = peers;
+            self.data.peers.clone_from(&peers);
+            self.data.prev_peers = peers;
             info!("Replacing flow, flow_id: {}", flow_id);
 
             let flow_info_value = self
@@ -167,6 +172,20 @@ impl CreateFlowProcedure {
         }
 
         self.collect_source_tables().await?;
+        ensure!(
+            self.data.unresolved_source_table_names.is_empty()
+                || defer_on_missing_source(&self.data.task)?,
+            error::UnsupportedSnafu {
+                operation: format!(
+                    "Create flow with missing source tables requires WITH ('{DEFER_ON_MISSING_SOURCE_KEY}'='true'): {}",
+                    self.data
+                        .unresolved_source_table_names
+                        .iter()
+                        .map(ToString::to_string)
+                        .join(", ")
+                )
+            }
+        );
 
         // Validate that source and sink tables are not the same
         let sink_table_name = &self.data.task.sink_table_name;
@@ -189,9 +208,19 @@ impl CreateFlowProcedure {
         if self.data.flow_id.is_none() {
             self.allocate_flow_id().await?;
         }
-        self.data.state = CreateFlowState::CreateFlows;
-        // determine flow type
         self.data.flow_type = Some(get_flow_type_from_options(&self.data.task)?);
+
+        self.data.state = if self.data.is_pending() {
+            self.data.peers.clear();
+            CreateFlowState::CreateMetadata
+        } else {
+            if self.data.peers.is_empty() {
+                // Replacing a pending flow means the flow id already exists, but there
+                // are no flow routes yet. Allocate peers for the newly-active flow.
+                self.data.peers = self.context.flow_metadata_allocator.alloc_peers(1).await?;
+            }
+            CreateFlowState::CreateFlows
+        };
 
         Ok(Status::executing(true))
     }
@@ -301,7 +330,44 @@ impl CreateFlowProcedure {
             .invalidate(&ctx, &caches)
             .await?;
 
+        if did_replace {
+            self.on_flownode_drop_previous_flows().await?;
+        }
+
         Ok(Status::done_with_output(flow_id))
+    }
+
+    async fn on_flownode_drop_previous_flows(&self) -> Result<()> {
+        let Some(prev_flow_info) = self.data.prev_flow_info_value.as_ref() else {
+            return Ok(());
+        };
+        if prev_flow_info.flownode_ids().is_empty() {
+            return Ok(());
+        }
+
+        let flow_id = self.data.flow_id.unwrap();
+        let mut drop_flow_tasks = Vec::with_capacity(self.data.prev_peers.len());
+        for peer in &self.data.prev_peers {
+            let requester = self.context.node_manager.flownode(peer).await;
+            let request = FlowRequest {
+                body: Some(flow_request::Body::Drop(DropRequest {
+                    flow_id: Some(api::v1::FlowId { id: flow_id }),
+                })),
+                ..Default::default()
+            };
+            drop_flow_tasks.push(async move {
+                requester
+                    .handle(request)
+                    .await
+                    .map_err(add_peer_context_if_needed(peer.clone()))
+            });
+        }
+        join_all(drop_flow_tasks)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(())
     }
 }
 
@@ -365,6 +431,40 @@ pub fn get_flow_type_from_options(flow_task: &CreateFlowTask) -> Result<FlowType
     }
 }
 
+pub const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
+
+pub fn defer_on_missing_source(flow_task: &CreateFlowTask) -> Result<bool> {
+    flow_task
+        .flow_options
+        .get(DEFER_ON_MISSING_SOURCE_KEY)
+        .map(|value| {
+            value
+                .trim()
+                .to_ascii_lowercase()
+                .parse::<bool>()
+                .map_err(|_| {
+                    error::UnexpectedSnafu {
+                        err_msg: format!(
+                            "Invalid flow option '{DEFER_ON_MISSING_SOURCE_KEY}': {value}"
+                        ),
+                    }
+                    .build()
+                })
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(false))
+}
+
+fn user_runtime_flow_options(options: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut options = options.clone();
+    options.remove(DEFER_ON_MISSING_SOURCE_KEY);
+    options
+}
+
+fn metadata_flow_options(options: &HashMap<String, String>) -> HashMap<String, String> {
+    options.clone()
+}
+
 /// The state of [CreateFlowProcedure].
 #[derive(Debug, Clone, Serialize, Deserialize, AsRefStr, PartialEq)]
 pub enum CreateFlowState {
@@ -411,17 +511,33 @@ pub struct CreateFlowData {
     pub(crate) flow_id: Option<FlowId>,
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
+    #[serde(default)]
+    pub(crate) unresolved_source_table_names: Vec<TableName>,
     /// Use alias for backward compatibility with QueryContext serialized data
     #[serde(alias = "query_context")]
     pub(crate) flow_context: FlowQueryContext,
     /// For verify if prev value is consistent when need to update flow metadata.
     /// only set when `or_replace` is true.
     pub(crate) prev_flow_info_value: Option<DeserializedValueWithBytes<FlowInfoValue>>,
+    #[serde(default)]
+    pub(crate) prev_peers: Vec<Peer>,
     /// Only set to true when replace actually happened.
     /// This is used to determine whether to invalidate the cache.
     #[serde(default)]
     pub(crate) did_replace: bool,
     pub(crate) flow_type: Option<FlowType>,
+    #[serde(default)]
+    pub(crate) last_activation_error: Option<String>,
+}
+
+impl CreateFlowData {
+    pub(crate) fn is_pending(&self) -> bool {
+        !self.unresolved_source_table_names.is_empty()
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        !self.is_pending()
+    }
 }
 
 impl From<&CreateFlowData> for CreateRequest {
@@ -446,7 +562,7 @@ impl From<&CreateFlowData> for CreateRequest {
                 .map(|seconds| api::v1::EvalInterval { seconds }),
             comment: value.task.comment.clone(),
             sql: value.task.sql.clone(),
-            flow_options: value.task.flow_options.clone(),
+            flow_options: user_runtime_flow_options(&value.task.flow_options),
         };
 
         let flow_type = value.flow_type.unwrap_or_default().to_string();
@@ -466,9 +582,9 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             eval_interval_secs: eval_interval,
             comment,
             sql,
-            flow_options: mut options,
             ..
         } = value.task.clone();
+        let mut options = metadata_flow_options(&value.task.flow_options);
 
         let flownode_ids = value
             .peers
@@ -495,6 +611,8 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
 
         let flow_info: FlowInfoValue = FlowInfoValue {
             source_table_ids: value.source_table_ids.clone(),
+            all_source_table_names: value.task.source_table_names.clone(),
+            unresolved_source_table_names: value.unresolved_source_table_names.clone(),
             sink_table_name,
             flownode_ids,
             catalog_name,
@@ -506,6 +624,12 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             eval_interval_secs: eval_interval,
             comment,
             options,
+            status: if value.is_active() {
+                FlowStatus::Active
+            } else {
+                FlowStatus::PendingSources
+            },
+            last_activation_error: value.last_activation_error.clone(),
             created_time: create_time,
             updated_time: chrono::Utc::now(),
         };
