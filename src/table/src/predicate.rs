@@ -41,7 +41,7 @@ mod stats;
 /// In theory, it should be converted to a timestamp scalar value by `TypeConversionRule`.
 macro_rules! return_none_if_utf8 {
     ($lit: ident) => {
-        if matches!($lit, ScalarValue::Utf8(_)) {
+        if is_string_timestamp_literal($lit) {
             warn!(
                 "Unexpected ScalarValue::Utf8 in time range predicate: {:?}. Maybe it's an implicit bug, please report it to https://github.com/GreptimeTeam/greptimedb/issues",
                 $lit
@@ -51,6 +51,13 @@ macro_rules! return_none_if_utf8 {
             return None;
         }
     };
+}
+
+pub fn is_string_timestamp_literal(scalar: &ScalarValue) -> bool {
+    matches!(
+        scalar,
+        ScalarValue::Utf8(_) | ScalarValue::LargeUtf8(_) | ScalarValue::Utf8View(_)
+    )
 }
 
 /// Reference-counted pointer to a list of logical exprs and a list of dynamic filter physical exprs.

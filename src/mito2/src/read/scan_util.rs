@@ -1375,6 +1375,7 @@ mod split_tests {
             input,
             ranges: vec![],
             scan_fingerprint: None,
+            scan_implied_time_range: None,
             query_start: std::time::Instant::now(),
         }
     }
@@ -1755,6 +1756,7 @@ mod tests {
             input,
             ranges: Vec::new(),
             scan_fingerprint: None,
+            scan_implied_time_range: None,
             query_start: Instant::now(),
         })
     }

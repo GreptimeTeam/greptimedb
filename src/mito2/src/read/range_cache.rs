@@ -19,13 +19,20 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use common_telemetry::warn;
+use common_time::Timestamp;
+use common_time::range::TimestampRange;
+use common_time::timestamp::TimeUnit;
+use datafusion_expr::expr::Expr;
+use datafusion_expr::{Between, BinaryExpr, Operator};
 use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::value::scalar_value_to_timestamp;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
 use store_api::storage::{FileId, RegionId, TimeSeriesRowSelector};
+use table::predicate::is_string_timestamp_literal;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cache::CacheStrategy;
@@ -139,7 +146,6 @@ impl ScanRequestFingerprint {
             .unwrap_or(&[])
     }
 
-    #[allow(dead_code)]
     pub(crate) fn without_time_filters(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -266,6 +272,177 @@ pub(crate) fn collect_partition_range_row_groups(
     }
 }
 
+/// Returns the timestamp range where all time-only predicates are guaranteed true.
+///
+/// Returns `Some(min_to_max)` for empty input (vacuously true everywhere).
+/// Returns `None` if any expression contains an unsupported shape: `OR`, `NOT`,
+/// `IN`, non-literal RHS, unsupported operator, column-name mismatch, an `=`
+/// literal that cannot be represented exactly in the column unit, or overflow
+/// during bound adjustment.
+///
+/// This is intentionally stricter than `extract_time_range_from_expr` in
+/// `table::predicate`: lower bounds round up and upper bounds round down. If a
+/// partition's file-time range is contained by the returned range, every row in
+/// that partition satisfies the original time predicates.
+///
+/// `IsNull`/`IsNotNull` on the time index are not routed into `time_filters`
+/// today. If that changes, handle them here before stripping time filters from
+/// the cache key.
+pub(crate) fn implied_time_range_from_exprs(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    exprs: &[&Expr],
+) -> Option<TimestampRange> {
+    let mut acc = TimestampRange::min_to_max();
+    for expr in exprs {
+        let r = implied_time_range_from_expr(ts_col_name, ts_col_unit, expr)?;
+        acc = acc.and(&r);
+    }
+    Some(acc)
+}
+
+fn implied_time_range_from_expr(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    expr: &Expr,
+) -> Option<TimestampRange> {
+    match expr {
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
+            Operator::And => {
+                let l = implied_time_range_from_expr(ts_col_name, ts_col_unit, left)?;
+                let r = implied_time_range_from_expr(ts_col_name, ts_col_unit, right)?;
+                Some(l.and(&r))
+            }
+            Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq => {
+                implied_from_cmp(ts_col_name, ts_col_unit, left, *op, right)
+            }
+            // `OR` would require a strict intersection over a union of half-planes
+            // (not the loose-span union provided by `TimestampRange::or`), so we
+            // refuse it. Any other operator is unsupported.
+            _ => None,
+        },
+        Expr::Between(Between {
+            expr,
+            negated,
+            low,
+            high,
+        }) => {
+            if *negated {
+                return None;
+            }
+            implied_from_between(ts_col_name, ts_col_unit, expr, low, high)
+        }
+        // Includes `IsNull`, `IsNotNull`, `Not`, `InList`, function calls, etc.
+        _ => None,
+    }
+}
+
+fn match_ts_column_literal<'a>(
+    ts_col_name: &str,
+    left: &'a Expr,
+    right: &'a Expr,
+) -> Option<(Timestamp, bool)> {
+    let (col, scalar, reverse) = match (left, right) {
+        (Expr::Column(c), Expr::Literal(s, _)) => (c, s, false),
+        (Expr::Literal(s, _), Expr::Column(c)) => (c, s, true),
+        _ => return None,
+    };
+    if col.name != ts_col_name {
+        return None;
+    }
+    // Reject string literals: their conversion needs a timezone we do not have,
+    // and the existing extractor in `table::predicate` rejects them too.
+    if is_string_timestamp_literal(scalar) {
+        return None;
+    }
+    scalar_value_to_timestamp(scalar, None).map(|t| (t, reverse))
+}
+
+fn implied_from_cmp(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    left: &Expr,
+    op: Operator,
+    right: &Expr,
+) -> Option<TimestampRange> {
+    let (ts, reverse) = match_ts_column_literal(ts_col_name, left, right)?;
+    // Normalize to "column OP literal".
+    let op = if reverse {
+        match op {
+            Operator::Lt => Operator::Gt,
+            Operator::LtEq => Operator::GtEq,
+            Operator::Gt => Operator::Lt,
+            Operator::GtEq => Operator::LtEq,
+            Operator::Eq => Operator::Eq,
+            _ => return None,
+        }
+    } else {
+        op
+    };
+
+    match op {
+        Operator::GtEq => {
+            // ts >= L. Round the lower bound up in the column unit.
+            let b = ts.convert_to_ceil(ts_col_unit)?;
+            Some(TimestampRange::from_start(b))
+        }
+        Operator::Gt => {
+            // ts > L. floor(L) + 1 is the tight lower bound in the column unit.
+            let v = ts.convert_to(ts_col_unit)?.value().checked_add(1)?;
+            Some(TimestampRange::from_start(Timestamp::new(v, ts_col_unit)))
+        }
+        Operator::LtEq => {
+            // ts <= L. Round the upper bound down in the column unit.
+            let b = ts.convert_to(ts_col_unit)?;
+            Some(TimestampRange::until_end(b, true))
+        }
+        Operator::Lt => {
+            // ts < L. Use the exclusive floor bound; it is sound even when the
+            // literal is not exactly representable in the column unit.
+            let b = ts.convert_to(ts_col_unit)?;
+            Some(TimestampRange::until_end(b, false))
+        }
+        Operator::Eq => {
+            // ts = L. Only provable when L is exactly representable.
+            let f = ts.convert_to(ts_col_unit)?;
+            let c = ts.convert_to_ceil(ts_col_unit)?;
+            if f.value() != c.value() {
+                return None;
+            }
+            Some(TimestampRange::single(f))
+        }
+        _ => None,
+    }
+}
+
+fn implied_from_between(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    expr: &Expr,
+    low: &Expr,
+    high: &Expr,
+) -> Option<TimestampRange> {
+    let Expr::Column(c) = expr else {
+        return None;
+    };
+    if c.name != ts_col_name {
+        return None;
+    }
+    let (low_s, high_s) = match (low, high) {
+        (Expr::Literal(l, _), Expr::Literal(h, _)) => (l, h),
+        _ => return None,
+    };
+    if is_string_timestamp_literal(low_s) || is_string_timestamp_literal(high_s) {
+        return None;
+    }
+    let low_ts = scalar_value_to_timestamp(low_s, None)?;
+    let high_ts = scalar_value_to_timestamp(high_s, None)?;
+    // BETWEEN low AND high is equivalent to ts >= low AND ts <= high.
+    let lo = low_ts.convert_to_ceil(ts_col_unit)?;
+    let hi = high_ts.convert_to(ts_col_unit)?;
+    Some(TimestampRange::new_inclusive(Some(lo), Some(hi)))
+}
+
 /// Builds a cache key for the given partition range if it is eligible for caching.
 pub(crate) fn build_range_cache_key(
     stream_ctx: &StreamContext,
@@ -292,17 +469,24 @@ pub(crate) fn build_range_cache_key(
         return None;
     }
 
-    // TODO(yingwen): We used to call `fingerprint.without_time_filters()` when the query's
-    // `TimestampRange` fully covered the partition's `FileTimeRange`, so different queries that
-    // all enclosed the same partition could share a cache entry. The cover check turned out to
-    // be too coarse: it returned true in cases where the dropped time predicates would still
-    // have excluded rows, so the cache served results that should have been filtered. Reviving
-    // the optimization needs a per-predicate implication check that walks each time-only `Expr`
-    // (recursing through AND/OR/NOT) and proves the predicate is satisfied for every timestamp
-    // inside the partition's `FileTimeRange` — not the looser "does `extract_time_range_from_expr`
-    // return a range that covers the partition" used previously. Until then, always carry the
-    // full fingerprint so cache reuse stays correct.
-    let scan = fingerprint.clone();
+    // If every time-only predicate is implied to be true on this partition's
+    // `FileTimeRange`, drop them from the cache key so that two queries with
+    // different but equally-covering time bounds share the same entry. The
+    // implied range is computed once per scan by `implied_time_range_from_exprs`
+    // (see `build_scan_fingerprint`); `None` means at least one time-only
+    // predicate had an unsupported shape (e.g. `OR`), so the optimization is
+    // disabled and the time predicates remain part of the key.
+    let range_meta = &stream_ctx.ranges[part_range.identifier];
+    let (file_min, file_max) = range_meta.time_range;
+    let covers = match &stream_ctx.scan_implied_time_range {
+        Some(implied) => implied.contains(&file_min) && implied.contains(&file_max),
+        None => false,
+    };
+    let scan = if covers {
+        fingerprint.without_time_filters()
+    } else {
+        fingerprint.clone()
+    };
 
     Some(RangeScanCacheKey {
         region_id: stream_ctx.input.region_metadata().region_id,
@@ -722,11 +906,16 @@ mod tests {
             num_rows: 10,
         };
         let partition_range = range_meta.new_partition_range(0);
-        let scan_fingerprint = crate::read::scan_region::build_scan_fingerprint(&input);
+        let (scan_fingerprint, scan_implied_time_range) =
+            match crate::read::scan_region::build_scan_fingerprint(&input) {
+                Some(b) => (Some(b.fingerprint), b.implied_time_range),
+                None => (None, None),
+            };
         let stream_ctx = StreamContext {
             input,
             ranges: vec![range_meta],
             scan_fingerprint,
+            scan_implied_time_range,
             query_start: Instant::now(),
         };
 
@@ -770,57 +959,279 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserves_time_filters_when_query_covers_partition_range() {
-        assert_range_cache_filters(
-            vec![
-                col("ts").gt_eq(ts_lit(1000)),
-                col("ts").lt(ts_lit(2001)),
-                col("ts").is_not_null(),
-                col("k0").eq(lit("foo")),
-            ],
-            TimestampRange::with_unit(1000, 2002, TimeUnit::Millisecond),
-            (
-                Timestamp::new_millisecond(1000),
-                Timestamp::new_millisecond(2000),
-            ),
-            vec![col("k0").eq(lit("foo")), col("ts").is_not_null()],
-            vec![col("ts").gt_eq(ts_lit(1000)), col("ts").lt(ts_lit(2001))],
-        )
-        .await;
+    async fn range_cache_time_filter_key_cases() {
+        let partition = (
+            Timestamp::new_millisecond(1000),
+            Timestamp::new_millisecond(2000),
+        );
+
+        struct Case {
+            filters: Vec<Expr>,
+            query_time_range: Option<TimestampRange>,
+            expected_filters: Vec<Expr>,
+            expected_time_filters: Vec<Expr>,
+        }
+
+        // Time filters are stripped only when their implied range fully covers
+        // the partition's file-time range. `is_not_null(ts)` stays in regular
+        // filters because it is not routed into `time_filters`.
+        for case in [
+            Case {
+                filters: vec![
+                    col("ts").gt_eq(ts_lit(1000)),
+                    col("ts").lt(ts_lit(2001)),
+                    col("ts").is_not_null(),
+                    col("k0").eq(lit("foo")),
+                ],
+                query_time_range: TimestampRange::with_unit(1000, 2002, TimeUnit::Millisecond),
+                expected_filters: vec![col("k0").eq(lit("foo")), col("ts").is_not_null()],
+                expected_time_filters: vec![],
+            },
+            Case {
+                filters: vec![
+                    col("ts").gt_eq(ts_lit(500)),
+                    col("ts").lt(ts_lit(3000)),
+                    col("k0").eq(lit("foo")),
+                ],
+                query_time_range: TimestampRange::with_unit(500, 3000, TimeUnit::Millisecond),
+                expected_filters: vec![col("k0").eq(lit("foo"))],
+                expected_time_filters: vec![],
+            },
+            Case {
+                filters: vec![
+                    col("ts").gt_eq(ts_lit(1000)),
+                    col("ts").lt_eq(ts_lit(2000)),
+                    col("k0").eq(lit("foo")),
+                ],
+                query_time_range: TimestampRange::with_unit(1000, 2001, TimeUnit::Millisecond),
+                expected_filters: vec![col("k0").eq(lit("foo"))],
+                expected_time_filters: vec![],
+            },
+            Case {
+                filters: vec![
+                    col("ts").between(ts_lit(1000), ts_lit(2000)),
+                    col("k0").eq(lit("foo")),
+                ],
+                query_time_range: TimestampRange::with_unit(1000, 2001, TimeUnit::Millisecond),
+                expected_filters: vec![col("k0").eq(lit("foo"))],
+                expected_time_filters: vec![],
+            },
+            Case {
+                filters: vec![col("ts").gt_eq(ts_lit(1200)), col("k0").eq(lit("foo"))],
+                query_time_range: TimestampRange::with_unit(1200, 2001, TimeUnit::Millisecond),
+                expected_filters: vec![col("k0").eq(lit("foo"))],
+                expected_time_filters: vec![col("ts").gt_eq(ts_lit(1200))],
+            },
+            Case {
+                filters: vec![
+                    col("ts").gt_eq(ts_lit(1500)),
+                    col("ts").is_not_null(),
+                    col("k0").eq(lit("foo")),
+                ],
+                query_time_range: None,
+                expected_filters: vec![col("k0").eq(lit("foo")), col("ts").is_not_null()],
+                expected_time_filters: vec![col("ts").gt_eq(ts_lit(1500))],
+            },
+        ] {
+            assert_range_cache_filters(
+                case.filters,
+                case.query_time_range,
+                partition,
+                case.expected_filters,
+                case.expected_time_filters,
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
-    async fn preserves_time_filters_when_query_does_not_cover_partition_range() {
-        assert_range_cache_filters(
-            vec![col("ts").gt_eq(ts_lit(1000)), col("k0").eq(lit("foo"))],
-            TimestampRange::with_unit(1000, 1500, TimeUnit::Millisecond),
-            (
-                Timestamp::new_millisecond(1000),
-                Timestamp::new_millisecond(2000),
-            ),
-            vec![col("k0").eq(lit("foo"))],
-            vec![col("ts").gt_eq(ts_lit(1000))],
+    async fn two_distinct_queries_share_cache_key_when_both_cover() {
+        let partition_range = (
+            Timestamp::new_millisecond(1000),
+            Timestamp::new_millisecond(2000),
+        );
+
+        let (ctx_a, part_a) = new_stream_context(
+            vec![
+                col("ts").gt_eq(ts_lit(500)),
+                col("ts").lt(ts_lit(3000)),
+                col("k0").eq(lit("foo")),
+            ],
+            TimestampRange::with_unit(500, 3000, TimeUnit::Millisecond),
+            partition_range,
         )
         .await;
+        let (ctx_b, part_b) = new_stream_context(
+            vec![
+                col("ts").gt_eq(ts_lit(100)),
+                col("ts").lt(ts_lit(5000)),
+                col("k0").eq(lit("foo")),
+            ],
+            TimestampRange::with_unit(100, 5000, TimeUnit::Millisecond),
+            partition_range,
+        )
+        .await;
+
+        let key_a = build_range_cache_key(&ctx_a, &part_a).unwrap();
+        let key_b = build_range_cache_key(&ctx_b, &part_b).unwrap();
+        assert_eq!(key_a.scan, key_b.scan);
+        assert!(key_a.scan.time_filters().is_empty());
     }
 
     #[tokio::test]
-    async fn preserves_time_filters_when_query_has_no_time_range_limit() {
-        assert_range_cache_filters(
-            vec![
-                col("ts").gt_eq(ts_lit(1000)),
-                col("ts").is_not_null(),
-                col("k0").eq(lit("foo")),
-            ],
+    async fn disables_optimization_on_or_clause() {
+        let partition_range = (
+            Timestamp::new_millisecond(1000),
+            Timestamp::new_millisecond(2000),
+        );
+
+        let or_a = col("ts").gt_eq(ts_lit(1000)).or(col("ts").lt(ts_lit(500)));
+        let or_b = col("ts").gt_eq(ts_lit(900)).or(col("ts").lt(ts_lit(400)));
+
+        let (ctx_a, part_a) = new_stream_context(
+            vec![or_a.clone(), col("k0").eq(lit("foo"))],
             None,
-            (
-                Timestamp::new_millisecond(1000),
-                Timestamp::new_millisecond(2000),
-            ),
-            vec![col("k0").eq(lit("foo")), col("ts").is_not_null()],
-            vec![col("ts").gt_eq(ts_lit(1000))],
+            partition_range,
         )
         .await;
+        let (ctx_b, part_b) = new_stream_context(
+            vec![or_b.clone(), col("k0").eq(lit("foo"))],
+            None,
+            partition_range,
+        )
+        .await;
+
+        assert!(ctx_a.scan_implied_time_range.is_none());
+        let key_a = build_range_cache_key(&ctx_a, &part_a).unwrap();
+        let key_b = build_range_cache_key(&ctx_b, &part_b).unwrap();
+        assert_ne!(key_a.scan, key_b.scan);
+        assert_eq!(
+            key_a.scan.time_filters(),
+            normalized_exprs([or_a]).as_slice()
+        );
+    }
+
+    fn ms_ts(v: i64) -> Timestamp {
+        Timestamp::new_millisecond(v)
+    }
+
+    fn implied_ms(expr: Expr) -> Option<TimestampRange> {
+        implied_time_range_from_exprs("ts", TimeUnit::Millisecond, &[&expr])
+    }
+
+    #[test]
+    fn implied_time_range_supported_exprs() {
+        for (expr, expected) in [
+            (
+                col("ts").gt_eq(ts_lit(1000)),
+                Some(TimestampRange::from_start(ms_ts(1000))),
+            ),
+            (
+                col("ts").gt(ts_lit(1000)),
+                Some(TimestampRange::from_start(ms_ts(1001))),
+            ),
+            (
+                col("ts").lt_eq(ts_lit(2000)),
+                Some(TimestampRange::until_end(ms_ts(2000), true)),
+            ),
+            (
+                col("ts").lt(ts_lit(2000)),
+                Some(TimestampRange::until_end(ms_ts(2000), false)),
+            ),
+            (
+                col("ts").eq(ts_lit(1500)),
+                Some(TimestampRange::single(ms_ts(1500))),
+            ),
+            (
+                ts_lit(1000).lt_eq(col("ts")),
+                Some(TimestampRange::from_start(ms_ts(1000))),
+            ),
+            (
+                col("ts").between(ts_lit(1000), ts_lit(2000)),
+                Some(TimestampRange::new_inclusive(
+                    Some(ms_ts(1000)),
+                    Some(ms_ts(2000)),
+                )),
+            ),
+            (
+                col("ts")
+                    .gt_eq(ts_lit(1000))
+                    .and(col("ts").lt(ts_lit(2000))),
+                TimestampRange::with_unit(1000, 2000, TimeUnit::Millisecond),
+            ),
+            (
+                col("ts")
+                    .gt_eq(ts_lit(1000))
+                    .and(col("ts").lt(ts_lit(5000)))
+                    .and(col("ts").lt_eq(ts_lit(3000))),
+                TimestampRange::with_unit(1000, 3001, TimeUnit::Millisecond),
+            ),
+        ] {
+            assert_eq!(implied_ms(expr), expected);
+        }
+
+        assert_eq!(
+            implied_time_range_from_exprs("ts", TimeUnit::Millisecond, &[]),
+            Some(TimestampRange::min_to_max())
+        );
+    }
+
+    #[test]
+    fn implied_time_range_unsupported_exprs() {
+        let not_between = Expr::Between(Between {
+            expr: Box::new(col("ts")),
+            negated: true,
+            low: Box::new(ts_lit(1000)),
+            high: Box::new(ts_lit(2000)),
+        });
+
+        for expr in [
+            not_between,
+            col("ts").gt_eq(ts_lit(1000)).or(col("ts").lt(ts_lit(500))),
+            Expr::Not(Box::new(col("ts").gt_eq(ts_lit(1000)))),
+            col("ts").in_list(vec![ts_lit(1000), ts_lit(2000)], false),
+            col("ts").gt_eq(col("other")),
+            col("other_ts").gt_eq(ts_lit(1000)),
+        ] {
+            assert!(implied_ms(expr).is_none());
+        }
+    }
+
+    #[test]
+    fn implied_time_range_unit_conversion() {
+        let second_1 = lit(ScalarValue::TimestampSecond(Some(1), None));
+        let ns_1500 = lit(ScalarValue::TimestampNanosecond(Some(1_500_000_000), None));
+        let ns_1500_5 = lit(ScalarValue::TimestampNanosecond(Some(1_500_500_000), None));
+
+        for (expr, expected) in [
+            (
+                col("ts").gt_eq(second_1.clone()),
+                Some(TimestampRange::from_start(ms_ts(1000))),
+            ),
+            (
+                col("ts").lt_eq(second_1),
+                Some(TimestampRange::until_end(ms_ts(1000), true)),
+            ),
+            (
+                col("ts").eq(ns_1500),
+                Some(TimestampRange::single(ms_ts(1500))),
+            ),
+            (col("ts").eq(ns_1500_5.clone()), None),
+            (
+                col("ts").gt_eq(ns_1500_5.clone()),
+                Some(TimestampRange::from_start(ms_ts(1501))),
+            ),
+            (
+                col("ts").lt_eq(ns_1500_5.clone()),
+                Some(TimestampRange::until_end(ms_ts(1500), true)),
+            ),
+            (
+                col("ts").gt(ns_1500_5),
+                Some(TimestampRange::from_start(ms_ts(1501))),
+            ),
+        ] {
+            assert_eq!(implied_ms(expr), expected);
+        }
     }
 
     #[test]
