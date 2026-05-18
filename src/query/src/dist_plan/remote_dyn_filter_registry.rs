@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
-use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
 use session::query_id::QueryId;
 use store_api::storage::RegionId;
@@ -268,7 +267,6 @@ impl DynFilterRegistryManager {
 
 #[cfg(test)]
 mod tests {
-    use datafusion_physical_expr::PhysicalExpr;
     use datafusion_physical_expr::expressions::{Column, lit};
     use uuid::Uuid;
 

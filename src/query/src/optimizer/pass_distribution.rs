@@ -133,6 +133,7 @@ impl PassDistribution {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
     use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
     use async_trait::async_trait;
     use common_query::request::QueryRequest;
@@ -153,6 +154,7 @@ mod tests {
     use table::table_name::TableName;
 
     use super::*;
+    use crate::dist_plan::ProducerScopeId;
     use crate::error::Result as QueryResult;
     use crate::region_query::RegionQueryHandler;
 
@@ -166,6 +168,24 @@ mod tests {
             _request: QueryRequest,
         ) -> QueryResult<SendableRecordBatchStream> {
             unreachable!("pass distribution tests should not execute remote queries")
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _region_id: RegionId,
+            _query_id: String,
+            _update: RemoteDynFilterUpdate,
+        ) -> QueryResult<()> {
+            unreachable!("pass distribution tests should not send remote dyn filter updates")
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _region_id: RegionId,
+            _query_id: String,
+            _unregister: RemoteDynFilterUnregister,
+        ) -> QueryResult<()> {
+            unreachable!("pass distribution tests should not send remote dyn filter unregisters")
         }
     }
 
@@ -272,6 +292,7 @@ mod tests {
             QueryContext::arc(),
             32,
             partition_cols,
+            ProducerScopeId::new(1),
         )
         .unwrap()
     }
