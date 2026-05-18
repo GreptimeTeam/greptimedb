@@ -461,7 +461,6 @@ impl ParquetReaderBuilder {
             self.expected_metadata.as_deref(),
             self.pre_filter_mode,
             &read_format,
-            parquet_meta.file_metadata().schema_descr(),
             &codec,
         );
 

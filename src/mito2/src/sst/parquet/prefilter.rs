@@ -288,7 +288,6 @@ pub(crate) fn build_reader_filter_plan(
     expected_metadata: Option<&RegionMetadata>,
     pre_filter_mode: PreFilterMode,
     read_format: &FlatReadFormat,
-    parquet_schema: &SchemaDescriptor,
     codec: &Arc<dyn PrimaryKeyCodec>,
 ) -> ReaderFilterPlan {
     let Some(predicate) = predicate else {
@@ -395,7 +394,6 @@ pub(crate) fn build_reader_filter_plan(
         pk_filter_expr_strs,
         prefilter_simple_filters.clone(),
         prefilter_physical_filters,
-        parquet_schema,
         schema_version,
     );
 
@@ -456,7 +454,6 @@ impl PrefilterContextBuilder {
     /// - The read format doesn't use flat layout
     /// - No prefilter columns are selected
     /// - Prefilter would read the full projection without any PK filter
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         read_format: &FlatReadFormat,
         codec: &Arc<dyn PrimaryKeyCodec>,
@@ -464,7 +461,6 @@ impl PrefilterContextBuilder {
         primary_key_filter_expr_strs: Option<SmallVec<[String; 1]>>,
         filters: Vec<SimpleFilterContext>,
         physical_filters: Vec<PhysicalFilterContext>,
-        parquet_schema: &SchemaDescriptor,
         schema_version: u64,
     ) -> Option<Self> {
         let metadata = read_format.metadata();
@@ -493,11 +489,8 @@ impl PrefilterContextBuilder {
             prefilter_column_names.insert(filter_ctx.column_name().to_string());
         }
 
-        let (_, prefilter_count) = compute_projection_mask(
-            &prefilter_column_names,
-            read_format.arrow_schema(),
-            parquet_schema,
-        );
+        let prefilter_count =
+            compute_projection_count(&prefilter_column_names, read_format.arrow_schema());
 
         if prefilter_count == 0 {
             return None;
@@ -565,18 +558,31 @@ fn compute_projection_mask(
     column_names: &HashSet<String>,
     arrow_schema: &datatypes::arrow::datatypes::SchemaRef,
     parquet_schema: &SchemaDescriptor,
-) -> (ProjectionMask, usize) {
+) -> ProjectionMask {
+    ProjectionMask::roots(
+        parquet_schema,
+        projection_indices(column_names, arrow_schema).into_iter(),
+    )
+}
+
+fn compute_projection_count(
+    column_names: &HashSet<String>,
+    arrow_schema: &datatypes::arrow::datatypes::SchemaRef,
+) -> usize {
+    projection_indices(column_names, arrow_schema).len()
+}
+
+fn projection_indices(
+    column_names: &HashSet<String>,
+    arrow_schema: &datatypes::arrow::datatypes::SchemaRef,
+) -> Vec<usize> {
     let mut projection_indices: Vec<usize> = column_names
         .iter()
         .filter_map(|name| arrow_schema.column_with_name(name).map(|(index, _)| index))
         .collect();
     projection_indices.sort_unstable();
     projection_indices.dedup();
-    let count = projection_indices.len();
-    (
-        ProjectionMask::roots(parquet_schema, projection_indices.iter().copied()),
-        count,
-    )
+    projection_indices
 }
 
 fn should_use_prefilter(
@@ -716,7 +722,7 @@ async fn build_prefilter_masks(
         .parquet_metadata()
         .file_metadata()
         .schema_descr();
-    let (projection, _) = compute_projection_mask(
+    let projection = compute_projection_mask(
         &prefilter_column_names,
         &prefilter_ctx.arrow_schema,
         parquet_schema,
@@ -1062,7 +1068,6 @@ mod tests {
     };
     use datatypes::arrow::datatypes::{Schema, UInt32Type};
     use mito_codec::row_converter::{PrimaryKeyFilter, build_primary_key_codec};
-    use parquet::arrow::ArrowSchemaConverter;
     use store_api::codec::PrimaryKeyEncoding;
 
     use super::*;
@@ -1132,12 +1137,6 @@ mod tests {
             .iter()
             .filter_map(|expr| PhysicalFilterContext::new_opt(metadata, None, read_format, expr))
             .collect()
-    }
-
-    fn parquet_schema(read_format: &FlatReadFormat) -> SchemaDescriptor {
-        ArrowSchemaConverter::new()
-            .convert(read_format.arrow_schema())
-            .unwrap()
     }
 
     fn new_raw_batch(primary_keys: &[&[u8]], field_values: &[u64]) -> RecordBatch {
@@ -1323,7 +1322,6 @@ mod tests {
         )
         .unwrap();
         let codec = build_primary_key_codec(metadata.as_ref());
-        let parquet_schema = parquet_schema(&read_format);
 
         let builder = PrefilterContextBuilder::new(
             &read_format,
@@ -1332,7 +1330,6 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
-            &parquet_schema,
             metadata.schema_version,
         );
         assert!(builder.is_none());
@@ -1427,7 +1424,6 @@ mod tests {
             true,
         )
         .unwrap();
-        let full_parquet_schema = parquet_schema(&full_read_format);
         let codec = build_primary_key_codec(metadata.as_ref());
 
         let skip_fields_plan = build_reader_filter_plan(
@@ -1438,7 +1434,6 @@ mod tests {
             None,
             PreFilterMode::SkipFields,
             &full_read_format,
-            &full_parquet_schema,
             &codec,
         );
         assert!(skip_fields_plan.prefilter_builder.is_some());
@@ -1457,13 +1452,11 @@ mod tests {
             true,
         )
         .unwrap();
-        let projected_parquet_schema = parquet_schema(&projected_read_format);
         let pk_prefilter_plan = build_reader_filter_plan(
             Some(&Predicate::new(vec![col("tag_0").eq(lit("a"))])),
             None,
             PreFilterMode::All,
             &projected_read_format,
-            &projected_parquet_schema,
             &codec,
         );
         assert!(pk_prefilter_plan.prefilter_builder.is_some());
@@ -1485,7 +1478,6 @@ mod tests {
             false,
         )
         .unwrap();
-        let parquet_schema = parquet_schema(&read_format);
         let codec = build_primary_key_codec(metadata.as_ref());
 
         let expr_a = col("tag_0").eq(lit("a"));
@@ -1495,7 +1487,6 @@ mod tests {
             None,
             PreFilterMode::All,
             &read_format,
-            &parquet_schema,
             &codec,
         );
         let plan_b_a = build_reader_filter_plan(
@@ -1503,7 +1494,6 @@ mod tests {
             None,
             PreFilterMode::All,
             &read_format,
-            &parquet_schema,
             &codec,
         );
 
