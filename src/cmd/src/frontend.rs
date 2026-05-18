@@ -33,6 +33,7 @@ use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -411,13 +412,20 @@ impl StartCommand {
         );
         let fundamental_cache_registry =
             build_fundamental_cache_registry(readonly_meta_backend.clone());
-        let layered_cache_registry = Arc::new(
-            with_default_composite_cache_registry(
-                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
-            )
-            .context(error::BuildCacheRegistrySnafu)?
-            .build(),
-        );
+        let mut layered_cache_builder = with_default_composite_cache_registry(
+            layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+        )
+        .context(error::BuildCacheRegistrySnafu)?;
+
+        if let Some(user_cache_invalidator) = plugins.get::<CacheInvalidatorRef>() {
+            layered_cache_builder = layered_cache_builder.add_cache_registry(
+                CacheRegistryBuilder::default()
+                    .add_invalidator(user_cache_invalidator)
+                    .build(),
+            );
+        }
+
+        let layered_cache_registry = Arc::new(layered_cache_builder.build());
 
         // frontend to datanode need not timeout.
         // Some queries are expected to take long time.

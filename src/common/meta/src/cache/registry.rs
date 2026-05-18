@@ -17,7 +17,7 @@ use std::sync::Arc;
 use anymap2::SendSyncAnyMap;
 use futures::future::join_all;
 
-use crate::cache_invalidator::{CacheInvalidator, Context};
+use crate::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef, Context};
 use crate::error::Result;
 use crate::instruction::CacheIdent;
 
@@ -97,6 +97,12 @@ impl CacheRegistryBuilder {
         self
     }
 
+    /// Adds a dynamically typed cache invalidator reference.
+    pub fn add_invalidator(mut self, invalidator: CacheInvalidatorRef) -> Self {
+        self.registry.register_invalidator(invalidator);
+        self
+    }
+
     /// Builds [CacheRegistry].
     pub fn build(self) -> CacheRegistry {
         self.registry
@@ -132,6 +138,14 @@ impl CacheRegistry {
     fn register<T: CacheInvalidator + 'static>(&mut self, cache: Arc<T>) -> bool {
         self.indexes.push(cache.clone());
         self.registry.insert(cache).is_some()
+    }
+
+    /// Registers a dynamically typed [`CacheInvalidatorRef`] into the registry.
+    ///
+    /// This allows code that only holds an `Arc<dyn CacheInvalidator>` to be
+    /// added without naming the concrete type.
+    pub fn register_invalidator(&mut self, invalidator: CacheInvalidatorRef) {
+        self.indexes.push(invalidator);
     }
 
     /// Returns __cloned__ the value stored in the collection for the type `T`, if it exists.
