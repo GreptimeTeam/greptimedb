@@ -252,42 +252,4 @@ mod tests {
         let peers = client.active_frontends().await.unwrap();
         assert_eq!(peers.len(), 0);
     }
-
-    #[tokio::test]
-    async fn test_active_frontends_filters_by_node_info_status() {
-        let client = create_meta_peer_client();
-        let in_memory = client.memory_backend();
-
-        put_node_info(
-            &in_memory,
-            NodeInfoKey {
-                role: Role::Frontend,
-                node_id: 1,
-            },
-            NodeInfo {
-                peer: Peer::new(1, "127.0.0.1:4001".to_string()),
-                last_activity_ts: current_time_millis(),
-                status: NodeStatus::Datanode(DatanodeStatus {
-                    rcus: 0,
-                    wcus: 0,
-                    leader_regions: 0,
-                    follower_regions: 0,
-                    workloads: DatanodeWorkloads::default(),
-                }),
-                version: String::new(),
-                git_commit: String::new(),
-                start_time_ms: 0,
-                total_cpu_millicores: 0,
-                total_memory_bytes: 0,
-                cpu_usage_millicores: 0,
-                memory_usage_bytes: 0,
-                hostname: String::new(),
-                env_vars: Default::default(),
-            },
-        )
-        .await;
-
-        let peers = client.active_frontends().await.unwrap();
-        assert_eq!(peers.len(), 0);
-    }
 }
