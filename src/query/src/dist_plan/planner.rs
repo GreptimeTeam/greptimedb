@@ -178,6 +178,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             query_ctx,
             session_state.config().target_partitions(),
             merge_scan.partition_cols().clone(),
+            merge_scan.producer_scope_id(),
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }

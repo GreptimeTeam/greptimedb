@@ -40,7 +40,7 @@ use datafusion::physical_plan::{
 use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::{Column, DynamicFilterPhysicalExpr};
-use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalExpr, PhysicalSortExpr};
+use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
@@ -57,10 +57,33 @@ use crate::dist_plan::dyn_filter_bridge::{
     CapturedDynFilter, bridge_dyn_filters_for_region, capture_remote_dyn_filters,
     query_context_with_initial_dyn_filter_regs,
 };
+use crate::dist_plan::{ProducerScopeId, RemoteDynFilterRegistryLease};
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::options::FlowQueryExtensions;
 use crate::query_engine::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
+
+fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
+    context.session_config().get_extension()
+}
+
+fn acquire_remote_dyn_filter_registry_cleanup(
+    context: &TaskContext,
+    query_ctx: &QueryContextRef,
+    captured_dyn_filters: &[CapturedDynFilter],
+) -> Option<RemoteDynFilterRegistryLease> {
+    if captured_dyn_filters.is_empty() {
+        return None;
+    }
+
+    let query_id = query_ctx.remote_query_id_value()?;
+    let query_engine_state = query_engine_state_from_task_context(context)?;
+    Some(
+        query_engine_state
+            .dyn_filter_registry_manager()
+            .acquire_lease(query_id),
+    )
+}
 
 #[derive(Debug, Hash, PartialOrd, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
@@ -69,6 +92,7 @@ pub struct MergeScanLogicalPlan {
     /// If this plan is a placeholder
     is_placeholder: bool,
     partition_cols: AliasMapping,
+    producer_scope_id: ProducerScopeId,
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -109,11 +133,17 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
-    pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: AliasMapping) -> Self {
+    pub fn new(
+        input: LogicalPlan,
+        is_placeholder: bool,
+        partition_cols: AliasMapping,
+        producer_scope_id: ProducerScopeId,
+    ) -> Self {
         Self {
             input,
             is_placeholder,
             partition_cols,
+            producer_scope_id,
         }
     }
 
@@ -139,6 +169,10 @@ impl MergeScanLogicalPlan {
     pub fn partition_cols(&self) -> &AliasMapping {
         &self.partition_cols
     }
+
+    pub fn producer_scope_id(&self) -> ProducerScopeId {
+        self.producer_scope_id
+    }
 }
 
 #[derive(Clone)]
@@ -155,6 +189,7 @@ pub struct MergeScanExec {
     /// Metrics for each partition
     partition_metrics: Arc<Mutex<HashMap<usize, PartitionMetrics>>>,
     query_ctx: QueryContextRef,
+    remote_dyn_filter_producer_scope_id: ProducerScopeId,
     captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
     target_partition: usize,
     partition_cols: AliasMapping,
@@ -182,6 +217,7 @@ impl MergeScanExec {
         query_ctx: QueryContextRef,
         target_partition: usize,
         partition_cols: AliasMapping,
+        producer_scope_id: ProducerScopeId,
     ) -> Result<Self> {
         // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
         // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
@@ -254,6 +290,7 @@ impl MergeScanExec {
             partition_metrics: Arc::default(),
             properties,
             query_ctx,
+            remote_dyn_filter_producer_scope_id: producer_scope_id,
             captured_remote_dyn_filters: Arc::default(),
             target_partition,
             partition_cols,
@@ -281,8 +318,14 @@ impl MergeScanExec {
         let current_channel = self.query_ctx.channel();
         let read_preference = self.query_ctx.read_preference();
         let explain_verbose = self.query_ctx.explain_verbose();
+        let remote_dyn_filter_registry_cleanup = acquire_remote_dyn_filter_registry_cleanup(
+            context.as_ref(),
+            &query_ctx,
+            &captured_remote_dyn_filters,
+        );
 
         let stream = Box::pin(stream!({
+            let _remote_dyn_filter_registry_cleanup = remote_dyn_filter_registry_cleanup;
             // only report metrics once for each MergeScan
             if partition == 0 {
                 MERGE_SCAN_REGIONS.observe(regions.len() as f64);
@@ -488,6 +531,7 @@ impl MergeScanExec {
             sub_stage_metrics: self.sub_stage_metrics.clone(),
             partition_metrics: self.partition_metrics.clone(),
             query_ctx: self.query_ctx.clone(),
+            remote_dyn_filter_producer_scope_id: self.remote_dyn_filter_producer_scope_id,
             captured_remote_dyn_filters: self.captured_remote_dyn_filters.clone(),
             target_partition: self.target_partition,
             partition_cols: self.partition_cols.clone(),
@@ -543,6 +587,13 @@ impl MergeScanExec {
             .values()
             .cloned()
             .collect()
+    }
+}
+
+#[cfg(test)]
+impl MergeScanExec {
+    fn remote_dyn_filter_producer_scope_id(&self) -> ProducerScopeId {
+        self.remote_dyn_filter_producer_scope_id
     }
 }
 
@@ -669,7 +720,7 @@ impl ExecutionPlan for MergeScanExec {
             .map(|filter| filter.as_any().is::<DynamicFilterPhysicalExpr>())
             .collect::<Vec<_>>();
         *self.captured_remote_dyn_filters.lock().unwrap() =
-            capture_remote_dyn_filters(parent_filters);
+            capture_remote_dyn_filters(self.remote_dyn_filter_producer_scope_id, parent_filters);
         let new_self = Arc::new(self.clone());
 
         Ok(FilterPushdownPropagation {
@@ -792,5 +843,158 @@ impl MergeScanMetric {
 
     pub fn record_greptime_exec_cost(&self, metrics: usize) {
         self.greptime_exec_cost.add(metrics);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use async_trait::async_trait;
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion_common::TableReference;
+    use datafusion_expr::{LogicalPlanBuilder, lit};
+    use datafusion_physical_expr::Distribution;
+    use datafusion_physical_expr::expressions::Column;
+    use session::ReadPreference;
+    use session::context::QueryContext;
+    use session::query_id::QueryId;
+    use table::table_name::TableName;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::dist_plan::DynFilterRegistryManager;
+    use crate::region_query::RegionQueryHandler;
+
+    fn test_query_id(value: u128) -> QueryId {
+        QueryId::from(Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn remote_dyn_filter_registry_cleanup_waits_for_last_query_scoped_stream_drop() {
+        let registry_manager = Arc::new(DynFilterRegistryManager::default());
+        let query_id = test_query_id(1);
+
+        registry_manager.get_or_init(query_id);
+        let first = registry_manager.acquire_lease(query_id);
+        let second = registry_manager.acquire_lease(query_id);
+
+        drop(first);
+        assert_eq!(registry_manager.registry_count(), 1);
+
+        drop(second);
+        assert_eq!(registry_manager.registry_count(), 0);
+    }
+
+    #[test]
+    fn remote_dyn_filter_registry_cleanup_shares_query_scope_across_independent_leases() {
+        let registry_manager = Arc::new(DynFilterRegistryManager::default());
+        let query_id = test_query_id(1);
+
+        let first_exec_like_lease = registry_manager.acquire_lease(query_id);
+        let second_exec_like_lease = registry_manager.acquire_lease(query_id);
+
+        drop(first_exec_like_lease);
+        assert_eq!(registry_manager.registry_count(), 1);
+
+        drop(second_exec_like_lease);
+        assert_eq!(registry_manager.registry_count(), 0);
+    }
+
+    struct TestRegionQueryHandler;
+
+    #[async_trait]
+    impl RegionQueryHandler for TestRegionQueryHandler {
+        async fn do_get(
+            &self,
+            _read_preference: ReadPreference,
+            _request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            unimplemented!("test only")
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _region_id: RegionId,
+            _query_id: String,
+            _update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            unimplemented!("test only")
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _region_id: RegionId,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            unimplemented!("test only")
+        }
+    }
+
+    #[test]
+    fn try_with_new_distribution_preserves_producer_scope_id() {
+        let producer_scope_id = ProducerScopeId::new(42);
+
+        // Build a plan whose schema contains "col1"
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i32).alias("col1")])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let schema = plan.schema().as_arrow().clone();
+        let table = TableName::new("catalog", "schema", "table");
+        let regions = vec![RegionId::new(1024, 1)];
+        let query_ctx = QueryContext::arc();
+
+        // Non-empty partition_cols so try_with_new_distribution can detect an overlap
+        let mut partition_cols = AliasMapping::new();
+        partition_cols.insert(
+            "col1".to_string(),
+            BTreeSet::from([ColumnExpr::new(Some(TableReference::bare("table")), "col1")]),
+        );
+
+        let session_state = SessionStateBuilder::new().build();
+
+        let handler = Arc::new(TestRegionQueryHandler);
+        let target_partition = 2;
+
+        let exec = MergeScanExec::new(
+            &session_state,
+            table,
+            regions,
+            plan,
+            &schema,
+            handler,
+            query_ctx,
+            target_partition,
+            partition_cols,
+            producer_scope_id,
+        )
+        .unwrap();
+
+        assert_eq!(
+            exec.remote_dyn_filter_producer_scope_id(),
+            producer_scope_id
+        );
+
+        // A distribution that differs from the current partitioning but shares a
+        // column name present in partition_cols, so try_with_new_distribution
+        // produces a clone instead of returning None.
+        let new_dist = Distribution::HashPartitioned(vec![
+            Arc::new(Column::new("col1", 0)),
+            Arc::new(Column::new("col2", 1)),
+        ]);
+
+        let cloned = exec
+            .try_with_new_distribution(new_dist)
+            .expect("expected a cloned exec with overlapping partition col");
+
+        assert_eq!(
+            cloned.remote_dyn_filter_producer_scope_id(),
+            producer_scope_id,
+            "try_with_new_distribution must preserve producer scope id"
+        );
     }
 }

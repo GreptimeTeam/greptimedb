@@ -34,7 +34,9 @@ use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
-use session::hints::{READ_PREFERENCE_HINT, is_reserved_extension_key};
+use session::hints::{
+    READ_PREFERENCE_HINT, REMOTE_QUERY_ID_EXTENSION_KEY, is_reserved_extension_key,
+};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -286,7 +288,7 @@ impl Drop for RequestTimer {
 mod tests {
     use chrono::FixedOffset;
     use common_time::Timezone;
-    use session::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
+    use session::hints::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
 
     use super::*;
 
@@ -303,6 +305,14 @@ mod tests {
             vec![
                 ("auto_create_table".to_string(), "true".to_string()),
                 ("read_preference".to_string(), "leader".to_string()),
+                (
+                    REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                    "spoofed".to_string(),
+                ),
+                (
+                    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
+                    "spoofed-regs".to_string(),
+                ),
             ],
         )
         .unwrap();
@@ -326,6 +336,12 @@ mod tests {
         assert_eq!(
             query_context.remote_query_id(),
             Some(extensions[1].1.as_str())
+        );
+        assert_ne!(query_context.remote_query_id(), Some("spoofed"));
+        assert!(
+            query_context
+                .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+                .is_none()
         );
     }
 

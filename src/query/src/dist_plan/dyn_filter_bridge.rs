@@ -16,29 +16,42 @@ use std::any::Any;
 use std::sync::Arc;
 
 use common_query::request::{
-    InitialDynFilterReg, InitialDynFilterRegs,
-    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
+    InitialDynFilterRegs,
 };
 use datafusion::execution::TaskContext;
 use datafusion_common::Result;
-use datafusion_physical_expr::expressions::{lit, Column, DynamicFilterPhysicalExpr};
 use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
+#[cfg(test)]
+use datafusion_physical_expr::expressions::{Column, lit};
 use session::context::{QueryContext, QueryContextRef};
+#[cfg(test)]
 use session::query_id::QueryId;
 use store_api::storage::RegionId;
+#[cfg(test)]
 use uuid::Uuid;
 
 use super::filter_id::build_remote_dyn_filter_id;
-use crate::dist_plan::{FilterId, QueryDynFilterRegistry, Subscriber};
+use crate::dist_plan::{FilterId, ProducerScopeId, QueryDynFilterRegistry, Subscriber};
 use crate::query_engine::QueryEngineState;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CapturedDynFilter {
+    pub(crate) producer_scope_id: ProducerScopeId,
     pub(crate) producer_local_ordinal: usize,
     pub(crate) alive_dyn_filter: Arc<DynamicFilterPhysicalExpr>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedDynFilter {
+    filter_id: FilterId,
+    alive_dyn_filter: Arc<DynamicFilterPhysicalExpr>,
+    children: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
+}
+
 pub(crate) fn capture_remote_dyn_filters(
+    producer_scope_id: ProducerScopeId,
     parent_filters: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
 ) -> Vec<CapturedDynFilter> {
     parent_filters
@@ -46,6 +59,7 @@ pub(crate) fn capture_remote_dyn_filters(
         .enumerate()
         .filter_map(|(producer_local_ordinal, filter)| {
             downcast_dynamic_filter(filter).map(|alive_dyn_filter| CapturedDynFilter {
+                producer_scope_id,
                 producer_local_ordinal,
                 alive_dyn_filter,
             })
@@ -62,9 +76,7 @@ fn downcast_dynamic_filter(
 }
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
-    let query_engine_state: Option<Arc<QueryEngineState>> =
-        context.session_config().get_extension();
-    query_engine_state
+    context.session_config().get_extension()
 }
 
 pub(crate) fn register_dyn_filters_for_region(
@@ -72,18 +84,13 @@ pub(crate) fn register_dyn_filters_for_region(
     region_id: RegionId,
     captured_dyn_filters: &[CapturedDynFilter],
 ) {
-    for captured_dyn_filter in captured_dyn_filters {
-        let Ok((filter_id, _children)) =
-            filter_id_and_children_for_filter(region_id, captured_dyn_filter)
-        else {
-            continue;
-        };
-
+    for resolved_filter in resolved_dyn_filters(region_id, captured_dyn_filters) {
         let _ = registry.register_remote_dyn_filter(
-            filter_id.clone(),
-            captured_dyn_filter.alive_dyn_filter.clone(),
+            resolved_filter.filter_id.clone(),
+            resolved_filter.alive_dyn_filter,
         );
-        let _ = registry.register_subscriber(&filter_id, Subscriber::new(region_id));
+        let _ =
+            registry.register_subscriber(&resolved_filter.filter_id, Subscriber::new(region_id));
     }
 }
 
@@ -108,13 +115,10 @@ pub(crate) fn bridge_dyn_filters_for_region(
     register_dyn_filters_for_region(&registry, region_id, captured_dyn_filters);
 }
 
-fn filter_id_and_children_for_filter(
+fn resolve_dyn_filter(
     region_id: RegionId,
     captured_dyn_filter: &CapturedDynFilter,
-) -> Result<(
-    FilterId,
-    Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
-)> {
+) -> Result<ResolvedDynFilter> {
     let children = captured_dyn_filter
         .alive_dyn_filter
         .children()
@@ -123,11 +127,26 @@ fn filter_id_and_children_for_filter(
         .collect::<Vec<_>>();
     let filter_id = build_remote_dyn_filter_id(
         region_id,
+        captured_dyn_filter.producer_scope_id,
         captured_dyn_filter.producer_local_ordinal,
         &children,
     )?;
 
-    Ok((filter_id, children))
+    Ok(ResolvedDynFilter {
+        filter_id,
+        alive_dyn_filter: captured_dyn_filter.alive_dyn_filter.clone(),
+        children,
+    })
+}
+
+fn resolved_dyn_filters(
+    region_id: RegionId,
+    captured_dyn_filters: &[CapturedDynFilter],
+) -> Vec<ResolvedDynFilter> {
+    captured_dyn_filters
+        .iter()
+        .filter_map(|captured_dyn_filter| resolve_dyn_filter(region_id, captured_dyn_filter).ok())
+        .collect()
 }
 
 fn build_initial_dyn_filter_regs_for_region(
@@ -135,20 +154,14 @@ fn build_initial_dyn_filter_regs_for_region(
     captured_dyn_filters: &[CapturedDynFilter],
 ) -> InitialDynFilterRegs {
     InitialDynFilterRegs::new(
-        captured_dyn_filters
-            .iter()
-            .filter_map(|captured_dyn_filter| {
-                let Ok((filter_id, children)) =
-                    filter_id_and_children_for_filter(region_id, captured_dyn_filter)
-                else {
-                    return None;
-                };
-
+        resolved_dyn_filters(region_id, captured_dyn_filters)
+            .into_iter()
+            .filter_map(|resolved_filter| {
                 match InitialDynFilterReg::from_filter_id_and_children(
-                    filter_id.to_string(),
-                    &children,
+                    resolved_filter.filter_id.to_string(),
+                    &resolved_filter.children,
                 ) {
-                    Ok(registration) => Some(registration),
+                    Ok(reg) => Some(reg),
                     Err(error) => {
                         common_telemetry::warn!(error; "Failed to encode initial remote dyn filter registration");
                         None
@@ -167,6 +180,11 @@ pub(crate) fn query_context_with_initial_dyn_filter_regs(
     let mut region_query_ctx = query_ctx.as_ref().clone();
     let regs = build_initial_dyn_filter_regs_for_region(region_id, captured_dyn_filters);
     if regs.is_empty() {
+        return region_query_ctx;
+    }
+
+    if let Err(error) = regs.validate_default_bounds() {
+        common_telemetry::warn!(error; "Dropping initial remote dyn filter registrations for region {} that exceed Task 03 bounds", region_id);
         return region_query_ctx;
     }
 
@@ -191,6 +209,10 @@ mod tests {
         QueryId::from(Uuid::from_u128(value))
     }
 
+    fn test_producer_scope(value: u64) -> ProducerScopeId {
+        ProducerScopeId::new(value)
+    }
+
     #[test]
     fn capture_remote_dyn_filters_preserves_parent_filter_ordinals() {
         let parent_filters = vec![
@@ -206,9 +228,12 @@ mod tests {
             )) as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
         ];
 
-        let captured = capture_remote_dyn_filters(parent_filters);
+        let producer_scope_id = test_producer_scope(42);
+        let captured = capture_remote_dyn_filters(producer_scope_id, parent_filters);
 
         assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].producer_scope_id, producer_scope_id);
+        assert_eq!(captured[1].producer_scope_id, producer_scope_id);
         assert_eq!(captured[0].producer_local_ordinal, 1);
         assert_eq!(captured[1].producer_local_ordinal, 3);
     }
@@ -217,6 +242,7 @@ mod tests {
     fn register_dyn_filters_for_region_reuses_existing_entry() {
         let registry = QueryDynFilterRegistry::new(test_query_id(1));
         let captured_dyn_filters = vec![CapturedDynFilter {
+            producer_scope_id: test_producer_scope(42),
             producer_local_ordinal: 2,
             alive_dyn_filter: Arc::new(DynamicFilterPhysicalExpr::new(
                 vec![Arc::new(Column::new("host", 0)) as Arc<_>],
@@ -230,14 +256,46 @@ mod tests {
 
         assert_eq!(registry.entry_count(), 1);
         let entry = registry.entries().pop().unwrap();
+        assert_eq!(
+            entry.filter_id().producer_scope_id(),
+            test_producer_scope(42)
+        );
         assert_eq!(entry.filter_id().producer_ordinal(), 2);
         assert_eq!(entry.subscribers().len(), 1);
         assert_eq!(entry.subscribers()[0].region_id(), region_id);
     }
 
     #[test]
+    fn register_dyn_filters_for_region_keeps_independent_producer_scopes_distinct() {
+        let registry = QueryDynFilterRegistry::new(test_query_id(1));
+        let region_id = RegionId::new(1024, 7);
+        let make_filter = |producer_scope_id| CapturedDynFilter {
+            producer_scope_id,
+            producer_local_ordinal: 2,
+            alive_dyn_filter: Arc::new(DynamicFilterPhysicalExpr::new(
+                vec![Arc::new(Column::new("host", 0)) as Arc<_>],
+                lit(true) as _,
+            )),
+        };
+
+        register_dyn_filters_for_region(
+            &registry,
+            region_id,
+            &[make_filter(test_producer_scope(42))],
+        );
+        register_dyn_filters_for_region(
+            &registry,
+            region_id,
+            &[make_filter(test_producer_scope(43))],
+        );
+
+        assert_eq!(registry.entry_count(), 2);
+    }
+
+    #[test]
     fn query_context_includes_region_initial_dyn_filter_regs() {
         let captured_dyn_filters = vec![CapturedDynFilter {
+            producer_scope_id: test_producer_scope(42),
             producer_local_ordinal: 2,
             alive_dyn_filter: Arc::new(DynamicFilterPhysicalExpr::new(
                 vec![Arc::new(Column::new("host", 0)) as Arc<_>],
@@ -269,6 +327,7 @@ mod tests {
             .unwrap();
         let expected_filter_id = build_remote_dyn_filter_id(
             region_id,
+            captured_dyn_filters[0].producer_scope_id,
             captured_dyn_filters[0].producer_local_ordinal,
             &[Arc::new(Column::new("host", 0)) as Arc<_>],
         )
@@ -278,5 +337,41 @@ mod tests {
         assert_eq!(regs.regs[0].filter_id, expected_filter_id.to_string());
         assert_eq!(decoded_children.len(), 1);
         assert!(decoded_children[0].as_any().is::<Column>());
+    }
+
+    #[test]
+    fn query_context_drops_initial_regs_when_duplicate_filter_ids_exceed_bounds() {
+        let captured_dyn_filters = vec![
+            CapturedDynFilter {
+                producer_scope_id: test_producer_scope(42),
+                producer_local_ordinal: 2,
+                alive_dyn_filter: Arc::new(DynamicFilterPhysicalExpr::new(
+                    vec![Arc::new(Column::new("host", 0)) as Arc<_>],
+                    lit(true) as _,
+                )),
+            },
+            CapturedDynFilter {
+                producer_scope_id: test_producer_scope(42),
+                producer_local_ordinal: 2,
+                alive_dyn_filter: Arc::new(DynamicFilterPhysicalExpr::new(
+                    vec![Arc::new(Column::new("host", 0)) as Arc<_>],
+                    lit(true) as _,
+                )),
+            },
+        ];
+        let region_id = RegionId::new(1024, 7);
+        let query_ctx = QueryContext::arc();
+
+        let region_query_ctx = query_context_with_initial_dyn_filter_regs(
+            &query_ctx,
+            region_id,
+            &captured_dyn_filters,
+        );
+
+        assert!(
+            region_query_ctx
+                .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+                .is_none()
+        );
     }
 }

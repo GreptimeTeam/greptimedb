@@ -293,11 +293,8 @@ impl RegionRequester {
         query_id: impl Into<String>,
         update: RemoteDynFilterUpdate,
     ) -> Result<RegionResponse> {
-        self.handle_inner(build_remote_dyn_filter_request(
-            query_id.into(),
-            remote_dyn_filter_request::Action::Update(update),
-        ))
-        .await
+        self.handle_inner(build_remote_dyn_filter_update_request(query_id, update))
+            .await
     }
 
     pub async fn handle_remote_dyn_filter_unregister(
@@ -305,12 +302,31 @@ impl RegionRequester {
         query_id: impl Into<String>,
         unregister: RemoteDynFilterUnregister,
     ) -> Result<RegionResponse> {
-        self.handle_inner(build_remote_dyn_filter_request(
-            query_id.into(),
-            remote_dyn_filter_request::Action::Unregister(unregister),
+        self.handle_inner(build_remote_dyn_filter_unregister_request(
+            query_id, unregister,
         ))
         .await
     }
+}
+
+pub fn build_remote_dyn_filter_update_request(
+    query_id: impl Into<String>,
+    update: RemoteDynFilterUpdate,
+) -> RegionRequest {
+    build_remote_dyn_filter_request(
+        query_id.into(),
+        remote_dyn_filter_request::Action::Update(update),
+    )
+}
+
+pub fn build_remote_dyn_filter_unregister_request(
+    query_id: impl Into<String>,
+    unregister: RemoteDynFilterUnregister,
+) -> RegionRequest {
+    build_remote_dyn_filter_request(
+        query_id.into(),
+        remote_dyn_filter_request::Action::Unregister(unregister),
+    )
 }
 
 fn build_remote_dyn_filter_request(
@@ -357,7 +373,9 @@ pub fn check_response_header(header: &Option<ResponseHeader>) -> Result<()> {
 #[cfg(test)]
 mod test {
     use api::v1::Status as PbStatus;
-    use api::v1::region::{RemoteDynFilterUpdate, region_request, remote_dyn_filter_request};
+    use api::v1::region::{
+        RemoteDynFilterUnregister, RemoteDynFilterUpdate, region_request, remote_dyn_filter_request,
+    };
 
     use super::*;
     use crate::Error::{IllegalDatabaseResponse, Server};
@@ -410,14 +428,14 @@ mod test {
 
     #[test]
     fn test_build_remote_dyn_filter_request_sets_header_and_body() {
-        let request = build_remote_dyn_filter_request(
-            "query-1".to_string(),
-            remote_dyn_filter_request::Action::Update(RemoteDynFilterUpdate {
+        let request = build_remote_dyn_filter_update_request(
+            "query-1",
+            RemoteDynFilterUpdate {
                 filter_id: "filter-1".to_string(),
                 payload: vec![1, 2, 3],
                 generation: 7,
                 is_complete: false,
-            }),
+            },
         );
 
         request.header.expect("remote dyn filter header must exist");
@@ -431,6 +449,29 @@ mod test {
         assert!(matches!(
             remote_request.action,
             Some(remote_dyn_filter_request::Action::Update(_))
+        ));
+    }
+
+    #[test]
+    fn test_build_remote_dyn_filter_unregister_request_sets_header_and_body() {
+        let request = build_remote_dyn_filter_unregister_request(
+            "query-1",
+            RemoteDynFilterUnregister {
+                filter_id: "filter-9".to_string(),
+            },
+        );
+
+        request.header.expect("remote dyn filter header must exist");
+
+        let body = request.body.expect("remote dyn filter body must exist");
+        let region_request::Body::RemoteDynFilter(remote_request) = body else {
+            panic!("expected remote dyn filter request body");
+        };
+
+        assert_eq!(remote_request.query_id, "query-1");
+        assert!(matches!(
+            remote_request.action,
+            Some(remote_dyn_filter_request::Action::Unregister(_))
         ));
     }
 }

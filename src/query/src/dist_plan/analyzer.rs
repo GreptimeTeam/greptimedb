@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
@@ -31,6 +32,7 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::dist_plan::ProducerScopeId;
 use crate::dist_plan::analyzer::utils::{
     PatchOptimizerContext, PlanTreeExpressionSimplifier, aliased_columns_for,
     rewrite_merge_sort_exprs,
@@ -122,14 +124,15 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let opt = config.extensions.get::<DistPlannerOptions>();
         let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
 
-        let result = match self.try_push_down(plan.clone()) {
+        let producer_scope_allocator = ProducerScopeAllocator::default();
+        let result = match self.try_push_down(plan.clone(), producer_scope_allocator.clone()) {
             Ok(plan) => plan,
             Err(err) => {
                 if allow_fallback {
                     common_telemetry::warn!(err; "Failed to push down plan, using fallback plan rewriter for plan: {plan}");
                     // if push down failed, use fallback plan rewriter
                     PUSH_DOWN_FALLBACK_ERRORS_TOTAL.inc();
-                    self.use_fallback(plan)?
+                    self.use_fallback(plan, producer_scope_allocator)?
                 } else {
                     return Err(err);
                 }
@@ -142,21 +145,37 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 
 impl DistPlannerAnalyzer {
     /// Try push down as many nodes as possible
-    fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
-        let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
-        let mut rewriter = PlanRewriter::default();
+    fn try_push_down(
+        &self,
+        plan: LogicalPlan,
+        producer_scope_allocator: ProducerScopeAllocator,
+    ) -> DfResult<LogicalPlan> {
+        let plan = plan.transform(|plan| {
+            Self::inspect_plan_with_subquery(plan, producer_scope_allocator.clone())
+        })?;
+        let mut rewriter = PlanRewriter::new(producer_scope_allocator);
         let result = plan.data.rewrite(&mut rewriter)?.data;
         Ok(result)
     }
 
     /// Use fallback plan rewriter to rewrite the plan and only push down table scan nodes
-    fn use_fallback(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
-        let mut rewriter = fallback::FallbackPlanRewriter;
-        let result = plan.rewrite(&mut rewriter)?.data;
+    fn use_fallback(
+        &self,
+        plan: LogicalPlan,
+        producer_scope_allocator: ProducerScopeAllocator,
+    ) -> DfResult<LogicalPlan> {
+        let plan = plan.transform(|plan| {
+            Self::inspect_plan_with_subquery(plan, producer_scope_allocator.clone())
+        })?;
+        let mut rewriter = fallback::FallbackPlanRewriter::new(producer_scope_allocator);
+        let result = plan.data.rewrite(&mut rewriter)?.data;
         Ok(result)
     }
 
-    fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
+    fn inspect_plan_with_subquery(
+        plan: LogicalPlan,
+        producer_scope_allocator: ProducerScopeAllocator,
+    ) -> DfResult<Transformed<LogicalPlan>> {
         // Workaround for https://github.com/GreptimeTeam/greptimedb/issues/5469 and https://github.com/GreptimeTeam/greptimedb/issues/5799
         // FIXME(yingwen): Remove the `Limit` plan once we update DataFusion.
         if let LogicalPlan::Limit(_) | LogicalPlan::Distinct(_) = &plan {
@@ -166,7 +185,10 @@ impl DistPlannerAnalyzer {
         let exprs = plan
             .expressions_consider_join()
             .into_iter()
-            .map(|e| e.transform(&Self::transform_subquery).map(|x| x.data))
+            .map(|e| {
+                e.transform(|expr| Self::transform_subquery(expr, producer_scope_allocator.clone()))
+                    .map(|x| x.data)
+            })
             .collect::<DfResult<Vec<_>>>()?;
 
         // Some plans that are special treated (should not call `with_new_exprs` on them)
@@ -178,33 +200,37 @@ impl DistPlannerAnalyzer {
         }
     }
 
-    fn transform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {
+    fn transform_subquery(
+        expr: Expr,
+        producer_scope_allocator: ProducerScopeAllocator,
+    ) -> DfResult<Transformed<Expr>> {
         match expr {
             Expr::Exists(exists) => Ok(Transformed::yes(Expr::Exists(Exists {
-                subquery: Self::handle_subquery(exists.subquery)?,
+                subquery: Self::handle_subquery(exists.subquery, producer_scope_allocator)?,
                 negated: exists.negated,
             }))),
             Expr::InSubquery(in_subquery) => Ok(Transformed::yes(Expr::InSubquery(InSubquery {
                 expr: in_subquery.expr,
-                subquery: Self::handle_subquery(in_subquery.subquery)?,
+                subquery: Self::handle_subquery(in_subquery.subquery, producer_scope_allocator)?,
                 negated: in_subquery.negated,
             }))),
             Expr::ScalarSubquery(scalar_subquery) => Ok(Transformed::yes(Expr::ScalarSubquery(
-                Self::handle_subquery(scalar_subquery)?,
+                Self::handle_subquery(scalar_subquery, producer_scope_allocator)?,
             ))),
 
             _ => Ok(Transformed::no(expr)),
         }
     }
 
-    fn handle_subquery(subquery: Subquery) -> DfResult<Subquery> {
-        let mut rewriter = PlanRewriter::default();
-        let mut rewrote_subquery = subquery
-            .subquery
-            .as_ref()
-            .clone()
-            .rewrite(&mut rewriter)?
-            .data;
+    fn handle_subquery(
+        subquery: Subquery,
+        producer_scope_allocator: ProducerScopeAllocator,
+    ) -> DfResult<Subquery> {
+        let subquery_plan = subquery.subquery.as_ref().clone().transform(|plan| {
+            Self::inspect_plan_with_subquery(plan, producer_scope_allocator.clone())
+        })?;
+        let mut rewriter = PlanRewriter::new(producer_scope_allocator);
+        let mut rewrote_subquery = subquery_plan.data.rewrite(&mut rewriter)?.data;
         // Workaround. DF doesn't support the first plan in subquery to be an Extension
         if matches!(rewrote_subquery, LogicalPlan::Extension(_)) {
             let output_schema = rewrote_subquery.schema().clone();
@@ -223,6 +249,21 @@ impl DistPlannerAnalyzer {
             outer_ref_columns: subquery.outer_ref_columns,
             spans: Default::default(),
         })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct ProducerScopeAllocator {
+    next_remote_dyn_filter_producer_scope_id: Arc<AtomicU64>,
+}
+
+impl ProducerScopeAllocator {
+    fn allocate(&self) -> ProducerScopeId {
+        ProducerScopeId::new(
+            self.next_remote_dyn_filter_producer_scope_id
+                .fetch_add(1, Ordering::SeqCst)
+                + 1,
+        )
     }
 }
 
@@ -289,9 +330,21 @@ struct PlanRewriter {
     /// so that we can push down the `Sort` plan as much as possible.
     expand_on_next_part_cond_trans_commutative: bool,
     new_child_plan: Option<LogicalPlan>,
+    producer_scope_allocator: ProducerScopeAllocator,
 }
 
 impl PlanRewriter {
+    fn new(producer_scope_allocator: ProducerScopeAllocator) -> Self {
+        Self {
+            producer_scope_allocator,
+            ..Default::default()
+        }
+    }
+
+    fn allocate_remote_dyn_filter_producer_scope_id(&self) -> ProducerScopeId {
+        self.producer_scope_allocator.allocate()
+    }
+
     fn get_parent(&self) -> Option<&LogicalPlan> {
         // level starts from 1, it's safe to minus by 1
         self.stack
@@ -586,12 +639,14 @@ impl PlanRewriter {
         );
 
         // add merge scan as the new root
+        let producer_scope_id = self.allocate_remote_dyn_filter_producer_scope_id();
         let mut node = MergeScanLogicalPlan::new(
             on_node.clone(),
             false,
             // at this stage, the partition cols should be set
             // treat it as non-partitioned if None
             self.partition_cols.clone().unwrap_or_default(),
+            producer_scope_id,
         )
         .into_logical_plan();
 

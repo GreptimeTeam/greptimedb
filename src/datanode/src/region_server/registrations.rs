@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_query::request::{
-    InitialDynFilterRegs, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterRegs,
 };
 use common_telemetry::warn;
 use dashmap::DashMap;
@@ -39,6 +39,30 @@ impl RegisteredDynFilter {
             subscriber_regions: vec![region_id],
         }
     }
+
+    fn register_region(&mut self, region_id: RegionId) -> bool {
+        if self.subscriber_regions.contains(&region_id) {
+            return false;
+        }
+
+        self.subscriber_regions.push(region_id);
+        true
+    }
+
+    fn remove_region(&mut self, region_id: RegionId) -> bool {
+        let original_len = self.subscriber_regions.len();
+        self.subscriber_regions
+            .retain(|region| *region != region_id);
+        original_len != self.subscriber_regions.len()
+    }
+
+    fn has_subscribers(&self) -> bool {
+        !self.subscriber_regions.is_empty()
+    }
+
+    fn should_drop_after_remove(&mut self, region_id: RegionId) -> bool {
+        self.remove_region(region_id) && !self.has_subscribers()
+    }
 }
 
 pub(super) fn initial_dyn_filter_regs_from_query_ctx(
@@ -47,7 +71,13 @@ pub(super) fn initial_dyn_filter_regs_from_query_ctx(
     let registrations =
         query_ctx.extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)?;
     match InitialDynFilterRegs::from_extension_value(registrations) {
-        Ok(registrations) => Some(registrations),
+        Ok(registrations) => match registrations.validate_default_bounds() {
+            Ok(()) => Some(registrations),
+            Err(error) => {
+                warn!(error; "Initial remote dyn filter registrations exceeded Task 03 bounds");
+                None
+            }
+        },
         Err(error) => {
             warn!(error; "Failed to decode initial remote dyn filter registrations from query context");
             None
@@ -65,17 +95,26 @@ pub(super) fn register_initial_dyn_filter_regs(
         return;
     }
 
+    if let Err(error) = regs.validate_default_bounds() {
+        warn!(error; "Ignored invalid initial dyn filter registrations for query_id {} region_id {}", query_id, region_id);
+        return;
+    }
+
     let query_regs = regs_by_query
         .entry(query_id.to_string())
         .or_insert_with(DashMap::new);
 
     for reg in &regs.regs {
-        if query_regs.contains_key(&reg.filter_id) {
+        if let Some(mut registered) = query_regs.get_mut(&reg.filter_id) {
+            if registered.register_region(region_id) {
+                continue;
+            }
+
             warn!(
                 query_id,
                 filter_id = reg.filter_id,
                 region_id = %region_id,
-                "Duplicate initial remote dyn filter registration ignored"
+                "Duplicate initial dyn filter reg ignored"
             );
             continue;
         }
@@ -102,11 +141,10 @@ pub(super) fn remove_initial_dyn_filter_regs_for_region(
         };
 
         let filter_ids_to_remove = query_regs
-            .iter()
-            .filter_map(|registered| {
+            .iter_mut()
+            .filter_map(|mut registered| {
                 registered
-                    .subscriber_regions
-                    .contains(&region_id)
+                    .should_drop_after_remove(region_id)
                     .then(|| registered.filter_id.clone())
             })
             .collect::<Vec<_>>();

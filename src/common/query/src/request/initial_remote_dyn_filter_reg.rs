@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::Schema;
@@ -24,6 +25,8 @@ use crate::request::{decode_physical_expr_from_bytes, encode_physical_expr_to_by
 
 pub const INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY: &str =
     "initial_remote_dyn_filter_registrations";
+pub const INITIAL_REMOTE_DYN_FILTER_REGS_MAX_COUNT: usize = 64;
+pub const INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialDynFilterRegs {
@@ -38,6 +41,54 @@ impl InitialDynFilterRegs {
 
     pub fn is_empty(&self) -> bool {
         self.regs.is_empty()
+    }
+
+    pub fn total_encoded_child_expr_bytes(&self) -> usize {
+        self.regs
+            .iter()
+            .map(InitialDynFilterReg::encoded_child_expr_bytes)
+            .sum()
+    }
+
+    pub fn validate_default_bounds(&self) -> Result<(), String> {
+        self.validate_bounds(
+            INITIAL_REMOTE_DYN_FILTER_REGS_MAX_COUNT,
+            INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES,
+        )
+    }
+
+    pub fn validate_bounds(
+        &self,
+        max_count: usize,
+        max_total_proto_bytes: usize,
+    ) -> Result<(), String> {
+        if self.regs.len() > max_count {
+            return Err(format!(
+                "InitialDynFilterRegs contains {} registrations, which exceeds the configured limit of {}",
+                self.regs.len(),
+                max_count
+            ));
+        }
+
+        let total_proto_bytes = self.total_encoded_child_expr_bytes();
+        if total_proto_bytes > max_total_proto_bytes {
+            return Err(format!(
+                "InitialDynFilterRegs contains {} total child expr proto bytes, which exceeds the configured limit of {}",
+                total_proto_bytes, max_total_proto_bytes
+            ));
+        }
+
+        let mut seen_filter_ids = HashSet::with_capacity(self.regs.len());
+        for reg in &self.regs {
+            if !seen_filter_ids.insert(reg.filter_id.as_str()) {
+                return Err(format!(
+                    "InitialDynFilterRegs contains duplicate filter_id '{}'",
+                    reg.filter_id
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn to_extension_value(&self) -> serde_json::Result<String> {
@@ -73,6 +124,10 @@ impl InitialDynFilterReg {
             .collect::<DataFusionResult<Vec<_>>>()?;
 
         Ok(Self::new(filter_id, child_exprs_datafusion_proto))
+    }
+
+    pub fn encoded_child_expr_bytes(&self) -> usize {
+        self.child_exprs_datafusion_proto.iter().map(Vec::len).sum()
     }
 
     pub fn decode_children(
@@ -117,6 +172,42 @@ mod tests {
         let decoded = InitialDynFilterRegs::from_extension_value(&encoded).unwrap();
 
         assert_eq!(decoded, regs);
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_validate_bounds_rejects_duplicate_filter_ids() {
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-a", vec![vec![1]]),
+            InitialDynFilterReg::new("filter-a", vec![vec![2]]),
+        ]);
+
+        let err = regs.validate_bounds(8, 1024).unwrap_err();
+
+        assert!(err.contains("duplicate filter_id 'filter-a'"));
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_validate_bounds_rejects_too_many_regs() {
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-a", vec![vec![1]]),
+            InitialDynFilterReg::new("filter-b", vec![vec![2]]),
+        ]);
+
+        let err = regs.validate_bounds(1, 1024).unwrap_err();
+
+        assert!(err.contains("exceeds the configured limit of 1"));
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_validate_bounds_rejects_total_proto_bytes_over_limit() {
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-a", vec![vec![1, 2, 3]]),
+            InitialDynFilterReg::new("filter-b", vec![vec![4, 5, 6]]),
+        ]);
+
+        let err = regs.validate_bounds(8, 5).unwrap_err();
+
+        assert!(err.contains("6 total child expr proto bytes"));
     }
 
     #[test]

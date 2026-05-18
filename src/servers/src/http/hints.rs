@@ -45,8 +45,11 @@ fn apply_hints(query_ctx: &mut QueryContext, hints: Vec<(String, String)>) {
 
 #[cfg(test)]
 mod tests {
+    use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY as COMMON_INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
     use session::context::{QueryContextBuilder, generate_remote_query_id};
-    use session::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
+    use session::hints::{
+        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
+    };
 
     use super::apply_hints;
 
@@ -67,6 +70,10 @@ mod tests {
                     REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
                     "spoofed".to_string(),
                 ),
+                (
+                    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
+                    "spoofed-regs".to_string(),
+                ),
                 ("ttl".to_string(), "7d".to_string()),
             ],
         );
@@ -75,6 +82,19 @@ mod tests {
             query_ctx.remote_query_id(),
             Some(original_query_id.as_str())
         );
+        assert!(
+            query_ctx
+                .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+                .is_none()
+        );
         assert_eq!(query_ctx.extension("ttl"), Some("7d"));
+    }
+
+    #[test]
+    fn test_initial_dyn_filter_registration_key_matches_common_query_constant() {
+        assert_eq!(
+            INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+            COMMON_INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY
+        );
     }
 }

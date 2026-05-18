@@ -231,7 +231,7 @@ impl QueryEngineState {
             .with_query_planner(Arc::new(DfQueryPlanner::new(
                 catalog_list.clone(),
                 partition_rule_manager,
-                region_query_handler,
+                region_query_handler.clone(),
             )))
             .with_optimizer_rules(optimizer.rules)
             .with_physical_optimizer_rules(physical_optimizer.rules)
@@ -410,25 +410,6 @@ impl QueryEngineState {
     ) -> Option<Arc<QueryDynFilterRegistry>> {
         let query_id = query_ctx.remote_query_id_value()?;
         Some(self.dyn_filter_registry_manager.get_or_init(query_id))
-    }
-
-    pub fn begin_closing_remote_dyn_filter_registry(
-        &self,
-        query_ctx: &QueryContextRef,
-    ) -> Option<Arc<QueryDynFilterRegistry>> {
-        // TODO(remote-dyn-filter): Wire query finish/cancel hooks through this helper once the
-        // distributed query lifecycle exposes a single cleanup callback for the query runtime.
-        let query_id = query_ctx.remote_query_id_value()?;
-        self.dyn_filter_registry_manager.begin_closing(&query_id)
-    }
-
-    pub fn reap_closed_remote_dyn_filter_registry(&self, query_ctx: &QueryContextRef) -> bool {
-        // TODO(remote-dyn-filter): Call this after the Closing cleanup tail marks the registry
-        // closed. Subtask 04 only exposes the runtime ownership path; later subtasks should decide
-        // the exact lifecycle hook that invokes this.
-        query_ctx
-            .remote_query_id_value()
-            .is_some_and(|query_id| self.dyn_filter_registry_manager.reap_closed(&query_id))
     }
 
     pub fn function_state(&self) -> Arc<FunctionState> {
@@ -650,30 +631,6 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(state.dyn_filter_registry_manager().registry_count(), 1);
         assert_eq!(first.query_id(), query_ctx.remote_query_id_value().unwrap());
-    }
-
-    #[test]
-    fn query_engine_state_exposes_closing_and_reap_helpers() {
-        let state = new_query_engine_state();
-        let query_ctx = QueryContext::arc();
-        let registry = state
-            .get_or_init_remote_dyn_filter_registry(&query_ctx)
-            .unwrap();
-
-        let closing = state
-            .begin_closing_remote_dyn_filter_registry(&query_ctx)
-            .unwrap();
-        assert!(Arc::ptr_eq(&registry, &closing));
-        assert_eq!(closing.state(), crate::dist_plan::RegistryState::Closing);
-
-        closing.mark_closed();
-        assert!(state.reap_closed_remote_dyn_filter_registry(&query_ctx));
-        assert!(
-            state
-                .dyn_filter_registry_manager()
-                .get(&query_ctx.remote_query_id_value().unwrap())
-                .is_none()
-        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ use context::{ConfigurationVariables, QueryContextBuilder};
 use derive_more::Debug;
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
+use crate::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
 
 /// Maximum number of warnings to store per session (similar to MySQL's max_error_count)
 const MAX_WARNINGS: usize = 64;

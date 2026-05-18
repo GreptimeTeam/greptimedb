@@ -19,14 +19,14 @@ use std::sync::Arc;
 use api::v1::region::RegionRequestHeader;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_plan::joins::HashTableLookupExpr;
 use datafusion::physical_plan::PhysicalExpr;
+use datafusion::physical_plan::joins::HashTableLookupExpr;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result as DataFusionResult};
 use datafusion_expr::LogicalPlan;
+use datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec;
 use datafusion_proto::physical_plan::from_proto::parse_physical_expr;
 use datafusion_proto::physical_plan::to_proto::serialize_physical_expr;
-use datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec;
 use datafusion_proto::protobuf::PhysicalExprNode;
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -34,8 +34,8 @@ use store_api::storage::RegionId;
 
 /// Current wire-format version for remote dynamic filter payload updates.
 pub use self::initial_remote_dyn_filter_reg::{
-    InitialDynFilterReg, InitialDynFilterRegs,
-    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
+    InitialDynFilterRegs,
 };
 
 pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;

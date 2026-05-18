@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -31,7 +32,8 @@ use datafusion::prelude::SessionContext;
 use datafusion_common::{JoinType, ScalarValue};
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{
-    AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, binary_expr, col, lit,
+    AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, Subquery, binary_expr,
+    col, lit,
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
@@ -52,6 +54,42 @@ use table::table::numbers::NumbersTable;
 use table::{Table, TableRef};
 
 use super::*;
+
+fn collect_merge_scan_producer_scope_ids(
+    plan: &LogicalPlan,
+    scopes: &mut BTreeSet<ProducerScopeId>,
+) {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+    {
+        scopes.insert(merge_scan.producer_scope_id());
+    }
+
+    for input in plan.inputs() {
+        collect_merge_scan_producer_scope_ids(input, scopes);
+    }
+}
+
+fn collect_merge_scan_producer_scope_id_list(
+    plan: &LogicalPlan,
+    scopes: &mut Vec<ProducerScopeId>,
+) {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+    {
+        scopes.push(merge_scan.producer_scope_id());
+    }
+
+    for input in plan.inputs() {
+        collect_merge_scan_producer_scope_id_list(input, scopes);
+    }
+}
 
 pub(crate) struct TestTable;
 
@@ -1361,6 +1399,60 @@ fn test_simplify_select_now_expression() {
 }
 
 #[test]
+fn sibling_merge_scan_producers_have_unique_scope_ids() {
+    init_default_ut_logging();
+    let left_table = TestTable::table_with_name(0, "left_table".to_string());
+    let right_table = TestTable::table_with_name(1, "right_table".to_string());
+
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let left_sorted =
+        LogicalPlanBuilder::scan_with_filters("left_table", left_source, None, vec![])
+            .unwrap()
+            .sort(vec![col("pk1").sort(true, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+
+    let right_sorted =
+        LogicalPlanBuilder::scan_with_filters("right_table", right_source, None, vec![])
+            .unwrap()
+            .sort(vec![col("pk1").sort(true, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+
+    let plan = LogicalPlanBuilder::from(left_sorted)
+        .cross_join(right_sorted)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let mut scopes = Vec::new();
+    collect_merge_scan_producer_scope_id_list(&result, &mut scopes);
+    let unique_scopes = scopes.iter().copied().collect::<BTreeSet<_>>();
+
+    assert!(
+        scopes.len() >= 2,
+        "Expected at least 2 ProducerScopeIds, got {}: {scopes:?}",
+        scopes.len()
+    );
+    assert_eq!(
+        scopes.len(),
+        unique_scopes.len(),
+        "Expected all sibling ProducerScopeIds to be unique, got scopes: {scopes:?}"
+    );
+}
+
+#[test]
 fn test_simplify_now_expression() {
     init_default_ut_logging();
     let test_table = TestTable::table_with_name(0, "t".to_string());
@@ -1821,6 +1913,46 @@ fn transform_sort_subquery_alias() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn producer_scope_ids_do_not_collide_between_subquery_and_outer_plan() {
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let subquery_plan =
+        LogicalPlanBuilder::scan_with_filters("inner", table_source.clone(), None, vec![])
+            .unwrap()
+            .build()
+            .unwrap();
+    let subquery = Subquery {
+        subquery: Arc::new(subquery_plan),
+        outer_ref_columns: Default::default(),
+        spans: Default::default(),
+    };
+    let allocator = ProducerScopeAllocator::default();
+    let rewritten_subquery =
+        DistPlannerAnalyzer::handle_subquery(subquery, allocator.clone()).unwrap();
+    let outer_plan = LogicalPlanBuilder::scan_with_filters("outer", table_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    let rewritten_outer = DistPlannerAnalyzer {}
+        .try_push_down(outer_plan, allocator)
+        .unwrap();
+
+    let mut subquery_scopes = BTreeSet::new();
+    collect_merge_scan_producer_scope_ids(
+        rewritten_subquery.subquery.as_ref(),
+        &mut subquery_scopes,
+    );
+    let mut outer_scopes = BTreeSet::new();
+    collect_merge_scan_producer_scope_ids(&rewritten_outer, &mut outer_scopes);
+
+    assert_eq!(subquery_scopes.len(), 1);
+    assert_eq!(outer_scopes.len(), 1);
+    assert_ne!(subquery_scopes, outer_scopes);
 }
 
 #[test]
