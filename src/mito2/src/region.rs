@@ -28,7 +28,6 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use common_base::hash::partition_expr_version;
 use common_telemetry::{error, info, warn};
-use crossbeam_utils::atomic::AtomicCell;
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
@@ -268,7 +267,7 @@ impl MitoRegion {
     /// Returns whether the region is writable.
     pub(crate) fn is_writable(&self) -> bool {
         matches!(
-            self.manifest_ctx.state.load(),
+            self.manifest_ctx.state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
                 | RegionRoleState::Leader(RegionLeaderState::Staging)
         )
@@ -277,7 +276,7 @@ impl MitoRegion {
     /// Returns whether the region is flushable.
     pub(crate) fn is_flushable(&self) -> bool {
         matches!(
-            self.manifest_ctx.state.load(),
+            self.manifest_ctx.state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
                 | RegionRoleState::Leader(RegionLeaderState::Staging)
                 | RegionRoleState::Leader(RegionLeaderState::Downgrading)
@@ -287,7 +286,7 @@ impl MitoRegion {
     /// Returns whether the region should abort index building.
     pub(crate) fn should_abort_index(&self) -> bool {
         matches!(
-            self.manifest_ctx.state.load(),
+            self.manifest_ctx.state(),
             RegionRoleState::Follower
                 | RegionRoleState::Leader(RegionLeaderState::Downgrading)
                 | RegionRoleState::Leader(RegionLeaderState::Staging)
@@ -297,14 +296,14 @@ impl MitoRegion {
     /// Returns whether the region is downgrading.
     pub(crate) fn is_downgrading(&self) -> bool {
         matches!(
-            self.manifest_ctx.state.load(),
+            self.manifest_ctx.state(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         )
     }
 
     /// Returns whether the region is in staging mode.
     pub(crate) fn is_staging(&self) -> bool {
-        self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Staging)
+        self.manifest_ctx.state() == RegionRoleState::Leader(RegionLeaderState::Staging)
     }
 
     pub fn region_id(&self) -> RegionId {
@@ -326,12 +325,12 @@ impl MitoRegion {
 
     /// Returns whether the region is readonly.
     pub fn is_follower(&self) -> bool {
-        self.manifest_ctx.state.load() == RegionRoleState::Follower
+        self.manifest_ctx.state() == RegionRoleState::Follower
     }
 
     /// Returns the state of the region.
     pub(crate) fn state(&self) -> RegionRoleState {
-        self.manifest_ctx.state.load()
+        self.manifest_ctx.state()
     }
 
     /// Sets the region role state.
@@ -522,16 +521,6 @@ impl MitoRegion {
         Ok(())
     }
 
-    /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Writable)` if the current state is `expect`.
-    /// Otherwise, logs an error.
-    pub(crate) fn switch_state_to_writable(&self, expect: RegionLeaderState) {
-        if let Err(e) = self
-            .compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Writable))
-        {
-            error!(e; "failed to switch region state to writable, expect state is {:?}", expect);
-        }
-    }
-
     /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Staging)` if the current state is `expect`.
     /// Otherwise, logs an error.
     pub(crate) fn switch_state_to_staging(&self, expect: RegionLeaderState) {
@@ -595,8 +584,8 @@ impl MitoRegion {
         state: RegionRoleState,
     ) -> Result<()> {
         self.manifest_ctx
-            .state
-            .compare_exchange(RegionRoleState::Leader(expect), state)
+            .control_state
+            .compare_exchange_role_state(RegionRoleState::Leader(expect), state)
             .map_err(|actual| {
                 RegionStateSnafu {
                     region_id: self.region_id,
@@ -909,6 +898,28 @@ impl Drop for RegionRequestPolicyGuard {
 }
 
 impl RegionControlState {
+    fn role_to_role_state(role: RegionRole) -> RegionRoleState {
+        match role {
+            RegionRole::Leader => RegionRoleState::Leader(RegionLeaderState::Writable),
+            RegionRole::Follower => RegionRoleState::Follower,
+            RegionRole::StagingLeader => RegionRoleState::Leader(RegionLeaderState::Staging),
+            RegionRole::DowngradingLeader => {
+                RegionRoleState::Leader(RegionLeaderState::Downgrading)
+            }
+        }
+    }
+
+    fn role_state_to_role(state: RegionRoleState) -> RegionRole {
+        match state {
+            RegionRoleState::Follower => RegionRole::Follower,
+            RegionRoleState::Leader(RegionLeaderState::Staging) => RegionRole::StagingLeader,
+            RegionRoleState::Leader(RegionLeaderState::Downgrading) => {
+                RegionRole::DowngradingLeader
+            }
+            RegionRoleState::Leader(_) => RegionRole::Leader,
+        }
+    }
+
     fn role_to_request_policy(role: RegionRole) -> RegionRequestPolicy {
         match role {
             RegionRole::Leader | RegionRole::StagingLeader => RegionRequestPolicy::Accept,
@@ -944,6 +955,66 @@ impl RegionControlState {
             inner: Arc::new(Mutex::new(inner)),
         }
     }
+
+    /// Returns the current region role.
+    pub(crate) fn role(&self) -> RegionRole {
+        let inner = self.inner.lock().unwrap();
+        inner.role
+    }
+
+    /// Returns the current region role state.
+    pub(crate) fn role_state(&self) -> RegionRoleState {
+        Self::role_to_role_state(self.role())
+    }
+
+    /// Compares and exchanges the region role state.
+    pub(crate) fn compare_exchange_role_state(
+        &self,
+        current: RegionRoleState,
+        next: RegionRoleState,
+    ) -> std::result::Result<RegionRoleState, RegionRoleState> {
+        let mut inner = self.inner.lock().unwrap();
+        let actual = Self::role_to_role_state(inner.role);
+
+        if actual != current {
+            return Err(actual);
+        }
+
+        let next_role = Self::role_state_to_role(next);
+        if inner.role != next_role {
+            inner.role = next_role;
+            inner.active_guard = false;
+            inner.request_policy = Self::role_to_request_policy(next_role);
+        }
+
+        Ok(actual)
+    }
+
+    /// Updates the region role state by applying `f` to the current role state.
+    pub(crate) fn fetch_update_role_state<F>(
+        &self,
+        f: F,
+    ) -> std::result::Result<RegionRoleState, RegionRoleState>
+    where
+        F: FnOnce(RegionRoleState) -> Option<RegionRoleState>,
+    {
+        let mut inner = self.inner.lock().unwrap();
+        let current = Self::role_to_role_state(inner.role);
+
+        let Some(next) = f(current) else {
+            return Err(current);
+        };
+
+        let next_role = Self::role_state_to_role(next);
+        if inner.role != next_role {
+            inner.role = next_role;
+            inner.active_guard = false;
+            inner.request_policy = Self::role_to_request_policy(next_role);
+        }
+
+        Ok(current)
+    }
+
     /// Acquires a guard to set the region request policy.
     ///
     /// The guard will reset the policy to the previous value when dropped.
@@ -979,9 +1050,9 @@ impl RegionControlState {
 pub(crate) struct ManifestContext {
     /// Manager to maintain manifest for this region.
     pub(crate) manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
-    /// The state of the region. The region checks the state before updating
-    /// manifest.
-    state: AtomicCell<RegionRoleState>,
+    // /// The state of the region. The region checks the state before updating
+    // /// manifest.
+    // state: AtomicCell<RegionRoleState>,
     /// The control state of the region, which is used to control the request policy of the region.
     control_state: RegionControlState,
     /// Partition info of the region in staging mode.
@@ -994,12 +1065,12 @@ pub(crate) struct ManifestContext {
 impl ManifestContext {
     pub(crate) fn new(
         manager: RegionManifestManager,
-        state: RegionRoleState,
+        // TODO(weny): remove it.
+        _state: RegionRoleState,
         control_state: RegionControlState,
     ) -> Self {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
-            state: AtomicCell::new(state),
             control_state,
             staging_partition_info: Mutex::new(None),
         }
@@ -1030,13 +1101,17 @@ impl ManifestContext {
         *self.staging_partition_info.lock().unwrap() = None;
     }
 
+    pub(crate) fn state(&self) -> RegionRoleState {
+        self.control_state.role_state()
+    }
+
     pub(crate) fn exit_staging(
         &self,
         region_id: RegionId,
         next_state: RegionRoleState,
     ) -> Result<()> {
-        self.state
-            .compare_exchange(
+        self.control_state
+            .compare_exchange_role_state(
                 RegionRoleState::Leader(RegionLeaderState::Staging),
                 next_state,
             )
@@ -1066,7 +1141,7 @@ impl ManifestContext {
 
     /// Returns the current region role state.
     pub(crate) fn current_state(&self) -> RegionRoleState {
-        self.state.load()
+        self.state()
     }
 
     /// Installs the manifest changes from the current version to the target version (inclusive).
@@ -1178,7 +1253,7 @@ impl ManifestContext {
         let manifest = manager.manifest();
         // Checks state inside the lock. This is to ensure that we won't update the manifest
         // after `set_readonly_gracefully()` is called.
-        let current_state = self.state.load();
+        let current_state = self.state();
         check_state(current_state, manifest.metadata.region_id)?;
 
         for action in &action_list.actions {
@@ -1236,7 +1311,7 @@ impl ManifestContext {
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
 
-        if self.state.load() == RegionRoleState::Follower {
+        if self.state() == RegionRoleState::Follower {
             warn!(
                 "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
                 manifest.metadata.region_id
@@ -1293,7 +1368,7 @@ impl ManifestContext {
                     );
                     return;
                 }
-                match self.state.fetch_update(|state| {
+                match self.control_state.fetch_update_role_state(|state| {
                     if !matches!(state, RegionRoleState::Follower) {
                         Some(RegionRoleState::Follower)
                     } else {
@@ -1329,7 +1404,7 @@ impl ManifestContext {
                     );
                     return;
                 }
-                match self.state.fetch_update(|state| {
+                match self.control_state.fetch_update_role_state(|state| {
                     if matches!(
                         state,
                         RegionRoleState::Follower
@@ -1375,7 +1450,7 @@ impl ManifestContext {
                     );
                     return;
                 }
-                match self.state.compare_exchange(
+                match self.control_state.compare_exchange_role_state(
                     RegionRoleState::Leader(RegionLeaderState::Writable),
                     RegionRoleState::Leader(RegionLeaderState::Downgrading),
                 ) {
@@ -1976,49 +2051,49 @@ mod tests {
         let region_id = RegionId::new(1024, 0);
         // Leader -> Follower
         manifest_ctx.set_role(RegionRole::Follower, region_id);
-        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+        assert_eq!(manifest_ctx.state(), RegionRoleState::Follower);
 
         // Follower -> Leader
         manifest_ctx.set_role(RegionRole::Leader, region_id);
         assert_eq!(
-            manifest_ctx.state.load(),
+            manifest_ctx.state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
 
         // Direct Leader -> StagingLeader should be ignored.
         manifest_ctx.set_role(RegionRole::StagingLeader, region_id);
         assert_eq!(
-            manifest_ctx.state.load(),
+            manifest_ctx.state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
 
         // Leader -> Downgrading Leader
         manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
         assert_eq!(
-            manifest_ctx.state.load(),
+            manifest_ctx.state(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         );
 
         // Downgrading Leader -> Follower
         manifest_ctx.set_role(RegionRole::Follower, region_id);
-        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+        assert_eq!(manifest_ctx.state(), RegionRoleState::Follower);
 
         // Can't downgrade from follower (Follower -> Downgrading Leader)
         manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
-        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+        assert_eq!(manifest_ctx.state(), RegionRoleState::Follower);
 
         // Set region role too Downgrading Leader
         manifest_ctx.set_role(RegionRole::Leader, region_id);
         manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
         assert_eq!(
-            manifest_ctx.state.load(),
+            manifest_ctx.state(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         );
 
         // Downgrading Leader -> Leader
         manifest_ctx.set_role(RegionRole::Leader, region_id);
         assert_eq!(
-            manifest_ctx.state.load(),
+            manifest_ctx.state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
     }
