@@ -1093,6 +1093,8 @@ pub(crate) struct EnterStagingResult {
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+    /// The guard for region request policy.
+    pub(crate) guard: RegionRequestPolicyGuard,
 }
 
 #[derive(Debug)]

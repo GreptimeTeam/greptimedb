@@ -54,7 +54,9 @@ use store_api::logstore::LogStore;
 use store_api::region_engine::{
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
-use store_api::region_request::{RegionAlterRequest, RegionTruncateRequest};
+use store_api::region_request::{
+    RegionAlterRequest, RegionTruncateRequest, StagingPartitionDirective,
+};
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
@@ -777,6 +779,7 @@ pub(crate) struct StalledRequests {
 pub(crate) enum BufferableRequest {
     Alter((RegionAlterRequest, OptionOutputTx)),
     Truncate((RegionTruncateRequest, OptionOutputTx)),
+    EnterStaging((StagingPartitionDirective, OptionOutputTx)),
     Drop((bool, OptionOutputTx)),
     Edit(RegionEditRequest),
 }
@@ -789,6 +792,9 @@ impl BufferableRequest {
                 sender.send(RejectRequestSnafu { region_id, reason }.fail());
             }
             BufferableRequest::Truncate((_, sender)) => {
+                sender.send(RejectRequestSnafu { region_id, reason }.fail());
+            }
+            BufferableRequest::EnterStaging((_, sender)) => {
                 sender.send(RejectRequestSnafu { region_id, reason }.fail());
             }
             BufferableRequest::Drop((_, sender)) => {
@@ -806,6 +812,9 @@ impl BufferableRequest {
                 sender.send(Err(error));
             }
             BufferableRequest::Truncate((_, sender)) => {
+                sender.send(Err(error));
+            }
+            BufferableRequest::EnterStaging((_, sender)) => {
                 sender.send(Err(error));
             }
             BufferableRequest::Drop((_, sender)) => {

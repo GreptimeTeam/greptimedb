@@ -50,6 +50,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BufferableRequest::Edit(req) => {
                 self.handle_region_edit(req);
             }
+            BufferableRequest::EnterStaging((req, sender)) => {
+                self.handle_enter_staging_request(region_id, req, sender)
+                    .await;
+            }
             BufferableRequest::Drop((partial_drop, sender)) => {
                 self.handle_drop_request(region_id, partial_drop, sender)
                     .await;

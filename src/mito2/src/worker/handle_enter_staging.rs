@@ -19,16 +19,19 @@ use store_api::logstore::LogStore;
 use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
 use store_api::storage::RegionId;
 
+use crate::admit_or_return;
 use crate::compaction::RequestCancelResult;
-use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
+use crate::error::{
+    RegionBusySnafu, RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu,
+};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange};
-use crate::region::{MitoRegionRef, RegionLeaderState, StagingPartitionInfo};
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRequestPolicy, StagingPartitionInfo};
 use crate::request::{
     BackgroundNotify, DdlRequest, EnterStagingResult, OptionOutputTx, SenderDdlRequest,
     WorkerRequest, WorkerRequestWithTime,
 };
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{BufferableRequest, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_enter_staging_request(
@@ -40,6 +43,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
+
+        admit_or_return!(
+            self,
+            region_id,
+            region.request_policy(),
+            BufferableRequest::EnterStaging((partition_directive, sender))
+        );
 
         // If the region is already in staging mode, verify the partition directive matches.
         if region.is_staging() {
@@ -186,6 +196,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Err(e));
             return;
         }
+        let Some(guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Stall) else {
+            sender.send(
+                RegionBusySnafu {
+                    region_id: region.region_id,
+                }
+                .fail(),
+            );
+            return;
+        };
 
         let listener = self.listener.clone();
         let request_sender = self.sender.clone();
@@ -224,6 +243,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender,
                     result,
                     partition_directive,
+                    guard,
                 }),
             };
             listener
@@ -274,6 +294,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         } else {
             region.switch_state_to_writable(RegionLeaderState::EnteringStaging);
         }
+        drop(enter_staging_result.guard);
         enter_staging_result
             .sender
             .send(enter_staging_result.result.map(|_| 0));
