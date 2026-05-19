@@ -1143,13 +1143,14 @@ mod tests {
     use common_datasource::compression::CompressionType;
     use common_meta::key::schema_name::SchemaNameValue;
     use common_time::DatabaseTimeToLive;
+    use store_api::region_engine::RegionRole;
     use tokio::sync::{Barrier, oneshot};
 
     use super::*;
     use crate::compaction::memory_manager::{CompactionMemoryGuard, new_compaction_memory_manager};
     use crate::error::InvalidSchedulerStateSnafu;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-    use crate::region::ManifestContext;
+    use crate::region::{ManifestContext, RegionControlState};
     use crate::schedule::scheduler::{Job, Scheduler};
     use crate::sst::FormatType;
     use crate::test_util::mock_schema_metadata_manager;
@@ -1716,6 +1717,7 @@ mod tests {
             Arc::new(ManifestContext::new(
                 manager,
                 RegionRoleState::Leader(RegionLeaderState::Staging),
+                RegionControlState::new_test(RegionId::new(0, 0), RegionRole::StagingLeader),
             ))
         };
 

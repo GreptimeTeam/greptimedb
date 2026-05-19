@@ -38,7 +38,7 @@ use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::opener::{sanitize_region_options, version_builder_from_manifest};
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionControlRef;
-use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRequestPolicy, RegionRoleState};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
     RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
@@ -406,6 +406,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Err(e));
             return;
         }
+        let Some(guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Stall) else {
+            sender.send(
+                RegionBusySnafu {
+                    region_id: region.region_id,
+                }
+                .fail(),
+            );
+            return;
+        };
+
         // Now the region is in truncating state.
 
         let request_sender = self.sender.clone();
@@ -429,6 +439,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 sender,
                 result,
                 kind: truncate.kind,
+                _guard: guard,
             };
             let _ = request_sender
                 .send(WorkerRequestWithTime::new(WorkerRequest::Background {

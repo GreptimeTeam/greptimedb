@@ -22,6 +22,7 @@ pub(crate) mod version;
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -41,6 +42,7 @@ use store_api::region_request::{PathType, StagingPartitionDirective};
 use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
+use tokio::sync::mpsc::UnboundedSender;
 pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
@@ -203,6 +205,22 @@ impl MitoRegion {
             "Stopped region manifest manager, region_id: {}",
             self.region_id
         );
+    }
+
+    /// Returns the request policy of the region.
+    pub(crate) fn request_policy(&self) -> RegionRequestPolicy {
+        self.manifest_ctx.region_request_policy()
+    }
+
+    /// Returns a guard for region request policy.
+    ///
+    /// The guard will hold the manifest write lock and prevent the region request policy from changing until it is dropped.
+    pub(crate) fn acquire_request_policy_guard(
+        &self,
+        request_policy: RegionRequestPolicy,
+    ) -> Option<RegionRequestPolicyGuard> {
+        self.manifest_ctx
+            .acquire_region_request_policy_guard(request_policy)
     }
 
     /// Returns current metadata of the region.
@@ -881,6 +899,134 @@ impl MitoRegion {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionRequestPolicy {
+    Accept,
+    Stall,
+    Reject(RejectReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectReason {
+    DowngradingLeader,
+    Follower,
+}
+
+#[derive(Debug)]
+struct RegionControlStateInner {
+    #[allow(dead_code)]
+    role: RegionRole,
+    request_policy: RegionRequestPolicy,
+    active_guard: bool,
+    region_id: RegionId,
+    guard_release_tx: UnboundedSender<(RegionId, RegionRequestPolicy)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegionControlState {
+    inner: Arc<Mutex<RegionControlStateInner>>,
+}
+
+/// Guard that sets the region request policy when created and resets it to the previous value when dropped.
+pub(crate) struct RegionRequestPolicyGuard {
+    control_state: Arc<Mutex<RegionControlStateInner>>,
+    previous_policy: RegionRequestPolicy,
+    active_policy: RegionRequestPolicy,
+    region_id: RegionId,
+    guard_release_tx: UnboundedSender<(RegionId, RegionRequestPolicy)>,
+}
+
+impl Debug for RegionRequestPolicyGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegionRequestPolicyGuard")
+            .field("region_id", &self.region_id)
+            .field("active_policy", &self.active_policy)
+            .field("previous_policy", &self.previous_policy)
+            .finish()
+    }
+}
+
+impl Drop for RegionRequestPolicyGuard {
+    fn drop(&mut self) {
+        let Ok(mut inner) = self.control_state.lock() else {
+            return;
+        };
+        if inner.active_guard && inner.request_policy == self.active_policy {
+            inner.request_policy = self.previous_policy;
+            inner.active_guard = false;
+        }
+        let _ = self
+            .guard_release_tx
+            .send((self.region_id, self.previous_policy));
+    }
+}
+
+impl RegionControlState {
+    fn role_to_request_policy(role: RegionRole) -> RegionRequestPolicy {
+        match role {
+            RegionRole::Leader | RegionRole::StagingLeader => RegionRequestPolicy::Accept,
+            RegionRole::DowngradingLeader => {
+                RegionRequestPolicy::Reject(RejectReason::DowngradingLeader)
+            }
+            RegionRole::Follower => RegionRequestPolicy::Reject(RejectReason::Follower),
+        }
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn new_test(region_id: RegionId, role: RegionRole) -> Self {
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let (tx, _rx) = unbounded_channel();
+        Self::new(region_id, role, tx)
+    }
+
+    pub(crate) fn new(
+        region_id: RegionId,
+        role: RegionRole,
+        guard_release_tx: UnboundedSender<(RegionId, RegionRequestPolicy)>,
+    ) -> Self {
+        let request_policy = Self::role_to_request_policy(role);
+        let inner = RegionControlStateInner {
+            role,
+            request_policy,
+            active_guard: false,
+            region_id,
+            guard_release_tx,
+        };
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+    /// Acquires a guard to set the region request policy.
+    ///
+    /// The guard will reset the policy to the previous value when dropped.
+    pub(crate) fn acquire_guard(
+        &self,
+        request_policy: RegionRequestPolicy,
+    ) -> Option<RegionRequestPolicyGuard> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.active_guard {
+            return None;
+        }
+        let previous_policy = inner.request_policy;
+        inner.request_policy = request_policy;
+        inner.active_guard = true;
+        Some(RegionRequestPolicyGuard {
+            control_state: self.inner.clone(),
+            previous_policy,
+            active_policy: request_policy,
+            region_id: inner.region_id,
+            guard_release_tx: inner.guard_release_tx.clone(),
+        })
+    }
+
+    /// Returns the current region request policy.
+    pub(crate) fn current_policy(&self) -> RegionRequestPolicy {
+        let inner = self.inner.lock().unwrap();
+        inner.request_policy
+    }
+}
+
 /// Context to update the region manifest.
 #[derive(Debug)]
 pub(crate) struct ManifestContext {
@@ -889,6 +1035,8 @@ pub(crate) struct ManifestContext {
     /// The state of the region. The region checks the state before updating
     /// manifest.
     state: AtomicCell<RegionRoleState>,
+    /// The control state of the region, which is used to control the request policy of the region.
+    control_state: RegionControlState,
     /// Partition info of the region in staging mode.
     ///
     /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
@@ -897,12 +1045,28 @@ pub(crate) struct ManifestContext {
 }
 
 impl ManifestContext {
-    pub(crate) fn new(manager: RegionManifestManager, state: RegionRoleState) -> Self {
+    pub(crate) fn new(
+        manager: RegionManifestManager,
+        state: RegionRoleState,
+        control_state: RegionControlState,
+    ) -> Self {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
+            control_state,
             staging_partition_info: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn region_request_policy(&self) -> RegionRequestPolicy {
+        self.control_state.current_policy()
+    }
+
+    pub(crate) fn acquire_region_request_policy_guard(
+        &self,
+        request_policy: RegionRequestPolicy,
+    ) -> Option<RegionRequestPolicyGuard> {
+        self.control_state.acquire_guard(request_policy)
     }
 
     pub(crate) fn staging_partition_info(&self) -> Option<StagingPartitionInfo> {
@@ -1609,7 +1773,8 @@ mod tests {
     };
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::{
-        ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
+        ManifestContext, ManifestStats, MitoRegion, RegionControlState, RegionLeaderState,
+        RegionRoleState,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
@@ -1648,6 +1813,7 @@ mod tests {
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
             RegionRoleState::Leader(RegionLeaderState::Writable),
+            RegionControlState::new_test(metadata.region_id, RegionRole::Leader),
         ));
 
         MitoRegion {
@@ -1937,6 +2103,7 @@ mod tests {
             Arc::new(ManifestContext::new(
                 manager,
                 RegionRoleState::Leader(RegionLeaderState::Staging),
+                RegionControlState::new_test(RegionId::new(0, 0), RegionRole::StagingLeader),
             ))
         };
 
@@ -2005,6 +2172,7 @@ mod tests {
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
             RegionRoleState::Leader(RegionLeaderState::Writable),
+            RegionControlState::new_test(metadata.region_id, RegionRole::Leader),
         ));
 
         let region = MitoRegion {

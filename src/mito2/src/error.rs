@@ -35,7 +35,7 @@ use store_api::storage::{FileId, RegionId};
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
-use crate::region::RegionRoleState;
+use crate::region::{RegionRoleState, RejectReason};
 use crate::schedule::remote_job_scheduler::JobId;
 use crate::worker::WorkerId;
 
@@ -530,6 +530,18 @@ pub enum Error {
     ))]
     RejectWrite {
         region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} state, rejecting write requests, reason: {:?}",
+        region_id,
+        reason
+    ))]
+    RejectRequest {
+        region_id: RegionId,
+        reason: RejectReason,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1366,6 +1378,7 @@ impl ErrorExt for Error {
             RegionClosed { .. } => StatusCode::Cancelled,
             RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
+            RejectRequest { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),

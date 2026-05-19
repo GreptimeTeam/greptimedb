@@ -55,6 +55,7 @@ use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
+use crate::region::RegionRequestPolicyGuard;
 use crate::region::options::RegionOptions;
 use crate::sst::file::FileMeta;
 use crate::sst::index::IndexBuildType;
@@ -1058,6 +1059,8 @@ pub(crate) struct TruncateResult {
     /// Truncate result.
     pub(crate) result: Result<()>,
     pub(crate) kind: TruncateKind,
+    /// The guard for region request policy.
+    pub(crate) _guard: RegionRequestPolicyGuard,
 }
 
 /// Notifies the region the result of writing region change action.

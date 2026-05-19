@@ -66,6 +66,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.time_provider.clone(),
             self.file_ref_manager.clone(),
             self.partition_expr_fetcher.clone(),
+            self.control_state_sender.clone(),
         )
         .metadata_builder(builder)
         .parse_options(request.options)?

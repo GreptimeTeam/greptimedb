@@ -31,8 +31,9 @@ mod handle_rebuild_index;
 mod handle_remap;
 mod handle_truncate;
 mod handle_write;
+mod utils;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,8 +54,9 @@ use store_api::logstore::LogStore;
 use store_api::region_engine::{
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
+use store_api::region_request::RegionTruncateRequest;
 use store_api::storage::{FileId, RegionId};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
@@ -62,7 +64,10 @@ use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::config::MitoConfig;
-use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{
+    self, CreateDirSnafu, JoinSnafu, RegionNotFoundSnafu, RejectRequestSnafu, Result,
+    WorkerStoppedSnafu,
+};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
@@ -70,11 +75,11 @@ use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
     CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
-    RegionMapRef,
+    RegionMapRef, RegionRequestPolicy, RejectReason,
 };
 use crate::request::{
-    BackgroundNotify, BulkInsertRequest, DdlRequest, SenderBulkRequest, SenderDdlRequest,
-    SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
+    SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::RegionFileId;
@@ -569,6 +574,7 @@ impl<S: LogStore> WorkerStarter<S> {
         let running = Arc::new(AtomicBool::new(true));
         let now = self.time_provider.current_time_millis();
         let id_string = self.id.to_string();
+        let (control_state_sender, control_state_receiver) = mpsc::unbounded_channel();
         let mut worker_thread = RegionWorkerLoop {
             id: self.id,
             config: self.config.clone(),
@@ -603,6 +609,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.config.experimental_compaction_on_exhausted,
             ),
             stalled_requests: StalledRequests::default(),
+            buffered_requests: WorkerRequestBuffer::default(),
             listener: self.listener,
             cache_manager: self.cache_manager,
             puffin_manager_factory: self.puffin_manager_factory,
@@ -619,6 +626,8 @@ impl<S: LogStore> WorkerStarter<S> {
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
+            control_state_receiver,
+            control_state_sender,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -767,6 +776,61 @@ pub(crate) struct StalledRequests {
     pub(crate) estimated_size: usize,
 }
 
+pub(crate) enum BufferableRequest {
+    Truncate((RegionTruncateRequest, OptionOutputTx)),
+}
+
+impl BufferableRequest {
+    /// Rejects the request by sending error to the sender.
+    pub(crate) fn reject(self, region_id: RegionId, reason: RejectReason) {
+        match self {
+            BufferableRequest::Truncate((_, sender)) => {
+                sender.send(RejectRequestSnafu { region_id, reason }.fail());
+            }
+        }
+    }
+
+    pub(crate) fn on_failure(self, error: error::Error) {
+        match self {
+            BufferableRequest::Truncate((_, sender)) => {
+                sender.send(Err(error));
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct WorkerRequestBuffer {
+    requests: HashMap<RegionId, VecDeque<BufferableRequest>>,
+}
+
+impl WorkerRequestBuffer {
+    pub(crate) fn push(&mut self, region_id: RegionId, request: BufferableRequest) {
+        self.requests
+            .entry(region_id)
+            .or_default()
+            .push_back(request);
+    }
+
+    pub(crate) fn next(&mut self, region_id: RegionId) -> Option<BufferableRequest> {
+        let queue = self.requests.get_mut(&region_id)?;
+        let request = queue.pop_front();
+        // TODO(weny): check if the remaining requests can be batched.
+        if queue.is_empty() {
+            self.requests.remove(&region_id);
+        }
+        request
+    }
+
+    pub(crate) fn remove_region(&mut self, region_id: RegionId) {
+        if let Some(requests) = self.requests.remove(&region_id) {
+            for req in requests {
+                req.on_failure(RegionNotFoundSnafu { region_id }.build());
+            }
+        }
+    }
+}
+
 impl StalledRequests {
     /// Appends stalled requests.
     pub(crate) fn append(
@@ -860,6 +924,8 @@ struct RegionWorkerLoop<S> {
     compaction_scheduler: CompactionScheduler,
     /// Stalled write requests.
     stalled_requests: StalledRequests,
+    /// Buffer for requests that cannot be processed immediately.
+    buffered_requests: WorkerRequestBuffer,
     /// Event listener for tests.
     listener: WorkerListener,
     /// Cache.
@@ -892,6 +958,10 @@ struct RegionWorkerLoop<S> {
     partition_expr_fetcher: PartitionExprFetcherRef,
     /// Semaphore to control flush concurrency.
     flush_semaphore: Arc<Semaphore>,
+    /// Control state sender to update region request policy.
+    control_state_sender: UnboundedSender<(RegionId, RegionRequestPolicy)>,
+    /// Control state receiver to update region request policy.
+    control_state_receiver: UnboundedReceiver<(RegionId, RegionRequestPolicy)>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -963,6 +1033,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         continue;
                     }
                 }
+                ctrl_state = self.control_state_receiver.recv() => {
+                    if let Some((region_id, policy)) = ctrl_state {
+                        self.try_resume_buffered_requests(region_id, policy).await;
+                    } else {
+                        // The channel is disconnected.
+                        break;
+                    }
+                }
                 _ = &mut sleep => {
                     // Timeout. Checks periodical tasks.
                     self.handle_periodical_tasks();
@@ -1023,6 +1101,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.clean().await;
 
         info!("Exit region worker thread {}", self.id);
+    }
+
+    async fn try_resume_buffered_requests(
+        &mut self,
+        region_id: RegionId,
+        policy: RegionRequestPolicy,
+    ) {
+        if policy == RegionRequestPolicy::Accept
+            && let Some(req) = self.buffered_requests.next(region_id)
+        {
+            self.handle_buffered_request(region_id, req).await;
+        }
     }
 
     async fn buffer_bulk_insert_request(

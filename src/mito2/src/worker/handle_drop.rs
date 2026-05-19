@@ -79,6 +79,7 @@ where
         // Removes this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
         self.dropping_regions.insert_region(region.clone());
+        self.buffered_requests.remove_region(region_id);
 
         // Delete region data in WAL.
         self.wal

@@ -39,6 +39,7 @@ use store_api::region_engine::RegionRole;
 use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, RegionId};
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
@@ -58,7 +59,8 @@ use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
-    ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
+    ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionControlState,
+    RegionLeaderState, RegionRequestPolicy, RegionRoleState,
 };
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
@@ -113,6 +115,7 @@ pub(crate) struct RegionOpener {
     replay_checkpoint: Option<u64>,
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
+    control_state_sender: UnboundedSender<(RegionId, RegionRequestPolicy)>,
 }
 
 impl RegionOpener {
@@ -131,6 +134,7 @@ impl RegionOpener {
         time_provider: TimeProviderRef,
         file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
+        control_state_sender: UnboundedSender<(RegionId, RegionRequestPolicy)>,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
@@ -151,6 +155,7 @@ impl RegionOpener {
             replay_checkpoint: None,
             file_ref_manager,
             partition_expr_fetcher,
+            control_state_sender,
         }
     }
 
@@ -334,6 +339,11 @@ impl RegionOpener {
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
+                RegionControlState::new(
+                    region_id,
+                    RegionRole::Leader,
+                    self.control_state_sender.clone(),
+                ),
             )),
             file_purger: create_file_purger(
                 config.gc.enable,
@@ -577,6 +587,11 @@ impl RegionOpener {
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
                 RegionRoleState::Follower,
+                RegionControlState::new(
+                    region_id,
+                    RegionRole::Follower,
+                    self.control_state_sender.clone(),
+                ),
             )),
             file_purger,
             provider: provider.clone(),
