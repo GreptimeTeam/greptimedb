@@ -21,9 +21,10 @@ pub struct InfluxdbOptions {
     pub default_merge_mode: InfluxdbMergeMode,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InfluxdbMergeMode {
+    #[default]
     LastNonNull,
     LastRow,
 }
@@ -34,12 +35,6 @@ impl InfluxdbMergeMode {
             InfluxdbMergeMode::LastNonNull => "last_non_null",
             InfluxdbMergeMode::LastRow => "last_row",
         }
-    }
-}
-
-impl Default for InfluxdbMergeMode {
-    fn default() -> Self {
-        Self::LastNonNull
     }
 }
 
