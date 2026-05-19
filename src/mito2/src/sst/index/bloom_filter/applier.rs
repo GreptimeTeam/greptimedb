@@ -137,9 +137,6 @@ pub struct BloomFilterIndexApplier {
     /// For each column, the value will be retained only if it contains __all__ predicates.
     predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
 
-    /// Default apply plan built from all collected predicates.
-    default_plan: SstApplyPlan,
-
     /// Expected predicate column types from the latest region metadata.
     expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
 }
@@ -162,7 +159,6 @@ impl BloomFilterIndexApplier {
         predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
         expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
     ) -> Self {
-        let default_plan = Self::build_apply_plan(predicates.clone());
         Self {
             table_dir,
             path_type,
@@ -171,7 +167,6 @@ impl BloomFilterIndexApplier {
             puffin_manager_factory,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
-            default_plan,
             predicates,
             expected_predicate_col_types,
         }
@@ -455,13 +450,11 @@ impl BloomFilterIndexApplier {
     /// Returns the predicate key.
     pub fn plan_for_sst(&self, sst_metadata: &RegionMetadataRef) -> Option<SstApplyPlan> {
         let mut compatible_predicates = BTreeMap::new();
-        let mut has_type_mismatch = false;
 
         for (col_id, expected) in &self.expected_predicate_col_types {
             if let Some(sst_col) = sst_metadata.column_by_id(*col_id)
                 && sst_col.column_schema.data_type != *expected
             {
-                has_type_mismatch = true;
                 continue;
             }
 
@@ -474,22 +467,12 @@ impl BloomFilterIndexApplier {
             return None;
         }
 
-        if !has_type_mismatch {
-            return Some(self.default_plan.clone());
-        }
-
-        Some(Self::build_apply_plan(compatible_predicates))
-    }
-
-    fn build_apply_plan(
-        predicates_by_col: BTreeMap<ColumnId, Vec<InListPredicate>>,
-    ) -> SstApplyPlan {
-        let predicates = Arc::new(predicates_by_col);
+        let predicates = Arc::new(compatible_predicates);
         let predicate_key = PredicateKey::new_bloom(predicates.clone());
-        SstApplyPlan {
+        Some(SstApplyPlan {
             predicate_key,
             predicates,
-        }
+        })
     }
 }
 
