@@ -25,7 +25,9 @@ use datatypes::arrow::compute::{TakeOptions, take};
 use datatypes::arrow::datatypes::{FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::DataType;
+use datatypes::schema::ext::ArrowSchemaExt;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use datatypes::vectors::json::array::JsonArray;
@@ -43,15 +45,19 @@ use crate::error::{
     EncodeSnafu, NewRecordBatchSnafu, Result, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
-use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::{FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray};
+use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
+use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, PrimaryKeyArray};
 use crate::sst::{internal_fields, tag_maybe_to_dictionary_field, with_field_id};
 
-/// Returns true if `left` and `right` have same columns and primary key encoding.
+/// Returns true if the columns in the `projection_mapper` and `read_format` have same data types
+/// and primary key encodings.
 pub(crate) fn has_same_columns_and_pk_encoding(
-    left: &RegionMetadata,
-    right: &RegionMetadata,
+    projection_mapper: &FlatProjectionMapper,
+    read_format: &FlatReadFormat,
+    compaction: bool,
 ) -> bool {
+    let left = projection_mapper.metadata();
+    let right = read_format.metadata();
     if left.primary_key_encoding != right.primary_key_encoding {
         return false;
     }
@@ -61,17 +67,13 @@ pub(crate) fn has_same_columns_and_pk_encoding(
     }
 
     for (left_col, right_col) in left.column_metadatas.iter().zip(&right.column_metadatas) {
-        if left_col.column_id != right_col.column_id || !left_col.is_same_datatype(right_col) {
+        if left_col.column_id != right_col.column_id {
             return false;
         }
-        debug_assert_eq!(
-            left_col.column_schema.data_type,
-            right_col.column_schema.data_type
-        );
         debug_assert_eq!(left_col.semantic_type, right_col.semantic_type);
     }
 
-    true
+    &projection_mapper.input_arrow_schema(compaction) == read_format.arrow_schema()
 }
 
 /// A helper struct to adapt schema of the batch to an expected schema.
@@ -88,16 +90,28 @@ impl FlatCompatBatch {
     /// Creates a [FlatCompatBatch].
     ///
     /// - `mapper` is built from the metadata users expect to see.
-    /// - `actual` is the [RegionMetadata] of the input parquet.
-    /// - `format_projection` is the projection of the read format for the input parquet.
+    /// - `read_format` is the [FlatReadFormat] of the input parquet.
     /// - `compaction` indicates whether the reader is for compaction.
     pub(crate) fn try_new(
         mapper: &FlatProjectionMapper,
-        actual: &RegionMetadataRef,
-        format_projection: &FormatProjection,
+        read_format: &FlatReadFormat,
         compaction: bool,
     ) -> Result<Option<Self>> {
-        let actual_schema = flat_projected_columns(actual, format_projection);
+        let actual = read_format.metadata();
+        let format_projection = read_format.format_projection();
+        let mut actual_schema = flat_projected_columns(actual, format_projection);
+        if read_format.arrow_schema().has_json_extension_field() {
+            for field in read_format.arrow_schema().fields() {
+                if is_json_extension_type(field)
+                    && let Some(column_id) =
+                        actual.column_by_name(field.name()).map(|x| x.column_id)
+                    && let Some(i) = actual_schema.iter().position(|x| x.0 == column_id)
+                {
+                    actual_schema[i].1 = ConcreteDataType::from_arrow_type(field.data_type());
+                }
+            }
+        }
+
         let expect_schema = mapper.batch_schema();
         if expect_schema == actual_schema {
             // Although the SST has a different schema, but the schema after projection is the same
@@ -152,10 +166,12 @@ impl FlatCompatBatch {
                     expect_column.column_id,
                 )));
             } else {
-                fields.push(Arc::new(with_field_id(
-                    (**column_field).clone(),
+                let field = with_field_id(
+                    Arc::unwrap_or_clone(column_field.clone()),
                     expect_column.column_id,
-                )));
+                )
+                .with_data_type(expect_data_type.as_arrow_type());
+                fields.push(Arc::new(field))
             };
 
             if let Some((index, actual_data_type)) = actual_schema_index.get(column_id) {
@@ -720,12 +736,10 @@ mod tests {
             false,
         )
         .unwrap();
-        let format_projection = read_format.format_projection();
 
-        let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, false)
-                .unwrap()
-                .unwrap();
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, false)
+            .unwrap()
+            .unwrap();
 
         let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
         tag_builder.append_value("tag1");
@@ -804,6 +818,7 @@ mod tests {
             &expected_metadata,
             vec![1, 2],
             ReadColumns::from_deduped_column_ids([1, 2, 3]),
+            None,
         )
         .unwrap();
         let read_format = FlatReadFormat::new(
@@ -814,12 +829,10 @@ mod tests {
             false,
         )
         .unwrap();
-        let format_projection = read_format.format_projection();
 
-        let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, false)
-                .unwrap()
-                .unwrap();
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, false)
+            .unwrap()
+            .unwrap();
 
         let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
         tag_builder.append_value("tag1");
@@ -905,12 +918,10 @@ mod tests {
             false,
         )
         .unwrap();
-        let format_projection = read_format.format_projection();
 
-        let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, false)
-                .unwrap()
-                .unwrap();
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, false)
+            .unwrap()
+            .unwrap();
 
         // Tag array.
         let mut tag1_builder = StringDictionaryBuilder::<UInt32Type>::new();
@@ -999,12 +1010,10 @@ mod tests {
             true,
         )
         .unwrap();
-        let format_projection = read_format.format_projection();
 
-        let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, true)
-                .unwrap()
-                .unwrap();
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, true)
+            .unwrap()
+            .unwrap();
 
         let sparse_k1 = encode_sparse_key(&[]);
         let input_columns: Vec<ArrayRef> = vec![

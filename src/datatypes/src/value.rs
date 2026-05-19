@@ -1205,7 +1205,7 @@ impl TryFrom<ScalarValue> for Value {
                 .map(|v| Value::Decimal128(Decimal128::new(v, p, s)))
                 .unwrap_or(Value::Null),
             ScalarValue::Struct(struct_array) => {
-                let struct_type: StructType = (struct_array.fields()).try_into()?;
+                let struct_type = StructType::from(struct_array.fields());
                 let items = struct_array
                     .columns()
                     .iter()
@@ -1741,6 +1741,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::json::value::{JsonVariant, JsonVariantRef};
     use crate::types::StructField;
+    use crate::types::json_type::{JsonNativeType, JsonObjectType};
     use crate::vectors::ListVectorBuilder;
 
     pub(crate) fn build_struct_type() -> StructType {
@@ -1789,10 +1790,6 @@ pub(crate) mod tests {
         ];
         let struct_arrow_array = StructArray::new(struct_type.as_arrow_fields(), arrays, None);
         ScalarValue::Struct(Arc::new(struct_arrow_array))
-    }
-
-    pub fn build_list_type() -> ConcreteDataType {
-        ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::boolean_datatype()))
     }
 
     pub(crate) fn build_list_value() -> ListValue {
@@ -2274,39 +2271,26 @@ pub(crate) mod tests {
         );
 
         check_type_and_value(
-            &ConcreteDataType::json_native_datatype(ConcreteDataType::boolean_datatype()),
+            &ConcreteDataType::json2(JsonNativeType::Bool),
             &Value::Json(Box::new(true.into())),
         );
 
         check_type_and_value(
-            &ConcreteDataType::json_native_datatype(build_list_type()),
+            &ConcreteDataType::json2(JsonNativeType::Array(Box::new(JsonNativeType::Bool))),
             &Value::Json(Box::new([true].into())),
         );
 
         check_type_and_value(
-            &ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
-                StructType::new(Arc::new(vec![
-                    StructField::new(
-                        "address".to_string(),
-                        ConcreteDataType::string_datatype(),
-                        true,
-                    ),
-                    StructField::new("age".to_string(), ConcreteDataType::uint64_datatype(), true),
-                    StructField::new(
-                        "awards".to_string(),
-                        ConcreteDataType::list_datatype(Arc::new(
-                            ConcreteDataType::boolean_datatype(),
-                        )),
-                        true,
-                    ),
-                    StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
-                    StructField::new(
-                        "name".to_string(),
-                        ConcreteDataType::string_datatype(),
-                        true,
-                    ),
-                ])),
-            )),
+            &ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([
+                ("address".to_string(), JsonNativeType::String),
+                ("age".to_string(), JsonNativeType::u64()),
+                (
+                    "awards".to_string(),
+                    JsonNativeType::Array(Box::new(JsonNativeType::Bool)),
+                ),
+                ("id".to_string(), JsonNativeType::i64()),
+                ("name".to_string(), JsonNativeType::String),
+            ]))),
             &Value::Json(Box::new(
                 [
                     ("id", JsonVariant::from(1i64)),

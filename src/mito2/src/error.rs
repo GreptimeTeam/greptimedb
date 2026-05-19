@@ -1241,6 +1241,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to generate Arrow schema from Parquet file: {}", file))]
+    ParquetToArrowSchema {
+        file: String,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1331,7 +1340,8 @@ impl ErrorExt for Error {
             | BuildEntry { .. }
             | Metadata { .. }
             | CastColumn { .. }
-            | MitoManifestInfo { .. } => StatusCode::Internal,
+            | MitoManifestInfo { .. }
+            | ParquetToArrowSchema { .. } => StatusCode::Internal,
 
             FetchManifests { source, .. } => source.status_code(),
 

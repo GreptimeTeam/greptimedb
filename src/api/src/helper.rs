@@ -22,6 +22,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
 use datatypes::json::value::{JsonNumber, JsonValue, JsonValueRef, JsonVariant};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
+use datatypes::types::json_type::JsonNativeType;
 use datatypes::types::{
     IntervalType, JsonFormat, JsonType, StructField, StructType, TimeType, TimestampType,
 };
@@ -127,7 +128,9 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                             datatype: type_ext.datatype(),
                             datatype_ext: type_ext.datatype_extension.clone().map(|d| *d),
                         };
-                        ConcreteDataType::json_native_datatype(inner_type.into())
+                        ConcreteDataType::json2(JsonNativeType::from(&ConcreteDataType::from(
+                            inner_type,
+                        )))
                     }
                     None => ConcreteDataType::Json(JsonType::null()),
                     _ => {
@@ -448,7 +451,8 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                             if native_type.is_null() {
                                 None
                             } else {
-                                let native_type = ConcreteDataType::from(native_type.as_ref());
+                                let native_type =
+                                    ConcreteDataType::from_arrow_type(&native_type.as_arrow_type());
                                 let (datatype, datatype_extension) =
                                     ColumnDataTypeWrapper::try_from(native_type)?.into_parts();
                                 Some(ColumnDataTypeExtension {
@@ -1157,6 +1161,7 @@ mod tests {
 
     use common_time::interval::IntervalUnit;
     use datatypes::scalars::ScalarVector;
+    use datatypes::types::json_type::JsonObjectType;
     use datatypes::types::{Int8Type, Int32Type, UInt8Type, UInt32Type};
     use datatypes::value::{ListValue, StructValue};
     use datatypes::vectors::{
@@ -1393,9 +1398,12 @@ mod tests {
             .into()
         );
         assert_eq!(
-            ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
-                struct_type.clone()
-            )),
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([
+                ("address".to_string(), JsonNativeType::String),
+                ("age".to_string(), JsonNativeType::i64()),
+                ("id".to_string(), JsonNativeType::i64()),
+                ("name".to_string(), JsonNativeType::String),
+            ]))),
             ColumnDataTypeWrapper::new(
                 ColumnDataType::Json,
                 Some(ColumnDataTypeExtension {
@@ -1579,20 +1587,6 @@ mod tests {
             ]))).try_into().expect("Failed to create column datatype from Struct(StructType { fields: [StructField { name: \"a\", data_type: Int64(Int64Type) }, StructField { name: \"a.a\", data_type: List(ListType { item_type: String(StringType) }) }] })")
         );
 
-        let struct_type = StructType::new(Arc::new(vec![
-            StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
-            StructField::new(
-                "name".to_string(),
-                ConcreteDataType::string_datatype(),
-                true,
-            ),
-            StructField::new("age".to_string(), ConcreteDataType::int32_datatype(), true),
-            StructField::new(
-                "address".to_string(),
-                ConcreteDataType::string_datatype(),
-                true,
-            ),
-        ]));
         assert_eq!(
             ColumnDataTypeWrapper::new(
                 ColumnDataType::Json,
@@ -1636,9 +1630,12 @@ mod tests {
                     })))
                 })
             ),
-            ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
-                struct_type.clone()
-            ))
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([
+                ("address".to_string(), JsonNativeType::String),
+                ("age".to_string(), JsonNativeType::i64()),
+                ("id".to_string(), JsonNativeType::i64()),
+                ("name".to_string(), JsonNativeType::String),
+            ])))
             .try_into()
             .expect("failed to convert json type")
         );
