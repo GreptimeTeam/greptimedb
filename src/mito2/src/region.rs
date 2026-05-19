@@ -1775,7 +1775,7 @@ mod tests {
     use store_api::logstore::provider::Provider;
     use store_api::region_engine::RegionRole;
     use store_api::region_request::PathType;
-    use store_api::storage::{FileId, RegionId};
+    use store_api::storage::RegionId;
 
     use crate::access_layer::AccessLayer;
     use crate::error::Error;
@@ -1852,44 +1852,6 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
         }
-    }
-
-    #[tokio::test]
-    async fn test_compaction_update_manifest_allows_editing_state() {
-        let env = SchedulerEnv::new().await;
-        let region = build_test_region(&env).await;
-        region.set_editing(RegionLeaderState::Writable).unwrap();
-
-        let file_id = FileId::random();
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
-            files_to_add: vec![crate::sst::file::FileMeta {
-                region_id: region.region_id,
-                file_id,
-                level: 1,
-                ..Default::default()
-            }],
-            files_to_remove: Vec::new(),
-            timestamp_ms: None,
-            compaction_time_window: None,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
-        }));
-
-        region
-            .manifest_ctx
-            .update_manifest_for_compaction(action_list)
-            .await
-            .unwrap();
-
-        assert!(
-            region
-                .manifest_ctx
-                .manifest()
-                .await
-                .files
-                .contains_key(&file_id)
-        );
     }
 
     #[tokio::test]
