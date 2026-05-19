@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests, SemanticType};
 use async_trait::async_trait;
@@ -27,6 +29,7 @@ use servers::interceptor::{LineProtocolInterceptor, LineProtocolInterceptorRef};
 use servers::query_handler::InfluxdbLineProtocolHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use store_api::mito_engine_options::MERGE_MODE_KEY;
 
 use crate::instance::Instance;
 
@@ -56,6 +59,14 @@ impl InfluxdbLineProtocolHandler for Instance {
         let requests = interceptor_ref
             .post_lines_conversion(requests, ctx.clone())
             .await?;
+
+        let ctx = if ctx.extension(MERGE_MODE_KEY).is_none() {
+            let mut ctx = (*ctx).clone();
+            ctx.set_extension(MERGE_MODE_KEY, self.influxdb_default_merge_mode.as_str());
+            Arc::new(ctx)
+        } else {
+            ctx
+        };
 
         self.handle_influx_row_inserts(requests, ctx)
             .await

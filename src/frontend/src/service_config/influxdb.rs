@@ -15,13 +15,40 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct InfluxdbOptions {
     pub enable: bool,
+    pub default_merge_mode: InfluxdbMergeMode,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InfluxdbMergeMode {
+    LastNonNull,
+    LastRow,
+}
+
+impl InfluxdbMergeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InfluxdbMergeMode::LastNonNull => "last_non_null",
+            InfluxdbMergeMode::LastRow => "last_row",
+        }
+    }
+}
+
+impl Default for InfluxdbMergeMode {
+    fn default() -> Self {
+        Self::LastNonNull
+    }
 }
 
 impl Default for InfluxdbOptions {
     fn default() -> Self {
-        Self { enable: true }
+        Self {
+            enable: true,
+            default_merge_mode: InfluxdbMergeMode::default(),
+        }
     }
 }
 
@@ -33,5 +60,12 @@ mod tests {
     fn test_influxdb_options() {
         let default = InfluxdbOptions::default();
         assert!(default.enable);
+        assert_eq!("last_non_null", default.default_merge_mode.as_str());
+    }
+
+    #[test]
+    fn test_influxdb_options_default_merge_mode() {
+        let options: InfluxdbOptions = toml::from_str("default_merge_mode = 'last_row'").unwrap();
+        assert_eq!("last_row", options.default_merge_mode.as_str());
     }
 }

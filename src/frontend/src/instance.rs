@@ -99,6 +99,7 @@ use crate::error::{
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
     StatementTimeoutSnafu, TableOperationSnafu,
 };
+use crate::service_config::InfluxdbMergeMode;
 use crate::stream_wrapper::CancellableStreamWrapper;
 
 lazy_static! {
@@ -122,6 +123,7 @@ pub struct Instance {
     event_recorder: Option<EventRecorderRef>,
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
+    influxdb_default_merge_mode: InfluxdbMergeMode,
     suspend: Arc<AtomicBool>,
 
     // cache for otlp metrics
