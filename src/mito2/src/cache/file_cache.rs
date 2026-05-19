@@ -628,8 +628,13 @@ impl FileCache {
         let file_path = self.inner.cache_file_path(key);
         self.get_parquet_meta_data(key, cache_metrics, page_index_policy)
             .await
-            .and_then(
-                |metadata| match CachedSstMeta::try_new(&file_path, metadata) {
+            .and_then(|metadata| {
+                match CachedSstMeta::try_new_with_page_index_policy(
+                    &file_path,
+                    metadata,
+                    None,
+                    page_index_policy,
+                ) {
                     Ok(metadata) => Some(Arc::new(metadata)),
                     Err(err) => {
                         CACHE_MISS
@@ -641,8 +646,8 @@ impl FileCache {
                         );
                         None
                     }
-                },
-            )
+                }
+            })
     }
 
     async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {

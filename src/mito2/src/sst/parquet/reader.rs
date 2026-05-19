@@ -614,7 +614,12 @@ impl ParquetReaderBuilder {
         metadata_loader.with_page_index_policy(page_index_policy);
         let metadata = metadata_loader.load(cache_metrics).await?;
 
-        let metadata = Arc::new(CachedSstMeta::try_new(file_path, metadata)?);
+        let metadata = Arc::new(CachedSstMeta::try_new_with_page_index_policy(
+            file_path,
+            metadata,
+            None,
+            page_index_policy,
+        )?);
         // Cache the metadata.
         self.cache_strategy
             .put_sst_meta_data(file_id, metadata.clone());
