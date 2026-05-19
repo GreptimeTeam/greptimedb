@@ -41,6 +41,7 @@ use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, RowSelection};
 use parquet::arrow::{ProjectionMask, parquet_to_arrow_schema};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
+use parquet::file::properties::DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT;
 use partition::expr::PartitionExpr;
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
@@ -80,8 +81,8 @@ use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
-use crate::sst::parquet::flat_format::FlatReadFormat;
-use crate::sst::parquet::format::need_override_sequence;
+use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
+use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
@@ -93,9 +94,35 @@ use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_pla
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
-use crate::sst::tag_maybe_to_dictionary_field;
+use crate::sst::{override_pk_field_to_binary, tag_maybe_to_dictionary_field};
 
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
+
+/// Number of leading row groups sampled by [`should_read_pk_as_binary`].
+const MAX_ROW_GROUPS_TO_CHECK_PK: usize = 4;
+
+/// Returns `true` if the `__primary_key` chunk in any of the first
+/// [`MAX_ROW_GROUPS_TO_CHECK_PK`] row groups exceeds the dictionary page size
+/// limit, signalling the writer likely fell back to plain encoding.
+fn should_read_pk_as_binary(parquet_meta: &ParquetMetaData) -> bool {
+    should_read_pk_as_binary_with_limit(parquet_meta, DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT)
+}
+
+fn should_read_pk_as_binary_with_limit(
+    parquet_meta: &ParquetMetaData,
+    dict_page_size_limit: usize,
+) -> bool {
+    let num_columns = parquet_meta.file_metadata().schema_descr().num_columns();
+    if num_columns < INTERNAL_COLUMN_NUM {
+        return false;
+    }
+    let pk_idx = primary_key_column_index(num_columns);
+    parquet_meta
+        .row_groups()
+        .iter()
+        .take(MAX_ROW_GROUPS_TO_CHECK_PK)
+        .any(|rg| rg.column(pk_idx).uncompressed_size() as usize > dict_page_size_limit)
+}
 const INDEX_TYPE_INVERTED: &str = "inverted";
 const INDEX_TYPE_BLOOM: &str = "bloom filter";
 const INDEX_TYPE_VECTOR: &str = "vector";
@@ -431,6 +458,7 @@ impl ParquetReaderBuilder {
         // Computes the projection mask.
         let parquet_read_cols = read_format.parquet_read_columns();
         let projection_plan = build_projection_plan(parquet_read_cols, parquet_schema_desc);
+        let has_nested_projection = parquet_read_cols.has_nested();
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
@@ -498,8 +526,15 @@ impl ParquetReaderBuilder {
         // Create ArrowReaderMetadata for async stream building.
         let mut arrow_reader_options = ArrowReaderOptions::new();
         if !read_format.arrow_schema().has_json_extension_field() {
-            arrow_reader_options =
-                arrow_reader_options.with_schema(read_format.arrow_schema().clone());
+            // Read `__primary_key` as Binary when it's too large for dictionary
+            // encoding; convert_batch wraps it back to a DictionaryArray.
+            let schema_for_reader = if should_read_pk_as_binary(&parquet_meta) {
+                read_format.set_pk_as_binary()?;
+                override_pk_field_to_binary(read_format.arrow_schema())
+            } else {
+                read_format.arrow_schema().clone()
+            };
+            arrow_reader_options = arrow_reader_options.with_schema(schema_for_reader);
         }
         let arrow_metadata =
             ArrowReaderMetadata::try_new(parquet_meta.clone(), arrow_reader_options)
@@ -515,7 +550,7 @@ impl ParquetReaderBuilder {
             output_schema,
             object_store: self.object_store.clone(),
             projection: projection_plan,
-            has_nested_projection: parquet_read_cols.has_nested(),
+            has_nested_projection,
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder: filter_plan.prefilter_builder,
         };
@@ -2671,5 +2706,68 @@ mod tests {
         // Binary expr is handled by SimpleFilterEvaluator — rejected here.
         let binary = col("tag_0").eq(lit("a"));
         assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &binary).is_none());
+    }
+
+    fn write_test_parquet_with_pk_column(values: &[&[u8]]) -> bytes::Bytes {
+        use datatypes::arrow::array::{
+            BinaryArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
+        };
+        use datatypes::arrow::datatypes::{Field as ArrowField, Schema as ArrowSchema, TimeUnit};
+        use store_api::storage::consts::{
+            OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
+        };
+
+        let n = values.len();
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            ArrowField::new(PRIMARY_KEY_COLUMN_NAME, DataType::Binary, false),
+            ArrowField::new(SEQUENCE_COLUMN_NAME, DataType::UInt64, false),
+            ArrowField::new(OP_TYPE_COLUMN_NAME, DataType::UInt8, false),
+        ]));
+        let ts: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![0_i64; n]));
+        let pk: ArrayRef = Arc::new(BinaryArray::from_iter_values(values.iter().copied()));
+        let seq: ArrayRef = Arc::new(UInt64Array::from(vec![0_u64; n]));
+        let op: ArrayRef = Arc::new(UInt8Array::from(vec![0_u8; n]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![ts, pk, seq, op]).unwrap();
+
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        bytes::Bytes::from(bytes)
+    }
+
+    fn load_parquet_meta(bytes: bytes::Bytes) -> Arc<ParquetMetaData> {
+        let builder =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+        builder.metadata().clone()
+    }
+
+    #[test]
+    fn test_should_read_pk_as_binary_small_chunk_returns_false() {
+        let bytes = write_test_parquet_with_pk_column(&[b"a", b"b", b"c"]);
+        let meta = load_parquet_meta(bytes);
+
+        assert!(!should_read_pk_as_binary_with_limit(&meta, 1024));
+    }
+
+    #[test]
+    fn test_should_read_pk_as_binary_large_chunk_returns_true() {
+        let owned: Vec<Vec<u8>> = (0..512u32)
+            .map(|i| {
+                let mut v = vec![0u8; 16];
+                v[..4].copy_from_slice(&i.to_le_bytes());
+                v
+            })
+            .collect();
+        let refs: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+        let bytes = write_test_parquet_with_pk_column(&refs);
+        let meta = load_parquet_meta(bytes);
+
+        assert!(should_read_pk_as_binary_with_limit(&meta, 1024));
     }
 }

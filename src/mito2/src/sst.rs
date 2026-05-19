@@ -270,6 +270,26 @@ pub(crate) fn internal_fields() -> [FieldRef; 3] {
     ]
 }
 
+/// Returns a copy of `schema` with the `__primary_key` field replaced by a plain `Binary` field.
+pub(crate) fn override_pk_field_to_binary(schema: &SchemaRef) -> SchemaRef {
+    let new_fields = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            if field.name() == PRIMARY_KEY_COLUMN_NAME {
+                Arc::new(Field::new(
+                    PRIMARY_KEY_COLUMN_NAME,
+                    ArrowDataType::Binary,
+                    field.is_nullable(),
+                ))
+            } else {
+                field.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    Arc::new(Schema::new(new_fields))
+}
+
 /// Gets the estimated number of series from record batches.
 ///
 /// This struct tracks the last timestamp value to detect series boundaries
