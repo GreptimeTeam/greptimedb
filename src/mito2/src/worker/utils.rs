@@ -44,6 +44,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BufferableRequest::Truncate((req, sender)) => {
                 self.handle_truncate_request(region_id, req, sender).await;
             }
+            BufferableRequest::Edit(req) => {
+                self.handle_region_edit(req);
+            }
         }
     }
 }

@@ -78,8 +78,8 @@ use crate::region::{
     RegionMapRef, RegionRequestPolicy, RejectReason,
 };
 use crate::request::{
-    BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
-    SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, RegionEditRequest,
+    SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::RegionFileId;
@@ -89,7 +89,6 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
-use crate::worker::handle_manifest::RegionEditQueues;
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
@@ -621,7 +620,6 @@ impl<S: LogStore> WorkerStarter<S> {
             stalling_count: WRITE_STALLING.with_label_values(&[&id_string]),
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
-            region_edit_queues: RegionEditQueues::default(),
             schema_metadata_manager: self.schema_metadata_manager,
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
@@ -778,6 +776,7 @@ pub(crate) struct StalledRequests {
 
 pub(crate) enum BufferableRequest {
     Truncate((RegionTruncateRequest, OptionOutputTx)),
+    Edit(RegionEditRequest),
 }
 
 impl BufferableRequest {
@@ -787,6 +786,9 @@ impl BufferableRequest {
             BufferableRequest::Truncate((_, sender)) => {
                 sender.send(RejectRequestSnafu { region_id, reason }.fail());
             }
+            BufferableRequest::Edit(req) => {
+                let _ = req.tx.send(RejectRequestSnafu { region_id, reason }.fail());
+            }
         }
     }
 
@@ -794,6 +796,9 @@ impl BufferableRequest {
         match self {
             BufferableRequest::Truncate((_, sender)) => {
                 sender.send(Err(error));
+            }
+            BufferableRequest::Edit(req) => {
+                let _ = req.tx.send(Err(error));
             }
         }
     }
@@ -948,8 +953,6 @@ struct RegionWorkerLoop<S> {
     region_count: IntGauge,
     /// Histogram of request wait time for this worker.
     request_wait_time: Histogram,
-    /// Queues for region edit requests.
-    region_edit_queues: RegionEditQueues,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
     /// Datanode level file references manager.

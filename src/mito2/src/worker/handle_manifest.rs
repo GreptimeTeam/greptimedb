@@ -16,7 +16,6 @@
 //!
 //! It updates the manifest and applies the changes to the region in background.
 
-use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -24,8 +23,8 @@ use common_telemetry::{info, warn};
 use parquet::file::metadata::PageIndexPolicy;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::RegionId;
 
+use crate::admit_or_return;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::IndexBuildMode;
@@ -38,80 +37,16 @@ use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::opener::{sanitize_region_options, version_builder_from_manifest};
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionControlRef;
-use crate::region::{MitoRegionRef, RegionLeaderState, RegionRequestPolicy, RegionRoleState};
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRequestPolicy};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
     RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::location;
-use crate::worker::{RegionWorkerLoop, WorkerListener};
-
-pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
-
-/// A queue for region edit requests received while the region is already `Editing`.
-///
-/// Normal writes and bulk inserts that arrive during `Editing` use the stalled-write queue instead.
-/// When an edit completes, those writes are handled before the next queued edit starts, preserving
-/// sequence ordering between direct SST edits and WAL/memtable writes unless global reject
-/// backpressure rejects them first.
-/// Everything is done in the region worker loop.
-pub(crate) struct RegionEditQueue {
-    region_id: RegionId,
-    requests: VecDeque<RegionEditRequest>,
-}
-
-impl RegionEditQueue {
-    const QUEUE_MAX_LEN: usize = 128;
-
-    fn new(region_id: RegionId) -> Self {
-        Self {
-            region_id,
-            requests: VecDeque::new(),
-        }
-    }
-
-    fn enqueue(&mut self, request: RegionEditRequest) {
-        if self.requests.len() > Self::QUEUE_MAX_LEN {
-            let _ = request.tx.send(
-                RegionBusySnafu {
-                    region_id: self.region_id,
-                }
-                .fail(),
-            );
-            return;
-        };
-        self.requests.push_back(request);
-    }
-
-    fn dequeue(&mut self) -> Option<RegionEditRequest> {
-        self.requests.pop_front()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.requests.is_empty()
-    }
-
-    fn reject_all_as_not_found(mut self) {
-        while let Some(request) = self.requests.pop_front() {
-            let _ = request.tx.send(
-                RegionNotFoundSnafu {
-                    region_id: self.region_id,
-                }
-                .fail(),
-            );
-        }
-    }
-}
+use crate::worker::{BufferableRequest, RegionWorkerLoop, WorkerListener};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Rejects queued region edit requests as region not found.
-    pub(crate) fn reject_region_edit_queue_as_not_found(&mut self, region_id: RegionId) {
-        if let Some(edit_queue) = self.region_edit_queues.remove(&region_id) {
-            edit_queue.reject_all_as_not_found();
-        }
-    }
-
     /// Handles region change result.
     pub(crate) async fn handle_manifest_region_change_result(
         &mut self,
@@ -247,17 +182,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        if !region.is_writable() {
-            if region.state() == RegionRoleState::Leader(RegionLeaderState::Editing) {
-                self.region_edit_queues
-                    .entry(region_id)
-                    .or_insert_with(|| RegionEditQueue::new(region_id))
-                    .enqueue(request);
-            } else {
-                let _ = request.tx.send(RegionBusySnafu { region_id }.fail());
-            }
-            return;
-        }
+        admit_or_return!(
+            self,
+            region_id,
+            region.request_policy(),
+            BufferableRequest::Edit(request)
+        );
 
         let RegionEditRequest {
             region_id: _,
@@ -284,6 +214,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let _ = sender.send(Err(e));
             return;
         }
+        let Some(guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Stall) else {
+            let _ = sender.send(
+                RegionBusySnafu {
+                    region_id: region.region_id,
+                }
+                .fail(),
+            );
+            return;
+        };
 
         let request_sender = self.sender.clone();
         let cache_manager = self.cache_manager.clone();
@@ -303,6 +242,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     // we always need to restore region state after region edit
                     update_region_state: true,
                     is_staging,
+                    _guard: Some(guard),
                 }),
             };
 
@@ -327,7 +267,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Fail writes stalled behind this edit if the region was removed before the
                 // edit-completion notification reached the worker.
                 self.fail_region_stalled_requests_as_not_found(&edit_result.region_id);
-                self.reject_region_edit_queue_as_not_found(edit_result.region_id);
                 let _ = edit_result.sender.send(
                     RegionNotFoundSnafu {
                         region_id: edit_result.region_id,
@@ -372,20 +311,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // Otherwise the next edit could reserve a committed sequence before those writes.
             self.handle_region_stalled_requests(&edit_result.region_id, false)
                 .await;
-        }
-
-        let next_request =
-            if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
-                let request = edit_queue.dequeue();
-                if edit_queue.is_empty() {
-                    self.region_edit_queues.remove(&edit_result.region_id);
-                }
-                request
-            } else {
-                None
-            };
-        if let Some(request) = next_request {
-            self.handle_region_edit(request);
         }
 
         if need_compaction {

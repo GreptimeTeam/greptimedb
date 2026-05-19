@@ -71,7 +71,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
         region.stop().await;
         self.fail_region_stalled_requests_as_not_found(&region_id);
-        self.reject_region_edit_queue_as_not_found(region_id);
+        self.buffered_requests.remove_region(region_id);
         // Clean flush status.
         self.flush_scheduler.on_region_closed(region_id);
         // Clean compaction status.

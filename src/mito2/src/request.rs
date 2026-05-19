@@ -1127,6 +1127,10 @@ pub(crate) struct RegionEditResult {
     pub(crate) update_region_state: bool,
     /// The region is in staging mode before handling this request.
     pub(crate) is_staging: bool,
+    /// The guard for region request policy.
+    ///
+    /// It's required in [`RegionEditRequest`] to ensure the request policy is not changed before the request is finished.
+    pub(crate) _guard: Option<RegionRequestPolicyGuard>,
 }
 
 #[derive(Debug)]
