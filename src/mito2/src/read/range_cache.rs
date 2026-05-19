@@ -469,13 +469,11 @@ pub(crate) fn build_range_cache_key(
         return None;
     }
 
-    // If every time-only predicate is implied to be true on this partition's
-    // `FileTimeRange`, drop them from the cache key so that two queries with
-    // different but equally-covering time bounds share the same entry. The
-    // implied range is computed once per scan by `implied_time_range_from_exprs`
-    // (see `build_scan_fingerprint`); `None` means at least one time-only
-    // predicate had an unsupported shape (e.g. `OR`), so the optimization is
-    // disabled and the time predicates remain part of the key.
+    // If the implied range covers this partition's `FileTimeRange`, drop
+    // time-only predicates from the cache key so that queries with different
+    // but equally-covering time bounds share an entry. `None` means some
+    // time-only predicate had an unsupported shape (e.g. `OR`), so we keep
+    // them in the key.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     let (file_min, file_max) = range_meta.time_range;
     let covers = match &stream_ctx.scan_implied_time_range {
