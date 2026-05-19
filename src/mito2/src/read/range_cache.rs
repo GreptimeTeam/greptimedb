@@ -397,9 +397,9 @@ fn implied_from_cmp(
             Some(TimestampRange::until_end(b, true))
         }
         Operator::Lt => {
-            // ts < L. Use the exclusive floor bound; it is sound even when the
-            // literal is not exactly representable in the column unit.
-            let b = ts.convert_to(ts_col_unit)?;
+            // ts < L. `ts < ceil(L)` is the tight bound: equal to `ts < L` when
+            // L is exactly representable, and `ts <= floor(L)` otherwise.
+            let b = ts.convert_to_ceil(ts_col_unit)?;
             Some(TimestampRange::until_end(b, false))
         }
         Operator::Eq => {
@@ -479,7 +479,17 @@ pub(crate) fn build_range_cache_key(
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     let (file_min, file_max) = range_meta.time_range;
     let covers = match &stream_ctx.scan_implied_time_range {
-        Some(implied) => implied.contains(&file_min) && implied.contains(&file_max),
+        Some(implied) => {
+            // The `contains` check is sound only when `file_min`/`file_max`
+            // share the implied range's unit (the time index column's unit).
+            // Mito stores time index values in that unit; assert to catch any
+            // future drift.
+            if let Some(ts) = implied.start().as_ref().or(implied.end().as_ref()) {
+                assert_eq!(file_min.unit(), ts.unit());
+                assert_eq!(file_max.unit(), ts.unit());
+            }
+            implied.contains(&file_min) && implied.contains(&file_max)
+        }
         None => false,
     };
     let scan = if covers {
@@ -1226,8 +1236,12 @@ mod tests {
                 Some(TimestampRange::until_end(ms_ts(1500), true)),
             ),
             (
-                col("ts").gt(ns_1500_5),
+                col("ts").gt(ns_1500_5.clone()),
                 Some(TimestampRange::from_start(ms_ts(1501))),
+            ),
+            (
+                col("ts").lt(ns_1500_5),
+                Some(TimestampRange::until_end(ms_ts(1501), false)),
             ),
         ] {
             assert_eq!(implied_ms(expr), expected);
