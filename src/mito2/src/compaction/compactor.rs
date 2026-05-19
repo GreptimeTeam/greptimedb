@@ -177,7 +177,7 @@ pub async fn open_compaction_region(
     let region_metadata = manifest.metadata.clone();
     let manifest_ctx = Arc::new(ManifestContext::new(
         manifest_manager,
-        RegionControlState::new(req.region_id, RegionRole::Leader),
+        RegionControlState::new(RegionRole::Leader),
     ));
 
     let file_purger = {

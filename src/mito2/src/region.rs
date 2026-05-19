@@ -857,7 +857,6 @@ struct RegionControlStateInner {
     role: RegionRole,
     request_policy: RegionRequestPolicy,
     active_guard: bool,
-    region_id: RegionId,
 }
 
 /// Controls the durable region role and the transient request admission policy.
@@ -879,13 +878,11 @@ pub(crate) struct RegionRequestPolicyGuard {
     previous_role: RegionRole,
     previous_policy: RegionRequestPolicy,
     active_policy: RegionRequestPolicy,
-    region_id: RegionId,
 }
 
 impl Debug for RegionRequestPolicyGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegionRequestPolicyGuard")
-            .field("region_id", &self.region_id)
             .field("previous_role", &self.previous_role)
             .field("active_policy", &self.active_policy)
             .field("previous_policy", &self.previous_policy)
@@ -938,13 +935,12 @@ impl RegionControlState {
         }
     }
 
-    pub(crate) fn new(region_id: RegionId, role: RegionRole) -> Self {
+    pub(crate) fn new(role: RegionRole) -> Self {
         let request_policy = Self::role_to_request_policy(role);
         let inner = RegionControlStateInner {
             role,
             request_policy,
             active_guard: false,
-            region_id,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -1028,7 +1024,6 @@ impl RegionControlState {
             previous_role,
             previous_policy,
             active_policy: request_policy,
-            region_id: inner.region_id,
         })
     }
 
@@ -1816,7 +1811,7 @@ mod tests {
 
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
-            RegionControlState::new(metadata.region_id, RegionRole::Leader),
+            RegionControlState::new(RegionRole::Leader),
         ));
 
         MitoRegion {
@@ -2067,7 +2062,7 @@ mod tests {
             .unwrap();
             Arc::new(ManifestContext::new(
                 manager,
-                RegionControlState::new(RegionId::new(0, 0), RegionRole::StagingLeader),
+                RegionControlState::new(RegionRole::StagingLeader),
             ))
         };
 
@@ -2135,7 +2130,7 @@ mod tests {
 
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
-            RegionControlState::new(metadata.region_id, RegionRole::Leader),
+            RegionControlState::new(RegionRole::Leader),
         ));
 
         let region = MitoRegion {

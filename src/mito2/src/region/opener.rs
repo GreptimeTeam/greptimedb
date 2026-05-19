@@ -334,7 +334,7 @@ impl RegionOpener {
             // Region is writable after it is created.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
-                RegionControlState::new(region_id, RegionRole::Leader),
+                RegionControlState::new(RegionRole::Leader),
             )),
             file_purger: create_file_purger(
                 config.gc.enable,
@@ -577,7 +577,7 @@ impl RegionOpener {
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
-                RegionControlState::new(region_id, RegionRole::Follower),
+                RegionControlState::new(RegionRole::Follower),
             )),
             file_purger,
             provider: provider.clone(),
