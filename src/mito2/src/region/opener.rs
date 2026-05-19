@@ -59,7 +59,7 @@ use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
     ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionControlState,
-    RegionLeaderState, RegionRequestPolicy, RegionRoleState, RejectReason,
+    RegionLeaderState, RegionRequestPolicy, RegionRequestRejectReason, RegionRoleState,
 };
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
@@ -1151,7 +1151,7 @@ fn maybe_preload_parquet_meta_cache(
 fn can_load_cache(state: RegionRoleState, request_policy: RegionRequestPolicy) -> bool {
     if matches!(
         request_policy,
-        RegionRequestPolicy::Reject(RejectReason::Dropping)
+        RegionRequestPolicy::Reject(RegionRequestRejectReason::Dropping)
     ) {
         return false;
     }

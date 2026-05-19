@@ -44,7 +44,7 @@ use crate::request::{
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::location;
-use crate::worker::{BufferableRequest, RegionWorkerLoop, WorkerListener};
+use crate::worker::{BufferedRegionRequest, RegionWorkerLoop, WorkerListener};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles region change result.
@@ -186,7 +186,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self,
             region_id,
             region.request_policy(),
-            BufferableRequest::Edit(request)
+            BufferedRegionRequest::Edit(request)
         );
 
         let RegionEditRequest {

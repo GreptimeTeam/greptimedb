@@ -77,7 +77,7 @@ use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
     CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
-    RegionMapRef, RejectReason,
+    RegionMapRef, RegionRequestRejectReason,
 };
 use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, RegionEditRequest,
@@ -609,7 +609,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.config.experimental_compaction_on_exhausted,
             ),
             stalled_requests: StalledRequests::default(),
-            buffered_requests: WorkerRequestBuffer::default(),
+            buffered_requests: PendingRegionRequestBuffer::default(),
             listener: self.listener,
             cache_manager: self.cache_manager,
             puffin_manager_factory: self.puffin_manager_factory,
@@ -773,7 +773,7 @@ pub(crate) struct StalledRequests {
     pub(crate) estimated_size: usize,
 }
 
-pub(crate) enum BufferableRequest {
+pub(crate) enum BufferedRegionRequest {
     Alter((RegionAlterRequest, OptionOutputTx)),
     Truncate((RegionTruncateRequest, OptionOutputTx)),
     EnterStaging((StagingPartitionDirective, OptionOutputTx)),
@@ -781,23 +781,23 @@ pub(crate) enum BufferableRequest {
     Edit(RegionEditRequest),
 }
 
-impl BufferableRequest {
+impl BufferedRegionRequest {
     /// Rejects the request by sending error to the sender.
-    pub(crate) fn reject(self, region_id: RegionId, reason: RejectReason) {
+    pub(crate) fn reject(self, region_id: RegionId, reason: RegionRequestRejectReason) {
         match self {
-            BufferableRequest::Alter((_, sender)) => {
+            BufferedRegionRequest::Alter((_, sender)) => {
                 sender.send(RejectRequestSnafu { region_id, reason }.fail());
             }
-            BufferableRequest::Truncate((_, sender)) => {
+            BufferedRegionRequest::Truncate((_, sender)) => {
                 sender.send(RejectRequestSnafu { region_id, reason }.fail());
             }
-            BufferableRequest::EnterStaging((_, sender)) => {
+            BufferedRegionRequest::EnterStaging((_, sender)) => {
                 sender.send(RejectRequestSnafu { region_id, reason }.fail());
             }
-            BufferableRequest::Drop((_, sender)) => {
+            BufferedRegionRequest::Drop((_, sender)) => {
                 sender.send(RejectRequestSnafu { region_id, reason }.fail());
             }
-            BufferableRequest::Edit(req) => {
+            BufferedRegionRequest::Edit(req) => {
                 let _ = req.tx.send(RejectRequestSnafu { region_id, reason }.fail());
             }
         }
@@ -805,19 +805,19 @@ impl BufferableRequest {
 
     pub(crate) fn on_failure(self, error: error::Error) {
         match self {
-            BufferableRequest::Alter((_, sender)) => {
+            BufferedRegionRequest::Alter((_, sender)) => {
                 sender.send(Err(error));
             }
-            BufferableRequest::Truncate((_, sender)) => {
+            BufferedRegionRequest::Truncate((_, sender)) => {
                 sender.send(Err(error));
             }
-            BufferableRequest::EnterStaging((_, sender)) => {
+            BufferedRegionRequest::EnterStaging((_, sender)) => {
                 sender.send(Err(error));
             }
-            BufferableRequest::Drop((_, sender)) => {
+            BufferedRegionRequest::Drop((_, sender)) => {
                 sender.send(Err(error));
             }
-            BufferableRequest::Edit(req) => {
+            BufferedRegionRequest::Edit(req) => {
                 let _ = req.tx.send(Err(error));
             }
         }
@@ -825,19 +825,19 @@ impl BufferableRequest {
 }
 
 #[derive(Default)]
-pub(crate) struct WorkerRequestBuffer {
-    requests: HashMap<RegionId, VecDeque<BufferableRequest>>,
+pub(crate) struct PendingRegionRequestBuffer {
+    requests: HashMap<RegionId, VecDeque<BufferedRegionRequest>>,
 }
 
-impl WorkerRequestBuffer {
-    pub(crate) fn push(&mut self, region_id: RegionId, request: BufferableRequest) {
+impl PendingRegionRequestBuffer {
+    pub(crate) fn push(&mut self, region_id: RegionId, request: BufferedRegionRequest) {
         self.requests
             .entry(region_id)
             .or_default()
             .push_back(request);
     }
 
-    pub(crate) fn next(&mut self, region_id: RegionId) -> Option<BufferableRequest> {
+    pub(crate) fn next(&mut self, region_id: RegionId) -> Option<BufferedRegionRequest> {
         let queue = self.requests.get_mut(&region_id)?;
         let request = queue.pop_front();
         // TODO(weny): check if the remaining requests can be batched.
@@ -855,7 +855,7 @@ impl WorkerRequestBuffer {
         }
     }
 
-    pub(crate) fn reject_region(&mut self, region_id: RegionId, reason: RejectReason) {
+    pub(crate) fn reject_region(&mut self, region_id: RegionId, reason: RegionRequestRejectReason) {
         if let Some(requests) = self.requests.remove(&region_id) {
             for req in requests {
                 req.reject(region_id, reason);
@@ -958,7 +958,7 @@ struct RegionWorkerLoop<S> {
     /// Stalled write requests.
     stalled_requests: StalledRequests,
     /// Buffer for requests that cannot be processed immediately.
-    buffered_requests: WorkerRequestBuffer,
+    buffered_requests: PendingRegionRequestBuffer,
     /// Event listener for tests.
     listener: WorkerListener,
     /// Cache.
@@ -1176,7 +1176,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         // starting the next buffered edit/DDL.
                         // TODO(hl): maybe we need to merge those queues for pending requests like pending_ddl,
                         // region edits and stalled request, so we can simplify the coordination between these queues.
-                        self.handle_buffered_region_write_requests(
+                        self.handle_same_region_writes_before_edit_result(
                             &region_id,
                             write_requests,
                             bulk_requests,

@@ -834,16 +834,20 @@ impl MitoRegion {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegionRequestPolicy {
+pub(crate) enum RegionRequestPolicy {
     Accept,
     Stall,
-    Reject(RejectReason),
+    Reject(RegionRequestRejectReason),
 }
 
+/// Reason why a region rejects incoming requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RejectReason {
+pub enum RegionRequestRejectReason {
+    /// The leader is downgrading and no longer accepts region requests.
     DowngradingLeader,
+    /// The region is a follower and cannot serve leader-only requests.
     Follower,
+    /// The region is being dropped.
     Dropping,
 }
 
@@ -856,8 +860,16 @@ struct RegionControlStateInner {
     region_id: RegionId,
 }
 
+/// Controls the durable region role and the transient request admission policy.
+///
+/// The region role determines the default request policy. A
+/// [`RegionRequestPolicyGuard`] may temporarily override the request policy for
+/// in-flight operations such as region edit or drop. When the guard is dropped,
+/// it restores the previous policy only if the region role and active policy
+/// still match the acquisition context, so it won't overwrite a newer role
+/// transition.
 #[derive(Debug, Clone)]
-pub struct RegionControlState {
+pub(crate) struct RegionControlState {
     inner: Arc<Mutex<RegionControlStateInner>>,
 }
 
@@ -918,9 +930,11 @@ impl RegionControlState {
         match role {
             RegionRole::Leader | RegionRole::StagingLeader => RegionRequestPolicy::Accept,
             RegionRole::DowngradingLeader => {
-                RegionRequestPolicy::Reject(RejectReason::DowngradingLeader)
+                RegionRequestPolicy::Reject(RegionRequestRejectReason::DowngradingLeader)
             }
-            RegionRole::Follower => RegionRequestPolicy::Reject(RejectReason::Follower),
+            RegionRole::Follower => {
+                RegionRequestPolicy::Reject(RegionRequestRejectReason::Follower)
+            }
         }
     }
 
@@ -997,7 +1011,7 @@ impl RegionControlState {
     /// Acquires a guard to set the region request policy.
     ///
     /// The guard will reset the policy to the previous value when dropped.
-    pub(crate) fn acquire_guard(
+    pub(crate) fn try_acquire_request_policy_guard(
         &self,
         request_policy: RegionRequestPolicy,
     ) -> Option<RegionRequestPolicyGuard> {
@@ -1019,7 +1033,7 @@ impl RegionControlState {
     }
 
     /// Returns the current region request policy.
-    pub(crate) fn current_policy(&self) -> RegionRequestPolicy {
+    pub(crate) fn current_request_policy(&self) -> RegionRequestPolicy {
         let inner = self.inner.lock().unwrap();
         inner.request_policy
     }
@@ -1049,14 +1063,15 @@ impl ManifestContext {
     }
 
     pub(crate) fn region_request_policy(&self) -> RegionRequestPolicy {
-        self.control_state.current_policy()
+        self.control_state.current_request_policy()
     }
 
     pub(crate) fn acquire_region_request_policy_guard(
         &self,
         request_policy: RegionRequestPolicy,
     ) -> Option<RegionRequestPolicyGuard> {
-        self.control_state.acquire_guard(request_policy)
+        self.control_state
+            .try_acquire_request_policy_guard(request_policy)
     }
 
     pub(crate) fn staging_partition_info(&self) -> Option<StagingPartitionInfo> {

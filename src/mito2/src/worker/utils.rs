@@ -15,7 +15,7 @@
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::worker::{BufferableRequest, RegionWorkerLoop};
+use crate::worker::{BufferedRegionRequest, RegionWorkerLoop};
 
 #[macro_export]
 macro_rules! admit_or_return {
@@ -38,23 +38,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_buffered_request(
         &mut self,
         region_id: RegionId,
-        req: BufferableRequest,
+        req: BufferedRegionRequest,
     ) {
         match req {
-            BufferableRequest::Alter((req, sender)) => {
+            BufferedRegionRequest::Alter((req, sender)) => {
                 self.handle_alter_request(region_id, req, sender).await;
             }
-            BufferableRequest::Truncate((req, sender)) => {
+            BufferedRegionRequest::Truncate((req, sender)) => {
                 self.handle_truncate_request(region_id, req, sender).await;
             }
-            BufferableRequest::Edit(req) => {
+            BufferedRegionRequest::Edit(req) => {
                 self.handle_region_edit(req);
             }
-            BufferableRequest::EnterStaging((req, sender)) => {
+            BufferedRegionRequest::EnterStaging((req, sender)) => {
                 self.handle_enter_staging_request(region_id, req, sender)
                     .await;
             }
-            BufferableRequest::Drop((partial_drop, sender)) => {
+            BufferedRegionRequest::Drop((partial_drop, sender)) => {
                 self.handle_drop_request(region_id, partial_drop, sender)
                     .await;
             }

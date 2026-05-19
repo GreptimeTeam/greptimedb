@@ -268,7 +268,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// The worker dispatch loop handles background notifications before the current batch's write
     /// buffer. Without this step, writes that arrived during edit N could be classified only after
     /// edit N+1 is started, placing them behind that next edit.
-    pub(crate) async fn handle_buffered_region_write_requests(
+    pub(crate) async fn handle_same_region_writes_before_edit_result(
         &mut self,
         region_id: &RegionId,
         write_requests: &mut Vec<SenderWriteRequest>,

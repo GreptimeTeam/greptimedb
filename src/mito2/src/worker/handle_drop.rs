@@ -29,9 +29,9 @@ use tokio::time::sleep;
 
 use crate::admit_or_return;
 use crate::error::{OpenDalSnafu, RegionBusySnafu, Result};
-use crate::region::{MitoRegionRef, RegionMapRef, RegionRequestPolicy, RejectReason};
+use crate::region::{MitoRegionRef, RegionMapRef, RegionRequestPolicy, RegionRequestRejectReason};
 use crate::request::OptionOutputTx;
-use crate::worker::{BufferableRequest, DROPPING_MARKER_FILE, RegionWorkerLoop};
+use crate::worker::{BufferedRegionRequest, DROPPING_MARKER_FILE, RegionWorkerLoop};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
 const MAX_RETRY_TIMES: u64 = 12; // 1 hours (5m * 12)
@@ -57,7 +57,7 @@ where
             self,
             region_id,
             region.request_policy(),
-            BufferableRequest::Drop((partial_drop, sender))
+            BufferedRegionRequest::Drop((partial_drop, sender))
         );
 
         let result = self.handle_drop_request_inner(region, partial_drop).await;
@@ -72,9 +72,9 @@ where
         let region_id = region.region_id();
         info!("Try to drop region: {}, worker: {}", region_id, self.id);
 
-        let Some(_guard) = region
-            .acquire_request_policy_guard(RegionRequestPolicy::Reject(RejectReason::Dropping))
-        else {
+        let Some(_guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Reject(
+            RegionRequestRejectReason::Dropping,
+        )) else {
             return RegionBusySnafu { region_id }.fail();
         };
         // Writes dropping marker

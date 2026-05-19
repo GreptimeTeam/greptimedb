@@ -31,7 +31,7 @@ use crate::request::{
     BackgroundNotify, DdlRequest, EnterStagingResult, OptionOutputTx, SenderDdlRequest,
     WorkerRequest, WorkerRequestWithTime,
 };
-use crate::worker::{BufferableRequest, RegionWorkerLoop};
+use crate::worker::{BufferedRegionRequest, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_enter_staging_request(
@@ -48,7 +48,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self,
             region_id,
             region.request_policy(),
-            BufferableRequest::EnterStaging((partition_directive, sender))
+            BufferedRegionRequest::EnterStaging((partition_directive, sender))
         );
 
         // If the region is already in staging mode, verify the partition directive matches.

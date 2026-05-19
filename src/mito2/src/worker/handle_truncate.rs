@@ -23,7 +23,7 @@ use crate::admit_or_return;
 use crate::error::RegionNotFoundSnafu;
 use crate::manifest::action::{RegionTruncate, TruncateKind};
 use crate::request::{OptionOutputTx, TruncateResult};
-use crate::worker::{BufferableRequest, RegionWorkerLoop};
+use crate::worker::{BufferedRegionRequest, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_truncate_request(
@@ -44,7 +44,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self,
             region_id,
             region.request_policy(),
-            BufferableRequest::Truncate((req, sender))
+            BufferedRegionRequest::Truncate((req, sender))
         );
 
         let version_data = region.version_control.current();

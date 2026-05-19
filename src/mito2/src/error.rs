@@ -35,7 +35,7 @@ use store_api::storage::{FileId, RegionId};
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
-use crate::region::{RegionRoleState, RejectReason};
+use crate::region::{RegionRequestRejectReason, RegionRoleState};
 use crate::schedule::remote_job_scheduler::JobId;
 use crate::worker::WorkerId;
 
@@ -537,7 +537,7 @@ pub enum Error {
     #[snafu(display("Region {} rejecting region requests, reason: {:?}", region_id, reason))]
     RejectRequest {
         region_id: RegionId,
-        reason: RejectReason,
+        reason: RegionRequestRejectReason,
         #[snafu(implicit)]
         location: Location,
     },

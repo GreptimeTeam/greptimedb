@@ -41,7 +41,7 @@ use crate::region::options::{RegionOptions, TwcsOptions};
 use crate::region::version::VersionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::sst::FormatType;
-use crate::worker::{BufferableRequest, RegionWorkerLoop};
+use crate::worker::{BufferedRegionRequest, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
@@ -61,7 +61,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self,
             region_id,
             region.request_policy(),
-            BufferableRequest::Alter((request, sender))
+            BufferedRegionRequest::Alter((request, sender))
         );
 
         info!("Try to alter region: {}, request: {:?}", region_id, request);
