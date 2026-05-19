@@ -864,6 +864,7 @@ pub struct RegionControlState {
 /// Guard that sets the region request policy when created and resets it to the previous value when dropped.
 pub(crate) struct RegionRequestPolicyGuard {
     control_state: Arc<Mutex<RegionControlStateInner>>,
+    previous_role: RegionRole,
     previous_policy: RegionRequestPolicy,
     active_policy: RegionRequestPolicy,
     region_id: RegionId,
@@ -874,6 +875,7 @@ impl Debug for RegionRequestPolicyGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegionRequestPolicyGuard")
             .field("region_id", &self.region_id)
+            .field("previous_role", &self.previous_role)
             .field("active_policy", &self.active_policy)
             .field("previous_policy", &self.previous_policy)
             .finish()
@@ -882,16 +884,13 @@ impl Debug for RegionRequestPolicyGuard {
 
 impl Drop for RegionRequestPolicyGuard {
     fn drop(&mut self) {
-        let Ok(mut inner) = self.control_state.lock() else {
-            return;
-        };
-        if inner.active_guard && inner.request_policy == self.active_policy {
+        let mut inner = self.control_state.lock().unwrap();
+        if inner.role == self.previous_role && inner.request_policy == self.active_policy {
             inner.request_policy = self.previous_policy;
-            inner.active_guard = false;
         }
-        let _ = self
-            .guard_release_tx
-            .send((self.region_id, self.previous_policy));
+        inner.active_guard = false;
+        let next_policy = inner.request_policy;
+        let _ = self.guard_release_tx.send((self.region_id, next_policy));
     }
 }
 
@@ -981,7 +980,6 @@ impl RegionControlState {
         let next_role = Self::role_state_to_role(next);
         if inner.role != next_role {
             inner.role = next_role;
-            inner.active_guard = false;
             inner.request_policy = Self::role_to_request_policy(next_role);
         }
 
@@ -1006,7 +1004,6 @@ impl RegionControlState {
         let next_role = Self::role_state_to_role(next);
         if inner.role != next_role {
             inner.role = next_role;
-            inner.active_guard = false;
             inner.request_policy = Self::role_to_request_policy(next_role);
         }
 
@@ -1024,11 +1021,13 @@ impl RegionControlState {
         if inner.active_guard {
             return None;
         }
+        let previous_role = inner.role;
         let previous_policy = inner.request_policy;
         inner.request_policy = request_policy;
         inner.active_guard = true;
         Some(RegionRequestPolicyGuard {
             control_state: self.inner.clone(),
+            previous_role,
             previous_policy,
             active_policy: request_policy,
             region_id: inner.region_id,
