@@ -1134,9 +1134,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         policy: RegionRequestPolicy,
     ) {
-        if policy == RegionRequestPolicy::Accept
-            && let Some(req) = self.buffered_requests.next(region_id)
-        {
+        if policy != RegionRequestPolicy::Accept {
+            return;
+        }
+
+        loop {
+            let Some(region) = self.regions.get_region(region_id) else {
+                self.buffered_requests.remove_region(region_id);
+                return;
+            };
+            if region.request_policy() != RegionRequestPolicy::Accept {
+                return;
+            }
+
+            let Some(req) = self.buffered_requests.next(region_id) else {
+                return;
+            };
             self.handle_buffered_request(region_id, req).await;
         }
     }

@@ -22,7 +22,6 @@ use store_api::storage::RegionId;
 use crate::admit_or_return;
 use crate::error::RegionNotFoundSnafu;
 use crate::manifest::action::{RegionTruncate, TruncateKind};
-use crate::region::RegionRequestPolicy;
 use crate::request::{OptionOutputTx, TruncateResult};
 use crate::worker::{BufferableRequest, RegionWorkerLoop};
 
