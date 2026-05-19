@@ -1,0 +1,19 @@
+src/mito2/src/worker.rs
+  s_e42b6d257d0823::t_4b0428763f7615 857-859,1139-1140,1148-1149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "a7c3a8a4063f77138f532a490bba063f5479ea12",
+  "prompts": {},
+  "sessions": {
+    "s_e42b6d257d0823": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1bf9cc4d4ffeLOM20qp3TwpkL0",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

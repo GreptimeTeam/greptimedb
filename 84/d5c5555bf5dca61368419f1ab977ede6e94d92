@@ -1,0 +1,16 @@
+src/mito2/src/worker/handle_manifest.rs
+  h_623774b620da8e 527-531,534
+src/mito2/src/test_util/scheduler_util.rs
+  h_623774b620da8e 38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "84d5c5555bf5dca61368419f1ab977ede6e94d92",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
