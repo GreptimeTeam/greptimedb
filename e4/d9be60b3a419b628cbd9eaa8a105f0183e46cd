@@ -1,0 +1,14 @@
+src/mito2/src/compaction/compactor.rs
+  h_623774b620da8e 50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "e4d9be60b3a419b628cbd9eaa8a105f0183e46cd",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
