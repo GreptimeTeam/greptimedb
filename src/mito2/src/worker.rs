@@ -54,7 +54,7 @@ use store_api::logstore::LogStore;
 use store_api::region_engine::{
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
-use store_api::region_request::RegionTruncateRequest;
+use store_api::region_request::{RegionAlterRequest, RegionTruncateRequest};
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
@@ -775,7 +775,9 @@ pub(crate) struct StalledRequests {
 }
 
 pub(crate) enum BufferableRequest {
+    Alter((RegionAlterRequest, OptionOutputTx)),
     Truncate((RegionTruncateRequest, OptionOutputTx)),
+    Drop((bool, OptionOutputTx)),
     Edit(RegionEditRequest),
 }
 
@@ -783,7 +785,13 @@ impl BufferableRequest {
     /// Rejects the request by sending error to the sender.
     pub(crate) fn reject(self, region_id: RegionId, reason: RejectReason) {
         match self {
+            BufferableRequest::Alter((_, sender)) => {
+                sender.send(RejectRequestSnafu { region_id, reason }.fail());
+            }
             BufferableRequest::Truncate((_, sender)) => {
+                sender.send(RejectRequestSnafu { region_id, reason }.fail());
+            }
+            BufferableRequest::Drop((_, sender)) => {
                 sender.send(RejectRequestSnafu { region_id, reason }.fail());
             }
             BufferableRequest::Edit(req) => {
@@ -794,7 +802,13 @@ impl BufferableRequest {
 
     pub(crate) fn on_failure(self, error: error::Error) {
         match self {
+            BufferableRequest::Alter((_, sender)) => {
+                sender.send(Err(error));
+            }
             BufferableRequest::Truncate((_, sender)) => {
+                sender.send(Err(error));
+            }
+            BufferableRequest::Drop((_, sender)) => {
                 sender.send(Err(error));
             }
             BufferableRequest::Edit(req) => {
@@ -1228,8 +1242,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(req) => {
-                    self.handle_drop_request(ddl.region_id, req.partial_drop)
-                        .await
+                    self.handle_drop_request(ddl.region_id, req.partial_drop, ddl.sender)
+                        .await;
+                    continue;
                 }
                 DdlRequest::Open((req, wal_entry_receiver)) => {
                     self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)

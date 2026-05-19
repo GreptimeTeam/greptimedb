@@ -41,11 +41,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         req: BufferableRequest,
     ) {
         match req {
+            BufferableRequest::Alter((req, sender)) => {
+                self.handle_alter_request(region_id, req, sender).await;
+            }
             BufferableRequest::Truncate((req, sender)) => {
                 self.handle_truncate_request(region_id, req, sender).await;
             }
             BufferableRequest::Edit(req) => {
                 self.handle_region_edit(req);
+            }
+            BufferableRequest::Drop((partial_drop, sender)) => {
+                self.handle_drop_request(region_id, partial_drop, sender)
+                    .await;
             }
         }
     }

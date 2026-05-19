@@ -79,6 +79,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Sets the region as writable.
         region.switch_state_to_writable(RegionLeaderState::Altering);
         // Sends the result.
+        drop(change_result.guard);
         change_result.sender.send(change_result.result.map(|_| 0));
 
         // In async mode, rebuild index after index metadata changed.
@@ -242,7 +243,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     // we always need to restore region state after region edit
                     update_region_state: true,
                     is_staging,
-                    _guard: Some(guard),
+                    guard: Some(guard),
                 }),
             };
 
@@ -260,7 +261,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Handles region edit result.
-    pub(crate) async fn handle_region_edit_result(&mut self, edit_result: RegionEditResult) {
+    pub(crate) async fn handle_region_edit_result(&mut self, mut edit_result: RegionEditResult) {
         let region = match self.regions.get_region(edit_result.region_id) {
             Some(region) => region,
             None => {
@@ -303,6 +304,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             need_compaction
         };
+        if let Some(guard) = edit_result.guard.take() {
+            drop(guard)
+        }
 
         let _ = edit_result.sender.send(edit_result.result);
 
@@ -364,7 +368,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 sender,
                 result,
                 kind: truncate.kind,
-                _guard: guard,
+                guard,
             };
             let _ = request_sender
                 .send(WorkerRequestWithTime::new(WorkerRequest::Background {
@@ -390,6 +394,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Err(e));
             return;
         }
+        let Some(guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Stall) else {
+            sender.send(
+                RegionBusySnafu {
+                    region_id: region.region_id,
+                }
+                .fail(),
+            );
+            return;
+        };
         let listener = self.listener.clone();
         let request_sender = self.sender.clone();
         let is_staging = region.is_staging();
@@ -412,6 +425,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     new_meta,
                     need_index,
                     new_options,
+                    guard,
                 }),
             };
             listener

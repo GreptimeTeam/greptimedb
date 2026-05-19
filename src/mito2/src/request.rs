@@ -1060,7 +1060,7 @@ pub(crate) struct TruncateResult {
     pub(crate) result: Result<()>,
     pub(crate) kind: TruncateKind,
     /// The guard for region request policy.
-    pub(crate) _guard: RegionRequestPolicyGuard,
+    pub(crate) guard: RegionRequestPolicyGuard,
 }
 
 /// Notifies the region the result of writing region change action.
@@ -1078,6 +1078,8 @@ pub(crate) struct RegionChangeResult {
     pub(crate) need_index: bool,
     /// New options for the region.
     pub(crate) new_options: Option<RegionOptions>,
+    /// The guard for region request policy.
+    pub(crate) guard: RegionRequestPolicyGuard,
 }
 
 /// Notifies the region the result of entering staging.
@@ -1130,7 +1132,7 @@ pub(crate) struct RegionEditResult {
     /// The guard for region request policy.
     ///
     /// It's required in [`RegionEditRequest`] to ensure the request policy is not changed before the request is finished.
-    pub(crate) _guard: Option<RegionRequestPolicyGuard>,
+    pub(crate) guard: Option<RegionRequestPolicyGuard>,
 }
 
 #[derive(Debug)]

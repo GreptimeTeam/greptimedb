@@ -27,9 +27,13 @@ use store_api::region_request::{AffectedRows, PathType};
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
-use crate::error::{OpenDalSnafu, Result};
-use crate::region::{RegionLeaderState, RegionMapRef};
-use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
+use crate::admit_or_return;
+use crate::error::{OpenDalSnafu, RegionBusySnafu, Result};
+use crate::region::{
+    MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRequestPolicy, RejectReason,
+};
+use crate::request::OptionOutputTx;
+use crate::worker::{BufferableRequest, DROPPING_MARKER_FILE, RegionWorkerLoop};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
 const MAX_RETRY_TIMES: u64 = 12; // 1 hours (5m * 12)
@@ -42,9 +46,32 @@ where
         &mut self,
         region_id: RegionId,
         partial_drop: bool,
-    ) -> Result<AffectedRows> {
-        let region = self.regions.writable_region(region_id)?;
+        sender: OptionOutputTx,
+    ) {
+        let region = match self.regions.writable_region(region_id) {
+            Ok(region) => region,
+            Err(err) => {
+                sender.send(Err(err));
+                return;
+            }
+        };
+        admit_or_return!(
+            self,
+            region_id,
+            region.request_policy(),
+            BufferableRequest::Drop((partial_drop, sender))
+        );
 
+        let result = self.handle_drop_request_inner(region, partial_drop).await;
+        sender.send(result);
+    }
+
+    pub async fn handle_drop_request_inner(
+        &mut self,
+        region: MitoRegionRef,
+        partial_drop: bool,
+    ) -> Result<AffectedRows> {
+        let region_id = region.region_id();
         info!("Try to drop region: {}, worker: {}", region_id, self.id);
 
         let is_staging = region.is_staging();
@@ -55,6 +82,11 @@ where
         };
         // Marks the region as dropping.
         region.set_dropping(expect_state)?;
+        let Some(_guard) = region
+            .acquire_request_policy_guard(RegionRequestPolicy::Reject(RejectReason::Dropping))
+        else {
+            return RegionBusySnafu { region_id }.fail();
+        };
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
         let region_dir = region.access_layer.build_region_dir(region_id);
@@ -80,6 +112,7 @@ where
         self.regions.remove_region(region_id);
         self.dropping_regions.insert_region(region.clone());
         self.buffered_requests.remove_region(region_id);
+        drop(_guard);
 
         // Delete region data in WAL.
         self.wal

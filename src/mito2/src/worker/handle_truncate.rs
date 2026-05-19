@@ -131,6 +131,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // We are already in the worker loop so we can set the state first.
         region.switch_state_to_writable(RegionLeaderState::Truncating);
+        drop(truncate_result.guard);
 
         match truncate_result.result {
             Ok(()) => {

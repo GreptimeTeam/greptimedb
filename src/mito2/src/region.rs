@@ -910,6 +910,7 @@ pub enum RegionRequestPolicy {
 pub enum RejectReason {
     DowngradingLeader,
     Follower,
+    Dropping,
 }
 
 #[derive(Debug)]
