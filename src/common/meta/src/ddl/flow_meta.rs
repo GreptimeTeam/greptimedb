@@ -59,13 +59,8 @@ impl FlowMetadataAllocator {
     /// Allocates the [FlowId] and [Peer]s.
     pub async fn create(&self, partitions: usize) -> Result<(FlowId, Vec<Peer>)> {
         let flow_id = self.allocate_flow_id().await?;
-        let peers = self.alloc_peers(partitions).await?;
+        let peers = self.peer_allocator.alloc(partitions).await?;
 
         Ok((flow_id, peers))
-    }
-
-    pub async fn alloc_peers(&self, partitions: usize) -> Result<Vec<Peer>> {
-        let peers = self.peer_allocator.alloc(partitions).await?;
-        Ok(peers)
     }
 }

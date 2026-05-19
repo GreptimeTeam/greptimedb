@@ -19,7 +19,7 @@ use std::fmt;
 
 use api::v1::ExpireAfter;
 use api::v1::flow::flow_request::Body as PbFlowRequest;
-use api::v1::flow::{CreateRequest, DropRequest, FlowRequest, FlowRequestHeader, flow_request};
+use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
 use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -72,10 +72,8 @@ impl CreateFlowProcedure {
                 flow_context: query_context.into(), // Convert to FlowQueryContext
                 state: CreateFlowState::Prepare,
                 prev_flow_info_value: None,
-                prev_peers: vec![],
                 did_replace: false,
                 flow_type: None,
-                last_activation_error: None,
             },
         }
     }
@@ -133,8 +131,7 @@ impl CreateFlowProcedure {
                 .map(|(_, value)| value.peer)
                 .collect::<Vec<_>>();
             self.data.flow_id = Some(flow_id);
-            self.data.peers.clone_from(&peers);
-            self.data.prev_peers = peers;
+            self.data.peers = peers;
             info!("Replacing flow, flow_id: {}", flow_id);
 
             let flow_info_value = self
@@ -186,6 +183,7 @@ impl CreateFlowProcedure {
                 )
             }
         );
+        self.ensure_supported_replace_transition()?;
 
         // Validate that source and sink tables are not the same
         let sink_table_name = &self.data.task.sink_table_name;
@@ -214,15 +212,30 @@ impl CreateFlowProcedure {
             self.data.peers.clear();
             CreateFlowState::CreateMetadata
         } else {
-            if self.data.peers.is_empty() {
-                // Replacing a pending flow means the flow id already exists, but there
-                // are no flow routes yet. Allocate peers for the newly-active flow.
-                self.data.peers = self.context.flow_metadata_allocator.alloc_peers(1).await?;
-            }
             CreateFlowState::CreateFlows
         };
 
         Ok(Status::executing(true))
+    }
+
+    fn ensure_supported_replace_transition(&self) -> Result<()> {
+        if !self.data.task.or_replace {
+            return Ok(());
+        }
+
+        let Some(prev_flow_info) = self.data.prev_flow_info_value.as_ref() else {
+            return Ok(());
+        };
+        let prev_pending = prev_flow_info.get_inner_ref().is_pending();
+        let new_pending = self.data.is_pending();
+        ensure!(
+            prev_pending == new_pending,
+            error::UnsupportedSnafu {
+                operation: "Replacing between pending and active flow states is not supported yet"
+            }
+        );
+
+        Ok(())
     }
 
     async fn on_flownode_create_flows(&mut self) -> Result<Status> {
@@ -330,44 +343,7 @@ impl CreateFlowProcedure {
             .invalidate(&ctx, &caches)
             .await?;
 
-        if did_replace {
-            self.on_flownode_drop_previous_flows().await?;
-        }
-
         Ok(Status::done_with_output(flow_id))
-    }
-
-    async fn on_flownode_drop_previous_flows(&self) -> Result<()> {
-        let Some(prev_flow_info) = self.data.prev_flow_info_value.as_ref() else {
-            return Ok(());
-        };
-        if prev_flow_info.flownode_ids().is_empty() {
-            return Ok(());
-        }
-
-        let flow_id = self.data.flow_id.unwrap();
-        let mut drop_flow_tasks = Vec::with_capacity(self.data.prev_peers.len());
-        for peer in &self.data.prev_peers {
-            let requester = self.context.node_manager.flownode(peer).await;
-            let request = FlowRequest {
-                body: Some(flow_request::Body::Drop(DropRequest {
-                    flow_id: Some(api::v1::FlowId { id: flow_id }),
-                })),
-                ..Default::default()
-            };
-            drop_flow_tasks.push(async move {
-                requester
-                    .handle(request)
-                    .await
-                    .map_err(add_peer_context_if_needed(peer.clone()))
-            });
-        }
-        join_all(drop_flow_tasks)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(())
     }
 }
 
@@ -519,15 +495,11 @@ pub struct CreateFlowData {
     /// For verify if prev value is consistent when need to update flow metadata.
     /// only set when `or_replace` is true.
     pub(crate) prev_flow_info_value: Option<DeserializedValueWithBytes<FlowInfoValue>>,
-    #[serde(default)]
-    pub(crate) prev_peers: Vec<Peer>,
     /// Only set to true when replace actually happened.
     /// This is used to determine whether to invalidate the cache.
     #[serde(default)]
     pub(crate) did_replace: bool,
     pub(crate) flow_type: Option<FlowType>,
-    #[serde(default)]
-    pub(crate) last_activation_error: Option<String>,
 }
 
 impl CreateFlowData {
@@ -629,7 +601,6 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             } else {
                 FlowStatus::PendingSources
             },
-            last_activation_error: value.last_activation_error.clone(),
             created_time: create_time,
             updated_time: chrono::Utc::now(),
         };

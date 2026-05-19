@@ -533,7 +533,6 @@ mod tests {
             comment: "hi".to_string(),
             options: Default::default(),
             status: FlowStatus::Active,
-            last_activation_error: None,
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
         }
@@ -789,7 +788,6 @@ mod tests {
             comment: "hi".to_string(),
             options: Default::default(),
             status: FlowStatus::Active,
-            last_activation_error: None,
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
         };
@@ -1170,7 +1168,6 @@ mod tests {
             comment: "hi".to_string(),
             options: Default::default(),
             status: FlowStatus::Active,
-            last_activation_error: None,
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
         };

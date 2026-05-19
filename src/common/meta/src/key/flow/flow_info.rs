@@ -166,8 +166,6 @@ pub struct FlowInfoValue {
     pub options: HashMap<String, String>,
     #[serde(default)]
     pub status: FlowStatus,
-    #[serde(default)]
-    pub last_activation_error: Option<String>,
     /// The created time
     #[serde(default)]
     pub created_time: DateTime<Utc>,
@@ -250,10 +248,6 @@ impl FlowInfoValue {
 
     pub fn status(&self) -> &FlowStatus {
         &self.status
-    }
-
-    pub fn last_activation_error(&self) -> &Option<String> {
-        &self.last_activation_error
     }
 
     pub fn created_time(&self) -> &DateTime<Utc> {

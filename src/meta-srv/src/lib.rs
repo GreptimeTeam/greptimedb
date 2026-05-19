@@ -22,7 +22,6 @@ pub mod discovery;
 pub mod error;
 pub mod events;
 mod failure_detector;
-pub mod flow;
 pub mod gc;
 pub mod handler;
 pub mod key;

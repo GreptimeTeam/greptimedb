@@ -41,108 +41,12 @@ WHERE flow_name = 'pending_with_defer';
 | AS SELECT val FROM pending_source WHERE val > 10 |                  |                    |              |                  |                      |
 +--------------------------------------------------+------------------+--------------------+--------------+------------------+----------------------+
 
-CREATE TABLE pending_source (
-    val INT,
-    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    TIME INDEX(ts)
-);
-
-Affected Rows: 0
-
--- SQLNESS SLEEP 12s
-SELECT
-    flow_definition,
-    source_table_ids,
-    source_table_names,
-    flownode_ids,
-    options LIKE '%"defer_on_missing_source":"true"%' AS has_defer_option,
-    options LIKE '%"flow_type":"batching"%' AS has_flow_type_option
-FROM INFORMATION_SCHEMA.FLOWS
-WHERE flow_name = 'pending_with_defer';
-
-+--------------------------------------------------+------------------+--------------------+--------------+------------------+----------------------+
-| flow_definition                                  | source_table_ids | source_table_names | flownode_ids | has_defer_option | has_flow_type_option |
-+--------------------------------------------------+------------------+--------------------+--------------+------------------+----------------------+
-| CREATE FLOW IF NOT EXISTS pending_with_defer     | []               |                    | {}           | true             | true                 |
-| SINK TO public.pending_sink                      |                  |                    |              |                  |                      |
-| WITH (defer_on_missing_source = 'true')          |                  |                    |              |                  |                      |
-| AS SELECT val FROM pending_source WHERE val > 10 |                  |                    |              |                  |                      |
-+--------------------------------------------------+------------------+--------------------+--------------+------------------+----------------------+
-
-INSERT INTO pending_source VALUES (10, 0), (11, 1), (12, 2);
-
-Affected Rows: 3
-
--- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
-ADMIN FLUSH_FLOW('pending_with_defer');
-
-Error: 1002(Unexpected), Failed to execute admin function flush_flow: Execution error: Can't found alive flownode
-
-SELECT val FROM pending_sink ORDER BY val;
-
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.pending_sink
-
-CREATE OR REPLACE FLOW pending_with_defer
-SINK TO pending_sink
-WITH (defer_on_missing_source = true)
-AS SELECT val FROM pending_replacement_source WHERE val > 100;
-
-Affected Rows: 0
-
-SELECT
-    flow_definition,
-    source_table_ids,
-    source_table_names,
-    flownode_ids,
-    options LIKE '%"defer_on_missing_source":"true"%' AS has_defer_option,
-    options LIKE '%"flow_type":"batching"%' AS has_flow_type_option
-FROM INFORMATION_SCHEMA.FLOWS
-WHERE flow_name = 'pending_with_defer';
-
-+---------------------------------------------------------------+------------------+--------------------+--------------+------------------+----------------------+
-| flow_definition                                               | source_table_ids | source_table_names | flownode_ids | has_defer_option | has_flow_type_option |
-+---------------------------------------------------------------+------------------+--------------------+--------------+------------------+----------------------+
-| CREATE FLOW IF NOT EXISTS pending_with_defer                  | []               |                    | {}           | true             | true                 |
-| SINK TO public.pending_sink                                   |                  |                    |              |                  |                      |
-| WITH (defer_on_missing_source = 'true')                       |                  |                    |              |                  |                      |
-| AS SELECT val FROM pending_replacement_source WHERE val > 100 |                  |                    |              |                  |                      |
-+---------------------------------------------------------------+------------------+--------------------+--------------+------------------+----------------------+
-
-CREATE TABLE pending_replacement_source (
-    val INT,
-    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    TIME INDEX(ts)
-);
-
-Affected Rows: 0
-
--- SQLNESS SLEEP 12s
-INSERT INTO pending_replacement_source VALUES (99, 3), (101, 4), (102, 5);
-
-Affected Rows: 3
-
--- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
-ADMIN FLUSH_FLOW('pending_with_defer');
-
-Error: 1002(Unexpected), Failed to execute admin function flush_flow: Execution error: Can't found alive flownode
-
-SELECT val FROM pending_sink ORDER BY val;
-
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.pending_sink
-
 DROP FLOW pending_with_defer;
 
-Error: 1002(Unexpected), Flow route not found: 'greptime.pending_with_defer'
-
-DROP TABLE pending_sink;
-
-Error: 4001(TableNotFound), Table not found: greptime.public.pending_sink
-
-DROP TABLE pending_source;
-
 Affected Rows: 0
 
-DROP TABLE pending_replacement_source;
+SELECT flow_name FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'pending_with_defer';
 
-Affected Rows: 0
+++
+++
 
