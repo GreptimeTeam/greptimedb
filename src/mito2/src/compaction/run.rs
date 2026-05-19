@@ -331,6 +331,7 @@ where
     let mut selection = BitVec::repeat(false, items.len());
     while !selection.all() {
         // until all items are assigned to some sorted run.
+        let mut last_pruned_start = None;
         for (item, mut selected) in items.iter().zip(selection.iter_mut()) {
             if *selected {
                 // item is already assigned.
@@ -346,10 +347,13 @@ where
                 // then it belongs to current run. Because now we introduced primary
                 // key range, we cannot simply use timestamps to check overlapping.
                 let (item_start, _) = item.range();
-                active_run_item_indices.retain(|idx| {
-                    let (_, run_item_end) = current_run.items[*idx].range();
-                    run_item_end > item_start
-                });
+                if last_pruned_start != Some(item_start) {
+                    active_run_item_indices.retain(|idx| {
+                        let (_, run_item_end) = current_run.items[*idx].range();
+                        run_item_end > item_start
+                    });
+                    last_pruned_start = Some(item_start);
+                }
 
                 let mut overlaps_any = false;
                 for idx in &active_run_item_indices {
