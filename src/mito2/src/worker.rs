@@ -857,6 +857,14 @@ impl WorkerRequestBuffer {
             }
         }
     }
+
+    pub(crate) fn reject_region(&mut self, region_id: RegionId, reason: RejectReason) {
+        if let Some(requests) = self.requests.remove(&region_id) {
+            for req in requests {
+                req.reject(region_id, reason);
+            }
+        }
+    }
 }
 
 impl StalledRequests {
@@ -1134,7 +1142,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         policy: RegionRequestPolicy,
     ) {
-        if policy != RegionRequestPolicy::Accept {
+        if policy == RegionRequestPolicy::Stall {
             return;
         }
 
@@ -1143,8 +1151,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.buffered_requests.remove_region(region_id);
                 return;
             };
-            if region.request_policy() != RegionRequestPolicy::Accept {
-                return;
+            match region.request_policy() {
+                RegionRequestPolicy::Accept => {}
+                RegionRequestPolicy::Stall => return,
+                RegionRequestPolicy::Reject(reason) => {
+                    self.buffered_requests.reject_region(region_id, reason);
+                    return;
+                }
             }
 
             let Some(req) = self.buffered_requests.next(region_id) else {

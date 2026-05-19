@@ -203,7 +203,9 @@ impl MitoRegion {
 
     /// Returns a guard for region request policy.
     ///
-    /// The guard will hold the manifest write lock and prevent the region request policy from changing until it is dropped.
+    /// The guard sets the request policy while it is alive and restores the
+    /// previous policy on drop if the region role and policy still match the
+    /// guard's acquisition context.
     pub(crate) fn acquire_request_policy_guard(
         &self,
         request_policy: RegionRequestPolicy,

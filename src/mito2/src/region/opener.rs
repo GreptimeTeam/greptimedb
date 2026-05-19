@@ -60,7 +60,7 @@ use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
     ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionControlState,
-    RegionLeaderState, RegionRequestPolicy, RegionRoleState,
+    RegionLeaderState, RegionRequestPolicy, RegionRoleState, RejectReason,
 };
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
@@ -918,10 +918,11 @@ impl RegionLoadCacheTask {
             let current_size = file_cache.puffin_cache_size();
             let capacity = file_cache.puffin_cache_capacity();
             let region_state = self.region.state();
-            if !can_load_cache(region_state) {
+            let request_policy = self.region.request_policy();
+            if !can_load_cache(region_state, request_policy) {
                 info!(
-                    "Stopping index cache by state: {:?}, region: {}, current_size: {}, capacity: {}",
-                    region_state, region_id, current_size, capacity
+                    "Stopping index cache by state: {:?}, request_policy: {:?}, region: {}, current_size: {}, capacity: {}",
+                    region_state, request_policy, region_id, current_size, capacity
                 );
                 break;
             }
@@ -1159,7 +1160,14 @@ fn maybe_preload_parquet_meta_cache(
     });
 }
 
-fn can_load_cache(state: RegionRoleState) -> bool {
+fn can_load_cache(state: RegionRoleState, request_policy: RegionRequestPolicy) -> bool {
+    if matches!(
+        request_policy,
+        RegionRequestPolicy::Reject(RejectReason::Dropping)
+    ) {
+        return false;
+    }
+
     match state {
         RegionRoleState::Leader(RegionLeaderState::Writable)
         | RegionRoleState::Leader(RegionLeaderState::Staging)

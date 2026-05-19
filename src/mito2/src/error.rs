@@ -534,11 +534,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Region {} state, rejecting write requests, reason: {:?}",
-        region_id,
-        reason
-    ))]
+    #[snafu(display("Region {} rejecting region requests, reason: {:?}", region_id, reason))]
     RejectRequest {
         region_id: RegionId,
         reason: RejectReason,
