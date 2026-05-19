@@ -35,9 +35,7 @@ use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::FlushScheduler;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::region::{
-    ManifestContext, ManifestContextRef, RegionControlState, RegionLeaderState, RegionRoleState,
-};
+use crate::region::{ManifestContext, ManifestContextRef, RegionControlState};
 use crate::request::WorkerRequestWithTime;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
 use crate::sst::FormatType;

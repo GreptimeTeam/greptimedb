@@ -524,9 +524,14 @@ async fn edit_region(
     );
 
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+    let expect_state = if is_staging {
+        RegionLeaderState::Staging
+    } else {
+        RegionLeaderState::Writable
+    };
     region
         .manifest_ctx
-        .update_manifest(RegionLeaderState::Writable, action_list, is_staging)
+        .update_manifest(expect_state, action_list, is_staging)
         .await
         .map(|_| ())
 }
