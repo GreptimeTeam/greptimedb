@@ -326,6 +326,72 @@ where
 
     let mut current_run = SortedRun::default();
     let mut runs = vec![];
+    let mut active_run_item_indices = Vec::new();
+
+    let mut selection = BitVec::repeat(false, items.len());
+    while !selection.all() {
+        // until all items are assigned to some sorted run.
+        let mut last_pruned_start = None;
+        for (item, mut selected) in items.iter().zip(selection.iter_mut()) {
+            if *selected {
+                // item is already assigned.
+                continue;
+            }
+            if current_run.items.is_empty() {
+                // current run is empty, just add current_item
+                selected.set(true);
+                current_run.push_item(item.clone());
+                active_run_item_indices.push(current_run.items.len() - 1);
+            } else {
+                // the current item does not overlap with any item in current run,
+                // then it belongs to current run. Because now we introduced primary
+                // key range, we cannot simply use timestamps to check overlapping.
+                let (item_start, _) = item.range();
+                if last_pruned_start != Some(item_start) {
+                    active_run_item_indices.retain(|idx| {
+                        let (_, run_item_end) = current_run.items[*idx].range();
+                        run_item_end > item_start
+                    });
+                    last_pruned_start = Some(item_start);
+                }
+
+                let mut overlaps_any = false;
+                for idx in &active_run_item_indices {
+                    let run_item = &current_run.items[*idx];
+                    if run_item.overlap(item) {
+                        overlaps_any = true;
+                        break;
+                    }
+                }
+                if !overlaps_any {
+                    // does not overlap, push to current run
+                    selected.set(true);
+                    let item_idx = current_run.items.len();
+                    current_run.push_item(item.clone());
+                    active_run_item_indices.push(item_idx);
+                }
+            }
+        }
+        // finished an iteration, we've found a new run.
+        runs.push(std::mem::take(&mut current_run));
+        active_run_item_indices.clear();
+    }
+    runs
+}
+
+#[cfg(any(test, feature = "test", feature = "testing"))]
+pub fn find_sorted_runs_original<T>(items: &mut [T]) -> Vec<SortedRun<T>>
+where
+    T: Item,
+{
+    if items.is_empty() {
+        return vec![];
+    }
+    // sort files
+    sort_ranged_items(items);
+
+    let mut current_run = SortedRun::default();
+    let mut runs = vec![];
 
     let mut selection = BitVec::repeat(false, items.len());
     while !selection.all() {
@@ -543,6 +609,30 @@ mod tests {
         runs
     }
 
+    fn sorted_run_ranges<T: Item>(runs: &[SortedRun<T>]) -> Vec<Vec<T::BoundType>> {
+        runs.iter()
+            .map(|r| {
+                r.items
+                    .iter()
+                    .flat_map(|f| {
+                        let (start, end) = f.range();
+                        [start, end]
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn check_find_sorted_runs_consistency(ranges: &[(i64, i64)]) {
+        let mut files = build_items(ranges);
+        let mut files_for_original = files.clone();
+
+        let runs = find_sorted_runs(&mut files);
+        let original_runs = find_sorted_runs_original(&mut files_for_original);
+
+        assert_eq!(sorted_run_ranges(&original_runs), sorted_run_ranges(&runs));
+    }
+
     #[test]
     fn test_find_sorted_runs() {
         check_sorted_runs(&[], &[]);
@@ -592,6 +682,27 @@ mod tests {
                 vec![(21, 22), (31, 32), (32, 42)],
             ],
         );
+    }
+
+    #[test]
+    fn test_find_sorted_runs_matches_original_impl() {
+        for ranges in [
+            &[][..],
+            &[(1, 1), (2, 2)],
+            &[(1, 2), (2, 3)],
+            &[(2, 4), (1, 3)],
+            &[(1, 3), (2, 4), (4, 5)],
+            &[(1, 2), (3, 4), (3, 5)],
+            &[(1, 3), (2, 4), (5, 6)],
+            &[(1, 2), (3, 5), (4, 6)],
+            &[(1, 2), (3, 4), (4, 6), (7, 8)],
+            &[(1, 2), (3, 4), (5, 6), (3, 6), (7, 8), (8, 9)],
+            &[(10, 19), (20, 21), (20, 29), (30, 39)],
+            &[(10, 19), (20, 29), (21, 22), (30, 39), (31, 32), (32, 42)],
+            &[(32, 42), (10, 19), (31, 32), (20, 29), (21, 22), (30, 39)],
+        ] {
+            check_find_sorted_runs_consistency(ranges);
+        }
     }
 
     fn check_reduce_runs(
