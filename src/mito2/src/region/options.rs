@@ -138,7 +138,7 @@ impl RegionOptions {
 
 impl RegionOptions {
     /// Parses [RegionOptions] from the raw `options_map`.
-    pub(crate) fn try_from_options(
+    pub fn try_from_options(
         region_id: RegionId,
         options_map: &HashMap<String, String>,
     ) -> Result<Self> {
