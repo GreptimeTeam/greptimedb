@@ -84,8 +84,6 @@ pub enum RegionLeaderState {
     Writable,
     /// The region is in staging mode - writable but no checkpoint/compaction.
     Staging,
-    /// The region is handling a region edit.
-    Editing,
     /// The region is stepping down.
     Downgrading,
 }
@@ -1227,7 +1225,6 @@ impl ManifestContext {
                 matches!(
                     current_state,
                     RegionRoleState::Leader(RegionLeaderState::Writable)
-                        | RegionRoleState::Leader(RegionLeaderState::Editing)
                         | RegionRoleState::Leader(RegionLeaderState::Downgrading)
                 ),
                 UpdateManifestSnafu {

@@ -36,7 +36,7 @@ use crate::engine::MitoEngine;
 use crate::engine::flush_test::MockTimeProvider;
 use crate::engine::listener::EventListener;
 use crate::manifest::action::RegionEdit;
-use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::region::{MitoRegionRef, RegionRequestPolicy};
 use crate::sst::file::FileMeta;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
 
@@ -220,7 +220,7 @@ async fn test_edit_region_fill_cache_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
-async fn test_write_during_region_editing_is_queued() {
+async fn test_write_during_region_edit_is_queued() {
     let mut env = TestEnv::new().await;
     let (engine, mut request_rx) = create_engine_with_request_listener(&mut env).await;
 
@@ -239,13 +239,7 @@ async fn test_write_during_region_editing_is_queued() {
     let edit_engine = engine.clone();
     let edit_task = tokio::spawn(async move { edit_engine.edit_region(region_id, edit).await });
 
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_region_request_policy(&region, RegionRequestPolicy::Stall).await;
     drain_worker_recv_events(&mut request_rx);
 
     let write_engine = engine.clone();
@@ -290,7 +284,7 @@ async fn test_write_during_region_editing_is_queued() {
 }
 
 #[tokio::test]
-async fn test_bulk_insert_during_region_editing_is_queued() {
+async fn test_bulk_insert_during_region_edit_is_queued() {
     let mut env = TestEnv::new().await;
     let (engine, mut request_rx) = create_engine_with_request_listener(&mut env).await;
 
@@ -310,13 +304,7 @@ async fn test_bulk_insert_during_region_editing_is_queued() {
     let edit_engine = engine.clone();
     let edit_task = tokio::spawn(async move { edit_engine.edit_region(region_id, edit).await });
 
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_region_request_policy(&region, RegionRequestPolicy::Stall).await;
     drain_worker_recv_events(&mut request_rx);
 
     let bulk_engine = engine.clone();
@@ -354,7 +342,7 @@ async fn test_bulk_insert_during_region_editing_is_queued() {
 }
 
 #[tokio::test]
-async fn test_stalled_write_fails_fast_if_region_closed_during_editing() {
+async fn test_stalled_write_fails_fast_if_region_closed_during_region_edit() {
     let mut env = TestEnv::new().await;
     let (engine, mut request_rx) = create_engine_with_request_listener(&mut env).await;
 
@@ -373,13 +361,7 @@ async fn test_stalled_write_fails_fast_if_region_closed_during_editing() {
     let edit_engine = engine.clone();
     let edit_task = tokio::spawn(async move { edit_engine.edit_region(region_id, edit).await });
 
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_region_request_policy(&region, RegionRequestPolicy::Stall).await;
 
     drain_worker_recv_events(&mut request_rx);
 
@@ -470,6 +452,16 @@ async fn wait_worker_recv_event(rx: &mut mpsc::UnboundedReceiver<usize>) {
         .await
         .unwrap()
         .unwrap();
+}
+
+async fn wait_region_request_policy(region: &MitoRegionRef, policy: RegionRequestPolicy) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while region.request_policy() != policy {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 fn test_region_edit(region_id: RegionId, file_id: FileId) -> RegionEdit {
