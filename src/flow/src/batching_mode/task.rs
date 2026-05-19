@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::CreateTableExpr;
 use catalog::CatalogManagerRef;
+use client::OutputWithMetrics;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::breakup_insert_plan;
 use common_telemetry::tracing::warn;
@@ -32,6 +33,10 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use operator::expr_helper::column_schemas_to_defs;
 use query::QueryEngineRef;
+use query::options::{
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+    FLOW_SINK_TABLE_ID,
+};
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -46,11 +51,12 @@ use tokio::time::Instant;
 use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::{FilterExprInfo, TaskState};
+use crate::batching_mode::state::{CheckpointMode, FilterExprInfo, TaskState};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    AddFilterRewriter, ColumnMatcherRewriter, FindGroupByFinalName, gen_plan_with_matching_schema,
-    get_table_info_df_schema, sql_to_df_plan,
+    AddFilterRewriter, ColumnMatcherRewriter, FindGroupByFinalName,
+    analyze_incremental_aggregate_plan, gen_plan_with_matching_schema, get_table_info_df_schema,
+    rewrite_incremental_aggregate_with_sink_merge, sql_to_df_plan,
 };
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
@@ -58,11 +64,16 @@ use crate::error::{
     SubstraitEncodeLogicalPlanSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{
-    METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
+    METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT, METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT,
+    METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
     METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY, METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT,
     METRIC_FLOW_ROWS,
 };
 use crate::{Error, FlowId};
+
+const CHECKPOINT_DECISION_ADVANCE: &str = "advance";
+const CHECKPOINT_DECISION_FALLBACK: &str = "fallback";
+const CHECKPOINT_REASON_NONE: &str = "none";
 
 /// The task's config, immutable once created
 #[derive(Clone)]
@@ -80,6 +91,108 @@ pub struct TaskConfig {
     pub query_type: QueryType,
     pub batch_opts: Arc<BatchingModeOptions>,
     pub flow_eval_interval: Option<Duration>,
+}
+
+/// Why the task fell back to full snapshot mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowQueryFallbackReason {
+    /// The query result did not include a region-watermark map at all.
+    MissingRegionWatermark,
+    /// Some participating regions could not prove safe advancement against
+    /// both the returned watermarks and the checkpoint map.
+    IncompleteRegionWatermark,
+    /// The datanode detected a stale incremental cursor and the Flow
+    /// must recompute from scratch.
+    StaleCursor,
+    /// A non-stale-cursor query failure; the Flow resets to full snapshot
+    /// to avoid cascading errors.
+    IncrementalQueryFailure,
+    /// Incremental mode has been permanently disabled for this Flow
+    /// (e.g. because the query shape is not incrementally safe).
+    IncrementalDisabled,
+}
+
+impl FlowQueryFallbackReason {
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::MissingRegionWatermark => "missing_region_watermark",
+            Self::IncompleteRegionWatermark => "incomplete_region_watermark",
+            Self::StaleCursor => "stale_cursor",
+            Self::IncrementalQueryFailure => "incremental_query_failure",
+            Self::IncrementalDisabled => "incremental_disabled",
+        }
+    }
+}
+
+/// Decision produced by [`BatchingTask::apply_query_result_to_state`] after
+/// each Flow query execution. Describes whether the task advanced its
+/// checkpoint state or fell back to full snapshot, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowCheckpointDecision {
+    /// FullSnapshot → Incremental transition.
+    ///
+    /// The query exercised every participating region, all returned valid
+    /// watermarks, and the checkpoint map was populated from scratch.
+    /// Subsequent executions will use incremental after-seqs.
+    AdvancedFromFullSnapshot {
+        participating_regions: usize,
+        watermarks: usize,
+    },
+    /// Existing Incremental → Incremental (in-place advancement).
+    ///
+    /// A subset of participating regions advanced their watermarks. The
+    /// task stays in incremental mode with an updated checkpoint map.
+    AdvancedIncremental {
+        participating_regions: usize,
+        watermarks: usize,
+    },
+    /// Any mode → FullSnapshot.
+    ///
+    /// Watermark information was incomplete, a participating region was
+    /// absent from the existing checkpoint map, the task has permanently
+    /// disabled incremental mode, or the query itself failed. The task
+    /// resets to full snapshot semantics for the next execution.
+    FallbackToFullSnapshot {
+        previous_mode: CheckpointMode,
+        reason: FlowQueryFallbackReason,
+    },
+}
+
+impl FlowCheckpointDecision {
+    fn mode_label(self) -> &'static str {
+        match self {
+            Self::AdvancedFromFullSnapshot { .. } => {
+                checkpoint_mode_label(CheckpointMode::FullSnapshot)
+            }
+            Self::AdvancedIncremental { .. } => checkpoint_mode_label(CheckpointMode::Incremental),
+            Self::FallbackToFullSnapshot { previous_mode, .. } => {
+                checkpoint_mode_label(previous_mode)
+            }
+        }
+    }
+
+    fn decision_label(self) -> &'static str {
+        match self {
+            Self::AdvancedFromFullSnapshot { .. } | Self::AdvancedIncremental { .. } => {
+                CHECKPOINT_DECISION_ADVANCE
+            }
+            Self::FallbackToFullSnapshot { .. } => CHECKPOINT_DECISION_FALLBACK,
+        }
+    }
+
+    fn reason_label(self) -> &'static str {
+        match self {
+            Self::FallbackToFullSnapshot { reason, .. } => reason.as_label(),
+            _ => CHECKPOINT_REASON_NONE,
+        }
+    }
+}
+
+fn checkpoint_mode_label(mode: CheckpointMode) -> &'static str {
+    match mode {
+        CheckpointMode::FullSnapshot => "full_snapshot",
+        CheckpointMode::Incremental => "incremental",
+    }
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
@@ -244,8 +357,16 @@ impl BatchingTask {
     ) -> Result<Option<(u32, Duration)>, Error> {
         if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
             debug!("Generate new query: {}", new_query.plan);
-            self.execute_logical_plan(frontend_client, &new_query.plan)
+            match self
+                .execute_logical_plan(frontend_client, &new_query.plan)
                 .await
+            {
+                Ok(result) => Ok(result),
+                Err(err) => {
+                    self.handle_executed_query_failure(&err, Some(&new_query));
+                    Err(err)
+                }
+            }
         } else {
             debug!("Generate no query");
             Ok(None)
@@ -345,6 +466,115 @@ impl BatchingTask {
         Ok(())
     }
 
+    /// For incremental-mode SQL queries, attempt to rewrite the delta aggregate
+    /// plan into a safe delta-LEFT-JOIN-sink merge plan. Returns `(plan, true)`
+    /// if the rewrite succeeded and incremental extensions are safe;
+    /// `(plan, false)` if incremental is not applicable (non-SQL, non-aggregate,
+    /// or unsupported aggregates).
+    async fn prepare_plan_for_incremental(
+        &self,
+        plan: &LogicalPlan,
+    ) -> Result<(LogicalPlan, bool), Error> {
+        let is_incremental_sql = {
+            let state = self.state.read().unwrap();
+            if state.is_incremental_disabled() {
+                return Ok((plan.clone(), false));
+            }
+            state.checkpoint_mode() == CheckpointMode::Incremental
+                && matches!(self.config.query_type, QueryType::Sql)
+        };
+
+        if !is_incremental_sql {
+            return Ok((plan.clone(), false));
+        }
+
+        // Extract inner query plan from the DML wrapper.
+        // Non-DML or non-SQL plans bypass the rewrite and keep checkpoint mode;
+        // non-aggregate TQL or non-INSERT plans do not need incremental scan extensions.
+        let inner_plan = match plan {
+            LogicalPlan::Dml(dml) => dml.input.as_ref().clone(),
+            _ => return Ok((plan.clone(), false)),
+        };
+
+        // Analyze the plan for incremental rewritability.
+        // PR3 only enables incremental reads for aggregate / group-by plans via
+        // the PR4 delta-left-join rewrite. Non-aggregate SQL (projection, filter,
+        // or other non-aggregate shapes) stays full-snapshot until separately
+        // supported, and incremental mode is permanently disabled for this flow.
+        let Some(analysis) = analyze_incremental_aggregate_plan(&inner_plan)? else {
+            warn!(
+                "Flow {} incremental mode but plan is not an aggregate query; \
+                 permanently disabling incremental for this flow",
+                self.config.flow_id
+            );
+            self.state.write().unwrap().disable_incremental();
+            return Ok((plan.clone(), false));
+        };
+
+        if !analysis.unsupported_exprs.is_empty() {
+            warn!(
+                "Flow {} incremental aggregate contains unsupported expressions {:?}; \
+                 permanently disabling incremental for this flow",
+                self.config.flow_id, analysis.unsupported_exprs
+            );
+            self.state.write().unwrap().disable_incremental();
+            return Ok((plan.clone(), false));
+        }
+
+        // Plain GROUP BY without aggregate expressions has no values to
+        // merge between delta and sink. The incremental delta scan emits
+        // changed groups, and sink primary-key write semantics make this
+        // idempotent; no explicit left-join rewrite is needed.
+        if analysis.merge_columns.is_empty() {
+            return Ok((plan.clone(), true));
+        }
+
+        // Fetch sink table for the merge rewrite
+        let (sink_table, _) = get_table_info_df_schema(
+            self.config.catalog_manager.clone(),
+            self.config.sink_table_name.clone(),
+        )
+        .await?;
+
+        let rewritten_inner = match rewrite_incremental_aggregate_with_sink_merge(
+            &inner_plan,
+            &analysis,
+            sink_table,
+            &self.config.sink_table_name,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(err) => {
+                warn!(
+                    "Flow {} failed to rewrite incremental aggregate with sink merge; \
+                     permanently disabling incremental for this flow: {:?}",
+                    self.config.flow_id, err
+                );
+                self.state.write().unwrap().disable_incremental();
+                return Ok((plan.clone(), false));
+            }
+        };
+
+        // Reconstruct DML plan with the rewritten inner plan
+        let rewritten = match plan {
+            LogicalPlan::Dml(dml) => LogicalPlan::Dml(DmlStatement::new(
+                dml.table_name.clone(),
+                dml.target.clone(),
+                dml.op.clone(),
+                Arc::new(rewritten_inner),
+            )),
+            _ => unreachable!("already matched Dml above"),
+        };
+
+        debug!(
+            "Flow {} rewrote incremental SQL aggregate query with sink merge",
+            self.config.flow_id
+        );
+
+        Ok((rewritten, true))
+    }
+
     pub async fn execute_logical_plan(
         &self,
         frontend_client: &Arc<FrontendClient>,
@@ -378,81 +608,345 @@ impl BatchingTask {
             })?
             .data;
 
-        let mut peer_desc = None;
+        // For incremental-mode SQL queries, attempt to rewrite the delta aggregate
+        // plan into a safe delta-LEFT-JOIN-sink form before deciding on extensions.
+        let (plan, incremental_safe) = self.prepare_plan_for_incremental(&plan).await?;
+
+        let extensions = self.build_flow_query_extensions(incremental_safe).await?;
+        let extension_refs = extensions
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        let query_mode = self.state.read().unwrap().checkpoint_mode();
+        Self::record_query_mode(flow_id, query_mode);
+        debug!(
+            "Flow {flow_id} executing batching query with checkpoint_mode={}, extension_count={}",
+            checkpoint_mode_label(query_mode),
+            extensions.len()
+        );
 
         let res = {
             let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
                 .with_label_values(&[flow_id.to_string().as_str()])
                 .start_timer();
 
-            // hack and special handling the insert logical plan
             let req = if let Some((insert_to, insert_plan)) =
                 breakup_insert_plan(&plan, catalog, schema)
             {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&insert_plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
-                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::InsertIntoPlan(
                         api::v1::InsertIntoPlan {
                             table_name: Some(insert_to),
                             logical_plan: message.to_vec(),
                         },
                     )),
-                })
+                }
             } else {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
 
-                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
-                })
+                }
             };
 
             frontend_client
-                .handle(req, catalog, schema, &mut peer_desc)
+                .query_with_terminal_metrics(catalog, schema, req, &extension_refs)
                 .await
         };
 
         let elapsed = instant.elapsed();
-        if let Ok(affected_rows) = &res {
-            debug!(
-                "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}",
-                elapsed
-            );
-            METRIC_FLOW_ROWS
-                .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
-                .inc_by(*affected_rows as _);
-        } else if let Err(err) = &res {
+        if let Err(err) = &res {
             warn!(
-                "Failed to execute Flow {flow_id} on frontend {:?}, result: {err:?}, elapsed: {:?} with query: {}",
-                peer_desc, elapsed, &plan
+                "Failed to execute Flow {flow_id}, result: {err:?}, elapsed: {:?} with query: {}",
+                elapsed, &plan
             );
+            self.state.write().unwrap().after_query_exec(elapsed, false);
         }
 
         // record slow query
         if elapsed >= self.config.batch_opts.slow_query_threshold {
             warn!(
-                "Flow {flow_id} on frontend {:?} executed for {:?} before complete, query: {}",
-                peer_desc, elapsed, &plan
+                "Flow {flow_id} executed for {:?} before complete, query: {}",
+                elapsed, &plan
             );
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
-                .with_label_values(&[
-                    flow_id.to_string().as_str(),
-                    &peer_desc.unwrap_or_default().to_string(),
-                ])
+                .with_label_values(&[flow_id.to_string().as_str(), "watermark-path"])
                 .observe(elapsed.as_secs_f64());
         }
 
-        self.state
-            .write()
-            .unwrap()
-            .after_query_exec(elapsed, res.is_ok());
-
         let res = res?;
+        let (affected_rows, _) = res.output.extract_rows_and_cost();
+        debug!(
+            "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
+            elapsed,
+            res.region_watermark_map()
+        );
+        METRIC_FLOW_ROWS
+            .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
+            .inc_by(affected_rows as _);
+        let affected_rows: u32 = affected_rows.try_into().map_err(|_| {
+            UnexpectedSnafu {
+                reason: format!("Failed to convert rows to u32: {}", affected_rows),
+            }
+            .build()
+        })?;
 
-        Ok(Some((res, elapsed)))
+        {
+            let mut state = self.state.write().unwrap();
+            let decision = Self::apply_query_result_to_state(&mut state, &res, elapsed);
+            Self::record_checkpoint_decision(flow_id, decision);
+        }
+
+        Ok(Some((affected_rows, elapsed)))
+    }
+
+    fn apply_query_result_to_state(
+        state: &mut TaskState,
+        res: &OutputWithMetrics,
+        elapsed: Duration,
+    ) -> FlowCheckpointDecision {
+        state.after_query_exec(elapsed, true);
+        let checkpoint_mode = state.checkpoint_mode();
+        if let (Some(participating_regions), Some(watermark_map)) =
+            (res.participating_regions(), res.region_watermark_map())
+        {
+            let can_advance = match checkpoint_mode {
+                CheckpointMode::FullSnapshot => state
+                    .can_advance_full_snapshot_checkpoints(&participating_regions, &watermark_map),
+                CheckpointMode::Incremental => state
+                    .can_advance_incremental_checkpoints_with_participation(
+                        &participating_regions,
+                        &watermark_map,
+                    ),
+            };
+
+            if can_advance {
+                let participating_region_count = participating_regions.len();
+                let watermark_count = watermark_map.len();
+                match checkpoint_mode {
+                    CheckpointMode::FullSnapshot => {
+                        state.advance_checkpoints(watermark_map);
+                        if state.is_incremental_disabled() {
+                            FlowCheckpointDecision::FallbackToFullSnapshot {
+                                previous_mode: CheckpointMode::FullSnapshot,
+                                reason: FlowQueryFallbackReason::IncrementalDisabled,
+                            }
+                        } else {
+                            FlowCheckpointDecision::AdvancedFromFullSnapshot {
+                                participating_regions: participating_region_count,
+                                watermarks: watermark_count,
+                            }
+                        }
+                    }
+                    CheckpointMode::Incremental => {
+                        state.advance_incremental_checkpoints_with_participation(
+                            &participating_regions,
+                            watermark_map,
+                        );
+                        FlowCheckpointDecision::AdvancedIncremental {
+                            participating_regions: participating_region_count,
+                            watermarks: watermark_count,
+                        }
+                    }
+                }
+            } else {
+                state.mark_full_snapshot();
+                FlowCheckpointDecision::FallbackToFullSnapshot {
+                    previous_mode: checkpoint_mode,
+                    reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+                }
+            }
+        } else {
+            state.mark_full_snapshot();
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: checkpoint_mode,
+                reason: FlowQueryFallbackReason::MissingRegionWatermark,
+            }
+        }
+    }
+
+    fn record_checkpoint_decision(flow_id: FlowId, decision: FlowCheckpointDecision) {
+        let flow_id = flow_id.to_string();
+        METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT
+            .with_label_values(&[
+                flow_id.as_str(),
+                decision.mode_label(),
+                decision.decision_label(),
+                decision.reason_label(),
+            ])
+            .inc();
+
+        match decision {
+            FlowCheckpointDecision::AdvancedFromFullSnapshot {
+                participating_regions,
+                watermarks,
+            } => {
+                info!(
+                    "Flow {flow_id} switched to incremental mode after full snapshot, participating_regions={participating_regions}, watermarks={watermarks}"
+                );
+            }
+            FlowCheckpointDecision::AdvancedIncremental {
+                participating_regions,
+                watermarks,
+            } => {
+                debug!(
+                    "Flow {flow_id} advanced incremental checkpoints, participating_regions={participating_regions}, watermarks={watermarks}"
+                );
+            }
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode,
+                reason,
+            } => {
+                warn!(
+                    "Flow {flow_id} switched to full snapshot mode, previous_mode={}, reason={}",
+                    checkpoint_mode_label(previous_mode),
+                    reason.as_label()
+                );
+            }
+        }
+    }
+
+    fn record_query_mode(flow_id: FlowId, mode: CheckpointMode) {
+        let flow_id = flow_id.to_string();
+        METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT
+            .with_label_values(&[flow_id.as_str(), checkpoint_mode_label(mode)])
+            .inc();
+    }
+
+    fn record_failure_fallback(
+        &self,
+        previous_mode: CheckpointMode,
+        reason: FlowQueryFallbackReason,
+    ) {
+        Self::record_checkpoint_decision(
+            self.config.flow_id,
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode,
+                reason,
+            },
+        );
+    }
+
+    fn handle_flow_query_failure(&self, err: &Error, query: Option<&PlanInfo>) -> bool {
+        let failure = FrontendClient::inspect_query_error(err);
+        let previous_mode = { self.state.read().unwrap().checkpoint_mode() };
+        let was_incremental = previous_mode == CheckpointMode::Incremental;
+        if failure.is_stale_cursor() {
+            warn!(
+                "Flow {} detected stale incremental query failure, switching to non-incremental recompute semantics for current query scope: {:?}",
+                self.config.flow_id, failure.stale_cursor
+            );
+            self.state.write().unwrap().mark_full_snapshot();
+            self.record_failure_fallback(previous_mode, FlowQueryFallbackReason::StaleCursor);
+
+            if query.is_none_or(|query| query.filter.is_none())
+                && let Err(mark_err) = self.mark_all_windows_as_dirty()
+            {
+                warn!(
+                    "Flow {} failed to mark all windows dirty after stale incremental query without time-window scope: {}",
+                    self.config.flow_id, mark_err
+                );
+            }
+
+            true
+        } else {
+            if was_incremental {
+                warn!(
+                    "Flow {} incremental query failed without stale-cursor detail, switching to non-incremental recompute semantics for current query scope",
+                    self.config.flow_id
+                );
+                self.state.write().unwrap().mark_full_snapshot();
+                self.record_failure_fallback(
+                    previous_mode,
+                    FlowQueryFallbackReason::IncrementalQueryFailure,
+                );
+
+                if query.is_none_or(|query| query.filter.is_none())
+                    && let Err(mark_err) = self.mark_all_windows_as_dirty()
+                {
+                    warn!(
+                        "Flow {} failed to mark all windows dirty after incremental query failure without time-window scope: {}",
+                        self.config.flow_id, mark_err
+                    );
+                }
+            }
+
+            false
+        }
+    }
+
+    fn restore_dirty_windows_after_failure(&self, query: &PlanInfo, is_stale_cursor: bool) {
+        if is_stale_cursor && query.filter.is_none() {
+            return;
+        }
+
+        self.state.write().unwrap().dirty_time_windows.add_windows(
+            query
+                .filter
+                .as_ref()
+                .map(|f| f.time_ranges.clone())
+                .unwrap_or_default(),
+        );
+    }
+
+    fn handle_executed_query_failure(&self, err: &Error, query: Option<&PlanInfo>) -> bool {
+        let is_stale_cursor = self.handle_flow_query_failure(err, query);
+        if let Some(query) = query {
+            self.restore_dirty_windows_after_failure(query, is_stale_cursor);
+        }
+        is_stale_cursor
+    }
+
+    async fn build_flow_query_extensions(
+        &self,
+        incremental_safe: bool,
+    ) -> Result<Vec<(&'static str, String)>, Error> {
+        let mut extensions = vec![("flow.return_region_seq", "true".to_string())];
+
+        if let Some(table) = self
+            .config
+            .catalog_manager
+            .table(
+                &self.config.sink_table_name[0],
+                &self.config.sink_table_name[1],
+                &self.config.sink_table_name[2],
+                None,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+        {
+            extensions.push((
+                FLOW_SINK_TABLE_ID,
+                table.table_info().table_id().to_string(),
+            ));
+        }
+
+        let state = self.state.read().unwrap();
+        if incremental_safe
+            && !state.is_incremental_disabled()
+            && state.checkpoint_mode() == CheckpointMode::Incremental
+            && !state.checkpoints().is_empty()
+        {
+            let checkpoints_json = serde_json::to_string(state.checkpoints()).map_err(|err| {
+                UnexpectedSnafu {
+                    reason: format!("Failed to serialize checkpoint map: {err}"),
+                }
+                .build()
+            })?;
+            extensions.push((
+                FLOW_INCREMENTAL_MODE,
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+            ));
+            extensions.push((FLOW_INCREMENTAL_AFTER_SEQS, checkpoints_json));
+        }
+
+        Ok(extensions)
     }
 
     /// start executing query in a loop, break when receive shutdown signal
@@ -558,16 +1052,13 @@ impl BatchingTask {
                 }
                 // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
                 Err(err) => {
+                    self.handle_executed_query_failure(&err, new_query.as_ref());
                     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT
                         .with_label_values(&[&flow_id_str])
                         .inc();
                     match new_query {
                         Some(query) => {
                             common_telemetry::error!(err; "Failed to execute query for flow={} with query: {}", self.config.flow_id, query.plan);
-                            // Re-add dirty windows back since query failed
-                            self.state.write().unwrap().dirty_time_windows.add_windows(
-                                query.filter.map(|f| f.time_ranges).unwrap_or_default(),
-                            );
                             // TODO(discord9): add some backoff here? half the query time window or what
                             // backoff meaning use smaller `max_window_cnt` for next query
 
@@ -978,12 +1469,487 @@ fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+
     use api::v1::column_def::try_as_column_schema;
+    use common_error::ext::PlainError;
+    use common_error::status_code::StatusCode;
+    use common_query::Output;
+    use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
     use pretty_assertions::assert_eq;
     use session::context::QueryContext;
+    use snafu::GenerateImplicitData;
 
     use super::*;
     use crate::test_utils::create_test_query_engine;
+
+    fn output_with_region_watermarks(
+        watermarks: impl IntoIterator<Item = (u64, Option<u64>)>,
+    ) -> OutputWithMetrics {
+        let result = OutputWithMetrics::from_output(Output::new_with_affected_rows(0));
+        result.metrics.update(Some(RecordBatchMetrics {
+            region_watermarks: watermarks
+                .into_iter()
+                .map(|(region_id, watermark)| RegionWatermarkEntry {
+                    region_id,
+                    watermark,
+                })
+                .collect(),
+            ..Default::default()
+        }));
+        result.metrics.mark_ready();
+        result
+    }
+
+    async fn new_test_task_with_missing_sink() -> BatchingTask {
+        new_test_task_and_plan_with_missing_sink().await.0
+    }
+
+    async fn new_test_task_and_plan_with_missing_sink() -> (BatchingTask, LogicalPlan) {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 1,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan: plan.clone(),
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "missing_sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        (task, plan)
+    }
+
+    fn ordinary_query_error() -> Error {
+        Error::External {
+            source: BoxedError::new(PlainError::new(
+                "ordinary query failure".to_string(),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        }
+    }
+
+    #[test]
+    fn test_apply_query_result_to_state_advances_full_snapshot_to_incremental() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]);
+
+        let decision = BatchingTask::apply_query_result_to_state(
+            &mut state,
+            &result,
+            std::time::Duration::from_millis(1),
+        );
+
+        assert_eq!(
+            decision,
+            FlowCheckpointDecision::AdvancedFromFullSnapshot {
+                participating_regions: 2,
+                watermarks: 2,
+            }
+        );
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+    }
+
+    #[test]
+    fn test_apply_query_result_to_state_stays_full_snapshot_when_incremental_disabled() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.disable_incremental();
+        assert!(state.is_incremental_disabled());
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+
+        let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]);
+        let decision = BatchingTask::apply_query_result_to_state(
+            &mut state,
+            &result,
+            std::time::Duration::from_millis(1),
+        );
+
+        // Should NOT claim advancement to incremental; should fallback with correct reason.
+        assert_eq!(
+            decision,
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: CheckpointMode::FullSnapshot,
+                reason: FlowQueryFallbackReason::IncrementalDisabled,
+            }
+        );
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(state.is_incremental_disabled());
+        // Checkpoints are still updated even if mode doesn't advance.
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+    }
+
+    #[test]
+    fn test_apply_query_result_to_state_rejects_unproved_watermark() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, None)]);
+
+        let decision = BatchingTask::apply_query_result_to_state(
+            &mut state,
+            &result,
+            std::time::Duration::from_millis(1),
+        );
+
+        assert_eq!(
+            decision,
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: CheckpointMode::FullSnapshot,
+                reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+            }
+        );
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(state.checkpoints().is_empty());
+    }
+
+    #[test]
+    fn test_apply_query_result_to_state_reports_missing_watermark() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        let result = OutputWithMetrics::from_output(Output::new_with_affected_rows(0));
+
+        let decision = BatchingTask::apply_query_result_to_state(
+            &mut state,
+            &result,
+            std::time::Duration::from_millis(1),
+        );
+
+        assert_eq!(
+            decision,
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: CheckpointMode::FullSnapshot,
+                reason: FlowQueryFallbackReason::MissingRegionWatermark,
+            }
+        );
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(state.checkpoints().is_empty());
+    }
+
+    #[test]
+    fn test_apply_query_result_to_state_advances_incremental_subset() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([
+            (1_u64, 10_u64),
+            (2_u64, 20_u64),
+            (3_u64, 30_u64),
+        ]));
+        let result = output_with_region_watermarks([(1_u64, Some(12_u64)), (3_u64, Some(35_u64))]);
+
+        let decision = BatchingTask::apply_query_result_to_state(
+            &mut state,
+            &result,
+            std::time::Duration::from_millis(1),
+        );
+
+        assert_eq!(
+            decision,
+            FlowCheckpointDecision::AdvancedIncremental {
+                participating_regions: 2,
+                watermarks: 2,
+            }
+        );
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 12_u64), (2_u64, 20_u64), (3_u64, 35_u64)])
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_decision_labels_are_stable() {
+        let advance = FlowCheckpointDecision::AdvancedIncremental {
+            participating_regions: 1,
+            watermarks: 1,
+        };
+        let fallback = FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: CheckpointMode::Incremental,
+            reason: FlowQueryFallbackReason::StaleCursor,
+        };
+
+        assert_eq!(advance.mode_label(), "incremental");
+        assert_eq!(advance.decision_label(), CHECKPOINT_DECISION_ADVANCE);
+        assert_eq!(advance.reason_label(), CHECKPOINT_REASON_NONE);
+        assert_eq!(fallback.mode_label(), "incremental");
+        assert_eq!(fallback.decision_label(), CHECKPOINT_DECISION_FALLBACK);
+        assert_eq!(fallback.reason_label(), "stale_cursor");
+    }
+
+    #[tokio::test]
+    async fn test_incremental_failure_falls_back_to_full_snapshot() {
+        let task = new_test_task_with_missing_sink().await;
+        task.state
+            .write()
+            .unwrap()
+            .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+
+        let is_stale_cursor = task.handle_flow_query_failure(&ordinary_query_error(), None);
+
+        assert!(!is_stale_cursor);
+        let state = task.state.read().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+    }
+
+    #[tokio::test]
+    async fn test_incremental_failure_without_query_scope_marks_full_flow_dirty() {
+        let task = new_test_task_with_missing_sink().await;
+        {
+            let mut state = task.state.write().unwrap();
+            state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+            state.dirty_time_windows.clean();
+        }
+
+        let is_stale_cursor = task.handle_flow_query_failure(&ordinary_query_error(), None);
+
+        assert!(!is_stale_cursor);
+        let state = task.state.read().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(state.dirty_time_windows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_executed_query_failure_restores_scoped_dirty_windows_for_flush_path() {
+        let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
+        {
+            let mut state = task.state.write().unwrap();
+            state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+            state.dirty_time_windows.clean();
+        }
+        let scoped_query = PlanInfo {
+            plan,
+            filter: Some(FilterExprInfo {
+                expr: datafusion_expr::lit(true),
+                col_name: "ts".to_string(),
+                time_ranges: vec![(Timestamp::new_second(10), Timestamp::new_second(20))],
+                window_size: chrono::Duration::seconds(10),
+            }),
+        };
+
+        let is_stale_cursor =
+            task.handle_executed_query_failure(&ordinary_query_error(), Some(&scoped_query));
+
+        assert!(!is_stale_cursor);
+        let state = task.state.read().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(state.dirty_time_windows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
+        let task = new_test_task_with_missing_sink().await;
+
+        let extensions = task.build_flow_query_extensions(false).await.unwrap();
+        assert_eq!(
+            extensions,
+            vec![("flow.return_region_seq", "true".to_string())]
+        );
+
+        task.state
+            .write()
+            .unwrap()
+            .advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+        let extensions = task.build_flow_query_extensions(true).await.unwrap();
+
+        assert!(extensions.contains(&("flow.return_region_seq", "true".to_string())));
+        assert!(extensions.contains(&(
+            FLOW_INCREMENTAL_MODE,
+            FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string()
+        )));
+        assert!(extensions.contains(&(
+            FLOW_INCREMENTAL_AFTER_SEQS,
+            serde_json::json!({"1": 10, "2": 20}).to_string(),
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+
+        // Build a DML wrapper using a real sink table from the test engine.
+        let (sink_table, _) = get_table_info_df_schema(
+            query_engine.engine_state().catalog_manager().clone(),
+            [
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        let table_provider = Arc::new(DfTableProviderAdapter::new(sink_table));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
+        let dml_plan = LogicalPlan::Dml(DmlStatement::new(
+            datafusion_common::TableReference::bare("test"),
+            table_source,
+            WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+            Arc::new(plan),
+        ));
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 1,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan: dml_plan.clone(),
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        // Put the state into Incremental mode with checkpoints.
+        task.state
+            .write()
+            .unwrap()
+            .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        assert_eq!(
+            task.state.read().unwrap().checkpoint_mode(),
+            CheckpointMode::Incremental
+        );
+
+        let (_plan, incremental_safe) = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+        assert!(!incremental_safe);
+        let state = task.state.read().unwrap();
+        assert!(state.is_incremental_disabled());
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    }
+
+    #[tokio::test]
+    async fn test_prepare_plan_for_incremental_disables_on_rewrite_error() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            "SELECT sum(number) AS total, ts FROM numbers_with_ts GROUP BY ts",
+            true,
+        )
+        .await
+        .unwrap();
+
+        let (sink_table, _) = get_table_info_df_schema(
+            query_engine.engine_state().catalog_manager().clone(),
+            [
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        let table_provider = Arc::new(DfTableProviderAdapter::new(sink_table));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
+        let dml_plan = LogicalPlan::Dml(DmlStatement::new(
+            datafusion_common::TableReference::bare("test"),
+            table_source,
+            WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+            Arc::new(plan),
+        ));
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 1,
+            query: "SELECT sum(number) AS total, ts FROM numbers_with_ts GROUP BY ts",
+            plan: dml_plan.clone(),
+            time_window_expr: None,
+            expire_after: None,
+            // The sink table exists, but does not have the rewritten aggregate
+            // output column `total`, so the rewrite fails deterministically.
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        task.state
+            .write()
+            .unwrap()
+            .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        assert_eq!(
+            task.state.read().unwrap().checkpoint_mode(),
+            CheckpointMode::Incremental
+        );
+
+        let (_plan, incremental_safe) = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+        assert!(!incremental_safe);
+        let state = task.state.read().unwrap();
+        assert!(state.is_incremental_disabled());
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    }
 
     #[tokio::test]
     async fn test_gen_create_table_sql() {

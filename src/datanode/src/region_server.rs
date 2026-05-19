@@ -314,6 +314,7 @@ impl RegionServer {
         let ctx = request.header.as_ref().map(|h| h.into());
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
 
+        let region_id = request.region_id;
         let injector_builder = NameAwareDataSourceInjectorBuilder::from_plan(&request.plan)
             .context(DataFusionSnafu)?;
         let mut injector = injector_builder
@@ -326,7 +327,6 @@ impl RegionServer {
             .context(DataFusionSnafu)?
             .data;
 
-        let region_id = request.region_id;
         let stream = self
             .inner
             .handle_read(QueryRequest { plan, ..request }, query_ctx.clone())
@@ -837,14 +837,13 @@ fn wrap_flow_region_watermark_stream(
     region_id: RegionId,
     query_ctx: &QueryContextRef,
 ) -> SendableRecordBatchStream {
-    let Some(seq) = should_collect_region_watermark_from_extensions(&query_ctx.extensions())
-        .then(|| query_ctx.get_snapshot(region_id.as_u64()))
-        .flatten()
-    else {
-        return stream;
-    };
-
-    Box::pin(RegionWatermarkStream::new(stream, region_id, seq))
+    if should_collect_region_watermark_from_extensions(&query_ctx.extensions())
+        && let Some(seq) = query_ctx.get_snapshot(region_id.as_u64())
+    {
+        Box::pin(RegionWatermarkStream::new(stream, region_id, seq)) as SendableRecordBatchStream
+    } else {
+        stream
+    }
 }
 
 /// Wraps a region read stream so terminal metrics can carry the scan-open watermark.
