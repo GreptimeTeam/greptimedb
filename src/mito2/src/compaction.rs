@@ -1716,7 +1716,6 @@ mod tests {
             .unwrap();
             Arc::new(ManifestContext::new(
                 manager,
-                RegionRoleState::Leader(RegionLeaderState::Staging),
                 RegionControlState::new_test(RegionId::new(0, 0), RegionRole::StagingLeader),
             ))
         };

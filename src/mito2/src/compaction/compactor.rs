@@ -47,7 +47,7 @@ use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
-use crate::region::{ManifestContext, RegionControlState, RegionLeaderState, RegionRoleState};
+use crate::region::{ManifestContext, RegionControlState, RegionLeaderState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
@@ -179,7 +179,6 @@ pub async fn open_compaction_region(
     let (tx, _) = unbounded_channel();
     let manifest_ctx = Arc::new(ManifestContext::new(
         manifest_manager,
-        RegionRoleState::Leader(RegionLeaderState::Writable),
         RegionControlState::new(req.region_id, RegionRole::Leader, tx),
     ));
 

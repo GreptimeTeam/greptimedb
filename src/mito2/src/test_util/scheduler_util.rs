@@ -147,7 +147,6 @@ impl SchedulerEnv {
             )
             .await
             .unwrap(),
-            RegionRoleState::Leader(RegionLeaderState::Writable),
             RegionControlState::new_test(region_id, RegionRole::Leader),
         ))
     }

@@ -1048,9 +1048,6 @@ impl RegionControlState {
 pub(crate) struct ManifestContext {
     /// Manager to maintain manifest for this region.
     pub(crate) manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
-    // /// The state of the region. The region checks the state before updating
-    // /// manifest.
-    // state: AtomicCell<RegionRoleState>,
     /// The control state of the region, which is used to control the request policy of the region.
     control_state: RegionControlState,
     /// Partition info of the region in staging mode.
@@ -1061,12 +1058,7 @@ pub(crate) struct ManifestContext {
 }
 
 impl ManifestContext {
-    pub(crate) fn new(
-        manager: RegionManifestManager,
-        // TODO(weny): remove it.
-        _state: RegionRoleState,
-        control_state: RegionControlState,
-    ) -> Self {
+    pub(crate) fn new(manager: RegionManifestManager, control_state: RegionControlState) -> Self {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             control_state,
@@ -1831,7 +1823,6 @@ mod tests {
 
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
-            RegionRoleState::Leader(RegionLeaderState::Writable),
             RegionControlState::new_test(metadata.region_id, RegionRole::Leader),
         ));
 
@@ -2121,7 +2112,6 @@ mod tests {
             .unwrap();
             Arc::new(ManifestContext::new(
                 manager,
-                RegionRoleState::Leader(RegionLeaderState::Staging),
                 RegionControlState::new_test(RegionId::new(0, 0), RegionRole::StagingLeader),
             ))
         };
@@ -2190,7 +2180,6 @@ mod tests {
 
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
-            RegionRoleState::Leader(RegionLeaderState::Writable),
             RegionControlState::new_test(metadata.region_id, RegionRole::Leader),
         ));
 
