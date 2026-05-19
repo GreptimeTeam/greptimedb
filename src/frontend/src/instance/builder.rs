@@ -281,6 +281,7 @@ impl FrontendBuilder {
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
             slow_query_options: self.options.slow_query.clone(),
+            influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
             suspend: Arc::new(AtomicBool::new(false)),
         })
     }
