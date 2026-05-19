@@ -345,7 +345,7 @@ where
                 // the current item does not overlap with any item in current run,
                 // then it belongs to current run. Because now we introduced primary
                 // key range, we cannot simply use timestamps to check overlapping.
-                let (item_start, item_end) = item.range();
+                let (item_start, _) = item.range();
                 active_run_item_indices.retain(|idx| {
                     let (_, run_item_end) = current_run.items[*idx].range();
                     run_item_end > item_start
@@ -354,8 +354,7 @@ where
                 let mut overlaps_any = false;
                 for idx in &active_run_item_indices {
                     let run_item = &current_run.items[*idx];
-                    let (run_item_start, _) = run_item.range();
-                    if run_item_start < item_end && run_item.overlap(item) {
+                    if run_item.overlap(item) {
                         overlaps_any = true;
                         break;
                     }
