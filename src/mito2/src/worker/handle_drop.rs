@@ -29,9 +29,7 @@ use tokio::time::sleep;
 
 use crate::admit_or_return;
 use crate::error::{OpenDalSnafu, RegionBusySnafu, Result};
-use crate::region::{
-    MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRequestPolicy, RejectReason,
-};
+use crate::region::{MitoRegionRef, RegionMapRef, RegionRequestPolicy, RejectReason};
 use crate::request::OptionOutputTx;
 use crate::worker::{BufferableRequest, DROPPING_MARKER_FILE, RegionWorkerLoop};
 
@@ -74,14 +72,6 @@ where
         let region_id = region.region_id();
         info!("Try to drop region: {}, worker: {}", region_id, self.id);
 
-        let is_staging = region.is_staging();
-        let expect_state = if is_staging {
-            RegionLeaderState::Staging
-        } else {
-            RegionLeaderState::Writable
-        };
-        // Marks the region as dropping.
-        region.set_dropping(expect_state)?;
         let Some(_guard) = region
             .acquire_request_policy_guard(RegionRequestPolicy::Reject(RejectReason::Dropping))
         else {
@@ -101,10 +91,6 @@ where
             .context(OpenDalSnafu)
             .inspect_err(|e| {
                 error!(e; "Failed to write the drop marker file for region {}", region_id);
-
-                // Sets the state back to writable. It's possible that the marker file has been written.
-                // We set the state back to writable so we can retry the drop operation.
-                region.switch_state_to_writable(RegionLeaderState::Dropping);
             })?;
 
         region.stop().await;

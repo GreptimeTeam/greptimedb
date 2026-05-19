@@ -180,7 +180,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             RegionMetaActionList::with_action(RegionMetaAction::PartitionExprChange(change));
         region
             .manifest_ctx
-            .update_manifest(RegionLeaderState::EnteringStaging, action_list, true)
+            .update_manifest(RegionLeaderState::Writable, action_list, true)
             .await?;
 
         Ok(())
@@ -192,10 +192,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         partition_directive: StagingPartitionDirective,
         sender: OptionOutputTx,
     ) {
-        if let Err(e) = region.set_entering_staging() {
-            sender.send(Err(e));
-            return;
-        }
         let Some(guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Stall) else {
             sender.send(
                 RegionBusySnafu {
@@ -290,9 +286,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 &region,
                 enter_staging_result.partition_directive,
             );
-            region.switch_state_to_staging(RegionLeaderState::EnteringStaging);
-        } else {
-            region.switch_state_to_writable(RegionLeaderState::EnteringStaging);
+            region.switch_state_to_staging(RegionLeaderState::Writable);
         }
         drop(enter_staging_result.guard);
         enter_staging_result

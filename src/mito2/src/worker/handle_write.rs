@@ -26,14 +26,14 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RejectWriteSnafu, Result,
+    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionNotFoundSnafu,
+    RejectRequestSnafu, RejectWriteSnafu, Result,
 };
 use crate::metrics;
 use crate::metrics::{
     WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
 };
-use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::region::RegionRequestPolicy;
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderBulkRequest, SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;
@@ -314,9 +314,9 @@ impl<S> RegionWorkerLoop<S> {
                     region_id,
                     region.state()
                 );
-                match region.state() {
-                    RegionRoleState::Leader(RegionLeaderState::Writable)
-                    | RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                let request_policy = region.request_policy();
+                match request_policy {
+                    RegionRequestPolicy::Accept => {
                         if region.reject_all_writes_in_staging() {
                             sender_req
                                 .sender
@@ -333,8 +333,7 @@ impl<S> RegionWorkerLoop<S> {
 
                         e.insert(region_ctx);
                     }
-                    RegionRoleState::Leader(RegionLeaderState::Altering)
-                    | RegionRoleState::Leader(RegionLeaderState::Editing) => {
+                    RegionRequestPolicy::Stall => {
                         // Editing is transient: queue the write so edit completion can drain it
                         // before starting the next queued edit.
                         debug!(
@@ -347,26 +346,11 @@ impl<S> RegionWorkerLoop<S> {
                         self.stalled_requests.push(sender_req);
                         continue;
                     }
-                    RegionRoleState::Leader(RegionLeaderState::EnteringStaging) => {
-                        debug!(
-                            "Region {} is entering staging, add request to pending writes",
-                            region.region_id
-                        );
-                        self.stalling_count.add(1);
-                        WRITE_STALL_TOTAL.inc();
-                        self.stalled_requests.push(sender_req);
-                        continue;
-                    }
-                    state => {
+                    RegionRequestPolicy::Reject(reason) => {
                         // The region is not writable.
-                        sender_req.sender.send(
-                            RegionStateSnafu {
-                                region_id,
-                                state,
-                                expect: RegionRoleState::Leader(RegionLeaderState::Writable),
-                            }
-                            .fail(),
-                        );
+                        sender_req
+                            .sender
+                            .send(RejectRequestSnafu { region_id, reason }.fail());
                         continue;
                     }
                 }
@@ -460,9 +444,9 @@ impl<S> RegionWorkerLoop<S> {
                 else {
                     continue;
                 };
-                match region.state() {
-                    RegionRoleState::Leader(RegionLeaderState::Writable)
-                    | RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                let request_policy = region.request_policy();
+                match request_policy {
+                    RegionRequestPolicy::Accept => {
                         if region.reject_all_writes_in_staging() {
                             bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
                             continue;
@@ -476,8 +460,7 @@ impl<S> RegionWorkerLoop<S> {
 
                         e.insert(region_ctx);
                     }
-                    RegionRoleState::Leader(RegionLeaderState::Altering)
-                    | RegionRoleState::Leader(RegionLeaderState::Editing) => {
+                    RegionRequestPolicy::Stall => {
                         // Editing is transient: queue the bulk write so edit completion can drain
                         // it before starting the next queued edit.
                         debug!(
@@ -490,16 +473,11 @@ impl<S> RegionWorkerLoop<S> {
                         self.stalled_requests.push_bulk(bulk_req);
                         continue;
                     }
-                    state => {
+                    RegionRequestPolicy::Reject(reason) => {
                         // The region is not writable.
-                        bulk_req.sender.send(
-                            RegionStateSnafu {
-                                region_id,
-                                state,
-                                expect: RegionRoleState::Leader(RegionLeaderState::Writable),
-                            }
-                            .fail(),
-                        );
+                        bulk_req
+                            .sender
+                            .send(RejectRequestSnafu { region_id, reason }.fail());
                         continue;
                     }
                 }

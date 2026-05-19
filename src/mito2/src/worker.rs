@@ -1187,7 +1187,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     if matches!(
                         &notify,
                         BackgroundNotify::RegionEdit(edit_result)
-                            if edit_result.update_region_state
+                            if edit_result.guard.is_some()
                     ) {
                         // Region state must be Editing when reach here.
                         // This call only moves write/bulk write request into stall queue. When region edit result

@@ -165,7 +165,6 @@ impl CompactionTaskImpl {
                 sender: expire_delete_sender,
                 edit,
                 result: Ok(()),
-                update_region_state: false,
                 is_staging: false,
                 guard: None,
             }),

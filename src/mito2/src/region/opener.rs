@@ -1165,14 +1165,10 @@ fn can_load_cache(state: RegionRoleState) -> bool {
     match state {
         RegionRoleState::Leader(RegionLeaderState::Writable)
         | RegionRoleState::Leader(RegionLeaderState::Staging)
-        | RegionRoleState::Leader(RegionLeaderState::Altering)
-        | RegionRoleState::Leader(RegionLeaderState::EnteringStaging)
         | RegionRoleState::Leader(RegionLeaderState::Editing)
         | RegionRoleState::Follower => true,
         // The region will be closed soon if it is downgrading.
-        RegionRoleState::Leader(RegionLeaderState::Downgrading)
-        | RegionRoleState::Leader(RegionLeaderState::Dropping)
-        | RegionRoleState::Leader(RegionLeaderState::Truncating) => false,
+        RegionRoleState::Leader(RegionLeaderState::Downgrading) => false,
     }
 }
 

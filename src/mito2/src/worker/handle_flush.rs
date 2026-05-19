@@ -296,6 +296,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         let flush_on_close = request.flush_reason == FlushReason::Closing;
+        let flush_on_enter_staging = request.flush_reason == FlushReason::EnterStaging;
         let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
 
         // In async mode, create indexes after flush.
@@ -334,8 +335,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.maybe_flush_worker();
             // Handle stalled requests.
             self.handle_stalled_requests().await;
-            // Schedules compaction.
-            self.schedule_compaction(&region).await;
+            // Avoid scheduling compaction if the flush is triggered by entering staging.
+            if !flush_on_enter_staging {
+                // Schedules compaction.
+                self.schedule_compaction(&region).await;
+            }
         }
 
         self.listener.on_flush_success(region_id);

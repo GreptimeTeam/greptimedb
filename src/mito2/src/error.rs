@@ -1378,11 +1378,12 @@ impl ErrorExt for Error {
             RegionClosed { .. } => StatusCode::Cancelled,
             RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
-            RejectRequest { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
+            &RejectRequest { .. } | RegionState { .. } | UpdateManifest { .. } => {
+                StatusCode::RegionNotReady
+            }
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),

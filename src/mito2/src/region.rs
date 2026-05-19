@@ -85,14 +85,6 @@ pub enum RegionLeaderState {
     Writable,
     /// The region is in staging mode - writable but no checkpoint/compaction.
     Staging,
-    /// The region is entering staging mode. - write requests will be stalled.
-    EnteringStaging,
-    /// The region is altering.
-    Altering,
-    /// The region is dropping.
-    Dropping,
-    /// The region is truncating.
-    Truncating,
     /// The region is handling a region edit.
     Editing,
     /// The region is stepping down.
@@ -297,8 +289,6 @@ impl MitoRegion {
         matches!(
             self.manifest_ctx.state.load(),
             RegionRoleState::Follower
-                | RegionRoleState::Leader(RegionLeaderState::Dropping)
-                | RegionRoleState::Leader(RegionLeaderState::Truncating)
                 | RegionRoleState::Leader(RegionLeaderState::Downgrading)
                 | RegionRoleState::Leader(RegionLeaderState::Staging)
         )
@@ -315,12 +305,6 @@ impl MitoRegion {
     /// Returns whether the region is in staging mode.
     pub(crate) fn is_staging(&self) -> bool {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Staging)
-    }
-
-    /// Returns whether the region is entering staging mode.
-    pub(crate) fn is_enter_staging(&self) -> bool {
-        self.manifest_ctx.state.load()
-            == RegionRoleState::Leader(RegionLeaderState::EnteringStaging)
     }
 
     pub fn region_id(&self) -> RegionId {
@@ -366,36 +350,6 @@ impl MitoRegion {
         }
     }
 
-    /// Sets the altering state.
-    /// You should call this method in the worker loop.
-    pub(crate) fn set_altering(&self) -> Result<()> {
-        self.compare_exchange_state(
-            RegionLeaderState::Writable,
-            RegionRoleState::Leader(RegionLeaderState::Altering),
-        )
-    }
-
-    /// Sets the dropping state.
-    /// You should call this method in the worker loop.
-    pub(crate) fn set_dropping(&self, expect: RegionLeaderState) -> Result<()> {
-        self.compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Dropping))
-    }
-
-    /// Sets the truncating state.
-    /// You should call this method in the worker loop.
-    pub(crate) fn set_truncating(&self) -> Result<()> {
-        self.compare_exchange_state(
-            RegionLeaderState::Writable,
-            RegionRoleState::Leader(RegionLeaderState::Truncating),
-        )
-    }
-
-    /// Sets the editing state.
-    /// You should call this method in the worker loop.
-    pub(crate) fn set_editing(&self, expect: RegionLeaderState) -> Result<()> {
-        self.compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Editing))
-    }
-
     /// Sets the staging state.
     ///
     /// You should call this method in the worker loop.
@@ -410,14 +364,6 @@ impl MitoRegion {
         self.compare_exchange_state(
             RegionLeaderState::Writable,
             RegionRoleState::Leader(RegionLeaderState::Staging),
-        )
-    }
-
-    /// Sets the entering staging state.
-    pub(crate) fn set_entering_staging(&self) -> Result<()> {
-        self.compare_exchange_state(
-            RegionLeaderState::Writable,
-            RegionRoleState::Leader(RegionLeaderState::EnteringStaging),
         )
     }
 
