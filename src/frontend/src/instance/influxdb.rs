@@ -32,6 +32,22 @@ use snafu::{OptionExt, ResultExt};
 use store_api::mito_engine_options::MERGE_MODE_KEY;
 
 use crate::instance::Instance;
+use crate::service_config::influxdb::InfluxdbMergeMode;
+
+fn ctx_with_default_merge_mode(
+    ctx: QueryContextRef,
+    default_merge_mode: InfluxdbMergeMode,
+) -> QueryContextRef {
+    if ctx.extension(MERGE_MODE_KEY).is_none()
+        && default_merge_mode != InfluxdbMergeMode::LastNonNull
+    {
+        let mut ctx = (*ctx).clone();
+        ctx.set_extension(MERGE_MODE_KEY, default_merge_mode.as_str());
+        Arc::new(ctx)
+    } else {
+        ctx
+    }
+}
 
 #[async_trait]
 impl InfluxdbLineProtocolHandler for Instance {
@@ -60,13 +76,7 @@ impl InfluxdbLineProtocolHandler for Instance {
             .post_lines_conversion(requests, ctx.clone())
             .await?;
 
-        let ctx = if ctx.extension(MERGE_MODE_KEY).is_none() {
-            let mut ctx = (*ctx).clone();
-            ctx.set_extension(MERGE_MODE_KEY, self.influxdb_default_merge_mode.as_str());
-            Arc::new(ctx)
-        } else {
-            ctx
-        };
+        let ctx = ctx_with_default_merge_mode(ctx, self.influxdb_default_merge_mode);
 
         self.handle_influx_row_inserts(requests, ctx)
             .await
@@ -178,4 +188,44 @@ fn align_time_unit(value: &ValueData, target: TimeUnit) -> servers::error::Resul
         TimeUnit::Microsecond => ValueData::TimestampMicrosecondValue(timestamp.value()),
         TimeUnit::Nanosecond => ValueData::TimestampNanosecondValue(timestamp.value()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use session::context::QueryContext;
+    use store_api::mito_engine_options::MERGE_MODE_KEY;
+
+    use super::*;
+    use crate::service_config::influxdb::InfluxdbMergeMode;
+
+    #[test]
+    fn test_influxdb_default_merge_mode_reuses_default_context() {
+        let ctx = QueryContext::arc();
+        let actual = ctx_with_default_merge_mode(ctx.clone(), InfluxdbMergeMode::LastNonNull);
+
+        assert!(Arc::ptr_eq(&ctx, &actual));
+        assert!(actual.extension(MERGE_MODE_KEY).is_none());
+    }
+
+    #[test]
+    fn test_influxdb_non_default_merge_mode_sets_extension() {
+        let ctx = QueryContext::arc();
+        let actual = ctx_with_default_merge_mode(ctx.clone(), InfluxdbMergeMode::LastRow);
+
+        assert!(!Arc::ptr_eq(&ctx, &actual));
+        assert_eq!(Some("last_row"), actual.extension(MERGE_MODE_KEY));
+    }
+
+    #[test]
+    fn test_influxdb_explicit_merge_mode_keeps_context() {
+        let mut ctx = QueryContext::arc();
+        Arc::get_mut(&mut ctx)
+            .unwrap()
+            .set_extension(MERGE_MODE_KEY, "last_row");
+
+        let actual = ctx_with_default_merge_mode(ctx.clone(), InfluxdbMergeMode::LastNonNull);
+
+        assert!(Arc::ptr_eq(&ctx, &actual));
+        assert_eq!(Some("last_row"), actual.extension(MERGE_MODE_KEY));
+    }
 }
