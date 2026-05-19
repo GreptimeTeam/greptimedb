@@ -1,0 +1,14 @@
+src/mito2/src/worker.rs
+  h_623774b620da8e 80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "a42e7c5df06ed1fdb1c69c14cb5d45d1afd073a0",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
