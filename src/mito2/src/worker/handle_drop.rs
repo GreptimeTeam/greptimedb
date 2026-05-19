@@ -28,7 +28,7 @@ use store_api::storage::RegionId;
 use tokio::time::sleep;
 
 use crate::admit_or_return;
-use crate::error::{OpenDalSnafu, RegionBusySnafu, Result};
+use crate::error::{OpenDalSnafu, Result};
 use crate::region::{MitoRegionRef, RegionMapRef, RegionRequestPolicy, RegionRequestRejectReason};
 use crate::request::OptionOutputTx;
 use crate::worker::{BufferedRegionRequest, DROPPING_MARKER_FILE, RegionWorkerLoop};
@@ -72,11 +72,9 @@ where
         let region_id = region.region_id();
         info!("Try to drop region: {}, worker: {}", region_id, self.id);
 
-        let Some(_guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Reject(
+        let _guard = region.acquire_request_policy_guard(RegionRequestPolicy::Reject(
             RegionRequestRejectReason::Dropping,
-        )) else {
-            return RegionBusySnafu { region_id }.fail();
-        };
+        ))?;
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
         let region_dir = region.access_layer.build_region_dir(region_id);

@@ -21,9 +21,7 @@ use store_api::storage::RegionId;
 
 use crate::admit_or_return;
 use crate::compaction::RequestCancelResult;
-use crate::error::{
-    RegionBusySnafu, RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu,
-};
+use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRequestPolicy, StagingPartitionInfo};
@@ -192,14 +190,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         partition_directive: StagingPartitionDirective,
         sender: OptionOutputTx,
     ) {
-        let Some(guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Stall) else {
-            sender.send(
-                RegionBusySnafu {
-                    region_id: region.region_id,
-                }
-                .fail(),
-            );
-            return;
+        let guard = match region.acquire_request_policy_guard(RegionRequestPolicy::Stall) {
+            Ok(guard) => guard,
+            Err(err) => {
+                sender.send(Err(err));
+                return;
+            }
         };
 
         let listener = self.listener.clone();

@@ -127,7 +127,6 @@ impl SchedulerEnv {
         &self,
         metadata: RegionMetadataRef,
     ) -> ManifestContextRef {
-        let region_id = metadata.region_id;
         Arc::new(ManifestContext::new(
             RegionManifestManager::new(
                 metadata,

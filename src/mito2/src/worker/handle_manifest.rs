@@ -28,7 +28,7 @@ use crate::admit_or_return;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::IndexBuildMode;
-use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
+use crate::error::{RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
@@ -203,14 +203,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         let is_staging = region.is_staging();
-        let Some(guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Stall) else {
-            let _ = sender.send(
-                RegionBusySnafu {
-                    region_id: region.region_id,
-                }
-                .fail(),
-            );
-            return;
+        let guard = match region.acquire_request_policy_guard(RegionRequestPolicy::Stall) {
+            Ok(guard) => guard,
+            Err(err) => {
+                let _ = sender.send(Err(err));
+                return;
+            }
         };
 
         let request_sender = self.sender.clone();
@@ -309,14 +307,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         sender: OptionOutputTx,
     ) {
         // This prevents the region from being accessed by other write requests.
-        let Some(guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Stall) else {
-            sender.send(
-                RegionBusySnafu {
-                    region_id: region.region_id,
-                }
-                .fail(),
-            );
-            return;
+        let guard = match region.acquire_request_policy_guard(RegionRequestPolicy::Stall) {
+            Ok(guard) => guard,
+            Err(err) => {
+                sender.send(Err(err));
+                return;
+            }
         };
 
         // Now the region is in truncating state.
@@ -363,14 +359,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         new_options: Option<RegionOptions>,
         sender: OptionOutputTx,
     ) {
-        let Some(guard) = region.acquire_request_policy_guard(RegionRequestPolicy::Stall) else {
-            sender.send(
-                RegionBusySnafu {
-                    region_id: region.region_id,
-                }
-                .fail(),
-            );
-            return;
+        let guard = match region.acquire_request_policy_guard(RegionRequestPolicy::Stall) {
+            Ok(guard) => guard,
+            Err(err) => {
+                sender.send(Err(err));
+                return;
+            }
         };
         let listener = self.listener.clone();
         let request_sender = self.sender.clone();

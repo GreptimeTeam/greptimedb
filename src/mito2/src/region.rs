@@ -45,8 +45,9 @@ pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
-    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
+    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, InvalidRegionRequestPolicySnafu,
+    RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu,
+    RequestPolicyGuardAlreadyAcquiredSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
@@ -208,9 +209,28 @@ impl MitoRegion {
     pub(crate) fn acquire_request_policy_guard(
         &self,
         request_policy: RegionRequestPolicy,
-    ) -> Option<RegionRequestPolicyGuard> {
+    ) -> Result<RegionRequestPolicyGuard> {
         self.manifest_ctx
             .acquire_region_request_policy_guard(request_policy)
+            .map_err(|err| match err {
+                RequestPolicyGuardError::AlreadyAcquired => {
+                    RequestPolicyGuardAlreadyAcquiredSnafu {
+                        region_id: self.region_id,
+                    }
+                    .build()
+                }
+                RequestPolicyGuardError::InvalidTransition {
+                    role,
+                    current_policy,
+                    next_policy,
+                } => InvalidRegionRequestPolicySnafu {
+                    region_id: self.region_id,
+                    role,
+                    current_policy,
+                    next_policy,
+                }
+                .build(),
+            })
     }
 
     /// Returns current metadata of the region.
@@ -834,9 +854,12 @@ impl MitoRegion {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RegionRequestPolicy {
+pub enum RegionRequestPolicy {
+    /// Accept incoming requests.
     Accept,
+    /// Stall incoming requests until the current guarded operation finishes.
     Stall,
+    /// Reject incoming requests with a structured reason.
     Reject(RegionRequestRejectReason),
 }
 
@@ -859,14 +882,24 @@ struct RegionControlStateInner {
     active_guard: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestPolicyGuardError {
+    AlreadyAcquired,
+    InvalidTransition {
+        role: RegionRole,
+        current_policy: RegionRequestPolicy,
+        next_policy: RegionRequestPolicy,
+    },
+}
+
 /// Controls the durable region role and the transient request admission policy.
 ///
-/// The region role determines the default request policy. A
-/// [`RegionRequestPolicyGuard`] may temporarily override the request policy for
-/// in-flight operations such as region edit or drop. When the guard is dropped,
-/// it restores the previous policy only if the region role and active policy
-/// still match the acquisition context, so it won't overwrite a newer role
-/// transition.
+/// The region role determines the default request policy. A writable or staging
+/// leader may use [`RegionRequestPolicyGuard`] to temporarily downgrade the
+/// request policy for in-flight operations such as region edit or drop. When the
+/// guard is dropped, it restores the previous policy only if the region role and
+/// active policy still match the acquisition context, so it won't overwrite a
+/// newer role transition.
 #[derive(Debug, Clone)]
 pub(crate) struct RegionControlState {
     inner: Arc<Mutex<RegionControlStateInner>>,
@@ -933,6 +966,22 @@ impl RegionControlState {
                 RegionRequestPolicy::Reject(RegionRequestRejectReason::Follower)
             }
         }
+    }
+
+    fn can_acquire_request_policy_guard(
+        role: RegionRole,
+        current_policy: RegionRequestPolicy,
+        next_policy: RegionRequestPolicy,
+    ) -> bool {
+        if current_policy == next_policy {
+            return false;
+        }
+
+        matches!(role, RegionRole::Leader | RegionRole::StagingLeader)
+            && matches!(
+                next_policy,
+                RegionRequestPolicy::Stall | RegionRequestPolicy::Reject(_)
+            )
     }
 
     pub(crate) fn new(role: RegionRole) -> Self {
@@ -1010,16 +1059,24 @@ impl RegionControlState {
     pub(crate) fn try_acquire_request_policy_guard(
         &self,
         request_policy: RegionRequestPolicy,
-    ) -> Option<RegionRequestPolicyGuard> {
+    ) -> std::result::Result<RegionRequestPolicyGuard, RequestPolicyGuardError> {
         let mut inner = self.inner.lock().unwrap();
         if inner.active_guard {
-            return None;
+            return Err(RequestPolicyGuardError::AlreadyAcquired);
+        }
+        if !Self::can_acquire_request_policy_guard(inner.role, inner.request_policy, request_policy)
+        {
+            return Err(RequestPolicyGuardError::InvalidTransition {
+                role: inner.role,
+                current_policy: inner.request_policy,
+                next_policy: request_policy,
+            });
         }
         let previous_role = inner.role;
         let previous_policy = inner.request_policy;
         inner.request_policy = request_policy;
         inner.active_guard = true;
-        Some(RegionRequestPolicyGuard {
+        Ok(RegionRequestPolicyGuard {
             control_state: self.inner.clone(),
             previous_role,
             previous_policy,
@@ -1064,7 +1121,7 @@ impl ManifestContext {
     pub(crate) fn acquire_region_request_policy_guard(
         &self,
         request_policy: RegionRequestPolicy,
-    ) -> Option<RegionRequestPolicyGuard> {
+    ) -> std::result::Result<RegionRequestPolicyGuard, RequestPolicyGuardError> {
         self.control_state
             .try_acquire_request_policy_guard(request_policy)
     }
@@ -1773,7 +1830,8 @@ mod tests {
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::{
         ManifestContext, ManifestStats, MitoRegion, RegionControlState, RegionLeaderState,
-        RegionRoleState,
+        RegionRequestPolicy, RegionRequestPolicyGuard, RegionRequestRejectReason, RegionRoleState,
+        RequestPolicyGuardError,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
@@ -1785,6 +1843,98 @@ mod tests {
     #[test]
     fn test_region_state_lock_free() {
         assert!(AtomicCell::<RegionRoleState>::is_lock_free());
+    }
+
+    #[test]
+    fn test_request_policy_guard_acquisition_rules() {
+        let leader = RegionControlState::new(RegionRole::Leader);
+        assert_invalid_request_policy_transition(
+            leader.try_acquire_request_policy_guard(RegionRequestPolicy::Accept),
+            RegionRole::Leader,
+            RegionRequestPolicy::Accept,
+            RegionRequestPolicy::Accept,
+        );
+
+        let guard = leader
+            .try_acquire_request_policy_guard(RegionRequestPolicy::Stall)
+            .unwrap();
+        assert_eq!(leader.current_request_policy(), RegionRequestPolicy::Stall);
+        assert!(matches!(
+            leader.try_acquire_request_policy_guard(RegionRequestPolicy::Reject(
+                RegionRequestRejectReason::Dropping,
+            )),
+            Err(RequestPolicyGuardError::AlreadyAcquired)
+        ));
+        drop(guard);
+        assert_eq!(leader.current_request_policy(), RegionRequestPolicy::Accept);
+
+        let guard = leader
+            .try_acquire_request_policy_guard(RegionRequestPolicy::Reject(
+                RegionRequestRejectReason::Dropping,
+            ))
+            .unwrap();
+        assert_eq!(
+            leader.current_request_policy(),
+            RegionRequestPolicy::Reject(RegionRequestRejectReason::Dropping)
+        );
+        drop(guard);
+        assert_eq!(leader.current_request_policy(), RegionRequestPolicy::Accept);
+
+        let staging_leader = RegionControlState::new(RegionRole::StagingLeader);
+        staging_leader
+            .try_acquire_request_policy_guard(RegionRequestPolicy::Stall)
+            .unwrap();
+
+        let downgrading_leader = RegionControlState::new(RegionRole::DowngradingLeader);
+        assert_guard_not_allowed(
+            &downgrading_leader,
+            RegionRole::DowngradingLeader,
+            RegionRequestPolicy::Reject(RegionRequestRejectReason::DowngradingLeader),
+        );
+
+        let follower = RegionControlState::new(RegionRole::Follower);
+        assert_guard_not_allowed(
+            &follower,
+            RegionRole::Follower,
+            RegionRequestPolicy::Reject(RegionRequestRejectReason::Follower),
+        );
+    }
+
+    fn assert_guard_not_allowed(
+        control_state: &RegionControlState,
+        role: RegionRole,
+        current_policy: RegionRequestPolicy,
+    ) {
+        for next_policy in [
+            RegionRequestPolicy::Accept,
+            RegionRequestPolicy::Stall,
+            RegionRequestPolicy::Reject(RegionRequestRejectReason::Dropping),
+        ] {
+            assert_invalid_request_policy_transition(
+                control_state.try_acquire_request_policy_guard(next_policy),
+                role,
+                current_policy,
+                next_policy,
+            );
+        }
+    }
+
+    fn assert_invalid_request_policy_transition(
+        result: std::result::Result<RegionRequestPolicyGuard, RequestPolicyGuardError>,
+        role: RegionRole,
+        current_policy: RegionRequestPolicy,
+        next_policy: RegionRequestPolicy,
+    ) {
+        assert!(matches!(
+            result,
+            Err(RequestPolicyGuardError::InvalidTransition {
+                role: actual_role,
+                current_policy: actual_current_policy,
+                next_policy: actual_next_policy,
+            }) if actual_role == role
+                && actual_current_policy == current_policy
+                && actual_next_policy == next_policy
+        ));
     }
 
     async fn build_test_region(env: &SchedulerEnv) -> MitoRegion {
