@@ -37,7 +37,6 @@ use datatypes::schema::Schema;
 use datatypes::schema::ext::ArrowSchemaExt;
 use datatypes::types::json_type::JsonNativeType;
 use futures::StreamExt;
-use parquet::file::metadata::PageIndexPolicy;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::ResultExt;
@@ -1098,7 +1097,7 @@ impl ScanInput {
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
             .fulltext_index_appliers(self.fulltext_index_appliers.clone());
         let reader = if !self.compaction && may_build_selective_row_selection {
-            reader.page_index_policy(PageIndexPolicy::Optional)
+            reader.deferred_optional_page_index()
         } else {
             reader
         };
