@@ -1,0 +1,42 @@
+src/mito2/src/worker/handle_open.rs
+  h_623774b620da8e 110
+src/mito2/src/request.rs
+  h_623774b620da8e 58,1062-1063
+src/mito2/src/worker/handle_drop.rs
+  h_623774b620da8e 82
+src/mito2/src/worker/handle_catchup.rs
+  h_623774b620da8e 126
+src/mito2/src/compaction/compactor.rs
+  h_623774b620da8e 30,49,181
+src/mito2/src/worker/utils.rs
+  h_623774b620da8e 1-49
+src/mito2/src/worker/handle_create.rs
+  h_623774b620da8e 69
+src/mito2/src/error.rs
+  h_623774b620da8e 38,544-555,1377
+src/mito2/src/test_util/scheduler_util.rs
+  h_623774b620da8e 26,39,132,151
+src/mito2/src/worker/handle_manifest.rs
+  h_623774b620da8e 41,409-418,442
+src/mito2/src/worker.rs
+  h_623774b620da8e 34,36,57,59,68-69,78,81,577,612,629-630,779-833,927-928,961-964,1036-1043,1106-1117
+src/mito2/src/worker/handle_truncate.rs
+  h_623774b620da8e 22,25,27,44-50
+src/mito2/src/region.rs
+  h_623774b620da8e 25,45,210-225,900-1027,1036-1037,1048-1049,1054,1059-1069,1738,1778,2030,2099
+src/mito2/src/region/opener.rs
+  h_623774b620da8e 42,62-63,118,137,158,341-345,589-593
+src/mito2/src/compaction.rs
+  h_623774b620da8e 1145,1152,1718
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "f0aa7c0d99475b8a0a8ef541f3bdce946d25287f",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
