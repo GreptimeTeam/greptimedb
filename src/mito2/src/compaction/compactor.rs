@@ -30,7 +30,6 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionRole;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
-use tokio::sync::mpsc::unbounded_channel;
 
 use crate::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
@@ -176,10 +175,9 @@ pub async fn open_compaction_region(
 
     let manifest = manifest_manager.manifest();
     let region_metadata = manifest.metadata.clone();
-    let (tx, _) = unbounded_channel();
     let manifest_ctx = Arc::new(ManifestContext::new(
         manifest_manager,
-        RegionControlState::new(req.region_id, RegionRole::Leader, tx),
+        RegionControlState::new(req.region_id, RegionRole::Leader),
     ));
 
     let file_purger = {

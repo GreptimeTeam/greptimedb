@@ -295,6 +295,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&enter_staging_result.region_id, true)
             .await;
+        self.handle_buffered_requests(enter_staging_result.region_id)
+            .await;
     }
 
     fn update_region_staging_partition_info(

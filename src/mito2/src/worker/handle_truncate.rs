@@ -140,6 +140,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             Err(e) => {
                 // Unable to truncate the region.
                 truncate_result.sender.send(Err(e));
+                self.handle_buffered_requests(region_id).await;
                 return;
             }
         }
@@ -165,6 +166,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .await
             {
                 truncate_result.sender.send(Err(e));
+                self.handle_buffered_requests(region_id).await;
                 return;
             }
         }
@@ -175,5 +177,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
 
         truncate_result.sender.send(Ok(0));
+        self.handle_buffered_requests(region_id).await;
     }
 }

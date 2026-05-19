@@ -123,7 +123,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.time_provider.clone(),
             self.file_ref_manager.clone(),
             self.partition_expr_fetcher.clone(),
-            self.control_state_sender.clone(),
         )
         .cache(Some(self.cache_manager.clone()))
         .options(region.version().options.clone())?

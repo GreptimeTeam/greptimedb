@@ -41,7 +41,6 @@ use store_api::region_request::{PathType, StagingPartitionDirective};
 use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
-use tokio::sync::mpsc::UnboundedSender;
 pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
@@ -267,7 +266,7 @@ impl MitoRegion {
     /// Returns whether the region is writable.
     pub(crate) fn is_writable(&self) -> bool {
         matches!(
-            self.manifest_ctx.state(),
+            self.manifest_ctx.current_state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
                 | RegionRoleState::Leader(RegionLeaderState::Staging)
         )
@@ -276,7 +275,7 @@ impl MitoRegion {
     /// Returns whether the region is flushable.
     pub(crate) fn is_flushable(&self) -> bool {
         matches!(
-            self.manifest_ctx.state(),
+            self.manifest_ctx.current_state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
                 | RegionRoleState::Leader(RegionLeaderState::Staging)
                 | RegionRoleState::Leader(RegionLeaderState::Downgrading)
@@ -286,7 +285,7 @@ impl MitoRegion {
     /// Returns whether the region should abort index building.
     pub(crate) fn should_abort_index(&self) -> bool {
         matches!(
-            self.manifest_ctx.state(),
+            self.manifest_ctx.current_state(),
             RegionRoleState::Follower
                 | RegionRoleState::Leader(RegionLeaderState::Downgrading)
                 | RegionRoleState::Leader(RegionLeaderState::Staging)
@@ -296,14 +295,14 @@ impl MitoRegion {
     /// Returns whether the region is downgrading.
     pub(crate) fn is_downgrading(&self) -> bool {
         matches!(
-            self.manifest_ctx.state(),
+            self.manifest_ctx.current_state(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         )
     }
 
     /// Returns whether the region is in staging mode.
     pub(crate) fn is_staging(&self) -> bool {
-        self.manifest_ctx.state() == RegionRoleState::Leader(RegionLeaderState::Staging)
+        self.manifest_ctx.current_state() == RegionRoleState::Leader(RegionLeaderState::Staging)
     }
 
     pub fn region_id(&self) -> RegionId {
@@ -325,12 +324,12 @@ impl MitoRegion {
 
     /// Returns whether the region is readonly.
     pub fn is_follower(&self) -> bool {
-        self.manifest_ctx.state() == RegionRoleState::Follower
+        self.manifest_ctx.current_state() == RegionRoleState::Follower
     }
 
     /// Returns the state of the region.
     pub(crate) fn state(&self) -> RegionRoleState {
-        self.manifest_ctx.state()
+        self.manifest_ctx.current_state()
     }
 
     /// Sets the region role state.
@@ -855,7 +854,6 @@ struct RegionControlStateInner {
     request_policy: RegionRequestPolicy,
     active_guard: bool,
     region_id: RegionId,
-    guard_release_tx: UnboundedSender<(RegionId, RegionRequestPolicy)>,
 }
 
 #[derive(Debug, Clone)]
@@ -870,7 +868,6 @@ pub(crate) struct RegionRequestPolicyGuard {
     previous_policy: RegionRequestPolicy,
     active_policy: RegionRequestPolicy,
     region_id: RegionId,
-    guard_release_tx: UnboundedSender<(RegionId, RegionRequestPolicy)>,
 }
 
 impl Debug for RegionRequestPolicyGuard {
@@ -891,8 +888,6 @@ impl Drop for RegionRequestPolicyGuard {
             inner.request_policy = self.previous_policy;
         }
         inner.active_guard = false;
-        let next_policy = inner.request_policy;
-        let _ = self.guard_release_tx.send((self.region_id, next_policy));
     }
 }
 
@@ -929,26 +924,13 @@ impl RegionControlState {
         }
     }
 
-    #[cfg(any(test, feature = "test"))]
-    pub(crate) fn new_test(region_id: RegionId, role: RegionRole) -> Self {
-        use tokio::sync::mpsc::unbounded_channel;
-
-        let (tx, _rx) = unbounded_channel();
-        Self::new(region_id, role, tx)
-    }
-
-    pub(crate) fn new(
-        region_id: RegionId,
-        role: RegionRole,
-        guard_release_tx: UnboundedSender<(RegionId, RegionRequestPolicy)>,
-    ) -> Self {
+    pub(crate) fn new(region_id: RegionId, role: RegionRole) -> Self {
         let request_policy = Self::role_to_request_policy(role);
         let inner = RegionControlStateInner {
             role,
             request_policy,
             active_guard: false,
             region_id,
-            guard_release_tx,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -1033,7 +1015,6 @@ impl RegionControlState {
             previous_policy,
             active_policy: request_policy,
             region_id: inner.region_id,
-            guard_release_tx: inner.guard_release_tx.clone(),
         })
     }
 
@@ -1092,10 +1073,6 @@ impl ManifestContext {
         *self.staging_partition_info.lock().unwrap() = None;
     }
 
-    pub(crate) fn state(&self) -> RegionRoleState {
-        self.control_state.role_state()
-    }
-
     pub(crate) fn exit_staging(
         &self,
         region_id: RegionId,
@@ -1132,7 +1109,7 @@ impl ManifestContext {
 
     /// Returns the current region role state.
     pub(crate) fn current_state(&self) -> RegionRoleState {
-        self.state()
+        self.control_state.role_state()
     }
 
     /// Installs the manifest changes from the current version to the target version (inclusive).
@@ -1243,7 +1220,7 @@ impl ManifestContext {
         let manifest = manager.manifest();
         // Checks state inside the lock. This is to ensure that we won't update the manifest
         // after `set_readonly_gracefully()` is called.
-        let current_state = self.state();
+        let current_state = self.current_state();
         check_state(current_state, manifest.metadata.region_id)?;
 
         for action in &action_list.actions {
@@ -1301,7 +1278,7 @@ impl ManifestContext {
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
 
-        if self.state() == RegionRoleState::Follower {
+        if self.current_state() == RegionRoleState::Follower {
             warn!(
                 "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
                 manifest.metadata.region_id
@@ -1824,7 +1801,7 @@ mod tests {
 
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
-            RegionControlState::new_test(metadata.region_id, RegionRole::Leader),
+            RegionControlState::new(metadata.region_id, RegionRole::Leader),
         ));
 
         MitoRegion {
@@ -2002,49 +1979,49 @@ mod tests {
         let region_id = RegionId::new(1024, 0);
         // Leader -> Follower
         manifest_ctx.set_role(RegionRole::Follower, region_id);
-        assert_eq!(manifest_ctx.state(), RegionRoleState::Follower);
+        assert_eq!(manifest_ctx.current_state(), RegionRoleState::Follower);
 
         // Follower -> Leader
         manifest_ctx.set_role(RegionRole::Leader, region_id);
         assert_eq!(
-            manifest_ctx.state(),
+            manifest_ctx.current_state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
 
         // Direct Leader -> StagingLeader should be ignored.
         manifest_ctx.set_role(RegionRole::StagingLeader, region_id);
         assert_eq!(
-            manifest_ctx.state(),
+            manifest_ctx.current_state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
 
         // Leader -> Downgrading Leader
         manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
         assert_eq!(
-            manifest_ctx.state(),
+            manifest_ctx.current_state(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         );
 
         // Downgrading Leader -> Follower
         manifest_ctx.set_role(RegionRole::Follower, region_id);
-        assert_eq!(manifest_ctx.state(), RegionRoleState::Follower);
+        assert_eq!(manifest_ctx.current_state(), RegionRoleState::Follower);
 
         // Can't downgrade from follower (Follower -> Downgrading Leader)
         manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
-        assert_eq!(manifest_ctx.state(), RegionRoleState::Follower);
+        assert_eq!(manifest_ctx.current_state(), RegionRoleState::Follower);
 
         // Set region role too Downgrading Leader
         manifest_ctx.set_role(RegionRole::Leader, region_id);
         manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
         assert_eq!(
-            manifest_ctx.state(),
+            manifest_ctx.current_state(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         );
 
         // Downgrading Leader -> Leader
         manifest_ctx.set_role(RegionRole::Leader, region_id);
         assert_eq!(
-            manifest_ctx.state(),
+            manifest_ctx.current_state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
     }
@@ -2075,7 +2052,7 @@ mod tests {
             .unwrap();
             Arc::new(ManifestContext::new(
                 manager,
-                RegionControlState::new_test(RegionId::new(0, 0), RegionRole::StagingLeader),
+                RegionControlState::new(RegionId::new(0, 0), RegionRole::StagingLeader),
             ))
         };
 
@@ -2143,7 +2120,7 @@ mod tests {
 
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
-            RegionControlState::new_test(metadata.region_id, RegionRole::Leader),
+            RegionControlState::new(metadata.region_id, RegionRole::Leader),
         ));
 
         let region = MitoRegion {

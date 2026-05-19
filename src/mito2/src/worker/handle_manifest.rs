@@ -95,6 +95,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id, true)
             .await;
+        self.handle_buffered_requests(change_result.region_id).await;
     }
 
     /// Handles region sync request.
@@ -292,6 +293,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // Otherwise the next edit could reserve a committed sequence before those writes.
             self.handle_region_stalled_requests(&edit_result.region_id, false)
                 .await;
+            self.handle_buffered_requests(edit_result.region_id).await;
         }
 
         if need_compaction {

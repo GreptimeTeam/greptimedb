@@ -58,7 +58,7 @@ use store_api::region_request::{
     RegionAlterRequest, RegionTruncateRequest, StagingPartitionDirective,
 };
 use store_api::storage::{FileId, RegionId};
-use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
@@ -575,7 +575,6 @@ impl<S: LogStore> WorkerStarter<S> {
         let running = Arc::new(AtomicBool::new(true));
         let now = self.time_provider.current_time_millis();
         let id_string = self.id.to_string();
-        let (control_state_sender, control_state_receiver) = mpsc::unbounded_channel();
         let mut worker_thread = RegionWorkerLoop {
             id: self.id,
             config: self.config.clone(),
@@ -626,8 +625,6 @@ impl<S: LogStore> WorkerStarter<S> {
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
-            control_state_receiver,
-            control_state_sender,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -992,10 +989,6 @@ struct RegionWorkerLoop<S> {
     partition_expr_fetcher: PartitionExprFetcherRef,
     /// Semaphore to control flush concurrency.
     flush_semaphore: Arc<Semaphore>,
-    /// Control state sender to update region request policy.
-    control_state_sender: UnboundedSender<(RegionId, RegionRequestPolicy)>,
-    /// Control state receiver to update region request policy.
-    control_state_receiver: UnboundedReceiver<(RegionId, RegionRequestPolicy)>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1067,14 +1060,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         continue;
                     }
                 }
-                ctrl_state = self.control_state_receiver.recv() => {
-                    if let Some((region_id, policy)) = ctrl_state {
-                        self.try_resume_buffered_requests(region_id, policy).await;
-                    } else {
-                        // The channel is disconnected.
-                        break;
-                    }
-                }
                 _ = &mut sleep => {
                     // Timeout. Checks periodical tasks.
                     self.handle_periodical_tasks();
@@ -1135,36 +1120,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.clean().await;
 
         info!("Exit region worker thread {}", self.id);
-    }
-
-    async fn try_resume_buffered_requests(
-        &mut self,
-        region_id: RegionId,
-        policy: RegionRequestPolicy,
-    ) {
-        if policy == RegionRequestPolicy::Stall {
-            return;
-        }
-
-        loop {
-            let Some(region) = self.regions.get_region(region_id) else {
-                self.buffered_requests.remove_region(region_id);
-                return;
-            };
-            match region.request_policy() {
-                RegionRequestPolicy::Accept => {}
-                RegionRequestPolicy::Stall => return,
-                RegionRequestPolicy::Reject(reason) => {
-                    self.buffered_requests.reject_region(region_id, reason);
-                    return;
-                }
-            }
-
-            let Some(req) = self.buffered_requests.next(region_id) else {
-                return;
-            };
-            self.handle_buffered_request(region_id, req).await;
-        }
     }
 
     async fn buffer_bulk_insert_request(

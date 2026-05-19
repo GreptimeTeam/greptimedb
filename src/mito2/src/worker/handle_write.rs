@@ -163,6 +163,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .inc_by(delete_rows as u64);
     }
 
+    /// Handles a specific region's buffered requests.
+    pub(crate) async fn handle_buffered_requests(&mut self, region_id: RegionId) {
+        loop {
+            let Some(region) = self.regions.get_region(region_id) else {
+                self.buffered_requests.remove_region(region_id);
+                return;
+            };
+            match region.request_policy() {
+                RegionRequestPolicy::Accept => {}
+                RegionRequestPolicy::Stall => return,
+                RegionRequestPolicy::Reject(reason) => {
+                    self.buffered_requests.reject_region(region_id, reason);
+                    return;
+                }
+            }
+
+            let Some(req) = self.buffered_requests.next(region_id) else {
+                return;
+            };
+            self.handle_buffered_request(region_id, req).await;
+        }
+    }
+
     /// Handles all stalled write requests.
     pub(crate) async fn handle_stalled_requests(&mut self) {
         // Handle stalled requests.
