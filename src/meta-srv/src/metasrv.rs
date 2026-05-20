@@ -483,22 +483,27 @@ pub struct SelectorContext {
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
 
-/// Wraps the datanode selector constructed from [`MetasrvOptions`].
+/// Context passed to a selector factory during metasrv bootstrap.
 ///
-/// This hook lets plugins decorate the configured selector without rebuilding it
-/// themselves. For example, a plugin can first constrain the candidate datanodes
-/// and then delegate the final choice to the selector chosen by `MetasrvOptions`,
-/// such as load-based, lease-based, or round-robin selection.
-///
-/// A plugin-provided [`SelectorRef`] still takes precedence over this wrapper. The
-/// wrapper is only applied when metasrv bootstrap builds the selector from options.
-pub trait SelectorWrapper: Send + Sync {
-    /// Returns the selector metasrv should use after wrapping the configured base selector.
-    fn wrap(&self, selector: SelectorRef) -> SelectorRef;
+/// The factory runs after bootstrap has constructed the selector configured by
+/// [`MetasrvOptions::selector`], so plugins can either decorate `base_selector` or
+/// build a completely different selector using bootstrap-only dependencies like
+/// [`MetaPeerClientRef`].
+pub struct SelectorFactoryContext {
+    pub metasrv_options: MetasrvOptions,
+    pub meta_peer_client: MetaPeerClientRef,
+    pub in_memory: ResettableKvBackendRef,
+    pub election: Option<ElectionRef>,
+    pub base_selector: SelectorRef,
 }
 
-/// Shared selector wrapper plugin registered through [`common_base::Plugins`].
-pub type SelectorWrapperRef = Arc<dyn SelectorWrapper>;
+/// Builds the final datanode selector metasrv should use.
+pub trait SelectorFactory: Send + Sync {
+    fn build(&self, ctx: SelectorFactoryContext) -> SelectorRef;
+}
+
+/// Shared selector factory plugin registered through [`common_base::Plugins`].
+pub type SelectorFactoryRef = Arc<dyn SelectorFactory>;
 pub type RegionStatAwareSelectorRef =
     Arc<dyn RegionStatAwareSelector<Context = SelectorContext, Output = Vec<(RegionId, Peer)>>>;
 

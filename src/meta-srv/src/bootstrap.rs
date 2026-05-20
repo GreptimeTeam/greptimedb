@@ -46,8 +46,8 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::OtherSnafu;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
-    BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
-    SelectorWrapperRef,
+    BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorFactoryContext,
+    SelectorFactoryRef, SelectorRef,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
@@ -382,35 +382,37 @@ pub async fn metasrv_builder(
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
     let meta_peer_client = build_default_meta_peer_client(&election, &in_memory);
 
-    let selector = if let Some(selector) = plugins.get::<SelectorRef>() {
-        info!("Using selector from plugins");
-        selector
-    } else {
-        let selector: Arc<
-            dyn Selector<
-                    Context = crate::metasrv::SelectorContext,
-                    Output = Vec<common_meta::peer::Peer>,
-                >,
-        > = match opts.selector {
-            SelectorType::LoadBased => Arc::new(LoadBasedSelector::new(
-                RegionNumsBasedWeightCompute,
-                meta_peer_client.clone(),
-            )) as SelectorRef,
-            SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
-            SelectorType::RoundRobin => {
-                Arc::new(RoundRobinSelector::new(SelectTarget::Datanode)) as SelectorRef
-            }
-        };
-        info!(
-            "Using selector from options, selector type: {}",
-            opts.selector.as_ref()
-        );
-        if let Some(wrapper) = plugins.get::<SelectorWrapperRef>() {
-            info!("Wrapping selector from options");
-            wrapper.wrap(selector)
-        } else {
-            selector
+    let base_selector: Arc<
+        dyn Selector<
+                Context = crate::metasrv::SelectorContext,
+                Output = Vec<common_meta::peer::Peer>,
+            >,
+    > = match opts.selector {
+        SelectorType::LoadBased => Arc::new(LoadBasedSelector::new(
+            RegionNumsBasedWeightCompute,
+            meta_peer_client.clone(),
+        )) as SelectorRef,
+        SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
+        SelectorType::RoundRobin => {
+            Arc::new(RoundRobinSelector::new(SelectTarget::Datanode)) as SelectorRef
         }
+    };
+    info!(
+        "Using selector from options, selector type: {}",
+        opts.selector.as_ref()
+    );
+
+    let selector = if let Some(factory) = plugins.get::<SelectorFactoryRef>() {
+        info!("Building selector from plugin factory");
+        factory.build(SelectorFactoryContext {
+            metasrv_options: opts.clone(),
+            meta_peer_client: meta_peer_client.clone(),
+            in_memory: in_memory.clone(),
+            election: election.clone(),
+            base_selector,
+        })
+    } else {
+        base_selector
     };
 
     Ok(MetasrvBuilder::new()
@@ -443,26 +445,26 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
 
     use super::*;
-    use crate::metasrv::SelectorWrapper;
+    use crate::metasrv::{SelectorFactory, SelectorFactoryContext};
 
-    struct RecordingSelectorWrapper {
+    struct RecordingSelectorFactory {
         called: Arc<AtomicBool>,
     }
 
-    impl SelectorWrapper for RecordingSelectorWrapper {
-        fn wrap(&self, selector: SelectorRef) -> SelectorRef {
+    impl SelectorFactory for RecordingSelectorFactory {
+        fn build(&self, ctx: SelectorFactoryContext) -> SelectorRef {
             self.called.store(true, Ordering::Relaxed);
-            selector
+            ctx.base_selector
         }
     }
 
     #[tokio::test]
-    async fn metasrv_builder_wraps_load_based_selector_from_plugins() {
+    async fn metasrv_builder_builds_load_based_selector_from_plugin_factory() {
         let called = Arc::new(AtomicBool::new(false));
         let plugins = Plugins::new();
-        plugins.insert(Arc::new(RecordingSelectorWrapper {
+        plugins.insert(Arc::new(RecordingSelectorFactory {
             called: called.clone(),
-        }) as SelectorWrapperRef);
+        }) as SelectorFactoryRef);
         let opts = MetasrvOptions {
             selector: SelectorType::LoadBased,
             ..Default::default()
