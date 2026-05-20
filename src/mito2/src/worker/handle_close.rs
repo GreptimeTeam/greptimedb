@@ -46,6 +46,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .version
                 .memtables
                 .is_empty()
+            && region.is_flushable()
         {
             info!("Region {} has pending data, waiting for flush", region_id);
             self.handle_flush_request(
