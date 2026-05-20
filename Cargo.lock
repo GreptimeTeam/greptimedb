@@ -13506,6 +13506,7 @@ dependencies = [
  "aquamarine",
  "async-stream",
  "async-trait",
+ "bytes",
  "common-base",
  "common-error",
  "common-grpc",
