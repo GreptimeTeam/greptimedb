@@ -352,20 +352,14 @@ impl MitoRegion {
         self.manifest_ctx.current_state()
     }
 
+    /// Returns the role of the region.
+    pub(crate) fn region_role(&self) -> RegionRole {
+        self.manifest_ctx.current_role()
+    }
+
     /// Sets the region role state.
     pub(crate) fn set_role(&self, next_role: RegionRole) {
         self.manifest_ctx.set_role(next_role, self.region_id);
-    }
-
-    pub(crate) fn region_role(&self) -> RegionRole {
-        match self.state() {
-            RegionRoleState::Follower => RegionRole::Follower,
-            RegionRoleState::Leader(RegionLeaderState::Staging) => RegionRole::StagingLeader,
-            RegionRoleState::Leader(RegionLeaderState::Downgrading) => {
-                RegionRole::DowngradingLeader
-            }
-            RegionRoleState::Leader(_) => RegionRole::Leader,
-        }
     }
 
     /// Sets the staging state.
@@ -1177,6 +1171,11 @@ impl ManifestContext {
     /// Returns the current region role state.
     pub(crate) fn current_state(&self) -> RegionRoleState {
         self.control_state.role_state()
+    }
+
+    /// Returns the current region role.
+    pub(crate) fn current_role(&self) -> RegionRole {
+        self.control_state.role()
     }
 
     /// Installs the manifest changes from the current version to the target version (inclusive).
