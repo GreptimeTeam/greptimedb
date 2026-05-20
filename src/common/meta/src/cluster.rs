@@ -17,7 +17,7 @@ use std::fmt::{Display, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
 
-use api::v1::meta::{DatanodeWorkloads, FlownodeWorkloads, HeartbeatRequest};
+use api::v1::meta::{DatanodeWorkloads, FlownodeWorkloads, FrontendWorkloads, HeartbeatRequest};
 use common_error::ext::ErrorExt;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -186,8 +186,12 @@ pub struct DatanodeStatus {
 }
 
 /// The status of a frontend.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FrontendStatus {}
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct FrontendStatus {
+    /// The workloads of the frontend.
+    #[serde(default)]
+    pub workloads: FrontendWorkloads,
+}
 
 /// The status of a flownode.
 #[derive(Debug, Serialize, Deserialize)]

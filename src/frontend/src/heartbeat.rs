@@ -17,7 +17,8 @@ mod tests;
 
 use std::sync::Arc;
 
-use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer};
+use api::v1::meta::heartbeat_request::NodeWorkloads;
+use api::v1::meta::{FrontendWorkloads, HeartbeatRequest, NodeInfo, Peer};
 use common_meta::datanode::EnvVars;
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
@@ -214,6 +215,7 @@ impl HeartbeatTask {
                     total_cpu_millicores,
                     total_memory_bytes,
                 ),
+                node_workloads: Some(NodeWorkloads::Frontend(FrontendWorkloads { types: vec![] })),
                 extensions,
                 ..Default::default()
             };
