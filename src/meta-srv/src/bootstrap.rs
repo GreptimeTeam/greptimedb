@@ -47,6 +47,7 @@ use crate::error::OtherSnafu;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
     BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
+    SelectorWrapperRef,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
@@ -404,7 +405,12 @@ pub async fn metasrv_builder(
             "Using selector from options, selector type: {}",
             opts.selector.as_ref()
         );
-        selector
+        if let Some(wrapper) = plugins.get::<SelectorWrapperRef>() {
+            info!("Wrapping selector from options");
+            wrapper.wrap(selector)
+        } else {
+            selector
+        }
     };
 
     Ok(MetasrvBuilder::new()
@@ -428,4 +434,48 @@ pub(crate) fn build_default_meta_peer_client(
         .map(Arc::new)
         // Safety: all required fields set at initialization
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+
+    use super::*;
+    use crate::metasrv::SelectorWrapper;
+
+    struct RecordingSelectorWrapper {
+        called: Arc<AtomicBool>,
+    }
+
+    impl SelectorWrapper for RecordingSelectorWrapper {
+        fn wrap(&self, selector: SelectorRef) -> SelectorRef {
+            self.called.store(true, Ordering::Relaxed);
+            selector
+        }
+    }
+
+    #[tokio::test]
+    async fn metasrv_builder_wraps_load_based_selector_from_plugins() {
+        let called = Arc::new(AtomicBool::new(false));
+        let plugins = Plugins::new();
+        plugins.insert(Arc::new(RecordingSelectorWrapper {
+            called: called.clone(),
+        }) as SelectorWrapperRef);
+        let opts = MetasrvOptions {
+            selector: SelectorType::LoadBased,
+            ..Default::default()
+        };
+
+        metasrv_builder(
+            &opts,
+            plugins,
+            Some(Arc::new(MemoryKvBackend::new()) as KvBackendRef),
+        )
+        .await
+        .unwrap();
+
+        assert!(called.load(Ordering::Relaxed));
+    }
 }

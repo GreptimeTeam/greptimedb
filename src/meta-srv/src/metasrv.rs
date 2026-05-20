@@ -482,6 +482,23 @@ pub struct SelectorContext {
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
+
+/// Wraps the datanode selector constructed from [`MetasrvOptions`].
+///
+/// This hook lets plugins decorate the configured selector without rebuilding it
+/// themselves. For example, a plugin can first constrain the candidate datanodes
+/// and then delegate the final choice to the selector chosen by `MetasrvOptions`,
+/// such as load-based, lease-based, or round-robin selection.
+///
+/// A plugin-provided [`SelectorRef`] still takes precedence over this wrapper. The
+/// wrapper is only applied when metasrv bootstrap builds the selector from options.
+pub trait SelectorWrapper: Send + Sync {
+    /// Returns the selector metasrv should use after wrapping the configured base selector.
+    fn wrap(&self, selector: SelectorRef) -> SelectorRef;
+}
+
+/// Shared selector wrapper plugin registered through [`common_base::Plugins`].
+pub type SelectorWrapperRef = Arc<dyn SelectorWrapper>;
 pub type RegionStatAwareSelectorRef =
     Arc<dyn RegionStatAwareSelector<Context = SelectorContext, Output = Vec<(RegionId, Peer)>>>;
 
