@@ -713,6 +713,8 @@ impl MitoRegion {
                     origin_region_id,
                     node_id: None,
                     visible,
+                    primary_key_min: meta.primary_key_min.clone(),
+                    primary_key_max: meta.primary_key_max.clone(),
                 }
             })
             .collect()

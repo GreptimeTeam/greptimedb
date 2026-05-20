@@ -56,7 +56,7 @@ ADMIN FLUSH_TABLE('sst_case');
 -- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3,9})?[[:blank:]]*) <DATETIME>
 -- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
 -- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
-SELECT * FROM information_schema.ssts_manifest order by file_path;
+SELECT * FROM information_schema.ssts_manifest order by region_id, sequence;
 
 -- SQLNESS REPLACE (\s+\d+\s+) <NUM>
 -- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
