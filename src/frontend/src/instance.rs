@@ -26,6 +26,7 @@ mod promql;
 mod region_query;
 pub mod standalone;
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, atomic};
@@ -200,47 +201,37 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        if stmt.is_readonly() {
-            let slow_query_timer = self
-                .slow_query_options
-                .enable
-                .then(|| self.event_recorder.clone())
-                .flatten()
-                .map(|event_recorder| {
-                    SlowQueryTimer::new(
-                        CatalogQueryStatement::Sql(stmt.clone()),
-                        self.slow_query_options.threshold,
-                        self.slow_query_options.sample_ratio,
-                        self.slow_query_options.record_type,
-                        event_recorder,
-                    )
-                });
+        let is_readonly_stmt = stmt.is_readonly();
+        if should_track_statement_process(&stmt) {
+            let slow_query_timer = if is_readonly_stmt {
+                self.slow_query_options
+                    .enable
+                    .then(|| self.event_recorder.clone())
+                    .flatten()
+                    .map(|event_recorder| {
+                        SlowQueryTimer::new(
+                            CatalogQueryStatement::Sql(stmt.clone()),
+                            self.slow_query_options.threshold,
+                            self.slow_query_options.sample_ratio,
+                            self.slow_query_options.record_type,
+                            event_recorder,
+                        )
+                    })
+            } else {
+                None
+            };
 
-            let ticket = self.process_manager.register_query(
-                query_ctx.current_catalog().to_string(),
-                vec![query_ctx.current_schema()],
-                stmt.to_string(),
-                query_ctx.conn_info().to_string(),
-                Some(query_ctx.process_id()),
+            let query = stmt.to_string();
+            let query_fut =
+                self.exec_statement_with_timeout(stmt, query_ctx.clone(), query_interceptor);
+            track_query_process(
+                &self.process_manager,
+                query_ctx,
+                query,
                 slow_query_timer,
-            );
-
-            let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
-
-            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
-                .await
-                .map_err(|_| error::CancelledSnafu.build())?
-                .map(|output| {
-                    let Output { meta, data } = output;
-
-                    let data = match data {
-                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
-                            CancellableStreamWrapper::new(stream, ticket),
-                        )),
-                        other => other,
-                    };
-                    Output { data, meta }
-                })
+                query_fut,
+            )
+            .await
         } else {
             self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor)
                 .await
@@ -652,47 +643,35 @@ impl Instance {
             .map(|s| s.to_string())
             .unwrap_or_else(|| plan.display_indent().to_string());
 
-        let result = if is_readonly_plan(&plan) {
-            let slow_query_timer = self
-                .slow_query_options
-                .enable
-                .then(|| self.event_recorder.clone())
-                .flatten()
-                .map(|event_recorder| {
-                    SlowQueryTimer::new(
-                        CatalogQueryStatement::Plan(query.clone()),
-                        self.slow_query_options.threshold,
-                        self.slow_query_options.sample_ratio,
-                        self.slow_query_options.record_type,
-                        event_recorder,
-                    )
-                });
-
-            let ticket = self.process_manager.register_query(
-                query_ctx.current_catalog().to_string(),
-                vec![query_ctx.current_schema()],
-                query,
-                query_ctx.conn_info().to_string(),
-                Some(query_ctx.process_id()),
-                slow_query_timer,
-            );
+        let plan_is_readonly = is_readonly_plan(&plan);
+        let result = if should_track_plan_process(stmt.as_ref(), &plan) {
+            let slow_query_timer = if plan_is_readonly {
+                self.slow_query_options
+                    .enable
+                    .then(|| self.event_recorder.clone())
+                    .flatten()
+                    .map(|event_recorder| {
+                        SlowQueryTimer::new(
+                            CatalogQueryStatement::Plan(query.clone()),
+                            self.slow_query_options.threshold,
+                            self.slow_query_options.sample_ratio,
+                            self.slow_query_options.record_type,
+                            event_recorder,
+                        )
+                    })
+            } else {
+                None
+            };
 
             let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone());
-
-            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
-                .await
-                .map_err(|_| error::CancelledSnafu.build())?
-                .map(|output| {
-                    let Output { meta, data } = output;
-
-                    let data = match data {
-                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
-                            CancellableStreamWrapper::new(stream, ticket),
-                        )),
-                        other => other,
-                    };
-                    Output { data, meta }
-                })
+            track_query_process(
+                &self.process_manager,
+                query_ctx.clone(),
+                query,
+                slow_query_timer,
+                query_fut,
+            )
+            .await
         } else {
             self.exec_plan_with_timeout(plan, query_ctx.clone()).await
         };
@@ -1181,6 +1160,51 @@ fn is_readonly_plan(plan: &LogicalPlan) -> bool {
     !matches!(plan, LogicalPlan::Dml(_) | LogicalPlan::Ddl(_))
 }
 
+fn should_track_statement_process(stmt: &Statement) -> bool {
+    stmt.is_readonly()
+        || matches!(stmt, Statement::Insert(insert) if insert.has_non_values_query_source())
+}
+
+fn should_track_plan_process(stmt: Option<&Statement>, plan: &LogicalPlan) -> bool {
+    is_readonly_plan(plan)
+        || matches!(stmt, Some(Statement::Insert(insert)) if insert.has_non_values_query_source())
+}
+
+async fn track_query_process<F>(
+    process_manager: &ProcessManagerRef,
+    query_ctx: QueryContextRef,
+    query: String,
+    slow_query_timer: Option<SlowQueryTimer>,
+    query_fut: F,
+) -> Result<Output>
+where
+    F: Future<Output = Result<Output>>,
+{
+    let ticket = process_manager.register_query(
+        query_ctx.current_catalog().to_string(),
+        vec![query_ctx.current_schema()],
+        query,
+        query_ctx.conn_info().to_string(),
+        Some(query_ctx.process_id()),
+        slow_query_timer,
+    );
+
+    CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+        .await
+        .map_err(|_| error::CancelledSnafu.build())?
+        .map(|output| {
+            let Output { meta, data } = output;
+
+            let data = match data {
+                OutputData::Stream(stream) => {
+                    OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+                }
+                other => other,
+            };
+            Output { data, meta }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1189,13 +1213,233 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+    use catalog::process_manager::ProcessManager;
     use common_base::Plugins;
+    use common_meta::cache::LayeredCacheRegistryBuilder;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
+    use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+    use common_meta::rpc::procedure::{
+        MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    };
+    use common_query::Output;
+    use common_recordbatch::RecordBatches;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use datafusion_expr::dml::InsertOp;
+    use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema as GtSchema};
     use query::query_engine::options::QueryOptions;
-    use session::context::QueryContext;
+    use session::context::{Channel, ConnInfo, QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
     use strfmt::Format;
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::test_util::EmptyTable;
+    use tokio::sync::{mpsc, oneshot};
 
     use super::*;
+    use crate::frontend::FrontendOptions;
+    use crate::instance::builder::FrontendBuilder;
+
+    fn parse_one_sql(sql: &str) -> Statement {
+        parse_stmt(sql, &GreptimeDbDialect {}).unwrap().remove(0)
+    }
+
+    fn test_query_ctx(process_id: u32) -> QueryContextRef {
+        Arc::new(
+            QueryContextBuilder::default()
+                .channel(Channel::Mysql)
+                .conn_info(ConnInfo::new(None, Channel::Mysql))
+                .process_id(process_id)
+                .build(),
+        )
+    }
+
+    struct BlockingInsertSelectInterceptor {
+        started_tx: mpsc::UnboundedSender<()>,
+        finish_rx: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl BlockingInsertSelectInterceptor {
+        fn new(started_tx: mpsc::UnboundedSender<()>, finish_rx: oneshot::Receiver<()>) -> Self {
+            Self {
+                started_tx,
+                finish_rx: std::sync::Mutex::new(Some(finish_rx)),
+            }
+        }
+    }
+
+    impl SqlQueryInterceptor for BlockingInsertSelectInterceptor {
+        type Error = Error;
+
+        fn pre_execute(
+            &self,
+            statement: &Statement,
+            _plan: Option<&LogicalPlan>,
+            _query_ctx: QueryContextRef,
+        ) -> Result<()> {
+            let Statement::Insert(insert) = statement else {
+                return Ok(());
+            };
+            if !insert.has_non_values_query_source() {
+                return Ok(());
+            }
+
+            let finish_rx = self.finish_rx.lock().unwrap().take().unwrap();
+            let _ = self.started_tx.send(());
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(finish_rx)
+                    .unwrap();
+            });
+            Ok(())
+        }
+    }
+
+    struct NoopProcedureExecutor;
+
+    #[async_trait::async_trait]
+    impl ProcedureExecutor for NoopProcedureExecutor {
+        async fn submit_ddl_task(
+            &self,
+            _ctx: &ExecutorContext,
+            _request: SubmitDdlTaskRequest,
+        ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "submit_ddl_task",
+            }
+            .fail()
+        }
+
+        async fn migrate_region(
+            &self,
+            _ctx: &ExecutorContext,
+            _request: MigrateRegionRequest,
+        ) -> common_meta::error::Result<MigrateRegionResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "migrate_region",
+            }
+            .fail()
+        }
+
+        async fn reconcile(
+            &self,
+            _ctx: &ExecutorContext,
+            _request: ReconcileRequest,
+        ) -> common_meta::error::Result<ReconcileResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "reconcile",
+            }
+            .fail()
+        }
+
+        async fn query_procedure_state(
+            &self,
+            _ctx: &ExecutorContext,
+            _pid: &str,
+        ) -> common_meta::error::Result<ProcedureStateResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "query_procedure_state",
+            }
+            .fail()
+        }
+
+        async fn list_procedures(
+            &self,
+            _ctx: &ExecutorContext,
+        ) -> common_meta::error::Result<ProcedureDetailResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "list_procedures",
+            }
+            .fail()
+        }
+    }
+
+    fn test_cache_registry(
+        kv_backend: common_meta::kv_backend::KvBackendRef,
+    ) -> common_meta::cache::LayeredCacheRegistryRef {
+        Arc::new(
+            cache::with_default_composite_cache_registry(
+                LayeredCacheRegistryBuilder::default()
+                    .add_cache_registry(cache::build_fundamental_cache_registry(kv_backend)),
+            )
+            .unwrap()
+            .build(),
+        )
+    }
+
+    fn test_table(table_id: u32, table_name: &str) -> table::TableRef {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new("id", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::new(table_name, table_meta)
+            .table_id(table_id)
+            .build()
+            .unwrap();
+
+        EmptyTable::from_table_info(&table_info)
+    }
+
+    async fn test_instance_with_insert_select_interceptor(
+        interceptor: SqlQueryInterceptorRef<Error>,
+    ) -> Instance {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let process_manager = Arc::new(ProcessManager::new("test-frontend".to_string(), None));
+        let catalog_manager =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source"));
+        catalog_manager
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "target".to_string(),
+                table_id: 1025,
+                table: test_table(1025, "target"),
+            })
+            .unwrap();
+        catalog_manager.register_process_list_table(process_manager.clone());
+
+        let cache_registry = test_cache_registry(kv_backend.clone());
+        let plugins = Plugins::new();
+        plugins.insert::<SqlQueryInterceptorRef<Error>>(interceptor);
+
+        FrontendBuilder::new(
+            FrontendOptions::default(),
+            kv_backend,
+            cache_registry,
+            catalog_manager,
+            Arc::new(client::client_manager::NodeClients::default()),
+            Arc::new(NoopProcedureExecutor),
+            process_manager,
+        )
+        .with_plugin(plugins)
+        .try_build()
+        .await
+        .unwrap()
+    }
+
+    async fn execute_one_sql(
+        instance: &Instance,
+        sql: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let mut results = instance.do_query_inner(sql, query_ctx).await;
+        assert_eq!(1, results.len());
+        results.remove(0)
+    }
 
     #[test]
     fn test_fast_legacy_check_deadlock_prevention() {
@@ -1311,6 +1555,123 @@ mod tests {
             "Expected more cache entries, got {}",
             final_count
         );
+    }
+
+    #[test]
+    fn test_should_track_statement_process() {
+        assert!(should_track_statement_process(&parse_one_sql(
+            "SELECT * FROM demo"
+        )));
+        assert!(should_track_statement_process(&parse_one_sql(
+            "INSERT INTO demo SELECT * FROM source"
+        )));
+        assert!(!should_track_statement_process(&parse_one_sql(
+            "INSERT INTO demo VALUES (1)"
+        )));
+        assert!(!should_track_statement_process(&parse_one_sql(
+            "INSERT INTO demo VALUES (now())"
+        )));
+    }
+
+    #[test]
+    fn test_should_track_plan_process() {
+        let select_stmt = parse_one_sql("SELECT * FROM demo");
+        let insert_select_stmt = parse_one_sql("INSERT INTO demo SELECT * FROM source");
+        let insert_values_stmt = parse_one_sql("INSERT INTO demo VALUES (now())");
+
+        let empty_plan = LogicalPlanBuilder::empty(false).build().unwrap();
+        assert!(should_track_plan_process(Some(&select_stmt), &empty_plan));
+        assert!(should_track_plan_process(
+            Some(&insert_select_stmt),
+            &insert_dml_plan()
+        ));
+        assert!(!should_track_plan_process(
+            Some(&insert_values_stmt),
+            &insert_dml_plan()
+        ));
+        assert!(!should_track_plan_process(None, &insert_dml_plan()));
+    }
+
+    #[tokio::test]
+    async fn test_track_query_process_registers_running_query() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let process_manager = Arc::new(ProcessManager::new("test-frontend".to_string(), None));
+        let query_ctx = test_query_ctx(4242);
+        let query = "INSERT INTO demo SELECT * FROM source".to_string();
+        let query_fut = async move {
+            let _ = started_tx.send(());
+            let _ = finish_rx.await;
+            Ok(Output::new_with_record_batches(RecordBatches::empty()))
+        };
+
+        let task = tokio::spawn({
+            let process_manager = process_manager.clone();
+            let query_ctx = query_ctx.clone();
+            async move { track_query_process(&process_manager, query_ctx, query, None, query_fut).await }
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let running = process_manager.local_processes(None).unwrap();
+        assert_eq!(running.len(), 1);
+        let process = &running[0];
+        assert_eq!(process.id, 4242);
+        assert_eq!(process.frontend, "test-frontend");
+        assert_eq!(process.query, "INSERT INTO demo SELECT * FROM source");
+
+        finish_tx.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        assert!(process_manager.local_processes(None).unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_insert_select_is_visible_in_show_processlist() {
+        let insert_sql = "INSERT INTO target SELECT * FROM source";
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let interceptor = Arc::new(BlockingInsertSelectInterceptor::new(started_tx, finish_rx));
+        let instance = Arc::new(test_instance_with_insert_select_interceptor(interceptor).await);
+
+        let insert_task = tokio::spawn({
+            let instance = instance.clone();
+            async move { execute_one_sql(&instance, insert_sql, test_query_ctx(4242)).await }
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let output = execute_one_sql(&instance, "SHOW PROCESSLIST", test_query_ctx(43))
+            .await
+            .unwrap();
+        let process_list = output.data.pretty_print().await;
+        assert!(
+            process_list.contains(insert_sql),
+            "process list did not contain running insert:\n{process_list}"
+        );
+
+        finish_tx.send(()).unwrap();
+        insert_task.await.unwrap().unwrap();
+    }
+
+    fn insert_dml_plan() -> LogicalPlan {
+        let schema = SchemaRef::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            true,
+        )]));
+        let target = Arc::new(LogicalTableSource::new(schema));
+        let input = LogicalPlanBuilder::empty(false).build().unwrap();
+
+        LogicalPlanBuilder::insert_into(input, "demo", target, InsertOp::Append)
+            .unwrap()
+            .build()
+            .unwrap()
     }
 
     #[test]

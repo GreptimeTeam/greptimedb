@@ -115,6 +115,17 @@ impl Insert {
         }
     }
 
+    /// Returns true when the insert source is a query rather than `VALUES`.
+    pub fn has_non_values_query_source(&self) -> bool {
+        match &self.inner {
+            Statement::Insert(SpInsert {
+                source: Some(box query),
+                ..
+            }) => !matches!(&*query.body, SetExpr::Values(_)),
+            _ => false,
+        }
+    }
+
     pub fn query_body(&self) -> Result<Option<GtQuery>> {
         Ok(match &self.inner {
             Statement::Insert(SpInsert {
@@ -321,6 +332,7 @@ mod tests {
         match stmt {
             Statement::Insert(insert) => {
                 let q = insert.query_body().unwrap().unwrap();
+                assert!(insert.has_non_values_query_source());
                 assert!(matches!(
                     q.inner,
                     Query {
@@ -330,6 +342,40 @@ mod tests {
                 ));
             }
             _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_has_non_values_query_source() {
+        let cases = [
+            ("INSERT INTO my_table SELECT * FROM other_table", true),
+            (
+                "INSERT INTO my_table WITH cte AS (SELECT * FROM other_table) SELECT * FROM cte",
+                true,
+            ),
+            (
+                "INSERT INTO my_table SELECT * FROM t1 UNION ALL SELECT * FROM t2",
+                true,
+            ),
+            ("INSERT INTO my_table VALUES(1)", false),
+            ("INSERT INTO my_table VALUES(now())", false),
+            ("INSERT INTO my_table VALUES(1 + 1)", false),
+        ];
+
+        for (sql, expected) in cases {
+            let stmt = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap()
+            .remove(0);
+            match stmt {
+                Statement::Insert(insert) => {
+                    assert_eq!(insert.has_non_values_query_source(), expected, "{sql}");
+                }
+                _ => unreachable!(),
+            }
         }
     }
 }

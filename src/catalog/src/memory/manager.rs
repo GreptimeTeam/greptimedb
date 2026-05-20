@@ -33,6 +33,8 @@ use table::metadata::{TableId, TableInfoRef};
 
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::information_schema::InformationSchemaProvider;
+#[cfg(any(test, feature = "testing"))]
+use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::SystemSchemaProvider;
 use crate::{CatalogManager, DeregisterTableRequest, RegisterSchemaRequest, RegisterTableRequest};
 
@@ -256,6 +258,33 @@ impl MemoryCatalogManager {
             .unwrap();
 
         manager
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn register_process_list_table(&self, process_manager: ProcessManagerRef) {
+        let backend = Arc::new(MemoryKvBackend::new());
+        let manager = Arc::new(self.clone());
+        let information_schema_provider = InformationSchemaProvider::new(
+            DEFAULT_CATALOG_NAME.to_string(),
+            Arc::downgrade(&manager) as Weak<dyn CatalogManager>,
+            Arc::new(FlowMetadataManager::new(backend.clone())),
+            Some(process_manager),
+            backend,
+        );
+        let process_list = information_schema_provider
+            .table(crate::information_schema::PROCESS_LIST)
+            .unwrap();
+        self.catalogs
+            .write()
+            .unwrap()
+            .get_mut(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .get_mut(INFORMATION_SCHEMA_NAME)
+            .unwrap()
+            .insert(
+                crate::information_schema::PROCESS_LIST.to_string(),
+                process_list,
+            );
     }
 
     fn schema_exist_sync(&self, catalog: &str, schema: &str) -> Result<bool> {
