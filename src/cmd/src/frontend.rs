@@ -33,7 +33,6 @@ use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
-use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -417,12 +416,9 @@ impl StartCommand {
         )
         .context(error::BuildCacheRegistrySnafu)?;
 
-        if let Some(user_cache_invalidator) = plugins.get::<CacheInvalidatorRef>() {
-            layered_cache_builder = layered_cache_builder.add_cache_registry(
-                CacheRegistryBuilder::default()
-                    .add_invalidator(user_cache_invalidator)
-                    .build(),
-            );
+        if let Some(plugin_cache_builder) = plugins::frontend::configure_cache_registry(&plugins) {
+            layered_cache_builder =
+                layered_cache_builder.add_cache_registry(plugin_cache_builder.build());
         }
 
         let layered_cache_registry = Arc::new(layered_cache_builder.build());

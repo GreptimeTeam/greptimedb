@@ -411,13 +411,18 @@ impl StartCommand {
         // Builds cache registry
         let layered_cache_builder = LayeredCacheRegistryBuilder::default();
         let fundamental_cache_registry = build_fundamental_cache_registry(kv_backend.clone());
-        let layered_cache_registry = Arc::new(
-            with_default_composite_cache_registry(
-                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
-            )
-            .context(error::BuildCacheRegistrySnafu)?
-            .build(),
-        );
+        let mut layered_cache_builder = with_default_composite_cache_registry(
+            layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+        )
+        .context(error::BuildCacheRegistrySnafu)?;
+
+        if let Some(plugin_cache_builder) = plugins::standalone::configure_cache_registry(&plugins)
+        {
+            layered_cache_builder =
+                layered_cache_builder.add_cache_registry(plugin_cache_builder.build());
+        }
+
+        let layered_cache_registry = Arc::new(layered_cache_builder.build());
 
         let mut builder = DatanodeBuilder::new(dn_opts, plugins.clone(), kv_backend.clone());
         builder.with_cache_registry(layered_cache_registry.clone());
