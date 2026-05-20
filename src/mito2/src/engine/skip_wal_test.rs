@@ -172,6 +172,48 @@ async fn test_close_follower_region_skip_wal() {
 }
 
 #[tokio::test]
+async fn test_close_follower_region_skip_wal_with_pending_data() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("close-follower-skip-wal-pending-data").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+
+    let wal_options = WalOptions::Noop;
+    request.options.insert(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&wal_options).unwrap(),
+    );
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: rows_schema(&request),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    assert!(!region.version().memtables.is_empty());
+
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    assert!(region.is_follower());
+
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    assert!(!engine.is_region_exists(region_id));
+}
+
+#[tokio::test]
 async fn test_close_region_after_truncate_skip_wal() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("close-truncate-skip-wal").await;
