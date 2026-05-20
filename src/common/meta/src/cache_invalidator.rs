@@ -149,6 +149,10 @@ where
                     let key = NodeAddressKey::with_flownode(*node_id);
                     self.invalidate_key(&key.to_bytes()).await;
                 }
+                CacheIdent::User(_) => {
+                    // User cache invalidation is handled by external
+                    // CacheInvalidator implementations.
+                }
             }
         }
         Ok(())
