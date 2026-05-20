@@ -26,7 +26,6 @@ mod promql;
 mod region_query;
 pub mod standalone;
 
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, atomic};
@@ -221,17 +220,31 @@ impl Instance {
                 None
             };
 
-            let query = stmt.to_string();
-            let query_fut =
-                self.exec_statement_with_timeout(stmt, query_ctx.clone(), query_interceptor);
-            track_query_process(
-                &self.process_manager,
-                query_ctx,
-                query,
+            let ticket = self.process_manager.register_query(
+                query_ctx.current_catalog().to_string(),
+                vec![query_ctx.current_schema()],
+                stmt.to_string(),
+                query_ctx.conn_info().to_string(),
+                Some(query_ctx.process_id()),
                 slow_query_timer,
-                query_fut,
-            )
-            .await
+            );
+
+            let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
+
+            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                .await
+                .map_err(|_| error::CancelledSnafu.build())?
+                .map(|output| {
+                    let Output { meta, data } = output;
+
+                    let data = match data {
+                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
+                            CancellableStreamWrapper::new(stream, ticket),
+                        )),
+                        other => other,
+                    };
+                    Output { data, meta }
+                })
         } else {
             self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor)
                 .await
@@ -663,15 +676,31 @@ impl Instance {
                 None
             };
 
-            let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone());
-            track_query_process(
-                &self.process_manager,
-                query_ctx.clone(),
+            let ticket = self.process_manager.register_query(
+                query_ctx.current_catalog().to_string(),
+                vec![query_ctx.current_schema()],
                 query,
+                query_ctx.conn_info().to_string(),
+                Some(query_ctx.process_id()),
                 slow_query_timer,
-                query_fut,
-            )
-            .await
+            );
+
+            let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone());
+
+            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                .await
+                .map_err(|_| error::CancelledSnafu.build())?
+                .map(|output| {
+                    let Output { meta, data } = output;
+
+                    let data = match data {
+                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
+                            CancellableStreamWrapper::new(stream, ticket),
+                        )),
+                        other => other,
+                    };
+                    Output { data, meta }
+                })
         } else {
             self.exec_plan_with_timeout(plan, query_ctx.clone()).await
         };
@@ -1170,41 +1199,6 @@ fn should_track_plan_process(stmt: Option<&Statement>, plan: &LogicalPlan) -> bo
         || matches!(stmt, Some(Statement::Insert(insert)) if insert.has_non_values_query_source())
 }
 
-async fn track_query_process<F>(
-    process_manager: &ProcessManagerRef,
-    query_ctx: QueryContextRef,
-    query: String,
-    slow_query_timer: Option<SlowQueryTimer>,
-    query_fut: F,
-) -> Result<Output>
-where
-    F: Future<Output = Result<Output>>,
-{
-    let ticket = process_manager.register_query(
-        query_ctx.current_catalog().to_string(),
-        vec![query_ctx.current_schema()],
-        query,
-        query_ctx.conn_info().to_string(),
-        Some(query_ctx.process_id()),
-        slow_query_timer,
-    );
-
-    CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
-        .await
-        .map_err(|_| error::CancelledSnafu.build())?
-        .map(|output| {
-            let Output { meta, data } = output;
-
-            let data = match data {
-                OutputData::Stream(stream) => {
-                    OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
-                }
-                other => other,
-            };
-            Output { data, meta }
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1224,7 +1218,6 @@ mod tests {
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
     use common_query::Output;
-    use common_recordbatch::RecordBatches;
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use datafusion_expr::dml::InsertOp;
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
@@ -1590,42 +1583,6 @@ mod tests {
             &insert_dml_plan()
         ));
         assert!(!should_track_plan_process(None, &insert_dml_plan()));
-    }
-
-    #[tokio::test]
-    async fn test_track_query_process_registers_running_query() {
-        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-        let (finish_tx, finish_rx) = oneshot::channel();
-        let process_manager = Arc::new(ProcessManager::new("test-frontend".to_string(), None));
-        let query_ctx = test_query_ctx(4242);
-        let query = "INSERT INTO demo SELECT * FROM source".to_string();
-        let query_fut = async move {
-            let _ = started_tx.send(());
-            let _ = finish_rx.await;
-            Ok(Output::new_with_record_batches(RecordBatches::empty()))
-        };
-
-        let task = tokio::spawn({
-            let process_manager = process_manager.clone();
-            let query_ctx = query_ctx.clone();
-            async move { track_query_process(&process_manager, query_ctx, query, None, query_fut).await }
-        });
-
-        tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-
-        let running = process_manager.local_processes(None).unwrap();
-        assert_eq!(running.len(), 1);
-        let process = &running[0];
-        assert_eq!(process.id, 4242);
-        assert_eq!(process.frontend, "test-frontend");
-        assert_eq!(process.query, "INSERT INTO demo SELECT * FROM source");
-
-        finish_tx.send(()).unwrap();
-        task.await.unwrap().unwrap();
-        assert!(process_manager.local_processes(None).unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
