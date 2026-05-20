@@ -1243,7 +1243,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Region {} is in {:?} state, expect: Leader or Leader(Downgrading)",
+        "Region {} is in {:?} state, expect: Writable, Staging or Downgrading",
         region_id,
         state
     ))]

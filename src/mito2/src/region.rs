@@ -1433,7 +1433,7 @@ impl RegionMap {
 
     /// Gets flushable region by region id.
     ///
-    /// Returns error if the region does not exist or not operatable.
+    /// Returns error if the region does not exist or not flushable.
     pub(crate) fn flushable_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
         let region = self
             .get_region(region_id)

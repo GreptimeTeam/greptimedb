@@ -37,8 +37,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!("Try to close region {}, worker: {}", region_id, self.id);
 
-        // If the region is using Noop WAL and has data in memtable,
-        // we should flush it before closing to ensure durability.
+        // If the region is using Noop WAL and has data in memtable and region is flushable (like,
+        // not in follower state), we should flush it before closing to ensure durability.
         if region.provider == Provider::Noop
             && !region
                 .version_control
