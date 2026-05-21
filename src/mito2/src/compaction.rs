@@ -29,6 +29,7 @@ use std::time::Instant;
 
 use api::v1::region::compact_request;
 use api::v1::region::compact_request::Options;
+use arrow_schema::Schema;
 use common_base::Plugins;
 use common_base::cancellation::CancellationHandle;
 use common_memory_manager::OnExhaustedPolicy;
@@ -39,6 +40,11 @@ use common_time::timestamp::TimeUnit;
 use common_time::{TimeToLive, Timestamp};
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
+use datatypes::extension::json::is_json_extension_type;
+use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::types::json_type::JsonNativeType;
+use parquet::arrow::parquet_to_arrow_schema;
+use parquet::file::metadata::PageIndexPolicy;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -54,13 +60,15 @@ use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
-    CompactRegionSnafu, CompactionCancelledSnafu, Error, GetSchemaMetadataSnafu,
-    ManualCompactionOverrideSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu,
-    RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu, TimeoutSnafu,
+    CompactRegionSnafu, CompactionCancelledSnafu, DataTypeMismatchSnafu, Error,
+    GetSchemaMetadataSnafu, ManualCompactionOverrideSnafu, ParquetToArrowSchemaSnafu,
+    RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, RemoteCompactionSnafu, Result,
+    TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::FlatSource;
 use crate::read::flat_projection::FlatProjectionMapper;
+use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
 use crate::region::options::{MergeMode, RegionOptions};
@@ -72,6 +80,7 @@ use crate::schedule::remote_job_scheduler::{
 };
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileHandle, FileMeta, Level};
+use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
 
@@ -996,19 +1005,56 @@ impl CompactionSstReaderBuilder<'_> {
     /// Build a [FlatSource] that yields Arrow `RecordBatch`s from reading all the input SST files,
     /// for compaction. The schema of the [FlatSource] is unified.
     async fn build_flat_sst_reader(self) -> Result<FlatSource> {
-        let scan_input = self.build_scan_input()?.with_compaction(true);
+        let scan_input = self.build_scan_input().await?.with_compaction(true);
 
         let schema = scan_input.mapper.output_schema();
         let schema = schema.arrow_schema();
 
-        SeqScan::new(scan_input)
+        let stream = SeqScan::new(scan_input)
             .build_flat_reader_for_compaction()
-            .await
-            .map(|stream| FlatSource::new_stream(schema.clone(), stream))
+            .await?;
+        Ok(FlatSource::new_stream(schema.clone(), stream))
     }
 
-    fn build_scan_input(self) -> Result<ScanInput> {
-        let mapper = FlatProjectionMapper::all(&self.metadata)?;
+    async fn build_scan_input(self) -> Result<ScanInput> {
+        let schema = self.metadata.schema.arrow_schema();
+        let json_type_hint = if schema.has_json_extension_field() {
+            let mut json_type_hint = schema
+                .fields()
+                .iter()
+                .filter(|&field| is_json_extension_type(field))
+                .map(|field| (field.name().clone(), JsonNativeType::Null))
+                .collect::<HashMap<_, _>>();
+
+            let schemas = self.collect_arrow_schemas_from_parquet().await?;
+            for schema in schemas {
+                for field in schema.fields() {
+                    let Some(merged) = json_type_hint.get_mut(field.name()) else {
+                        continue;
+                    };
+
+                    let json_type = JsonNativeType::try_from(field.data_type())
+                        .context(DataTypeMismatchSnafu)?;
+                    merged.merge(&json_type);
+                }
+            }
+
+            Some(json_type_hint)
+        } else {
+            None
+        };
+
+        let projection = (0..self.metadata.column_metadatas.len()).collect();
+        let read_columns = ReadColumns::from_deduped_column_ids(
+            self.metadata.column_metadatas.iter().map(|x| x.column_id),
+        );
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &self.metadata,
+            projection,
+            read_columns,
+            json_type_hint.as_ref(),
+        )?;
+
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
@@ -1027,6 +1073,43 @@ impl CompactionSstReaderBuilder<'_> {
         }
 
         Ok(scan_input)
+    }
+
+    async fn collect_arrow_schemas_from_parquet(&self) -> Result<Vec<Schema>> {
+        let mut schemas = Vec::with_capacity(self.inputs.len());
+
+        for file_handle in self.inputs {
+            let file_path =
+                file_handle.file_path(self.sst_layer.table_dir(), self.sst_layer.path_type());
+            let file_size = file_handle.meta_ref().file_size;
+            let parquet_metadata = match self
+                .sst_layer
+                .read_sst(file_handle.clone())
+                .cache(CacheStrategy::Compaction(self.cache.clone()))
+                .read_parquet_metadata(
+                    &file_path,
+                    file_size,
+                    &mut MetadataCacheMetrics::default(),
+                    PageIndexPolicy::default(),
+                )
+                .await
+                .map(|x| x.0.parquet_metadata())
+            {
+                Ok(x) => x,
+                Err(e) if e.is_object_not_found() => continue,
+                Err(e) => return Err(e),
+            };
+            let file_metadata = parquet_metadata.file_metadata();
+
+            let schema = parquet_to_arrow_schema(
+                file_metadata.schema_descr(),
+                file_metadata.key_value_metadata(),
+            )
+            .context(ParquetToArrowSchemaSnafu { file: file_path })?;
+
+            schemas.push(schema);
+        }
+        Ok(schemas)
     }
 }
 

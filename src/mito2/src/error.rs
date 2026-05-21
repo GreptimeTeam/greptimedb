@@ -1242,6 +1242,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to generate Arrow schema from Parquet file: {}", file))]
+    ParquetToArrowSchema {
+        file: String,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Region {} is in {:?} state, expect: Writable, Staging or Downgrading",
         region_id,
@@ -1343,7 +1352,8 @@ impl ErrorExt for Error {
             | BuildEntry { .. }
             | Metadata { .. }
             | CastColumn { .. }
-            | MitoManifestInfo { .. } => StatusCode::Internal,
+            | MitoManifestInfo { .. }
+            | ParquetToArrowSchema { .. } => StatusCode::Internal,
 
             FetchManifests { source, .. } => source.status_code(),
 

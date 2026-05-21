@@ -296,6 +296,7 @@ mod tests {
             &metadata,
             vec![4, 1],
             ReadColumns::from_deduped_column_ids([4, 1, 3]),
+            None,
         )
         .unwrap();
         assert_eq!(&[4, 1, 3], mapper.read_columns().column_ids().as_slice());

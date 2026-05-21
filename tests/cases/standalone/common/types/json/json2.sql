@@ -22,6 +22,8 @@ values (4, '{"a": {"b": -4}, "d": [{"e": {"g": -0.4}}]}'),
 
 admin flush_table('json2_table');
 
+admin compact_table('json2_table', 'swcs', '86400');
+
 insert into json2_table
 values (7, '{"a": {"b": "s7"}, "c": [1], "d": [{"e": {"g": -0.7}}]}'),
        (8, '{"a": {"b": 8}, "c": "s8"}');

@@ -37,8 +37,8 @@ use datatypes::schema::ext::ArrowSchemaExt;
 use futures::StreamExt;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
-use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, RowSelection};
+use parquet::arrow::{ProjectionMask, parquet_to_arrow_schema};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use partition::expr::PartitionExpr;
 use snafu::ResultExt;
@@ -53,7 +53,9 @@ use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
-use crate::error::{ReadDataPartSnafu, Result, SerializePartitionExprSnafu};
+use crate::error::{
+    ParquetToArrowSchemaSnafu, ReadDataPartSnafu, Result, SerializePartitionExprSnafu,
+};
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
@@ -407,10 +409,16 @@ impl ParquetReaderBuilder {
                     .map(|col| col.column_id),
             )
         };
+
+        let file_metadata = parquet_meta.file_metadata();
+        let parquet_schema_desc = file_metadata.schema_descr();
+        let file_schema =
+            parquet_to_arrow_schema(parquet_schema_desc, file_metadata.key_value_metadata())
+                .context(ParquetToArrowSchemaSnafu { file: &file_path })?;
         let mut read_format = FlatReadFormat::new(
             region_meta.clone(),
             read_cols,
-            Some(parquet_meta.file_metadata().schema_descr().num_columns()),
+            Some(Arc::new(file_schema)),
             &file_path,
             skip_auto_convert,
         )?;
@@ -420,7 +428,6 @@ impl ParquetReaderBuilder {
         }
 
         // Computes the projection mask.
-        let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
         let parquet_read_cols = read_format.parquet_read_columns();
         let projection_plan = build_projection_plan(parquet_read_cols, parquet_schema_desc);
         let selection = self
@@ -619,7 +626,7 @@ impl ParquetReaderBuilder {
 
     /// Reads parquet metadata of specific file.
     /// Returns (fused metadata, cache_miss_flag).
-    async fn read_parquet_metadata(
+    pub(crate) async fn read_parquet_metadata(
         &self,
         file_path: &str,
         file_size: u64,

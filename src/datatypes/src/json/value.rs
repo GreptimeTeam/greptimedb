@@ -394,22 +394,25 @@ impl JsonValue {
                 },
                 JsonVariant::String(x) => Value::String(x.into()),
                 JsonVariant::Array(array) => {
-                    let item_type = if let Some(first) = array.first() {
-                        first.native_type()
-                    } else {
-                        JsonNativeType::Null
-                    };
-                    Value::List(ListValue::new(
-                        array.into_iter().map(helper).collect(),
-                        Arc::new((&item_type).into()),
-                    ))
+                    let values = array.into_iter().map(helper).collect::<Vec<_>>();
+                    debug_assert!(
+                        values
+                            .windows(2)
+                            .all(|w| w[0].data_type() == w[1].data_type())
+                    );
+                    let item_type = values
+                        .first()
+                        .map(|x| x.data_type())
+                        .unwrap_or_else(ConcreteDataType::null_datatype);
+                    Value::List(ListValue::new(values, Arc::new(item_type)))
                 }
                 JsonVariant::Object(object) => {
                     let mut fields = Vec::with_capacity(object.len());
                     let mut items = Vec::with_capacity(object.len());
                     for (k, v) in object {
-                        fields.push(StructField::new(k, (&v.native_type()).into(), true));
-                        items.push(helper(v));
+                        let v = helper(v);
+                        fields.push(StructField::new(k, v.data_type(), true));
+                        items.push(v);
                     }
                     Value::Struct(StructValue::new(items, StructType::new(Arc::new(fields))))
                 }

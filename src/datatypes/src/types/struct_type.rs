@@ -28,22 +28,21 @@ pub struct StructType {
     fields: Arc<Vec<StructField>>,
 }
 
-impl TryFrom<&Fields> for StructType {
-    type Error = crate::error::Error;
-    fn try_from(value: &Fields) -> Result<Self, Self::Error> {
+impl From<&Fields> for StructType {
+    fn from(value: &Fields) -> Self {
         let fields = value
             .iter()
             .map(|field| {
-                Ok(StructField::new(
+                StructField::new(
                     field.name().clone(),
-                    ConcreteDataType::try_from(field.data_type())?,
+                    ConcreteDataType::from_arrow_type(field.data_type()),
                     field.is_nullable(),
-                ))
+                )
             })
-            .collect::<Result<Vec<StructField>, Self::Error>>()?;
-        Ok(StructType {
+            .collect::<Vec<_>>();
+        StructType {
             fields: Arc::new(fields),
-        })
+        }
     }
 }
 
