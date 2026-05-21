@@ -34,9 +34,7 @@ use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
-use session::hints::{
-    READ_PREFERENCE_HINT, REMOTE_QUERY_ID_EXTENSION_KEY, is_reserved_extension_key,
-};
+use session::hints::{READ_PREFERENCE_HINT, is_reserved_extension_key};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -288,7 +286,9 @@ impl Drop for RequestTimer {
 mod tests {
     use chrono::FixedOffset;
     use common_time::Timezone;
-    use session::hints::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
+    use session::hints::{
+        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
+    };
 
     use super::*;
 

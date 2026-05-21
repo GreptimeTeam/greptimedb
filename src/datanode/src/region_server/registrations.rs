@@ -100,9 +100,7 @@ pub(super) fn register_initial_dyn_filter_regs(
         return;
     }
 
-    let query_regs = regs_by_query
-        .entry(query_id.to_string())
-        .or_insert_with(DashMap::new);
+    let query_regs = regs_by_query.entry(query_id.to_string()).or_default();
 
     for reg in &regs.regs {
         if let Some(mut registered) = query_regs.get_mut(&reg.filter_id) {

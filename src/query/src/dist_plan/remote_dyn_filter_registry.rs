@@ -20,7 +20,7 @@ use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
 use session::query_id::QueryId;
 use store_api::storage::RegionId;
 
-use crate::dist_plan::{FilterId, ProducerScopeId};
+use crate::dist_plan::FilterId;
 
 /// Routing metadata for a remote dynamic filter subscriber.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,9 +235,7 @@ impl DynFilterRegistryManager {
         registry: &Arc<QueryDynFilterRegistry>,
     ) -> Option<Arc<QueryDynFilterRegistry>> {
         let mut registries = self.registries.write().unwrap();
-        let Some(current) = registries.get(query_id) else {
-            return None;
-        };
+        let current = registries.get(query_id)?;
 
         if Arc::ptr_eq(current, registry) && registry.active_stream_count() == 0 {
             registries.remove(query_id)
@@ -271,7 +269,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::dist_plan::FilterFingerprint;
+    use crate::dist_plan::{FilterFingerprint, ProducerScopeId};
 
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
