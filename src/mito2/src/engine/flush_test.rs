@@ -671,7 +671,6 @@ async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
 struct MockFlushHook {
     sst_written_count: AtomicUsize,
     manifest_updated_count: AtomicUsize,
-    primary_keys_count: AtomicUsize,
     notify: Notify,
 }
 
@@ -680,7 +679,6 @@ impl MockFlushHook {
         Self {
             sst_written_count: AtomicUsize::new(0),
             manifest_updated_count: AtomicUsize::new(0),
-            primary_keys_count: AtomicUsize::new(0),
             notify: Notify::new(),
         }
     }
@@ -697,17 +695,13 @@ impl FlushHook for MockFlushHook {
         region_id: RegionId,
         _region_metadata: &RegionMetadataRef,
         files: &[SstFileInfo<'_>],
-        primary_keys: &[Vec<u8>],
     ) {
         self.sst_written_count
             .fetch_add(files.len(), Ordering::Relaxed);
-        self.primary_keys_count
-            .store(primary_keys.len(), Ordering::Relaxed);
         common_telemetry::info!(
-            "MockFlushHook::on_sst_files_written: region={}, files={}, primary_keys={}",
+            "MockFlushHook::on_sst_files_written: region={}, files={}",
             region_id,
             files.len(),
-            primary_keys.len(),
         );
         for (i, file) in files.iter().enumerate() {
             common_telemetry::info!(
@@ -729,11 +723,10 @@ impl FlushHook for MockFlushHook {
     ) {
         self.manifest_updated_count.fetch_add(1, Ordering::Relaxed);
         common_telemetry::info!(
-            "MockFlushHook::on_manifest_updated: region={}, manifest_version={}, files_added={}, primary_keys_collected={}",
+            "MockFlushHook::on_manifest_updated: region={}, manifest_version={}, files_added={}",
             region_id,
             manifest_version,
             edit.files_to_add.len(),
-            self.primary_keys_count.load(Ordering::Relaxed),
         );
         self.notify.notify_one();
     }
@@ -778,7 +771,6 @@ async fn test_flush_hook() {
 
     let sst_count = hook.sst_written_count.load(Ordering::Relaxed);
     let manifest_count = hook.manifest_updated_count.load(Ordering::Relaxed);
-    let pk_count = hook.primary_keys_count.load(Ordering::Relaxed);
 
     assert!(
         sst_count > 0,
@@ -788,15 +780,10 @@ async fn test_flush_hook() {
         manifest_count, 1,
         "Expected exactly 1 manifest update, got {manifest_count}"
     );
-    assert!(
-        pk_count >= 2,
-        "Expected at least 2 unique primary keys (tags 'a' and 'b'), got {pk_count}"
-    );
 
     common_telemetry::info!(
-        "test_flush_hook passed: sst_count={}, manifest_count={}, pk_count={}",
+        "test_flush_hook passed: sst_count={}, manifest_count={}",
         sst_count,
         manifest_count,
-        pk_count
     );
 }

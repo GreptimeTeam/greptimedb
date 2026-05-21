@@ -300,7 +300,6 @@ impl CompactionTaskImpl {
                 self.compaction_region.region_id,
                 &self.compaction_region.region_metadata,
                 &files,
-                &merge_output.primary_keys,
             )
             .await;
         }

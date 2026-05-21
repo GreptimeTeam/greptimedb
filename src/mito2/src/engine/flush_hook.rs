@@ -41,35 +41,19 @@ pub struct SstFileInfo<'a> {
 ///
 /// plugins.insert(Arc::new(MyHook) as FlushHookRef);
 /// ```
-///
-/// To decode primary keys into tag name-value pairs, use:
-/// ```ignore
-/// use mito_codec::row_converter::build_primary_key_codec;
-///
-/// let codec = build_primary_key_codec(region_metadata);
-/// for pk_bytes in primary_keys {
-///     let decoded = codec.decode(pk_bytes)?;
-///     // Dense: Vec<(ColumnId, Value)>
-///     // Sparse: SparseValues with column_id -> value mapping
-/// }
-/// ```
 #[async_trait]
 pub trait FlushHook: Send + Sync {
     /// Called after SST files are written during flush.
     ///
     /// - `files`: per-file metadata (SstInfo + FileMeta) for each SST written.
-    /// - `primary_keys`: all unique primary keys (encoded bytes) across all files
-    ///   in this flush. Decode with `build_primary_key_codec(region_metadata)`.
-    /// - `region_metadata`: provides the schema to decode primary keys into
-    ///   tag/label name-value pairs.
+    /// - `region_metadata`: provides the schema for column type information.
     async fn on_sst_files_written(
         &self,
         region_id: RegionId,
         region_metadata: &RegionMetadataRef,
         files: &[SstFileInfo<'_>],
-        primary_keys: &[Vec<u8>],
     ) {
-        let _ = (region_id, region_metadata, files, primary_keys);
+        let _ = (region_id, region_metadata, files);
     }
 
     /// Called after the region manifest is successfully updated.

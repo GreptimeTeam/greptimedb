@@ -14,18 +14,16 @@
 
 //! Flush related utilities and structs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
 use common_base::Plugins;
 use common_telemetry::{debug, error, info};
-use datatypes::arrow::array::{Array, BinaryArray, DictionaryArray};
-use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
-use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
@@ -69,35 +67,6 @@ use crate::sst::parquet::{
 };
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
 use crate::worker::WorkerListener;
-
-pub(crate) type SharedPrimaryKeys = Arc<Mutex<HashSet<Vec<u8>>>>;
-
-pub(crate) struct PkCollectingIter {
-    inner: BoxedRecordBatchIterator,
-    primary_keys: SharedPrimaryKeys,
-}
-
-impl Iterator for PkCollectingIter {
-    type Item = Result<RecordBatch, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let batch = self.inner.next();
-        if let Some(Ok(ref record_batch)) = batch
-            && let Some(pk_col) =
-                record_batch.column_by_name(store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME)
-            && let Some(pk_dict) = pk_col
-                .as_any()
-                .downcast_ref::<DictionaryArray<UInt32Type>>()
-            && let Some(pk_values) = pk_dict.values().as_any().downcast_ref::<BinaryArray>()
-        {
-            let mut keys = self.primary_keys.lock().unwrap();
-            for i in 0..pk_values.len() {
-                keys.insert(pk_values.value(i).to_vec());
-            }
-        }
-        batch
-    }
-}
 
 /// Global write buffer (memtable) manager.
 ///
@@ -422,7 +391,6 @@ impl RegionFlushTask {
             encoded_part_count,
             flush_metrics,
             sst_infos,
-            primary_keys,
         } = self.do_flush_memtables(version, write_opts).await?;
 
         if !file_metas.is_empty() {
@@ -461,7 +429,7 @@ impl RegionFlushTask {
                     file_meta,
                 })
                 .collect();
-            hook.on_sst_files_written(self.region_id, &version.metadata, &files, &primary_keys)
+            hook.on_sst_files_written(self.region_id, &version.metadata, &files)
                 .await;
         }
 
@@ -527,8 +495,6 @@ impl RegionFlushTask {
         let mut flush_metrics = Metrics::new(WriteType::Flush);
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
         let hook: Option<FlushHookRef> = self.plugins.get();
-        let shared_pks: Option<SharedPrimaryKeys> =
-            hook.as_ref().map(|_| Arc::new(Mutex::new(HashSet::new())));
         let mut all_sst_infos = Vec::new();
         for mem in memtables {
             if mem.is_empty() {
@@ -562,7 +528,7 @@ impl RegionFlushTask {
                 num_sources,
                 results,
             } = self
-                .flush_flat_mem_ranges(version, &write_opts, mem_ranges, shared_pks.clone())
+                .flush_flat_mem_ranges(version, &write_opts, mem_ranges)
                 .await?;
             encoded_part_count += num_encoded;
             for (source_idx, result) in results.into_iter().enumerate() {
@@ -615,10 +581,6 @@ impl RegionFlushTask {
             );
         }
 
-        let primary_keys = shared_pks
-            .map(|pks| pks.lock().unwrap().drain().collect())
-            .unwrap_or_default();
-
         Ok(DoFlushMemtablesResult {
             file_metas,
             flushed_bytes,
@@ -626,7 +588,6 @@ impl RegionFlushTask {
             encoded_part_count,
             flush_metrics,
             sst_infos: all_sst_infos,
-            primary_keys,
         })
     }
 
@@ -635,7 +596,6 @@ impl RegionFlushTask {
         version: &VersionRef,
         write_opts: &WriteOptions,
         mem_ranges: MemtableRanges,
-        pk_collector: Option<SharedPrimaryKeys>,
     ) -> Result<FlushFlatMemResult> {
         let batch_schema = to_flat_sst_arrow_schema(
             &version.metadata,
@@ -648,7 +608,6 @@ impl RegionFlushTask {
             mem_ranges,
             &version.options,
             field_column_start,
-            pk_collector.clone(),
         )?;
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
@@ -794,25 +753,11 @@ struct DoFlushMemtablesResult {
     encoded_part_count: usize,
     flush_metrics: Metrics,
     sst_infos: Vec<SstInfo>,
-    primary_keys: Vec<Vec<u8>>,
 }
 
 struct FlatSources {
     sources: SmallVec<[(FlatSource, SequenceNumber); 4]>,
     encoded: SmallVec<[(EncodedRange, SequenceNumber); 4]>,
-}
-
-pub(crate) fn wrap_with_pk_collector(
-    iter: BoxedRecordBatchIterator,
-    pk_collector: &Option<SharedPrimaryKeys>,
-) -> BoxedRecordBatchIterator {
-    match pk_collector {
-        Some(collector) => Box::new(PkCollectingIter {
-            inner: iter,
-            primary_keys: collector.clone(),
-        }),
-        None => iter,
-    }
 }
 
 /// Returns the max sequence and [FlatSource] for the given memtable.
@@ -821,7 +766,6 @@ fn memtable_flat_sources(
     mem_ranges: MemtableRanges,
     options: &RegionOptions,
     field_column_start: usize,
-    pk_collector: Option<SharedPrimaryKeys>,
 ) -> Result<FlatSources> {
     let MemtableRanges { ranges } = mem_ranges;
     let mut flat_sources = FlatSources {
@@ -846,7 +790,6 @@ fn memtable_flat_sources(
                 field_column_start,
                 iter,
             );
-            let iter = wrap_with_pk_collector(iter, &pk_collector);
             flat_sources
                 .sources
                 .push((FlatSource::new_iter(schema, iter), max_sequence));
@@ -911,7 +854,6 @@ fn memtable_flat_sources(
                     field_column_start,
                     std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
                 )?;
-                let maybe_dedup = wrap_with_pk_collector(maybe_dedup, &pk_collector);
 
                 flat_sources.sources.push((
                     FlatSource::new_iter(schema.clone(), maybe_dedup),
@@ -944,7 +886,6 @@ fn memtable_flat_sources(
                 field_column_start,
                 input_iters,
             )?;
-            let maybe_dedup = wrap_with_pk_collector(maybe_dedup, &pk_collector);
 
             flat_sources
                 .sources
@@ -1615,7 +1556,6 @@ mod tests {
                 mem_ranges,
                 &options,
                 metadata.primary_key.len(),
-                None,
             )
             .unwrap();
             assert!(flat_sources.encoded.is_empty());
@@ -1642,14 +1582,9 @@ mod tests {
                 ..Default::default()
             };
 
-            let flat_sources = memtable_flat_sources(
-                schema,
-                mem_ranges,
-                &options,
-                metadata.primary_key.len(),
-                None,
-            )
-            .unwrap();
+            let flat_sources =
+                memtable_flat_sources(schema, mem_ranges, &options, metadata.primary_key.len())
+                    .unwrap();
             assert!(flat_sources.encoded.is_empty());
             assert_eq!(1, flat_sources.sources.len());
 
