@@ -28,7 +28,7 @@ use crate::sst::parquet::SstInfo;
 /// Information about a single SST file written during flush.
 pub struct SstFileInfo<'a> {
     pub sst_info_ref: &'a SstInfo,
-    pub file_meta: FileMeta,
+    pub file_meta: &'a FileMeta,
 }
 
 /// Extension hook for flush operations.

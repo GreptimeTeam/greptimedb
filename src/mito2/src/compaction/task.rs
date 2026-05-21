@@ -292,8 +292,8 @@ impl CompactionTaskImpl {
                 .iter()
                 .zip(merge_output.files_to_add.iter())
                 .map(|(info, meta)| SstFileInfo {
-                    file_meta: meta.clone(),
                     sst_info_ref: info,
+                    file_meta: meta,
                 })
                 .collect();
             hook.on_sst_files_written(
