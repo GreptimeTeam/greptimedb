@@ -148,17 +148,35 @@ pub(crate) struct CachedSstMeta {
     parquet_metadata: Arc<ParquetMetaData>,
     region_metadata: RegionMetadataRef,
     region_metadata_weight: usize,
+    page_index_policy: PageIndexPolicy,
 }
 
 impl CachedSstMeta {
+    #[cfg(test)]
     pub(crate) fn try_new(file_path: &str, parquet_metadata: ParquetMetaData) -> Result<Self> {
-        Self::try_new_with_region_metadata(file_path, parquet_metadata, None)
+        let page_index_policy = infer_loaded_page_index_policy(&parquet_metadata);
+        Self::try_new_with_page_index_policy(file_path, parquet_metadata, None, page_index_policy)
     }
 
     pub(crate) fn try_new_with_region_metadata(
         file_path: &str,
         parquet_metadata: ParquetMetaData,
         region_metadata: Option<RegionMetadataRef>,
+    ) -> Result<Self> {
+        let page_index_policy = infer_loaded_page_index_policy(&parquet_metadata);
+        Self::try_new_with_page_index_policy(
+            file_path,
+            parquet_metadata,
+            region_metadata,
+            page_index_policy,
+        )
+    }
+
+    pub(crate) fn try_new_with_page_index_policy(
+        file_path: &str,
+        parquet_metadata: ParquetMetaData,
+        region_metadata: Option<RegionMetadataRef>,
+        page_index_policy: PageIndexPolicy,
     ) -> Result<Self> {
         let file_metadata = parquet_metadata.file_metadata();
         let key_values = file_metadata
@@ -196,6 +214,7 @@ impl CachedSstMeta {
             parquet_metadata,
             region_metadata,
             region_metadata_weight,
+            page_index_policy,
         })
     }
 
@@ -205,6 +224,22 @@ impl CachedSstMeta {
 
     pub(crate) fn region_metadata(&self) -> RegionMetadataRef {
         self.region_metadata.clone()
+    }
+
+    fn satisfies_page_index_policy(&self, requested: PageIndexPolicy) -> bool {
+        match requested {
+            PageIndexPolicy::Skip => true,
+            PageIndexPolicy::Optional => self.page_index_policy != PageIndexPolicy::Skip,
+            PageIndexPolicy::Required => self.page_index_policy == PageIndexPolicy::Required,
+        }
+    }
+}
+
+fn infer_loaded_page_index_policy(parquet_metadata: &ParquetMetaData) -> PageIndexPolicy {
+    if parquet_metadata.column_index().is_some() || parquet_metadata.offset_index().is_some() {
+        PageIndexPolicy::Optional
+    } else {
+        PageIndexPolicy::Skip
     }
 }
 
@@ -279,10 +314,11 @@ impl CacheStrategy {
     pub(crate) fn get_sst_meta_data_from_mem_cache(
         &self,
         file_id: RegionFileId,
+        page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
         match self {
             CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.get_sst_meta_data_from_mem_cache(file_id)
+                cache_manager.get_sst_meta_data_from_mem_cache(file_id, page_index_policy)
             }
             CacheStrategy::Disabled => None,
         }
@@ -293,7 +329,7 @@ impl CacheStrategy {
         &self,
         file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
-        self.get_sst_meta_data_from_mem_cache(file_id)
+        self.get_sst_meta_data_from_mem_cache(file_id, PageIndexPolicy::Skip)
             .map(|metadata| metadata.parquet_metadata())
     }
 
@@ -592,7 +628,7 @@ impl CacheManager {
         metrics: &mut MetadataCacheMetrics,
         page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
-        if let Some(metadata) = self.get_sst_meta_data_from_mem_cache(file_id) {
+        if let Some(metadata) = self.get_sst_meta_data_from_mem_cache(file_id, page_index_policy) {
             metrics.mem_cache_hit += 1;
             return Some(metadata);
         }
@@ -631,9 +667,12 @@ impl CacheManager {
     pub(crate) fn get_sst_meta_data_from_mem_cache(
         &self,
         file_id: RegionFileId,
+        page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
         self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
             let value = sst_meta_cache.get(&SstMetaKey(file_id.region_id(), file_id.file_id()));
+            let value =
+                value.filter(|metadata| metadata.satisfies_page_index_policy(page_index_policy));
             update_hit_miss(value, SST_META_TYPE)
         })
     }
@@ -644,7 +683,7 @@ impl CacheManager {
         &self,
         file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
-        self.get_sst_meta_data_from_mem_cache(file_id)
+        self.get_sst_meta_data_from_mem_cache(file_id, PageIndexPolicy::Skip)
             .map(|metadata| metadata.parquet_metadata())
     }
 
@@ -1386,6 +1425,63 @@ mod tests {
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&region_metadata, &cached.region_metadata()));
+    }
+
+    #[tokio::test]
+    async fn test_parquet_meta_cache_respects_page_index_policy() {
+        let cache = CacheManager::builder().sst_meta_cache_size(2000).build();
+        let region_id = RegionId::new(1, 1);
+        let file_id = RegionFileId::new(region_id, FileId::random());
+        let (metadata, _) = sst_parquet_meta();
+
+        let skip_metadata = Arc::new(
+            CachedSstMeta::try_new_with_page_index_policy(
+                "test.parquet",
+                Arc::unwrap_or_clone(metadata.clone()),
+                None,
+                PageIndexPolicy::Skip,
+            )
+            .unwrap(),
+        );
+        cache.put_sst_meta_data(file_id, skip_metadata);
+
+        let mut metrics = MetadataCacheMetrics::default();
+        assert!(
+            cache
+                .get_sst_meta_data(file_id, &mut metrics, PageIndexPolicy::Optional)
+                .await
+                .is_none()
+        );
+        assert_eq!(1, metrics.cache_miss);
+
+        let optional_metadata = Arc::new(
+            CachedSstMeta::try_new_with_page_index_policy(
+                "test.parquet",
+                Arc::unwrap_or_clone(metadata),
+                None,
+                PageIndexPolicy::Optional,
+            )
+            .unwrap(),
+        );
+        cache.put_sst_meta_data(file_id, optional_metadata);
+
+        let mut metrics = MetadataCacheMetrics::default();
+        assert!(
+            cache
+                .get_sst_meta_data(file_id, &mut metrics, PageIndexPolicy::Optional)
+                .await
+                .is_some()
+        );
+        assert_eq!(1, metrics.mem_cache_hit);
+
+        let mut metrics = MetadataCacheMetrics::default();
+        assert!(
+            cache
+                .get_sst_meta_data(file_id, &mut metrics, PageIndexPolicy::Skip)
+                .await
+                .is_some()
+        );
+        assert_eq!(1, metrics.mem_cache_hit);
     }
 
     #[test]

@@ -1080,6 +1080,7 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
+        let may_build_selective_row_selection = predicate.is_some();
         let decode_pk_values = !self.compaction
             && self
                 .mapper
@@ -1095,6 +1096,11 @@ impl ScanInput {
             .inverted_index_appliers(self.inverted_index_appliers.clone())
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
             .fulltext_index_appliers(self.fulltext_index_appliers.clone());
+        let reader = if !self.compaction && may_build_selective_row_selection {
+            reader.deferred_optional_page_index()
+        } else {
+            reader
+        };
         #[cfg(feature = "vector_index")]
         let reader = {
             let mut reader = reader;
