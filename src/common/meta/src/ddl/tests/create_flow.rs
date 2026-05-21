@@ -625,7 +625,7 @@ async fn test_replace_pending_flow_with_pending_flow_updates_metadata() {
     assert_eq!(replaced_flow.source_table_ids(), Vec::<u32>::new());
     assert_eq!(
         replaced_flow.unresolved_source_table_names(),
-        &[second_missing_source.clone()]
+        std::slice::from_ref(&second_missing_source)
     );
     assert_eq!(
         replaced_flow.all_source_table_names(),
