@@ -91,6 +91,8 @@ impl CreateFlowProcedure {
         let create_if_not_exists = self.data.task.create_if_not_exists;
         let or_replace = self.data.task.or_replace;
 
+        validate_flow_options(&self.data.task)?;
+
         let flow_name_value = self
             .context
             .flow_metadata_manager
@@ -431,6 +433,26 @@ pub fn defer_on_missing_source(flow_task: &CreateFlowTask) -> Result<bool> {
         .map(|value| value.unwrap_or(false))
 }
 
+pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
+    for key in flow_task.flow_options.keys() {
+        match key.as_str() {
+            DEFER_ON_MISSING_SOURCE_KEY | FlowType::FLOW_TYPE_KEY => {}
+            unknown => {
+                return UnexpectedSnafu {
+                    err_msg: format!(
+                        "Unknown flow option '{unknown}', supported user options: {DEFER_ON_MISSING_SOURCE_KEY}"
+                    ),
+                }
+                .fail();
+            }
+        }
+    }
+
+    defer_on_missing_source(flow_task)?;
+    get_flow_type_from_options(flow_task)?;
+    Ok(())
+}
+
 fn user_runtime_flow_options(options: &HashMap<String, String>) -> HashMap<String, String> {
     let mut options = options.clone();
     options.remove(DEFER_ON_MISSING_SOURCE_KEY);
@@ -572,7 +594,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             .collect::<Vec<_>>();
 
         let flow_type = value.flow_type.unwrap_or_default().to_string();
-        options.insert("flow_type".to_string(), flow_type);
+        options.insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type);
 
         let mut create_time = chrono::Utc::now();
         if let Some(prev_flow_value) = value.prev_flow_info_value.as_ref()

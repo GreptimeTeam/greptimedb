@@ -34,7 +34,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_reado
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{DEFER_ON_MISSING_SOURCE_KEY, FlowType};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::procedure_executor::ExecutorContext;
@@ -113,7 +113,6 @@ struct DdlSubmitOptions {
     timeout: Duration,
 }
 
-const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 const ALLOWED_FLOW_OPTIONS: [&str; 1] = [DEFER_ON_MISSING_SOURCE_KEY];
 
 fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
@@ -224,7 +223,7 @@ fn determine_flow_type_for_source_state(
             }
         );
         info!(
-            "Flow `{}` defaults to batching because defer_on_missing_source=true and some source tables are not available yet",
+            "Flow `{}` is created as a pending batching flow because source tables are missing and defer_on_missing_source=true",
             flow_name
         );
         return Ok(Some(FlowType::Batching));
