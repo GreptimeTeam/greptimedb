@@ -206,8 +206,6 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 /// Reason of a flush task.
 #[derive(Debug, IntoStaticStr, Clone, Copy, PartialEq, Eq)]
 pub enum FlushReason {
-    /// Other reasons.
-    Others,
     /// Engine reaches flush threshold.
     EngineFull,
     /// Manual flush.
@@ -243,6 +241,8 @@ impl From<RegionFlushReason> for FlushReason {
             RegionFlushReason::RegionMigration => FlushReason::RegionMigration,
             RegionFlushReason::Repartition => FlushReason::Repartition,
             RegionFlushReason::RemoteWalPrune => FlushReason::RemoteWalPrune,
+            RegionFlushReason::Closing => FlushReason::Closing,
+            RegionFlushReason::Downgrading => FlushReason::Downgrading,
         }
     }
 }
@@ -1355,7 +1355,7 @@ mod tests {
         let (output_tx, output_rx) = oneshot::channel();
         let mut task = RegionFlushTask {
             region_id: builder.region_id(),
-            reason: FlushReason::Others,
+            reason: FlushReason::Manual,
             senders: Vec::new(),
             request_sender: tx,
             access_layer: env.access_layer.clone(),
@@ -1401,7 +1401,7 @@ mod tests {
         let mut tasks: Vec<_> = (0..3)
             .map(|_| RegionFlushTask {
                 region_id: builder.region_id(),
-                reason: FlushReason::Others,
+                reason: FlushReason::Manual,
                 senders: Vec::new(),
                 request_sender: tx.clone(),
                 access_layer: env.access_layer.clone(),
@@ -1587,7 +1587,7 @@ mod tests {
         let mut tasks: Vec<_> = (0..2)
             .map(|_| RegionFlushTask {
                 region_id: builder.region_id(),
-                reason: FlushReason::Others,
+                reason: FlushReason::Manual,
                 senders: Vec::new(),
                 request_sender: tx.clone(),
                 access_layer: env.access_layer.clone(),

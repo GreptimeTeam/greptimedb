@@ -1153,7 +1153,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     continue;
                 }
                 DdlRequest::Flush(req) => {
-                    self.handle_flush_request(ddl.region_id, req, None, ddl.sender);
+                    self.handle_flush_request(ddl.region_id, req, ddl.sender);
                     continue;
                 }
                 DdlRequest::Compact(req) => {
