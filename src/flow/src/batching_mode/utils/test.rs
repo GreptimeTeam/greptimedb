@@ -624,6 +624,37 @@ async fn test_analyze_incremental_aggregate_plan_allows_alias_wrapped_scan() {
 }
 
 #[tokio::test]
+async fn test_rewrite_incremental_aggregate_allows_alias_wrapped_scan() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql = "SELECT max(n.number) AS number, n.ts FROM numbers_with_ts AS n GROUP BY n.ts";
+    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(analysis.unsupported_exprs.is_empty());
+
+    let rewritten = rewrite_incremental_aggregate_with_sink_merge(
+        &plan,
+        &analysis,
+        single_row_u32_table("alias_wrapped_sink", vec!["ts", "number"]),
+        &[
+            "greptime".to_string(),
+            "public".to_string(),
+            "alias_wrapped_sink".to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let rewritten_fields = rewritten
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(rewritten_fields, analysis.output_field_names);
+}
+
+#[tokio::test]
 async fn test_analyze_incremental_aggregate_plan_rejects_having_filter() {
     let sql =
         "SELECT sum(number) AS number, ts FROM numbers_with_ts GROUP BY ts HAVING sum(number) > 10";
@@ -980,6 +1011,18 @@ async fn test_analyze_incremental_aggregate_plan_rejects_uncovered_outputs() {
         "non-literal extra output should be rejected: {:?}",
         analysis.unsupported_exprs
     );
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_rejects_computed_group_key_shadow() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql =
+        "SELECT number + 1 AS number, sum(number) AS total FROM numbers_with_ts GROUP BY number";
+    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert_unsupported(&analysis, "not a transparent group expression");
 }
 
 #[tokio::test]
