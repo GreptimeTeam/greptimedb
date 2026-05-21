@@ -411,13 +411,17 @@ impl StartCommand {
         );
         let fundamental_cache_registry =
             build_fundamental_cache_registry(readonly_meta_backend.clone());
-        let layered_cache_registry = Arc::new(
-            with_default_composite_cache_registry(
-                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
-            )
-            .context(error::BuildCacheRegistrySnafu)?
-            .build(),
-        );
+        let mut layered_cache_builder = with_default_composite_cache_registry(
+            layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+        )
+        .context(error::BuildCacheRegistrySnafu)?;
+
+        if let Some(plugin_cache_builder) = plugins::frontend::configure_cache_registry(&plugins) {
+            layered_cache_builder =
+                layered_cache_builder.add_cache_registry(plugin_cache_builder.build());
+        }
+
+        let layered_cache_registry = Arc::new(layered_cache_builder.build());
 
         // frontend to datanode need not timeout.
         // Some queries are expected to take long time.
