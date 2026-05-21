@@ -516,6 +516,38 @@ async fn test_query_prepared() -> Result<()> {
         _ => unreachable!(),
     }
 
+    // Regression test for #8142: LIMIT ? should work in prepared statements.
+    // The LIMIT placeholder should be inferred as Int64 so the MySQL prepare
+    // response advertises the correct parameter count.
+    {
+        let stmt = connection
+            .prep("SELECT uint32s FROM all_datatypes LIMIT ?")
+            .await
+            .unwrap();
+        let rows: Vec<Row> = connection
+            .exec(stmt, vec![mysql_async::Value::Int(1)])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "LIMIT 1 should return 1 row");
+    }
+
+    // Also cover mixed placeholders: the WHERE placeholder is inferred from
+    // the column type and the LIMIT placeholder is inferred from its context.
+    {
+        let stmt = connection
+            .prep("SELECT uint32s FROM all_datatypes WHERE uint32s >= ? LIMIT ?")
+            .await
+            .unwrap();
+        let rows: Vec<Row> = connection
+            .exec(
+                stmt,
+                vec![mysql_async::Value::UInt(0), mysql_async::Value::UInt(1)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "LIMIT 1 should return 1 row");
+    }
+
     Ok(())
 }
 
