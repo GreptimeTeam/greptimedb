@@ -196,7 +196,6 @@ impl MysqlInstanceShim {
         // We have to transform the placeholder, because DataFusion only parses placeholders
         // in the form of "$i", it can't process "?" right now.
         let (statement, placeholder_count) = transform_placeholders_with_count(statement);
-        let query = statement.to_string();
         let param_num = placeholder_count + 1;
 
         let describe_result = self
@@ -249,10 +248,13 @@ impl MysqlInstanceShim {
                     })?;
             }
             _ => {
-                self.save_plan(SqlPlan::Statement(statement, query), stmt_key)
-                    .inspect_err(|e| {
-                        error!(e; "Failed to save prepared statement");
-                    })?;
+                self.save_plan(
+                    SqlPlan::Statement(statement, raw_query.to_string()),
+                    stmt_key,
+                )
+                .inspect_err(|e| {
+                    error!(e; "Failed to save prepared statement");
+                })?;
             }
         }
 
@@ -315,7 +317,7 @@ impl MysqlInstanceShim {
                     self.do_query(&query, query_ctx.clone()).await
                 }
             }
-            SqlPlan::Statement(_stmt, query) => {
+            SqlPlan::Statement(stmt, query) => {
                 let param_strs = match params {
                     Params::ProtocolParams(params) => {
                         params.iter().map(convert_param_value_to_string).collect()
@@ -326,7 +328,7 @@ impl MysqlInstanceShim {
                     "do_execute Replacing with Params: {:?}, Original Query: {}",
                     param_strs, query
                 );
-                let query = replace_params(param_strs, query);
+                let query = replace_params(param_strs, stmt, query)?;
                 debug!("Mysql execute replaced query: {}", query);
                 self.do_query(&query, query_ctx.clone()).await
             }
@@ -665,6 +667,10 @@ fn convert_param_value_to_string(param: &ParamValue) -> String {
         ValueInner::UInt(u) => u.to_string(),
         ValueInner::Double(u) => u.to_string(),
         ValueInner::NULL => "NULL".to_string(),
+        // MySQL prepared fallback emits SQL text. Delegate bytes/string literal
+        // escaping to mysql_common. `false` means normal MySQL backslash escapes;
+        // if NO_BACKSLASH_ESCAPES is supported in this path later, wire the
+        // session SQL mode here.
         ValueInner::Bytes(b) => MysqlValue::Bytes(b.to_vec()).as_sql(false),
         ValueInner::Date(_) => format!("'{}'", NaiveDate::from(param.value)),
         ValueInner::Datetime(_) => format!("'{}'", NaiveDateTime::from(param.value)),
@@ -672,113 +678,120 @@ fn convert_param_value_to_string(param: &ParamValue) -> String {
     }
 }
 
-fn replace_params(params: Vec<String>, query: String) -> String {
-    let mut output = String::with_capacity(query.len());
-    let mut index = 0;
-    let bytes = query.as_bytes();
-
-    while index < bytes.len() {
-        if matches!(bytes[index], b'\'' | b'"' | b'`') {
-            let quote = bytes[index];
-            push_quoted_segment(&mut output, &query, &mut index, quote);
-        } else if index + 1 < bytes.len() && bytes[index] == b'-' && bytes[index + 1] == b'-' {
-            push_line_comment(&mut output, &query, &mut index);
-        } else if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
-            push_block_comment(&mut output, &query, &mut index);
-        } else if bytes[index] == b'$' {
-            let placeholder_start = index;
-            index += 1;
-            let digit_start = index;
-
-            while index < bytes.len() && bytes[index].is_ascii_digit() {
-                index += 1;
-            }
-
-            if digit_start < index
-                && let Ok(param_index) = query[digit_start..index].parse::<usize>()
-                && let Some(param) = param_index.checked_sub(1).and_then(|idx| params.get(idx))
-            {
-                output.push_str(param);
-            } else {
-                output.push_str(&query[placeholder_start..index]);
-            }
-        } else {
-            let ch = query[index..]
-                .chars()
-                .next()
-                .expect("index should be on a char boundary");
-            output.push(ch);
-            index += ch.len_utf8();
+fn replace_params(params: Vec<String>, stmt: Statement, mut query: String) -> Result<String> {
+    let spans = helper::placeholder_spans(stmt);
+    ensure!(
+        spans.len() == params.len(),
+        error::InternalSnafu {
+            err_msg: format!(
+                "Prepared statement expected {} parameters but got {}",
+                spans.len(),
+                params.len()
+            )
         }
+    );
+
+    let mut replacements = Vec::with_capacity(spans.len());
+    for span in spans {
+        let start = location_to_byte_offset(&query, span.start_line, span.start_column)
+            .ok_or_else(|| {
+                error::InternalSnafu {
+                    err_msg: format!(
+                        "Invalid placeholder start span: line {}, column {}",
+                        span.start_line, span.start_column
+                    ),
+                }
+                .build()
+            })?;
+        let end =
+            location_to_byte_offset(&query, span.end_line, span.end_column).ok_or_else(|| {
+                error::InternalSnafu {
+                    err_msg: format!(
+                        "Invalid placeholder end span: line {}, column {}",
+                        span.end_line, span.end_column
+                    ),
+                }
+                .build()
+            })?;
+        let param = span
+            .index
+            .checked_sub(1)
+            .and_then(|idx| params.get(idx))
+            .ok_or_else(|| {
+                error::InternalSnafu {
+                    err_msg: format!("Missing prepared statement parameter {}", span.index),
+                }
+                .build()
+            })?;
+
+        ensure!(
+            start < end && end <= query.len(),
+            error::InternalSnafu {
+                err_msg: format!(
+                    "Invalid placeholder byte span: {}..{} for query length {}",
+                    start,
+                    end,
+                    query.len()
+                )
+            }
+        );
+        ensure!(
+            query.get(start..end) == Some("?"),
+            error::InternalSnafu {
+                err_msg: format!(
+                    "Prepared statement placeholder span maps to {:?} instead of '?'",
+                    query.get(start..end)
+                )
+            }
+        );
+
+        replacements.push((start, end, param.clone()));
     }
 
-    output
-}
-
-fn push_quoted_segment(output: &mut String, query: &str, index: &mut usize, quote: u8) {
-    let bytes = query.as_bytes();
-    output.push(quote as char);
-    *index += 1;
-
-    while *index < bytes.len() {
-        let ch = query[*index..]
-            .chars()
-            .next()
-            .expect("index should be on a char boundary");
-        output.push(ch);
-        *index += ch.len_utf8();
-
-        if ch == '\\' {
-            if *index < bytes.len() {
-                let next = query[*index..]
-                    .chars()
-                    .next()
-                    .expect("index should be on a char boundary");
-                output.push(next);
-                *index += next.len_utf8();
+    replacements.sort_unstable_by_key(|(start, _, _)| *start);
+    for windows in replacements.windows(2) {
+        ensure!(
+            windows[0].1 <= windows[1].0,
+            error::InternalSnafu {
+                err_msg: "Overlapping placeholder spans in prepared statement".to_string()
             }
-        } else if ch as u8 == quote {
-            if *index < bytes.len() && bytes[*index] == quote {
-                output.push(quote as char);
-                *index += 1;
-            } else {
-                break;
-            }
-        }
+        );
     }
+
+    // All spans are computed against the original query. Apply replacements
+    // from right to left so changing one parameter's string length never shifts
+    // the byte offsets of placeholders that have not been replaced yet.
+    for (start, end, param) in replacements.into_iter().rev() {
+        query.replace_range(start..end, &param);
+    }
+
+    Ok(query)
 }
 
-fn push_line_comment(output: &mut String, query: &str, index: &mut usize) {
-    let bytes = query.as_bytes();
-    while *index < bytes.len() {
-        let ch = query[*index..]
-            .chars()
-            .next()
-            .expect("index should be on a char boundary");
-        output.push(ch);
-        *index += ch.len_utf8();
+fn location_to_byte_offset(query: &str, line: u64, column: u64) -> Option<usize> {
+    // sqlparser spans are 1-based line/column locations, and columns advance by
+    // Rust `char`s rather than bytes. Convert them to byte offsets before using
+    // `String::replace_range` on the original SQL text.
+    if line == 0 || column == 0 {
+        return None;
+    }
+
+    let mut current_line = 1;
+    let mut current_column = 1;
+    for (index, ch) in query.char_indices() {
+        if current_line == line && current_column == column {
+            return Some(index);
+        }
+
         if ch == '\n' {
-            break;
+            current_line += 1;
+            current_column = 1;
+        } else {
+            current_column += 1;
         }
     }
-}
 
-fn push_block_comment(output: &mut String, query: &str, index: &mut usize) {
-    let bytes = query.as_bytes();
-    while *index < bytes.len() {
-        if *index + 1 < bytes.len() && bytes[*index] == b'*' && bytes[*index + 1] == b'/' {
-            output.push_str("*/");
-            *index += 2;
-            break;
-        }
-
-        let ch = query[*index..]
-            .chars()
-            .next()
-            .expect("index should be on a char boundary");
-        output.push(ch);
-        *index += ch.len_utf8();
-    }
+    (current_line == line && current_column == column).then_some(query.len())
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -970,6 +983,14 @@ mod tests {
         )
     }
 
+    fn statement_with_transformed_placeholders(query: &str) -> Statement {
+        let mut statements =
+            ParserContext::create_with_dialect(query, &MySqlDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(statements.len(), 1);
+        transform_placeholders_with_count(statements.remove(0)).0
+    }
+
     #[test]
     fn test_prepared_params_keep_unknown_type_placeholders() {
         let mut param_types = HashMap::new();
@@ -985,29 +1006,87 @@ mod tests {
     }
 
     #[test]
-    fn test_replace_params_single_pass() {
-        let query = "SELECT $1, $2".to_string();
+    fn test_replace_params_by_placeholder_span() {
+        let query = "SELECT ?, ?".to_string();
+        let stmt = statement_with_transformed_placeholders(&query);
         let params = vec!["'$2 should stay'".to_string(), "'value'".to_string()];
 
         assert_eq!(
             "SELECT '$2 should stay', 'value'",
-            replace_params(params, query)
+            replace_params(params, stmt, query).unwrap()
         );
 
-        let query = "SELECT '$1', \"$2\", `$3`, $1, $10".to_string();
-        let params = (1..=10).map(|idx| format!("'{idx}'")).collect();
+        let query = "SELECT ?, ?, ?".to_string();
+        let stmt = statement_with_transformed_placeholders(&query);
+        let params = vec![
+            "'much longer than a placeholder'".to_string(),
+            "0".to_string(),
+            "'also much longer than a placeholder'".to_string(),
+        ];
 
         assert_eq!(
-            "SELECT '$1', \"$2\", `$3`, '1', '10'",
-            replace_params(params, query)
+            "SELECT 'much longer than a placeholder', 0, 'also much longer than a placeholder'",
+            replace_params(params, stmt, query).unwrap()
         );
 
-        let query = "SELECT /* $1 */ $1 -- $2\n, $2".to_string();
+        let query = "SELECT '$1', \"$2\", `$3`, ?, ?".to_string();
+        let stmt = statement_with_transformed_placeholders(&query);
+        let params = vec!["'1'".to_string(), "'2'".to_string()];
+
+        assert_eq!(
+            "SELECT '$1', \"$2\", `$3`, '1', '2'",
+            replace_params(params, stmt, query).unwrap()
+        );
+
+        let query = "SELECT /* ? */ ? -- ?\n, ?".to_string();
+        let stmt = statement_with_transformed_placeholders(&query);
         let params = vec!["'first'".to_string(), "'second'".to_string()];
 
         assert_eq!(
-            "SELECT /* $1 */ 'first' -- $2\n, 'second'",
-            replace_params(params, query)
+            "SELECT /* ? */ 'first' -- ?\n, 'second'",
+            replace_params(params, stmt, query).unwrap()
+        );
+
+        let query = "SELECT '中文', ?".to_string();
+        let stmt = statement_with_transformed_placeholders(&query);
+        let params = vec!["'value'".to_string()];
+
+        assert_eq!(
+            "SELECT '中文', 'value'",
+            replace_params(params, stmt, query).unwrap()
+        );
+
+        let query = "SELECT '中文',\n  ?".to_string();
+        let stmt = statement_with_transformed_placeholders(&query);
+        let params = vec!["'value'".to_string()];
+
+        assert_eq!(
+            "SELECT '中文',\n  'value'",
+            replace_params(params, stmt, query).unwrap()
+        );
+
+        let query = "SELECT 'x'\r\n, ?".to_string();
+        let stmt = statement_with_transformed_placeholders(&query);
+        let params = vec!["'crlf'".to_string()];
+
+        assert_eq!(
+            "SELECT 'x'\r\n, 'crlf'",
+            replace_params(params, stmt, query).unwrap()
+        );
+
+        let query = "SELECT\t?".to_string();
+        let stmt = statement_with_transformed_placeholders(&query);
+        let params = vec!["NULL".to_string()];
+
+        assert_eq!("SELECT\tNULL", replace_params(params, stmt, query).unwrap());
+
+        let query = "SELECT CAST(? AS INT64), ? + (SELECT ?)".to_string();
+        let stmt = statement_with_transformed_placeholders(&query);
+        let params = vec!["1".to_string(), "2".to_string(), "3".to_string()];
+
+        assert_eq!(
+            "SELECT CAST(1 AS INT64), 2 + (SELECT 3)",
+            replace_params(params, stmt, query).unwrap()
         );
     }
 

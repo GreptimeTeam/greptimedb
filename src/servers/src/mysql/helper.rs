@@ -32,6 +32,17 @@ use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
 
+/// Location of a prepared-statement placeholder in the original SQL text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlaceholderSpan {
+    /// 1-based placeholder index.
+    pub(crate) index: usize,
+    pub(crate) start_line: u64,
+    pub(crate) start_column: u64,
+    pub(crate) end_line: u64,
+    pub(crate) end_column: u64,
+}
+
 /// Returns the placeholder string "$i".
 pub fn format_placeholder(i: usize) -> String {
     format!("${}", i)
@@ -88,6 +99,54 @@ pub fn transform_placeholders_with_count(stmt: Statement) -> (Statement, usize) 
     }
 }
 
+/// Collect spans of "$i" placeholders in a statement.
+/// Only works for Insert, Query and Delete statements.
+pub(crate) fn placeholder_spans(mut stmt: Statement) -> Vec<PlaceholderSpan> {
+    let mut spans = Vec::new();
+    match stmt {
+        Statement::Query(ref mut query) => collect_placeholder_spans(&mut query.inner, &mut spans),
+        Statement::Insert(ref mut insert) => {
+            collect_placeholder_spans(&mut insert.inner, &mut spans)
+        }
+        Statement::Delete(ref mut delete) => {
+            collect_placeholder_spans(&mut delete.inner, &mut spans)
+        }
+        _ => {}
+    };
+
+    spans
+}
+
+fn collect_placeholder_spans<V>(v: &mut V, spans: &mut Vec<PlaceholderSpan>)
+where
+    V: VisitMut,
+{
+    let _ = visit_expressions_mut(v, |expr| {
+        if let Expr::Value(ValueWithSpan {
+            value: ValueExpr::Placeholder(s),
+            span,
+        }) = expr
+            && let Some(index) = placeholder_index(s)
+        {
+            spans.push(PlaceholderSpan {
+                index,
+                start_line: span.start.line,
+                start_column: span.start.column,
+                end_line: span.end.line,
+                end_column: span.end.column,
+            });
+        }
+        ControlFlow::<()>::Continue(())
+    });
+}
+
+fn placeholder_index(s: &str) -> Option<usize> {
+    s.strip_prefix('$')?
+        .parse::<usize>()
+        .ok()
+        .filter(|i| *i > 0)
+}
+
 fn visit_placeholders<V>(v: &mut V) -> usize
 where
     V: VisitMut,
@@ -98,6 +157,7 @@ where
             value: ValueExpr::Placeholder(s),
             ..
         }) = expr
+            && s == "?"
         {
             *s = format_placeholder(index);
             index += 1;

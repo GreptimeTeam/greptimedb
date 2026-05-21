@@ -574,6 +574,13 @@ async fn test_query_prepared() -> Result<()> {
             .await
             .unwrap();
         assert_eq!(row, Some(vec![0xFF, 0xFE]));
+
+        let stmt = connection.prep("SELECT ?").await.unwrap();
+        let row: Option<Option<String>> = connection
+            .exec_first(stmt, vec![mysql_async::Value::NULL])
+            .await
+            .unwrap();
+        assert_eq!(row, Some(None));
     }
 
     // Values inserted into the SQL text must not be processed again while
@@ -615,6 +622,24 @@ async fn test_query_prepared() -> Result<()> {
             .await
             .unwrap();
         assert_eq!(row, Some(("$1".to_string(), "actual".to_string())));
+
+        let stmt = connection.prep("SELECT /* ? */ ? -- ?\n").await.unwrap();
+        assert_eq!(stmt.num_params(), 1);
+
+        let row: Option<String> = connection
+            .exec_first(stmt, vec![mysql_async::Value::Bytes(b"commented".to_vec())])
+            .await
+            .unwrap();
+        assert_eq!(row, Some("commented".to_string()));
+
+        let stmt = connection.prep("SELECT '中文', ?").await.unwrap();
+        assert_eq!(stmt.num_params(), 1);
+
+        let row: Option<(String, String)> = connection
+            .exec_first(stmt, vec![mysql_async::Value::Bytes(b"actual".to_vec())])
+            .await
+            .unwrap();
+        assert_eq!(row, Some(("中文".to_string(), "actual".to_string())));
     }
 
     // Also cover mixed known and unknown placeholders. The projection
@@ -638,6 +663,23 @@ async fn test_query_prepared() -> Result<()> {
             .await
             .unwrap();
         assert!(!rows.is_empty());
+    }
+
+    // LIMIT placeholders used to be a common case where DataFusion did not
+    // infer a parameter type. The prepare response must still advertise the
+    // parameter and execution must substitute it correctly.
+    {
+        let stmt = connection
+            .prep("SELECT uint32s FROM all_datatypes ORDER BY uint32s LIMIT ?")
+            .await
+            .unwrap();
+        assert_eq!(stmt.num_params(), 1);
+
+        let rows: Vec<Row> = connection
+            .exec(stmt, vec![mysql_async::Value::UInt(1)])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
     }
 
     Ok(())
