@@ -34,13 +34,11 @@ fn resolve_flush_reason(
     request_reason: Option<RegionFlushReason>,
     is_downgrading: bool,
 ) -> FlushReason {
-    request_reason.map(FlushReason::from).unwrap_or({
-        if is_downgrading {
-            FlushReason::Downgrading
-        } else {
-            FlushReason::Manual
-        }
-    })
+    match request_reason {
+        Some(reason) => FlushReason::from(reason),
+        None if is_downgrading => FlushReason::Downgrading,
+        None => FlushReason::Manual,
+    }
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
