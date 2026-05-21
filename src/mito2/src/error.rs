@@ -1241,6 +1241,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Region {} is in {:?} state, expect: Writable, Staging or Downgrading",
+        region_id,
+        state
+    ))]
+    FlushableRegionState {
+        region_id: RegionId,
+        state: RegionRoleState,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1430,6 +1442,8 @@ impl ErrorExt for Error {
             TooManyFilesToRead { .. } | TooManyGcJobs { .. } => StatusCode::RateLimited,
 
             PruneFile { source, .. } => source.status_code(),
+
+            FlushableRegionState { .. } => StatusCode::RegionNotReady,
         }
     }
 

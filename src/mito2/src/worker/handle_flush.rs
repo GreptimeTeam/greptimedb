@@ -182,11 +182,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         request: RegionFlushRequest,
         reason: Option<FlushReason>,
-        mut sender: OptionOutputTx,
+        sender: OptionOutputTx,
     ) {
-        let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
-            return;
+        let region = match self.regions.flushable_region(region_id) {
+            Ok(region) => region,
+            Err(e) => {
+                sender.send(Err(e));
+                return;
+            }
         };
+
         // `update_topic_latest_entry_id` updates `topic_latest_entry_id` when memtables are empty.
         // But the flush is skipped if memtables are empty. Thus should update the `topic_latest_entry_id`
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.
