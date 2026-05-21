@@ -33,7 +33,7 @@ use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTIO
 use crate::region::RegionRoleState;
 use crate::request::{
     BackgroundNotify, CompactionCancelled, CompactionFailed, CompactionFinished, OutputTx,
-    RegionEditResult, WorkerRequest, WorkerRequestWithTime,
+    RegionEditResult, Waiters, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::file::FileMeta;
 use crate::worker::WorkerListener;
@@ -162,7 +162,7 @@ impl CompactionTaskImpl {
             region_id,
             notify: BackgroundNotify::RegionEdit(RegionEditResult {
                 region_id,
-                sender: expire_delete_sender,
+                waiters: Waiters::one(expire_delete_sender),
                 edit,
                 result: Ok(()),
                 update_region_state: false,
