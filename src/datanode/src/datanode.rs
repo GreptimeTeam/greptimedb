@@ -21,9 +21,7 @@ use std::time::{Duration, Instant};
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
-use common_meta::cache::{
-    LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef,
-};
+use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::TopicStatsReporter;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
