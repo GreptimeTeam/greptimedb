@@ -888,6 +888,7 @@ impl PrometheusHandler for Instance {
 
         interceptor.pre_execute(query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
 
+        // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
         let query_statement = if let QueryStatement::Promql(eval_stmt, alias) = stmt {
             CatalogQueryStatement::Promql(eval_stmt, alias)
         } else {
@@ -1275,11 +1276,11 @@ mod tests {
 
         fn pre_execute(
             &self,
-            statement: &Statement,
+            statement: Option<&Statement>,
             _plan: Option<&LogicalPlan>,
             _query_ctx: QueryContextRef,
         ) -> Result<()> {
-            let Statement::Insert(insert) = statement else {
+            let Some(Statement::Insert(insert)) = statement else {
                 return Ok(());
             };
             if !insert.has_non_values_query_source() {

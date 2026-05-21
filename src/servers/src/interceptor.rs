@@ -30,7 +30,6 @@ use sql::statements::statement::Statement;
 use table::TableRef;
 use vrl::value::Value;
 
-
 /// SqlQueryInterceptor can track life cycle of a sql query and customize or
 /// abort its execution at given point.
 pub trait SqlQueryInterceptor {

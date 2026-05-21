@@ -35,8 +35,7 @@ use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    ArrowSnafu, CollectRecordbatchSnafu, Result, UnexpectedResultSnafu,
-    status_code_to_http_status,
+    ArrowSnafu, CollectRecordbatchSnafu, Result, UnexpectedResultSnafu, status_code_to_http_status,
 };
 use crate::http::header::{GREPTIME_DB_HEADER_METRICS, collect_plan_metrics};
 use crate::http::prometheus::{
