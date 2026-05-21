@@ -17,10 +17,9 @@
 use common_telemetry::info;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
-use store_api::region_request::RegionFlushRequest;
+use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
-use crate::flush::FlushReason;
 use crate::request::OptionOutputTx;
 use crate::worker::RegionWorkerLoop;
 
@@ -51,8 +50,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             info!("Region {} has pending data, waiting for flush", region_id);
             self.handle_flush_request(
                 region_id,
-                RegionFlushRequest::default(),
-                Some(FlushReason::Closing),
+                RegionFlushRequest {
+                    reason: Some(RegionFlushReason::Closing),
+                    ..Default::default()
+                },
                 sender,
             );
             return;

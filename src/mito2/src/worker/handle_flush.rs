@@ -31,19 +31,14 @@ use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
 fn resolve_flush_reason(
-    explicit_reason: Option<FlushReason>,
     request_reason: Option<RegionFlushReason>,
     is_downgrading: bool,
 ) -> FlushReason {
-    explicit_reason
-        .or_else(|| request_reason.map(FlushReason::from))
-        .unwrap_or({
-            if is_downgrading {
-                FlushReason::Downgrading
-            } else {
-                FlushReason::Manual
-            }
-        })
+    match request_reason {
+        Some(reason) => FlushReason::from(reason),
+        None if is_downgrading => FlushReason::Downgrading,
+        None => FlushReason::Manual,
+    }
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -181,7 +176,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionFlushRequest,
-        reason: Option<FlushReason>,
         sender: OptionOutputTx,
     ) {
         let region = match self.regions.flushable_region(region_id) {
@@ -197,7 +191,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.
         self.update_topic_latest_entry_id(&region);
 
-        let reason = resolve_flush_reason(reason, request.reason, region.is_downgrading());
+        let reason = resolve_flush_reason(request.reason, region.is_downgrading());
         let mut task =
             self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
         task.push_sender(sender);
@@ -370,37 +364,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_flush_reason_prefers_explicit_reason() {
-        let reason = resolve_flush_reason(
-            Some(FlushReason::Closing),
-            Some(RegionFlushReason::RemoteWalPrune),
-            true,
-        );
-        assert_eq!(reason, FlushReason::Closing);
-    }
-
-    #[test]
     fn test_resolve_flush_reason_uses_request_reason() {
         assert_eq!(
-            resolve_flush_reason(None, Some(RegionFlushReason::RegionMigration), true),
+            resolve_flush_reason(Some(RegionFlushReason::RegionMigration), true),
             FlushReason::RegionMigration
         );
         assert_eq!(
-            resolve_flush_reason(None, Some(RegionFlushReason::Repartition), false),
+            resolve_flush_reason(Some(RegionFlushReason::Repartition), false),
             FlushReason::Repartition
         );
         assert_eq!(
-            resolve_flush_reason(None, Some(RegionFlushReason::RemoteWalPrune), false),
+            resolve_flush_reason(Some(RegionFlushReason::RemoteWalPrune), false),
             FlushReason::RemoteWalPrune
+        );
+        assert_eq!(
+            resolve_flush_reason(Some(RegionFlushReason::Closing), false),
+            FlushReason::Closing
+        );
+        assert_eq!(
+            resolve_flush_reason(Some(RegionFlushReason::Downgrading), false),
+            FlushReason::Downgrading
         );
     }
 
     #[test]
     fn test_resolve_flush_reason_fallback_unchanged() {
-        assert_eq!(
-            resolve_flush_reason(None, None, true),
-            FlushReason::Downgrading
-        );
-        assert_eq!(resolve_flush_reason(None, None, false), FlushReason::Manual);
+        assert_eq!(resolve_flush_reason(None, true), FlushReason::Downgrading);
+        assert_eq!(resolve_flush_reason(None, false), FlushReason::Manual);
     }
 }
