@@ -27,6 +27,7 @@ use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_engine::RegionRole;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
@@ -43,9 +44,10 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::region::ManifestContext;
 use crate::region::options::RegionOptions;
+use crate::region::state::RegionControlState;
 use crate::region::version::VersionRef;
-use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
@@ -176,7 +178,7 @@ pub async fn open_compaction_region(
     let region_metadata = manifest.metadata.clone();
     let manifest_ctx = Arc::new(ManifestContext::new(
         manifest_manager,
-        RegionRoleState::Leader(RegionLeaderState::Writable),
+        RegionControlState::new(RegionRole::Leader),
     ));
 
     let file_purger = {

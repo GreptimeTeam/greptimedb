@@ -39,7 +39,8 @@ use crate::manifest::storage::{
     manifest_compress_type, manifest_dir,
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
-use crate::region::{ManifestStats, RegionLeaderState, RegionRoleState};
+use crate::region::ManifestStats;
+use crate::region::state::{RegionLeaderState, RegionRoleState};
 use crate::sst::FormatType;
 
 /// Options for [RegionManifestManager].

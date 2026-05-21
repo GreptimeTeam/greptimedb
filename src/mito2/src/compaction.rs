@@ -63,9 +63,10 @@ use crate::read::FlatSource;
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
+use crate::region::ManifestContextRef;
 use crate::region::options::{MergeMode, RegionOptions};
+use crate::region::state::{RegionLeaderState, RegionRoleState};
 use crate::region::version::VersionControlRef;
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequestWithTime};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
@@ -1143,6 +1144,7 @@ mod tests {
     use common_datasource::compression::CompressionType;
     use common_meta::key::schema_name::SchemaNameValue;
     use common_time::DatabaseTimeToLive;
+    use store_api::region_engine::RegionRole;
     use tokio::sync::{Barrier, oneshot};
 
     use super::*;
@@ -1150,6 +1152,7 @@ mod tests {
     use crate::error::InvalidSchedulerStateSnafu;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::ManifestContext;
+    use crate::region::state::RegionControlState;
     use crate::schedule::scheduler::{Job, Scheduler};
     use crate::sst::FormatType;
     use crate::test_util::mock_schema_metadata_manager;
@@ -1715,7 +1718,7 @@ mod tests {
             .unwrap();
             Arc::new(ManifestContext::new(
                 manager,
-                RegionRoleState::Leader(RegionLeaderState::Staging),
+                RegionControlState::new(RegionRole::StagingLeader),
             ))
         };
 

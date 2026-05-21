@@ -31,11 +31,12 @@ use prost::DecodeError;
 use snafu::{Location, Snafu};
 use store_api::ManifestVersion;
 use store_api::logstore::provider::Provider;
+use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, RegionId};
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
-use crate::region::RegionRoleState;
+use crate::region::state::{RegionRequestPolicy, RegionRequestRejectReason, RegionRoleState};
 use crate::schedule::remote_job_scheduler::JobId;
 use crate::worker::WorkerId;
 
@@ -530,6 +531,37 @@ pub enum Error {
     ))]
     RejectWrite {
         region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region {} rejecting region requests, reason: {:?}", region_id, reason))]
+    RejectRequest {
+        region_id: RegionId,
+        reason: RegionRequestRejectReason,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region {} already has an active request policy guard", region_id))]
+    RequestPolicyGuardAlreadyAcquired {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invalid request policy transition for region {}, role: {:?}, current policy: {:?}, next policy: {:?}",
+        region_id,
+        role,
+        current_policy,
+        next_policy,
+    ))]
+    InvalidRegionRequestPolicy {
+        region_id: RegionId,
+        role: RegionRole,
+        current_policy: RegionRequestPolicy,
+        next_policy: RegionRequestPolicy,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1369,7 +1401,10 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
+            &RejectRequest { .. }
+            | InvalidRegionRequestPolicy { .. }
+            | RegionState { .. }
+            | UpdateManifest { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),
@@ -1408,7 +1443,7 @@ impl ErrorExt for Error {
             | FulltextFinish { source, .. }
             | ApplyFulltextIndex { source, .. } => source.status_code(),
             DecodeStats { .. } | StatsNotPresent { .. } => StatusCode::Internal,
-            RegionBusy { .. } => StatusCode::RegionBusy,
+            RegionBusy { .. } | RequestPolicyGuardAlreadyAcquired { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
 

@@ -19,16 +19,18 @@ use store_api::logstore::LogStore;
 use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
 use store_api::storage::RegionId;
 
+use crate::admit_or_return;
 use crate::compaction::RequestCancelResult;
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange};
-use crate::region::{MitoRegionRef, RegionLeaderState, StagingPartitionInfo};
+use crate::region::state::{RegionLeaderState, RegionRequestPolicy};
+use crate::region::{MitoRegionRef, StagingPartitionInfo};
 use crate::request::{
     BackgroundNotify, DdlRequest, EnterStagingResult, OptionOutputTx, SenderDdlRequest,
     WorkerRequest, WorkerRequestWithTime,
 };
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{BufferedRegionRequest, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_enter_staging_request(
@@ -40,6 +42,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
+
+        admit_or_return!(
+            self,
+            region_id,
+            region.request_policy(),
+            BufferedRegionRequest::EnterStaging((partition_directive, sender))
+        );
 
         // If the region is already in staging mode, verify the partition directive matches.
         if region.is_staging() {
@@ -170,7 +179,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             RegionMetaActionList::with_action(RegionMetaAction::PartitionExprChange(change));
         region
             .manifest_ctx
-            .update_manifest(RegionLeaderState::EnteringStaging, action_list, true)
+            .update_manifest(RegionLeaderState::Writable, action_list, true)
             .await?;
 
         Ok(())
@@ -182,10 +191,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         partition_directive: StagingPartitionDirective,
         sender: OptionOutputTx,
     ) {
-        if let Err(e) = region.set_entering_staging() {
-            sender.send(Err(e));
-            return;
-        }
+        let guard = match region.acquire_request_policy_guard(RegionRequestPolicy::Stall) {
+            Ok(guard) => guard,
+            Err(err) => {
+                sender.send(Err(err));
+                return;
+            }
+        };
 
         let listener = self.listener.clone();
         let request_sender = self.sender.clone();
@@ -224,6 +236,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender,
                     result,
                     partition_directive,
+                    guard,
                 }),
             };
             listener
@@ -270,15 +283,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 &region,
                 enter_staging_result.partition_directive,
             );
-            region.switch_state_to_staging(RegionLeaderState::EnteringStaging);
-        } else {
-            region.switch_state_to_writable(RegionLeaderState::EnteringStaging);
+            region.switch_state_to_staging(RegionLeaderState::Writable);
         }
+        drop(enter_staging_result.guard);
         enter_staging_result
             .sender
             .send(enter_staging_result.result.map(|_| 0));
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&enter_staging_result.region_id, true)
+            .await;
+        self.handle_buffered_requests(enter_staging_result.region_id)
             .await;
     }
 

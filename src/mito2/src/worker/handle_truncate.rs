@@ -19,11 +19,11 @@ use store_api::logstore::LogStore;
 use store_api::region_request::RegionTruncateRequest;
 use store_api::storage::RegionId;
 
+use crate::admit_or_return;
 use crate::error::RegionNotFoundSnafu;
 use crate::manifest::action::{RegionTruncate, TruncateKind};
-use crate::region::RegionLeaderState;
 use crate::request::{OptionOutputTx, TruncateResult};
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{BufferedRegionRequest, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_truncate_request(
@@ -39,6 +39,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         };
+
+        admit_or_return!(
+            self,
+            region_id,
+            region.request_policy(),
+            BufferedRegionRequest::Truncate((req, sender))
+        );
 
         let version_data = region.version_control.current();
 
@@ -121,8 +128,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        // We are already in the worker loop so we can set the state first.
-        region.switch_state_to_writable(RegionLeaderState::Truncating);
+        drop(truncate_result.guard);
 
         match truncate_result.result {
             Ok(()) => {
@@ -134,6 +140,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             Err(e) => {
                 // Unable to truncate the region.
                 truncate_result.sender.send(Err(e));
+                self.handle_buffered_requests(region_id).await;
                 return;
             }
         }
@@ -159,6 +166,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .await
             {
                 truncate_result.sender.send(Err(e));
+                self.handle_buffered_requests(region_id).await;
                 return;
             }
         }
@@ -169,5 +177,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
 
         truncate_result.sender.send(Ok(0));
+        self.handle_buffered_requests(region_id).await;
     }
 }

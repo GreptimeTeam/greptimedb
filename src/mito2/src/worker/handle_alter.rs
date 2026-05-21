@@ -31,6 +31,7 @@ use store_api::mito_engine_options;
 use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};
 use store_api::storage::RegionId;
 
+use crate::admit_or_return;
 use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
@@ -40,7 +41,7 @@ use crate::region::options::{RegionOptions, TwcsOptions};
 use crate::region::version::VersionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::sst::FormatType;
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{BufferedRegionRequest, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
@@ -56,6 +57,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         };
+        admit_or_return!(
+            self,
+            region_id,
+            region.request_policy(),
+            BufferedRegionRequest::Alter((request, sender))
+        );
 
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 

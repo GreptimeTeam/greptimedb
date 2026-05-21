@@ -50,7 +50,8 @@ use crate::metrics::{
     GC_DELETE_FILE_CNT, GC_DURATION_SECONDS, GC_ERRORS_TOTAL, GC_FILES_DELETED_TOTAL,
     GC_ORPHANED_INDEX_FILES, GC_RUNS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES,
 };
-use crate::region::{MitoRegionRef, RegionRoleState};
+use crate::region::MitoRegionRef;
+use crate::region::state::RegionRoleState;
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_indexes};
 use crate::sst::location::{self};
 

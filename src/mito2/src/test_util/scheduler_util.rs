@@ -23,6 +23,7 @@ use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use object_store::ObjectStore;
 use object_store::services::Fs;
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_engine::RegionRole;
 use store_api::region_request::PathType;
 use tokio::sync::mpsc::Sender;
 
@@ -34,7 +35,8 @@ use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::FlushScheduler;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::region::{ManifestContext, ManifestContextRef, RegionLeaderState, RegionRoleState};
+use crate::region::state::RegionControlState;
+use crate::region::{ManifestContext, ManifestContextRef};
 use crate::request::WorkerRequestWithTime;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
 use crate::sst::FormatType;
@@ -143,7 +145,7 @@ impl SchedulerEnv {
             )
             .await
             .unwrap(),
-            RegionRoleState::Leader(RegionLeaderState::Writable),
+            RegionControlState::new(RegionRole::Leader),
         ))
     }
 

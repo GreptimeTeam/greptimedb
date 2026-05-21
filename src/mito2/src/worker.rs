@@ -31,8 +31,9 @@ mod handle_rebuild_index;
 mod handle_remap;
 mod handle_truncate;
 mod handle_write;
+mod utils;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,6 +54,9 @@ use store_api::logstore::LogStore;
 use store_api::region_engine::{
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
+use store_api::region_request::{
+    RegionAlterRequest, RegionTruncateRequest, StagingPartitionDirective,
+};
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
@@ -62,19 +66,23 @@ use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::config::MitoConfig;
-use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{
+    self, CreateDirSnafu, JoinSnafu, RegionNotFoundSnafu, RejectRequestSnafu, Result,
+    WorkerStoppedSnafu,
+};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
+use crate::region::state::RegionRequestRejectReason;
 use crate::region::{
     CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
     RegionMapRef,
 };
 use crate::request::{
-    BackgroundNotify, BulkInsertRequest, DdlRequest, SenderBulkRequest, SenderDdlRequest,
-    SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, RegionEditRequest,
+    SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::RegionFileId;
@@ -84,7 +92,6 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
-use crate::worker::handle_manifest::RegionEditQueues;
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
@@ -603,6 +610,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.config.experimental_compaction_on_exhausted,
             ),
             stalled_requests: StalledRequests::default(),
+            buffered_requests: PendingRegionRequestBuffer::default(),
             listener: self.listener,
             cache_manager: self.cache_manager,
             puffin_manager_factory: self.puffin_manager_factory,
@@ -614,7 +622,6 @@ impl<S: LogStore> WorkerStarter<S> {
             stalling_count: WRITE_STALLING.with_label_values(&[&id_string]),
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
-            region_edit_queues: RegionEditQueues::default(),
             schema_metadata_manager: self.schema_metadata_manager,
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
@@ -767,6 +774,97 @@ pub(crate) struct StalledRequests {
     pub(crate) estimated_size: usize,
 }
 
+pub(crate) enum BufferedRegionRequest {
+    Alter((RegionAlterRequest, OptionOutputTx)),
+    Truncate((RegionTruncateRequest, OptionOutputTx)),
+    EnterStaging((StagingPartitionDirective, OptionOutputTx)),
+    Drop((bool, OptionOutputTx)),
+    Edit(RegionEditRequest),
+}
+
+impl BufferedRegionRequest {
+    /// Rejects the request by sending error to the sender.
+    pub(crate) fn reject(self, region_id: RegionId, reason: RegionRequestRejectReason) {
+        match self {
+            BufferedRegionRequest::Alter((_, sender)) => {
+                sender.send(RejectRequestSnafu { region_id, reason }.fail());
+            }
+            BufferedRegionRequest::Truncate((_, sender)) => {
+                sender.send(RejectRequestSnafu { region_id, reason }.fail());
+            }
+            BufferedRegionRequest::EnterStaging((_, sender)) => {
+                sender.send(RejectRequestSnafu { region_id, reason }.fail());
+            }
+            BufferedRegionRequest::Drop((_, sender)) => {
+                sender.send(RejectRequestSnafu { region_id, reason }.fail());
+            }
+            BufferedRegionRequest::Edit(req) => {
+                let _ = req.tx.send(RejectRequestSnafu { region_id, reason }.fail());
+            }
+        }
+    }
+
+    pub(crate) fn on_failure(self, error: error::Error) {
+        match self {
+            BufferedRegionRequest::Alter((_, sender)) => {
+                sender.send(Err(error));
+            }
+            BufferedRegionRequest::Truncate((_, sender)) => {
+                sender.send(Err(error));
+            }
+            BufferedRegionRequest::EnterStaging((_, sender)) => {
+                sender.send(Err(error));
+            }
+            BufferedRegionRequest::Drop((_, sender)) => {
+                sender.send(Err(error));
+            }
+            BufferedRegionRequest::Edit(req) => {
+                let _ = req.tx.send(Err(error));
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PendingRegionRequestBuffer {
+    requests: HashMap<RegionId, VecDeque<BufferedRegionRequest>>,
+}
+
+impl PendingRegionRequestBuffer {
+    pub(crate) fn push(&mut self, region_id: RegionId, request: BufferedRegionRequest) {
+        self.requests
+            .entry(region_id)
+            .or_default()
+            .push_back(request);
+    }
+
+    pub(crate) fn next(&mut self, region_id: RegionId) -> Option<BufferedRegionRequest> {
+        let queue = self.requests.get_mut(&region_id)?;
+        let request = queue.pop_front();
+        // TODO(weny): check if the remaining requests can be batched.
+        if queue.is_empty() {
+            self.requests.remove(&region_id);
+        }
+        request
+    }
+
+    pub(crate) fn remove_region(&mut self, region_id: RegionId) {
+        if let Some(requests) = self.requests.remove(&region_id) {
+            for req in requests {
+                req.on_failure(RegionNotFoundSnafu { region_id }.build());
+            }
+        }
+    }
+
+    pub(crate) fn reject_region(&mut self, region_id: RegionId, reason: RegionRequestRejectReason) {
+        if let Some(requests) = self.requests.remove(&region_id) {
+            for req in requests {
+                req.reject(region_id, reason);
+            }
+        }
+    }
+}
+
 impl StalledRequests {
     /// Appends stalled requests.
     pub(crate) fn append(
@@ -860,6 +958,8 @@ struct RegionWorkerLoop<S> {
     compaction_scheduler: CompactionScheduler,
     /// Stalled write requests.
     stalled_requests: StalledRequests,
+    /// Buffer for requests that cannot be processed immediately.
+    buffered_requests: PendingRegionRequestBuffer,
     /// Event listener for tests.
     listener: WorkerListener,
     /// Cache.
@@ -882,8 +982,6 @@ struct RegionWorkerLoop<S> {
     region_count: IntGauge,
     /// Histogram of request wait time for this worker.
     request_wait_time: Histogram,
-    /// Queues for region edit requests.
-    region_edit_queues: RegionEditQueues,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
     /// Datanode level file references manager.
@@ -1071,17 +1169,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     if matches!(
                         &notify,
                         BackgroundNotify::RegionEdit(edit_result)
-                            if edit_result.update_region_state
+                            if edit_result.guard.is_some()
                     ) {
-                        // Region state must be Editing when reach here.
-                        // This call only moves write/bulk write request into stall queue. When region edit result
-                        // is processed inside handle_background_notify and region state is switched back to Writable,
-                        // stalled request will be processed before the next region edit is dequeued from
-                        // RegionEditQueue immediately in handle_region_edit_result. It not only ensured pending writes
-                        // are processed in time, but also prevents them from starvation.
+                        // Region edit completion is handled as a general request before the current
+                        // batch's write requests. Move same-region writes into stalled_requests while
+                        // the edit guard is still active, so edit completion drains those writes before
+                        // starting the next buffered edit/DDL.
                         // TODO(hl): maybe we need to merge those queues for pending requests like pending_ddl,
                         // region edits and stalled request, so we can simplify the coordination between these queues.
-                        self.handle_buffered_region_write_requests(
+                        self.handle_same_region_writes_before_edit_result(
                             &region_id,
                             write_requests,
                             bulk_requests,
@@ -1135,8 +1231,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(req) => {
-                    self.handle_drop_request(ddl.region_id, req.partial_drop)
-                        .await
+                    self.handle_drop_request(ddl.region_id, req.partial_drop, ddl.sender)
+                        .await;
+                    continue;
                 }
                 DdlRequest::Open((req, wal_entry_receiver)) => {
                     self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)

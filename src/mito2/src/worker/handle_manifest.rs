@@ -16,7 +16,6 @@
 //!
 //! It updates the manifest and applies the changes to the region in background.
 
-use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -24,94 +23,31 @@ use common_telemetry::{info, warn};
 use parquet::file::metadata::PageIndexPolicy;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::RegionId;
 
+use crate::admit_or_return;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::IndexBuildMode;
-use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
+use crate::error::{RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
+use crate::region::MitoRegionRef;
 use crate::region::opener::{sanitize_region_options, version_builder_from_manifest};
 use crate::region::options::RegionOptions;
+use crate::region::state::{RegionLeaderState, RegionRequestPolicy};
 use crate::region::version::VersionControlRef;
-use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
     RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::location;
-use crate::worker::{RegionWorkerLoop, WorkerListener};
-
-pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
-
-/// A queue for region edit requests received while the region is already `Editing`.
-///
-/// Normal writes and bulk inserts that arrive during `Editing` use the stalled-write queue instead.
-/// When an edit completes, those writes are handled before the next queued edit starts, preserving
-/// sequence ordering between direct SST edits and WAL/memtable writes unless global reject
-/// backpressure rejects them first.
-/// Everything is done in the region worker loop.
-pub(crate) struct RegionEditQueue {
-    region_id: RegionId,
-    requests: VecDeque<RegionEditRequest>,
-}
-
-impl RegionEditQueue {
-    const QUEUE_MAX_LEN: usize = 128;
-
-    fn new(region_id: RegionId) -> Self {
-        Self {
-            region_id,
-            requests: VecDeque::new(),
-        }
-    }
-
-    fn enqueue(&mut self, request: RegionEditRequest) {
-        if self.requests.len() > Self::QUEUE_MAX_LEN {
-            let _ = request.tx.send(
-                RegionBusySnafu {
-                    region_id: self.region_id,
-                }
-                .fail(),
-            );
-            return;
-        };
-        self.requests.push_back(request);
-    }
-
-    fn dequeue(&mut self) -> Option<RegionEditRequest> {
-        self.requests.pop_front()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.requests.is_empty()
-    }
-
-    fn reject_all_as_not_found(mut self) {
-        while let Some(request) = self.requests.pop_front() {
-            let _ = request.tx.send(
-                RegionNotFoundSnafu {
-                    region_id: self.region_id,
-                }
-                .fail(),
-            );
-        }
-    }
-}
+use crate::worker::{BufferedRegionRequest, RegionWorkerLoop, WorkerListener};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Rejects queued region edit requests as region not found.
-    pub(crate) fn reject_region_edit_queue_as_not_found(&mut self, region_id: RegionId) {
-        if let Some(edit_queue) = self.region_edit_queues.remove(&region_id) {
-            edit_queue.reject_all_as_not_found();
-        }
-    }
-
     /// Handles region change result.
     pub(crate) async fn handle_manifest_region_change_result(
         &mut self,
@@ -141,9 +77,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
         }
 
-        // Sets the region as writable.
-        region.switch_state_to_writable(RegionLeaderState::Altering);
         // Sends the result.
+        drop(change_result.guard);
         change_result.sender.send(change_result.result.map(|_| 0));
 
         // In async mode, rebuild index after index metadata changed.
@@ -161,6 +96,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id, true)
             .await;
+        self.handle_buffered_requests(change_result.region_id).await;
     }
 
     /// Handles region sync request.
@@ -247,17 +183,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        if !region.is_writable() {
-            if region.state() == RegionRoleState::Leader(RegionLeaderState::Editing) {
-                self.region_edit_queues
-                    .entry(region_id)
-                    .or_insert_with(|| RegionEditQueue::new(region_id))
-                    .enqueue(request);
-            } else {
-                let _ = request.tx.send(RegionBusySnafu { region_id }.fail());
-            }
-            return;
-        }
+        admit_or_return!(
+            self,
+            region_id,
+            region.request_policy(),
+            BufferedRegionRequest::Edit(request)
+        );
 
         let RegionEditRequest {
             region_id: _,
@@ -272,18 +203,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             file.sequence = NonZeroU64::new(file_sequence);
         }
 
-        // Allow retrieving `is_staging` before spawn the edit region task.
         let is_staging = region.is_staging();
-        let expect_state = if is_staging {
-            RegionLeaderState::Staging
-        } else {
-            RegionLeaderState::Writable
+        let guard = match region.acquire_request_policy_guard(RegionRequestPolicy::Stall) {
+            Ok(guard) => guard,
+            Err(err) => {
+                let _ = sender.send(Err(err));
+                return;
+            }
         };
-        // Marks the region as editing.
-        if let Err(e) = region.set_editing(expect_state) {
-            let _ = sender.send(Err(e));
-            return;
-        }
 
         let request_sender = self.sender.clone();
         let cache_manager = self.cache_manager.clone();
@@ -300,9 +227,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender,
                     edit,
                     result,
-                    // we always need to restore region state after region edit
-                    update_region_state: true,
                     is_staging,
+                    guard: Some(guard),
                 }),
             };
 
@@ -320,14 +246,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Handles region edit result.
-    pub(crate) async fn handle_region_edit_result(&mut self, edit_result: RegionEditResult) {
+    pub(crate) async fn handle_region_edit_result(&mut self, mut edit_result: RegionEditResult) {
         let region = match self.regions.get_region(edit_result.region_id) {
             Some(region) => region,
             None => {
                 // Fail writes stalled behind this edit if the region was removed before the
                 // edit-completion notification reached the worker.
                 self.fail_region_stalled_requests_as_not_found(&edit_result.region_id);
-                self.reject_region_edit_queue_as_not_found(edit_result.region_id);
                 let _ = edit_result.sender.send(
                     RegionNotFoundSnafu {
                         region_id: edit_result.region_id,
@@ -339,12 +264,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         let need_compaction = if edit_result.is_staging {
-            if edit_result.update_region_state {
-                // For staging regions, edits are not applied immediately,
-                // as they remain invisible until the region exits the staging state.
-                region.switch_state_to_staging(RegionLeaderState::Editing);
-            }
-
             false
         } else {
             let need_compaction =
@@ -358,34 +277,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region.file_purger.clone(),
                 );
             }
-            if edit_result.update_region_state {
-                region.switch_state_to_writable(RegionLeaderState::Editing);
-            }
 
             need_compaction
         };
+        let has_guard = edit_result.guard.is_some();
+        if let Some(guard) = edit_result.guard.take() {
+            drop(guard)
+        }
 
         let _ = edit_result.sender.send(edit_result.result);
 
-        if edit_result.update_region_state {
+        if has_guard {
             // Writes stalled specifically by this edit are handled before the next queued edit.
             // Otherwise the next edit could reserve a committed sequence before those writes.
             self.handle_region_stalled_requests(&edit_result.region_id, false)
                 .await;
-        }
-
-        let next_request =
-            if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
-                let request = edit_queue.dequeue();
-                if edit_queue.is_empty() {
-                    self.region_edit_queues.remove(&edit_result.region_id);
-                }
-                request
-            } else {
-                None
-            };
-        if let Some(request) = next_request {
-            self.handle_region_edit(request);
+            self.handle_buffered_requests(edit_result.region_id).await;
         }
 
         if need_compaction {
@@ -400,12 +307,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         truncate: RegionTruncate,
         sender: OptionOutputTx,
     ) {
-        // Marks the region as truncating.
         // This prevents the region from being accessed by other write requests.
-        if let Err(e) = region.set_truncating() {
-            sender.send(Err(e));
-            return;
-        }
+        let guard = match region.acquire_request_policy_guard(RegionRequestPolicy::Stall) {
+            Ok(guard) => guard,
+            Err(err) => {
+                sender.send(Err(err));
+                return;
+            }
+        };
+
         // Now the region is in truncating state.
 
         let request_sender = self.sender.clone();
@@ -419,7 +329,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
             let result = manifest_ctx
-                .update_manifest(RegionLeaderState::Truncating, action_list, is_staging)
+                .update_manifest(RegionLeaderState::Writable, action_list, is_staging)
                 .await
                 .map(|_| ());
 
@@ -429,6 +339,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 sender,
                 result,
                 kind: truncate.kind,
+                guard,
             };
             let _ = request_sender
                 .send(WorkerRequestWithTime::new(WorkerRequest::Background {
@@ -449,11 +360,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         new_options: Option<RegionOptions>,
         sender: OptionOutputTx,
     ) {
-        // Marks the region as altering.
-        if let Err(e) = region.set_altering() {
-            sender.send(Err(e));
-            return;
-        }
+        let guard = match region.acquire_request_policy_guard(RegionRequestPolicy::Stall) {
+            Ok(guard) => guard,
+            Err(err) => {
+                sender.send(Err(err));
+                return;
+            }
+        };
         let listener = self.listener.clone();
         let request_sender = self.sender.clone();
         let is_staging = region.is_staging();
@@ -464,7 +377,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             let result = region
                 .manifest_ctx
-                .update_manifest(RegionLeaderState::Altering, action_list, is_staging)
+                .update_manifest(RegionLeaderState::Writable, action_list, is_staging)
                 .await
                 .map(|_| ());
             let notify = WorkerRequest::Background {
@@ -476,6 +389,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     new_meta,
                     need_index,
                     new_options,
+                    guard,
                 }),
             };
             listener
@@ -607,9 +521,14 @@ async fn edit_region(
     );
 
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+    let expect_state = if is_staging {
+        RegionLeaderState::Staging
+    } else {
+        RegionLeaderState::Writable
+    };
     region
         .manifest_ctx
-        .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
+        .update_manifest(expect_state, action_list, is_staging)
         .await
         .map(|_| ())
 }

@@ -56,6 +56,7 @@ use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
 use crate::region::options::RegionOptions;
+use crate::region::state::RegionRequestPolicyGuard;
 use crate::sst::file::FileMeta;
 use crate::sst::index::IndexBuildType;
 use crate::wal::EntryId;
@@ -1058,6 +1059,8 @@ pub(crate) struct TruncateResult {
     /// Truncate result.
     pub(crate) result: Result<()>,
     pub(crate) kind: TruncateKind,
+    /// The guard for region request policy.
+    pub(crate) guard: RegionRequestPolicyGuard,
 }
 
 /// Notifies the region the result of writing region change action.
@@ -1075,6 +1078,8 @@ pub(crate) struct RegionChangeResult {
     pub(crate) need_index: bool,
     /// New options for the region.
     pub(crate) new_options: Option<RegionOptions>,
+    /// The guard for region request policy.
+    pub(crate) guard: RegionRequestPolicyGuard,
 }
 
 /// Notifies the region the result of entering staging.
@@ -1088,6 +1093,8 @@ pub(crate) struct EnterStagingResult {
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+    /// The guard for region request policy.
+    pub(crate) guard: RegionRequestPolicyGuard,
 }
 
 #[derive(Debug)]
@@ -1120,10 +1127,12 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
-    /// Whether region state need to be set to Writable after handling this request.
-    pub(crate) update_region_state: bool,
     /// The region is in staging mode before handling this request.
     pub(crate) is_staging: bool,
+    /// The guard for region request policy.
+    ///
+    /// It's required in [`RegionEditRequest`] to ensure the request policy is not changed before the request is finished.
+    pub(crate) guard: Option<RegionRequestPolicyGuard>,
 }
 
 #[derive(Debug)]

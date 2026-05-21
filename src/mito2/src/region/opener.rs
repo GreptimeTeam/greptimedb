@@ -56,9 +56,12 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::region::options::RegionOptions;
+use crate::region::state::{
+    RegionLeaderState, RegionRequestPolicy, RegionRequestRejectReason, RegionRoleState,
+};
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
-    ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
+    ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionControlState,
 };
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
@@ -333,7 +336,7 @@ impl RegionOpener {
             // Region is writable after it is created.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
-                RegionRoleState::Leader(RegionLeaderState::Writable),
+                RegionControlState::new(RegionRole::Leader),
             )),
             file_purger: create_file_purger(
                 config.gc.enable,
@@ -576,7 +579,7 @@ impl RegionOpener {
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
-                RegionRoleState::Follower,
+                RegionControlState::new(RegionRole::Follower),
             )),
             file_purger,
             provider: provider.clone(),
@@ -905,10 +908,11 @@ impl RegionLoadCacheTask {
             let current_size = file_cache.puffin_cache_size();
             let capacity = file_cache.puffin_cache_capacity();
             let region_state = self.region.state();
-            if !can_load_cache(region_state) {
+            let request_policy = self.region.request_policy();
+            if !can_load_cache(region_state, request_policy) {
                 info!(
-                    "Stopping index cache by state: {:?}, region: {}, current_size: {}, capacity: {}",
-                    region_state, region_id, current_size, capacity
+                    "Stopping index cache by state: {:?}, request_policy: {:?}, region: {}, current_size: {}, capacity: {}",
+                    region_state, request_policy, region_id, current_size, capacity
                 );
                 break;
             }
@@ -1146,18 +1150,20 @@ fn maybe_preload_parquet_meta_cache(
     });
 }
 
-fn can_load_cache(state: RegionRoleState) -> bool {
+fn can_load_cache(state: RegionRoleState, request_policy: RegionRequestPolicy) -> bool {
+    if matches!(
+        request_policy,
+        RegionRequestPolicy::Reject(RegionRequestRejectReason::Dropping)
+    ) {
+        return false;
+    }
+
     match state {
         RegionRoleState::Leader(RegionLeaderState::Writable)
         | RegionRoleState::Leader(RegionLeaderState::Staging)
-        | RegionRoleState::Leader(RegionLeaderState::Altering)
-        | RegionRoleState::Leader(RegionLeaderState::EnteringStaging)
-        | RegionRoleState::Leader(RegionLeaderState::Editing)
         | RegionRoleState::Follower => true,
         // The region will be closed soon if it is downgrading.
-        RegionRoleState::Leader(RegionLeaderState::Downgrading)
-        | RegionRoleState::Leader(RegionLeaderState::Dropping)
-        | RegionRoleState::Leader(RegionLeaderState::Truncating) => false,
+        RegionRoleState::Leader(RegionLeaderState::Downgrading) => false,
     }
 }
 

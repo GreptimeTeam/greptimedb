@@ -45,7 +45,8 @@ use crate::error::Error;
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange,
 };
-use crate::region::{RegionLeaderState, RegionRoleState, parse_partition_expr};
+use crate::region::parse_partition_expr;
+use crate::region::state::{RegionLeaderState, RegionRoleState};
 use crate::request::WorkerRequest;
 use crate::sst::FormatType;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
