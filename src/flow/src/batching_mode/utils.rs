@@ -52,6 +52,9 @@ use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu, TableNotFoundSnafu};
 use crate::{Error, TableName};
 
+#[cfg(test)]
+mod test;
+
 /// Describes how one aggregate output field should be merged with the
 /// corresponding existing field in the sink table.
 ///
