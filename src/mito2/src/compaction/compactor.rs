@@ -44,9 +44,10 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::region::ManifestContext;
 use crate::region::options::RegionOptions;
+use crate::region::state::RegionControlState;
 use crate::region::version::VersionRef;
-use crate::region::{ManifestContext, RegionControlState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;

@@ -51,8 +51,9 @@ use crate::read::FlatSource;
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
+use crate::region::state::{RegionLeaderState, RegionRoleState};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
+use crate::region::{ManifestContextRef, parse_partition_expr};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderBulkRequest,
     SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,

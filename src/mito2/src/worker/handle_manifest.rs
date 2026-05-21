@@ -34,10 +34,11 @@ use crate::manifest::action::{
 };
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
+use crate::region::MitoRegionRef;
 use crate::region::opener::{sanitize_region_options, version_builder_from_manifest};
 use crate::region::options::RegionOptions;
+use crate::region::state::{RegionLeaderState, RegionRequestPolicy};
 use crate::region::version::VersionControlRef;
-use crate::region::{MitoRegionRef, RegionLeaderState, RegionRequestPolicy};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
     RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,

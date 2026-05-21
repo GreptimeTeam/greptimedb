@@ -24,7 +24,8 @@ use crate::compaction::RequestCancelResult;
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange};
-use crate::region::{MitoRegionRef, RegionLeaderState, RegionRequestPolicy, StagingPartitionInfo};
+use crate::region::state::{RegionLeaderState, RegionRequestPolicy};
+use crate::region::{MitoRegionRef, StagingPartitionInfo};
 use crate::request::{
     BackgroundNotify, DdlRequest, EnterStagingResult, OptionOutputTx, SenderDdlRequest,
     WorkerRequest, WorkerRequestWithTime,

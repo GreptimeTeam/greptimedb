@@ -59,9 +59,10 @@ use crate::error::{
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::Batch;
+use crate::region::ManifestContextRef;
 use crate::region::options::IndexOptions;
+use crate::region::state::RegionLeaderState;
 use crate::region::version::VersionControlRef;
-use crate::region::{ManifestContextRef, RegionLeaderState};
 use crate::request::{
     BackgroundNotify, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, WorkerRequest,
     WorkerRequestWithTime,

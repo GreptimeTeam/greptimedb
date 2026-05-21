@@ -36,7 +36,7 @@ use store_api::storage::{FileId, RegionId};
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
-use crate::region::{RegionRequestPolicy, RegionRequestRejectReason, RegionRoleState};
+use crate::region::state::{RegionRequestPolicy, RegionRequestRejectReason, RegionRoleState};
 use crate::schedule::remote_job_scheduler::JobId;
 use crate::worker::WorkerId;
 

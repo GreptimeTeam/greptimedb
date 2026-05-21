@@ -29,7 +29,8 @@ use tokio::time::sleep;
 
 use crate::admit_or_return;
 use crate::error::{OpenDalSnafu, Result};
-use crate::region::{MitoRegionRef, RegionMapRef, RegionRequestPolicy, RegionRequestRejectReason};
+use crate::region::state::{RegionRequestPolicy, RegionRequestRejectReason};
+use crate::region::{MitoRegionRef, RegionMapRef};
 use crate::request::OptionOutputTx;
 use crate::worker::{BufferedRegionRequest, DROPPING_MARKER_FILE, RegionWorkerLoop};
 

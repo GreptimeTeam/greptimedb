@@ -21,12 +21,12 @@ use crate::worker::{BufferedRegionRequest, RegionWorkerLoop};
 macro_rules! admit_or_return {
     ($worker:expr, $region_id:expr, $policy:expr, $request:expr) => {
         match $policy {
-            $crate::region::RegionRequestPolicy::Accept => {}
-            $crate::region::RegionRequestPolicy::Stall => {
+            $crate::region::state::RegionRequestPolicy::Accept => {}
+            $crate::region::state::RegionRequestPolicy::Stall => {
                 $worker.buffered_requests.push($region_id, $request);
                 return;
             }
-            $crate::region::RegionRequestPolicy::Reject(reason) => {
+            $crate::region::state::RegionRequestPolicy::Reject(reason) => {
                 $request.reject($region_id, reason);
                 return;
             }

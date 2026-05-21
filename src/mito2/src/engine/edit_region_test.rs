@@ -36,7 +36,8 @@ use crate::engine::MitoEngine;
 use crate::engine::flush_test::MockTimeProvider;
 use crate::engine::listener::EventListener;
 use crate::manifest::action::RegionEdit;
-use crate::region::{MitoRegionRef, RegionRequestPolicy};
+use crate::region::MitoRegionRef;
+use crate::region::state::RegionRequestPolicy;
 use crate::sst::file::FileMeta;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
 

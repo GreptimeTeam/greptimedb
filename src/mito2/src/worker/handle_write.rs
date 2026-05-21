@@ -33,7 +33,7 @@ use crate::metrics;
 use crate::metrics::{
     WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
 };
-use crate::region::RegionRequestPolicy;
+use crate::region::state::RegionRequestPolicy;
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderBulkRequest, SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;

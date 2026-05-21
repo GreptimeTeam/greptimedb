@@ -30,7 +30,7 @@ use crate::compaction::picker::{CompactionTask, PickerOutput};
 use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
-use crate::region::RegionRoleState;
+use crate::region::state::RegionRoleState;
 use crate::request::{
     BackgroundNotify, CompactionCancelled, CompactionFailed, CompactionFinished, OutputTx,
     RegionEditResult, WorkerRequest, WorkerRequestWithTime,

@@ -56,10 +56,12 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::region::options::RegionOptions;
+use crate::region::state::{
+    RegionLeaderState, RegionRequestPolicy, RegionRequestRejectReason, RegionRoleState,
+};
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
     ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionControlState,
-    RegionLeaderState, RegionRequestPolicy, RegionRequestRejectReason, RegionRoleState,
 };
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;

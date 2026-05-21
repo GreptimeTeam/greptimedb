@@ -63,9 +63,10 @@ use crate::read::FlatSource;
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
+use crate::region::ManifestContextRef;
 use crate::region::options::{MergeMode, RegionOptions};
+use crate::region::state::{RegionLeaderState, RegionRoleState};
 use crate::region::version::VersionControlRef;
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequestWithTime};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
@@ -1150,7 +1151,8 @@ mod tests {
     use crate::compaction::memory_manager::{CompactionMemoryGuard, new_compaction_memory_manager};
     use crate::error::InvalidSchedulerStateSnafu;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-    use crate::region::{ManifestContext, RegionControlState};
+    use crate::region::ManifestContext;
+    use crate::region::state::RegionControlState;
     use crate::schedule::scheduler::{Job, Scheduler};
     use crate::sst::FormatType;
     use crate::test_util::mock_schema_metadata_manager;

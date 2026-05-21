@@ -75,9 +75,10 @@ use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
+use crate::region::state::RegionRequestRejectReason;
 use crate::region::{
     CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
-    RegionMapRef, RegionRequestRejectReason,
+    RegionMapRef,
 };
 use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, RegionEditRequest,

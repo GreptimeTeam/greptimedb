@@ -26,7 +26,8 @@ use crate::error::{
 use crate::manifest::action::{RegionEdit, RegionManifest};
 use crate::manifest::storage::manifest_dir;
 use crate::manifest::storage::staging::{StagingBlobStorage, staging_blob_path};
-use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::region::MitoRegionRef;
+use crate::region::state::{RegionLeaderState, RegionRoleState};
 use crate::request::{OptionOutputTx, RegionEditRequest, WorkerRequest, WorkerRequestWithTime};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::RegionWorkerLoop;
