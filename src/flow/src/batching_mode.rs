@@ -25,7 +25,7 @@ pub(crate) mod frontend_client;
 mod state;
 mod task;
 mod time_window;
-mod utils;
+pub(crate) mod utils;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatchingModeOptions {

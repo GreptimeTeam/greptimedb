@@ -27,6 +27,7 @@ use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use futures::TryStreamExt;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::RegionRequest;
+use store_api::storage::consts::FLOW_STALE_CURSOR_ERROR_MARKER;
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
 
 use crate::config::MitoConfig;
@@ -84,10 +85,10 @@ async fn test_incremental_query_stale_error() {
     };
     assert_eq!(StatusCode::RequestOutdated, err.status_code());
     let err_msg = err.to_string();
-    assert!(err_msg.contains("STALE_CURSOR"));
-    assert!(err_msg.contains(&region_id.to_string()));
-    assert!(err_msg.contains("given_seq: 0"));
-    assert!(err_msg.contains(&format!("min_readable_seq: {min_readable_seq}")));
+    assert!(err_msg.contains(FLOW_STALE_CURSOR_ERROR_MARKER));
+    assert!(err_msg.contains(&format!("region_id={}", region_id.as_u64())));
+    assert!(err_msg.contains("given_seq=0"));
+    assert!(err_msg.contains(&format!("min_readable_seq={min_readable_seq}")));
 
     let incremental_rows = Rows {
         schema: column_schemas,

@@ -57,6 +57,24 @@ ORDER BY
     host,
     time_window;
 
+INSERT INTO flow_inc_read_input VALUES
+    ('a', 3.0, '2024-01-01 00:00:00.300');
+
+-- Third flush targets an existing (host, time_window) group. Incremental
+-- aggregate merge should combine the new delta with the existing sink row.
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('flow_inc_read_sum');
+
+SELECT
+    host,
+    val_sum,
+    time_window
+FROM
+    flow_inc_read_sink
+ORDER BY
+    host,
+    time_window;
+
 DROP FLOW flow_inc_read_sum;
 DROP TABLE flow_inc_read_sink;
 DROP TABLE flow_inc_read_input;

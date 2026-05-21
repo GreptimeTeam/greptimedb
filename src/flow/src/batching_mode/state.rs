@@ -155,7 +155,8 @@ impl TaskState {
         participating_regions: &BTreeSet<u64>,
         watermark_map: &HashMap<u64, u64>,
     ) -> bool {
-        !self.checkpoints.is_empty()
+        !self.incremental_disabled
+            && !self.checkpoints.is_empty()
             && !participating_regions.is_empty()
             && participating_regions.len() == watermark_map.len()
             && participating_regions
@@ -668,6 +669,28 @@ impl FilterExprInfo {
                 acc + end.sub(start).unwrap_or(chrono::Duration::zero())
             })
     }
+
+    pub fn predicate_for_col(
+        &self,
+        col_name: &str,
+    ) -> Result<Option<datafusion_expr::Expr>, Error> {
+        use datafusion_common::Column;
+        use datafusion_expr::{Expr, lit};
+
+        let mut expr_lst = Vec::with_capacity(self.time_ranges.len());
+        for (start, end) in &self.time_ranges {
+            let lower = to_df_literal(*start)?;
+            let upper = to_df_literal(*end)?;
+            let filter_col = || Expr::Column(Column::new_unqualified(col_name));
+            expr_lst.push(
+                filter_col()
+                    .gt_eq(lit(lower))
+                    .and(filter_col().lt(lit(upper))),
+            );
+        }
+
+        Ok(expr_lst.into_iter().reduce(|a, b| a.or(b)))
+    }
 }
 
 #[cfg(test)]
@@ -797,6 +820,14 @@ mod test {
             state.can_advance_incremental_checkpoints_with_participation(
                 &BTreeSet::from([1_u64, 2_u64]),
                 &HashMap::from([(1_u64, 11_u64), (2_u64, 21_u64)]),
+            )
+        );
+
+        state.disable_incremental();
+        assert!(
+            !state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([1_u64, 2_u64]),
+                &HashMap::from([(1_u64, 12_u64), (2_u64, 22_u64)]),
             )
         );
     }
@@ -986,6 +1017,55 @@ mod test {
                 .map(|e| unparser.expr_to_sql(e).unwrap().to_string());
             assert_eq!(expected_filter_expr, to_sql.as_deref());
         }
+    }
+
+    #[test]
+    fn test_filter_expr_info_predicate_for_col_empty_ranges() {
+        let filter = FilterExprInfo {
+            expr: datafusion_expr::col("ts"),
+            col_name: "ts".to_string(),
+            time_ranges: vec![],
+            window_size: chrono::Duration::seconds(1),
+        };
+
+        assert!(filter.predicate_for_col("time_window").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_filter_expr_info_predicate_for_col_single_range() {
+        let filter = FilterExprInfo {
+            expr: datafusion_expr::col("ts"),
+            col_name: "ts".to_string(),
+            time_ranges: vec![(Timestamp::new_second(0), Timestamp::new_second(1))],
+            window_size: chrono::Duration::seconds(1),
+        };
+
+        let predicate = filter.predicate_for_col("time_window").unwrap().unwrap();
+        let unparser = datafusion::sql::unparser::Unparser::default();
+        assert_eq!(
+            "((time_window >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (time_window < CAST('1970-01-01 00:00:01' AS TIMESTAMP)))",
+            unparser.expr_to_sql(&predicate).unwrap().to_string()
+        );
+    }
+
+    #[test]
+    fn test_filter_expr_info_predicate_for_col_multiple_ranges() {
+        let filter = FilterExprInfo {
+            expr: datafusion_expr::col("ts"),
+            col_name: "ts".to_string(),
+            time_ranges: vec![
+                (Timestamp::new_second(0), Timestamp::new_second(1)),
+                (Timestamp::new_second(10), Timestamp::new_second(11)),
+            ],
+            window_size: chrono::Duration::seconds(1),
+        };
+
+        let predicate = filter.predicate_for_col("time_window").unwrap().unwrap();
+        let unparser = datafusion::sql::unparser::Unparser::default();
+        assert_eq!(
+            "(((time_window >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (time_window < CAST('1970-01-01 00:00:01' AS TIMESTAMP))) OR ((time_window >= CAST('1970-01-01 00:00:10' AS TIMESTAMP)) AND (time_window < CAST('1970-01-01 00:00:11' AS TIMESTAMP))))",
+            unparser.expr_to_sql(&predicate).unwrap().to_string()
+        );
     }
 
     #[tokio::test]

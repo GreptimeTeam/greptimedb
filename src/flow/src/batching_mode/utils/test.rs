@@ -15,10 +15,13 @@
 use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
+use common_time::Timestamp;
 use datafusion_common::tree_node::TreeNode as _;
 use datafusion_expr::GroupingSet;
-use datatypes::prelude::{ConcreteDataType, Scalar, VectorRef};
+use datatypes::prelude::{ConcreteDataType, MutableVector, Scalar, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::timestamp::TimestampMillisecond;
+use datatypes::vectors::TimestampMillisecondVectorBuilder;
 use pretty_assertions::assert_eq;
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContext;
@@ -26,6 +29,7 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::test_util::MemTable;
 
 use super::*;
+use crate::batching_mode::state::FilterExprInfo;
 use crate::test_utils::create_test_query_engine;
 
 fn u32_table(table_name: &str, columns: Vec<&str>, rows: usize) -> TableRef {
@@ -48,6 +52,30 @@ fn single_row_u32_table(table_name: &str, columns: Vec<&str>) -> TableRef {
 
 fn empty_u32_table(table_name: &str, columns: Vec<&str>) -> TableRef {
     u32_table(table_name, columns, 0)
+}
+
+fn time_window_u32_table(table_name: &str) -> TableRef {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "time_window",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+    ]));
+
+    let mut time_window_builder = TimestampMillisecondVectorBuilder::with_capacity(1);
+    time_window_builder.push(Some(TimestampMillisecond::new(0)));
+    let recordbatch = RecordBatch::new(
+        schema,
+        vec![
+            time_window_builder.to_vector_cloned(),
+            Arc::new(<u32 as Scalar>::VectorType::from_vec(vec![1])) as VectorRef,
+        ],
+    )
+    .unwrap();
+    MemTable::table(table_name, recordbatch)
 }
 
 fn assert_same_logical_plan(actual: &LogicalPlan, expected: &LogicalPlan) {
@@ -85,6 +113,28 @@ fn expected_left_join_rewrite(
     join_keys: (Vec<Column>, Vec<Column>),
     projection_exprs: Vec<Expr>,
 ) -> LogicalPlan {
+    expected_left_join_rewrite_with_sink_filter(
+        delta_plan,
+        sink_table,
+        sink_table_name,
+        delta_selected_exprs,
+        sink_selected_exprs,
+        None,
+        join_keys,
+        projection_exprs,
+    )
+}
+
+fn expected_left_join_rewrite_with_sink_filter(
+    delta_plan: &LogicalPlan,
+    sink_table: TableRef,
+    sink_table_name: &TableName,
+    delta_selected_exprs: Vec<Expr>,
+    sink_selected_exprs: Vec<Expr>,
+    sink_filter: Option<Expr>,
+    join_keys: (Vec<Column>, Vec<Column>),
+    projection_exprs: Vec<Expr>,
+) -> LogicalPlan {
     let delta_alias = "__flow_delta";
     let sink_alias = "__flow_sink";
     let delta_selected = LogicalPlanBuilder::from(delta_plan.clone())
@@ -94,7 +144,17 @@ fn expected_left_join_rewrite(
         .unwrap()
         .build()
         .unwrap();
-    let sink_selected = LogicalPlanBuilder::from(test_sink_scan(sink_table, sink_table_name))
+    let sink_scan = test_sink_scan(sink_table, sink_table_name);
+    let sink_input = if let Some(predicate) = sink_filter {
+        LogicalPlanBuilder::from(sink_scan)
+            .filter(predicate)
+            .unwrap()
+            .build()
+            .unwrap()
+    } else {
+        sink_scan
+    };
+    let sink_selected = LogicalPlanBuilder::from(sink_input)
         .project(sink_selected_exprs)
         .unwrap()
         .alias(sink_alias)
@@ -641,6 +701,7 @@ async fn test_rewrite_incremental_aggregate_allows_alias_wrapped_scan() {
             "public".to_string(),
             "alias_wrapped_sink".to_string(),
         ],
+        None,
     )
     .await
     .unwrap();
@@ -887,6 +948,7 @@ async fn test_analyze_incremental_aggregate_plan_allows_literal_outputs() {
         &analysis,
         sink_table.clone(),
         &sink_table_name,
+        None,
     )
     .await
     .unwrap();
@@ -975,6 +1037,7 @@ async fn test_rewrite_incremental_aggregate_preserves_non_identifier_aliases() {
             "public".to_string(),
             "non_identifier_alias_sink".to_string(),
         ],
+        None,
     )
     .await
     .unwrap();
@@ -1161,6 +1224,7 @@ async fn test_rewrite_incremental_aggregate_with_left_join() {
         &analysis,
         sink_table.clone(),
         &sink_table_name,
+        None,
     )
     .await
     .unwrap();
@@ -1178,6 +1242,67 @@ async fn test_rewrite_incremental_aggregate_with_left_join() {
         vec![
             max_merge_expr("number"),
             qualified_col("__flow_delta", "ts").alias("ts"),
+        ],
+    );
+    assert_same_logical_plan(&rewritten, &expected);
+}
+
+#[tokio::test]
+async fn test_rewrite_incremental_aggregate_filters_sink_dirty_time_window() {
+    // This verifies the rewrite placement when callers supply an already
+    // inferred sink dirty-window predicate. The task-level inference rules are
+    // covered by `infer_sink_time_window_filter_col` tests in task.rs.
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql = "SELECT max(number) AS number, date_bin(INTERVAL '1 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window";
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
+        .await
+        .unwrap();
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    let sink_table = time_window_u32_table("time_window_sink");
+    let sink_table_name = [
+        "greptime".to_string(),
+        "public".to_string(),
+        "time_window_sink".to_string(),
+    ];
+    let dirty_filter = FilterExprInfo {
+        expr: unqualified_col("ts"),
+        col_name: "ts".to_string(),
+        time_ranges: vec![(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(1000),
+        )],
+        window_size: chrono::Duration::seconds(1),
+    };
+    let sink_filter = dirty_filter
+        .predicate_for_col("time_window")
+        .unwrap()
+        .unwrap();
+
+    let rewritten = rewrite_incremental_aggregate_with_sink_merge(
+        &plan,
+        &analysis,
+        sink_table.clone(),
+        &sink_table_name,
+        Some(sink_filter.clone()),
+    )
+    .await
+    .unwrap();
+
+    let expected = expected_left_join_rewrite_with_sink_filter(
+        &plan,
+        sink_table,
+        &sink_table_name,
+        vec![unqualified_col("time_window"), unqualified_col("number")],
+        vec![unqualified_col("time_window"), unqualified_col("number")],
+        Some(sink_filter),
+        (
+            vec![qualified_column("__flow_delta", "time_window")],
+            vec![qualified_column("__flow_sink", "time_window")],
+        ),
+        vec![
+            max_merge_expr("number"),
+            qualified_col("__flow_delta", "time_window").alias("time_window"),
         ],
     );
     assert_same_logical_plan(&rewritten, &expected);
@@ -1230,6 +1355,7 @@ async fn test_rewrite_incremental_aggregate_rejects_empty_group_keys() {
         &analysis,
         sink_table,
         &sink_table_name,
+        None,
     )
     .await
     .unwrap_err();
@@ -1261,6 +1387,7 @@ async fn test_rewrite_incremental_aggregate_preserves_raw_aggregate_field_name()
         &analysis,
         sink_table.clone(),
         &sink_table_name,
+        None,
     )
     .await
     .unwrap();

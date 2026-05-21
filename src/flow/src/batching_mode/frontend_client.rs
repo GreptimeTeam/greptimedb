@@ -21,7 +21,7 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{CreateTableExpr, QueryRequest};
 use client::{Client, Database, OutputWithMetrics};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, StackError};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_client_tls_config};
 use common_meta::peer::{Peer, PeerDiscovery};
 use common_query::{Output, OutputData};
@@ -37,6 +37,9 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::consts::{
+    FLOW_STALE_CURSOR_ERROR_MARKER, FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE,
+};
 use tokio::sync::SetOnce;
 
 use crate::batching_mode::BatchingModeOptions;
@@ -215,14 +218,20 @@ pub struct FlowStaleCursorDetail {
     pub min_readable_seq: Option<u64>,
 }
 
-const STALE_CURSOR_TOKEN: &str = "STALE_CURSOR";
-const STALE_CURSOR_RETRY_HINT: &str = "FALLBACK_FULL_RECOMPUTE";
-
 impl FrontendClient {
-    /// TODO(discord9): better way to detect stale cursor error instead of parsing the error message.
+    /// Detect stale cursor errors from a stable marker + key-value payload.
+    ///
+    /// Typed errors are usually erased before this point by the
+    /// datanode/frontend/query error boundary, so the storage side emits a small
+    /// machine-readable payload next to its human-readable error message, e.g.:
+    /// `GREPTIMEDB_FLOW_STALE_CURSOR_V1 region_id=1 given_seq=2 min_readable_seq=3 retry_hint=FALLBACK_FULL_RECOMPUTE`.
     pub fn inspect_query_error(err: &Error) -> FlowQueryFailure {
+        let last = err.last().to_string();
+        let display = err.to_string();
         let debug = format!("{err:?}");
-        let stale_cursor = parse_stale_cursor_detail(&debug);
+        let stale_cursor = [last.as_str(), display.as_str(), debug.as_str()]
+            .into_iter()
+            .find_map(parse_stale_cursor_detail);
         FlowQueryFailure { stale_cursor }
     }
 
@@ -606,26 +615,25 @@ impl std::fmt::Display for PeerDesc {
 }
 
 fn parse_stale_cursor_detail(message: &str) -> Option<FlowStaleCursorDetail> {
-    if !message.contains(STALE_CURSOR_TOKEN) || !message.contains(STALE_CURSOR_RETRY_HINT) {
+    let marker_idx = message.find(FLOW_STALE_CURSOR_ERROR_MARKER)?;
+    let payload = &message[marker_idx + FLOW_STALE_CURSOR_ERROR_MARKER.len()..];
+
+    if extract_kv(payload, "retry_hint")? != FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE {
         return None;
     }
 
     Some(FlowStaleCursorDetail {
-        region_id: extract_segment(message, "region: ", ", given_seq:"),
-        given_seq: extract_u64_segment(message, "given_seq: ", ", min_readable_seq:"),
-        min_readable_seq: extract_u64_segment(message, "min_readable_seq: ", ", retry_hint:"),
+        region_id: extract_kv(payload, "region_id").map(str::to_string),
+        given_seq: extract_kv(payload, "given_seq").and_then(|v| v.parse().ok()),
+        min_readable_seq: extract_kv(payload, "min_readable_seq").and_then(|v| v.parse().ok()),
     })
 }
 
-fn extract_segment(message: &str, start: &str, end: &str) -> Option<String> {
-    let start_idx = message.find(start)? + start.len();
-    let tail = &message[start_idx..];
-    let end_idx = tail.find(end)?;
-    Some(tail[..end_idx].trim().to_string())
-}
-
-fn extract_u64_segment(message: &str, start: &str, end: &str) -> Option<u64> {
-    extract_segment(message, start, end)?.parse().ok()
+fn extract_kv<'a>(payload: &'a str, key: &str) -> Option<&'a str> {
+    payload.split_whitespace().find_map(|token| {
+        let (token_key, token_value) = token.split_once('=')?;
+        (token_key == key).then_some(token_value)
+    })
 }
 
 #[cfg(test)]
@@ -821,7 +829,10 @@ mod tests {
     fn test_inspect_query_error_detects_stale_cursor() {
         let err = Error::External {
             source: BoxedError::new(PlainError::new(
-                "STALE_CURSOR: incremental query stale, region: 4398046511104(1024, 0), given_seq: 9, min_readable_seq: 18, retry_hint: FALLBACK_FULL_RECOMPUTE".to_string(),
+                format!(
+                    "{} region_id=4398046511104 given_seq=9 min_readable_seq=18 retry_hint={}",
+                    FLOW_STALE_CURSOR_ERROR_MARKER, FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE
+                ),
                 StatusCode::EngineExecuteQuery,
             )),
             location: snafu::Location::generate(),
@@ -832,11 +843,79 @@ mod tests {
         assert_eq!(
             failure.stale_cursor,
             Some(FlowStaleCursorDetail {
-                region_id: Some("4398046511104(1024, 0)".to_string()),
+                region_id: Some("4398046511104".to_string()),
                 given_seq: Some(9),
                 min_readable_seq: Some(18),
             })
         );
+    }
+
+    #[test]
+    fn test_inspect_query_error_accepts_reordered_stale_cursor_fields() {
+        let err = Error::External {
+            source: BoxedError::new(PlainError::new(
+                format!(
+                    "{}   min_readable_seq=18 retry_hint={}   given_seq=9 region_id=4398046511104 extra=ignored",
+                    FLOW_STALE_CURSOR_ERROR_MARKER, FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE
+                ),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        };
+
+        let failure = FrontendClient::inspect_query_error(&err);
+        assert!(failure.is_stale_cursor());
+        assert_eq!(
+            failure.stale_cursor,
+            Some(FlowStaleCursorDetail {
+                region_id: Some("4398046511104".to_string()),
+                given_seq: Some(9),
+                min_readable_seq: Some(18),
+            })
+        );
+    }
+
+    #[test]
+    fn test_inspect_query_error_keeps_stale_cursor_with_missing_optional_detail() {
+        let err = Error::External {
+            source: BoxedError::new(PlainError::new(
+                format!(
+                    "{} retry_hint={}",
+                    FLOW_STALE_CURSOR_ERROR_MARKER, FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE
+                ),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        };
+
+        let failure = FrontendClient::inspect_query_error(&err);
+        assert!(failure.is_stale_cursor());
+        assert_eq!(
+            failure.stale_cursor,
+            Some(FlowStaleCursorDetail {
+                region_id: None,
+                given_seq: None,
+                min_readable_seq: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_inspect_query_error_rejects_malformed_retry_hint() {
+        let err = Error::External {
+            source: BoxedError::new(PlainError::new(
+                format!(
+                    "{} region_id=1 given_seq=9 min_readable_seq=18 retry_hint={};",
+                    FLOW_STALE_CURSOR_ERROR_MARKER, FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE
+                ),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        };
+
+        let failure = FrontendClient::inspect_query_error(&err);
+        assert!(!failure.is_stale_cursor());
+        assert_eq!(failure.stale_cursor, None);
     }
 
     #[test]

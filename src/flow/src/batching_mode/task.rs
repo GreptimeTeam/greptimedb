@@ -28,7 +28,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::DFSchemaRef;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp};
+use datafusion_expr::{DmlStatement, Expr, LogicalPlan, WriteOp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use operator::expr_helper::column_schemas_to_defs;
@@ -54,7 +54,7 @@ use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::state::{CheckpointMode, FilterExprInfo, TaskState};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    AddFilterRewriter, ColumnMatcherRewriter, FindGroupByFinalName,
+    AddFilterRewriter, ColumnMatcherRewriter, FindGroupByFinalName, IncrementalAggregateAnalysis,
     analyze_incremental_aggregate_plan, gen_plan_with_matching_schema, get_table_info_df_schema,
     rewrite_incremental_aggregate_with_sink_merge, sql_to_df_plan,
 };
@@ -358,7 +358,7 @@ impl BatchingTask {
         if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
             debug!("Generate new query: {}", new_query.plan);
             match self
-                .execute_logical_plan(frontend_client, &new_query.plan)
+                .execute_logical_plan(frontend_client, &new_query.plan, new_query.filter.as_ref())
                 .await
             {
                 Ok(result) => Ok(result),
@@ -474,6 +474,7 @@ impl BatchingTask {
     async fn prepare_plan_for_incremental(
         &self,
         plan: &LogicalPlan,
+        dirty_filter: Option<&FilterExprInfo>,
     ) -> Result<(LogicalPlan, bool), Error> {
         let is_incremental_sql = {
             let state = self.state.read().unwrap();
@@ -535,12 +536,20 @@ impl BatchingTask {
             self.config.sink_table_name.clone(),
         )
         .await?;
+        let sink_schema = sink_table.table_info().meta.schema.clone();
+        let sink_dirty_filter = build_sink_dirty_time_window_filter_expr(
+            self.config.flow_id,
+            &analysis,
+            &sink_schema,
+            dirty_filter,
+        )?;
 
         let rewritten_inner = match rewrite_incremental_aggregate_with_sink_merge(
             &inner_plan,
             &analysis,
             sink_table,
             &self.config.sink_table_name,
+            sink_dirty_filter,
         )
         .await
         {
@@ -579,6 +588,7 @@ impl BatchingTask {
         &self,
         frontend_client: &Arc<FrontendClient>,
         plan: &LogicalPlan,
+        dirty_filter: Option<&FilterExprInfo>,
     ) -> Result<Option<(u32, Duration)>, Error> {
         let instant = Instant::now();
         let flow_id = self.config.flow_id;
@@ -610,7 +620,9 @@ impl BatchingTask {
 
         // For incremental-mode SQL queries, attempt to rewrite the delta aggregate
         // plan into a safe delta-LEFT-JOIN-sink form before deciding on extensions.
-        let (plan, incremental_safe) = self.prepare_plan_for_incremental(&plan).await?;
+        let (plan, incremental_safe) = self
+            .prepare_plan_for_incremental(&plan, dirty_filter)
+            .await?;
 
         let extensions = self.build_flow_query_extensions(incremental_safe).await?;
         let extension_refs = extensions
@@ -712,6 +724,14 @@ impl BatchingTask {
     ) -> FlowCheckpointDecision {
         state.after_query_exec(elapsed, true);
         let checkpoint_mode = state.checkpoint_mode();
+        if checkpoint_mode == CheckpointMode::Incremental && state.is_incremental_disabled() {
+            state.mark_full_snapshot();
+            return FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: CheckpointMode::Incremental,
+                reason: FlowQueryFallbackReason::IncrementalDisabled,
+            };
+        }
+
         if let (Some(participating_regions), Some(watermark_map)) =
             (res.participating_regions(), res.region_watermark_map())
         {
@@ -1000,8 +1020,12 @@ impl BatchingTask {
             };
 
             let res = if let Some(new_query) = &new_query {
-                self.execute_logical_plan(&frontend_client, &new_query.plan)
-                    .await
+                self.execute_logical_plan(
+                    &frontend_client,
+                    &new_query.plan,
+                    new_query.filter.as_ref(),
+                )
+                .await
             } else {
                 Ok(None)
             };
@@ -1132,8 +1156,12 @@ impl BatchingTask {
                         self.config.flow_id
                     );
                     // clean dirty time window too, this could be from create flow's check_execute
-                    let is_dirty = !self.state.read().unwrap().dirty_time_windows.is_empty();
-                    self.state.write().unwrap().dirty_time_windows.clean();
+                    let is_dirty = {
+                        let mut state = self.state.write().unwrap();
+                        let is_dirty = !state.dirty_time_windows.is_empty();
+                        state.dirty_time_windows.clean();
+                        is_dirty
+                    };
 
                     if !is_dirty {
                         // no dirty data, hence no need to update
@@ -1141,7 +1169,7 @@ impl BatchingTask {
                         return Ok(None);
                     }
 
-                    let plan = gen_plan_with_matching_schema(
+                    let plan = match gen_plan_with_matching_schema(
                         &self.config.query,
                         query_ctx,
                         engine,
@@ -1149,15 +1177,27 @@ impl BatchingTask {
                         primary_key_indices,
                         allow_partial,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(plan) => plan,
+                        Err(err) => {
+                            self.state.write().unwrap().dirty_time_windows.set_dirty();
+                            return Err(err);
+                        }
+                    };
 
                     return Ok(Some(PlanInfo { plan, filter: None }));
                 }
                 _ => {
                     // clean for tql have no use for time window
-                    self.state.write().unwrap().dirty_time_windows.clean();
+                    let had_dirty_windows = {
+                        let mut state = self.state.write().unwrap();
+                        let had_dirty_windows = !state.dirty_time_windows.is_empty();
+                        state.dirty_time_windows.clean();
+                        had_dirty_windows
+                    };
 
-                    let plan = gen_plan_with_matching_schema(
+                    let plan = match gen_plan_with_matching_schema(
                         &self.config.query,
                         query_ctx,
                         engine,
@@ -1165,7 +1205,16 @@ impl BatchingTask {
                         primary_key_indices,
                         allow_partial,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(plan) => plan,
+                        Err(err) => {
+                            if had_dirty_windows {
+                                self.state.write().unwrap().dirty_time_windows.set_dirty();
+                            }
+                            return Err(err);
+                        }
+                    };
 
                     return Ok(Some(PlanInfo { plan, filter: None }));
                 }
@@ -1257,6 +1306,72 @@ impl BatchingTask {
         };
 
         Ok(Some(info))
+    }
+}
+
+fn build_sink_dirty_time_window_filter_expr(
+    flow_id: FlowId,
+    analysis: &IncrementalAggregateAnalysis,
+    sink_schema: &Schema,
+    dirty_filter: Option<&FilterExprInfo>,
+) -> Result<Option<Expr>, Error> {
+    let Some(dirty_filter) = dirty_filter else {
+        return Ok(None);
+    };
+
+    let Some(sink_filter_col) =
+        infer_sink_time_window_filter_col(flow_id, analysis, sink_schema, dirty_filter)
+    else {
+        return Ok(None);
+    };
+
+    dirty_filter.predicate_for_col(&sink_filter_col)
+}
+
+fn infer_sink_time_window_filter_col(
+    flow_id: FlowId,
+    analysis: &IncrementalAggregateAnalysis,
+    sink_schema: &Schema,
+    dirty_filter: &FilterExprInfo,
+) -> Option<String> {
+    if analysis.group_key_names.is_empty() {
+        return None;
+    }
+
+    let is_timestamp_group_key = |name: &str| {
+        analysis.group_key_names.iter().any(|key| key == name)
+            && sink_schema
+                .column_schema_by_name(name)
+                .is_some_and(|col| col.data_type.is_timestamp())
+    };
+
+    if is_timestamp_group_key(&dirty_filter.col_name) {
+        return Some(dirty_filter.col_name.clone());
+    }
+
+    let candidates = analysis
+        .group_key_names
+        .iter()
+        .filter(|name| is_timestamp_group_key(name))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    match candidates.as_slice() {
+        [name] => Some(name.clone()),
+        [] => {
+            warn!(
+                "Flow {} cannot infer sink dirty-window filter column: no timestamp group key in {:?}",
+                flow_id, analysis.group_key_names
+            );
+            None
+        }
+        _ => {
+            warn!(
+                "Flow {} cannot infer sink dirty-window filter column: ambiguous timestamp group keys {:?}",
+                flow_id, candidates
+            );
+            None
+        }
     }
 }
 
@@ -1479,6 +1594,9 @@ mod test {
     use pretty_assertions::assert_eq;
     use session::context::QueryContext;
     use snafu::GenerateImplicitData;
+    use store_api::storage::consts::{
+        FLOW_STALE_CURSOR_ERROR_MARKER, FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE,
+    };
 
     use super::*;
     use crate::test_utils::create_test_query_engine;
@@ -1499,6 +1617,129 @@ mod test {
         }));
         result.metrics.mark_ready();
         result
+    }
+
+    fn test_analysis_with_group_keys(group_key_names: Vec<&str>) -> IncrementalAggregateAnalysis {
+        IncrementalAggregateAnalysis {
+            group_key_names: group_key_names
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect(),
+            merge_columns: vec![],
+            literal_columns: vec![],
+            output_field_names: vec![],
+            unsupported_exprs: vec![],
+        }
+    }
+
+    fn test_dirty_filter(col_name: &str) -> FilterExprInfo {
+        FilterExprInfo {
+            expr: datafusion_expr::col(col_name),
+            col_name: col_name.to_string(),
+            time_ranges: vec![],
+            window_size: chrono::Duration::seconds(1),
+        }
+    }
+
+    fn test_sink_schema(columns: Vec<(&str, ConcreteDataType)>) -> Schema {
+        Schema::new(
+            columns
+                .into_iter()
+                .map(|(name, data_type)| ColumnSchema::new(name, data_type, true))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn test_infer_sink_time_window_filter_col_uses_matching_source_group_key() {
+        let analysis = test_analysis_with_group_keys(vec!["ts", "host"]);
+        let sink_schema = test_sink_schema(vec![
+            ("ts", ConcreteDataType::timestamp_millisecond_datatype()),
+            ("host", ConcreteDataType::string_datatype()),
+        ]);
+        let dirty_filter = test_dirty_filter("ts");
+
+        assert_eq!(
+            Some("ts".to_string()),
+            infer_sink_time_window_filter_col(1, &analysis, &sink_schema, &dirty_filter)
+        );
+    }
+
+    #[test]
+    fn test_infer_sink_time_window_filter_col_uses_unique_timestamp_group_key() {
+        let analysis = test_analysis_with_group_keys(vec!["host", "time_window"]);
+        let sink_schema = test_sink_schema(vec![
+            ("host", ConcreteDataType::string_datatype()),
+            (
+                "time_window",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ),
+            (
+                AUTO_CREATED_UPDATE_AT_TS_COL,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ),
+        ]);
+        let dirty_filter = test_dirty_filter("ts");
+
+        assert_eq!(
+            Some("time_window".to_string()),
+            infer_sink_time_window_filter_col(1, &analysis, &sink_schema, &dirty_filter)
+        );
+    }
+
+    #[test]
+    fn test_infer_sink_time_window_filter_col_skips_global_aggregate() {
+        let analysis = test_analysis_with_group_keys(vec![]);
+        let sink_schema = test_sink_schema(vec![
+            ("number", ConcreteDataType::uint32_datatype()),
+            (
+                "time_window",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ),
+        ]);
+        let dirty_filter = test_dirty_filter("ts");
+
+        assert_eq!(
+            None,
+            infer_sink_time_window_filter_col(1, &analysis, &sink_schema, &dirty_filter)
+        );
+    }
+
+    #[test]
+    fn test_infer_sink_time_window_filter_col_skips_without_timestamp_group_key() {
+        let analysis = test_analysis_with_group_keys(vec!["host", "device"]);
+        let sink_schema = test_sink_schema(vec![
+            ("host", ConcreteDataType::string_datatype()),
+            ("device", ConcreteDataType::string_datatype()),
+            (
+                AUTO_CREATED_UPDATE_AT_TS_COL,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ),
+        ]);
+        let dirty_filter = test_dirty_filter("ts");
+
+        assert_eq!(
+            None,
+            infer_sink_time_window_filter_col(1, &analysis, &sink_schema, &dirty_filter)
+        );
+    }
+
+    #[test]
+    fn test_infer_sink_time_window_filter_col_skips_ambiguous_timestamp_group_keys() {
+        let analysis = test_analysis_with_group_keys(vec!["ts", "time_window"]);
+        let sink_schema = test_sink_schema(vec![
+            ("ts", ConcreteDataType::timestamp_millisecond_datatype()),
+            (
+                "time_window",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ),
+        ]);
+        let dirty_filter = test_dirty_filter("source_ts");
+
+        assert_eq!(
+            None,
+            infer_sink_time_window_filter_col(1, &analysis, &sink_schema, &dirty_filter)
+        );
     }
 
     async fn new_test_task_with_missing_sink() -> BatchingTask {
@@ -1549,6 +1790,19 @@ mod test {
         Error::External {
             source: BoxedError::new(PlainError::new(
                 "ordinary query failure".to_string(),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        }
+    }
+
+    fn stale_cursor_query_error() -> Error {
+        Error::External {
+            source: BoxedError::new(PlainError::new(
+                format!(
+                    "{} region_id=1 given_seq=9 min_readable_seq=18 retry_hint={}",
+                    FLOW_STALE_CURSOR_ERROR_MARKER, FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE
+                ),
                 StatusCode::EngineExecuteQuery,
             )),
             location: snafu::Location::generate(),
@@ -1775,6 +2029,38 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_stale_cursor_failure_restores_scoped_dirty_windows_only() {
+        let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
+        {
+            let mut state = task.state.write().unwrap();
+            state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+            state.dirty_time_windows.clean();
+        }
+        let scoped_query = PlanInfo {
+            plan,
+            filter: Some(FilterExprInfo {
+                expr: datafusion_expr::lit(true),
+                col_name: "ts".to_string(),
+                time_ranges: vec![(Timestamp::new_second(10), Timestamp::new_second(20))],
+                window_size: chrono::Duration::seconds(10),
+            }),
+        };
+
+        let is_stale_cursor =
+            task.handle_executed_query_failure(&stale_cursor_query_error(), Some(&scoped_query));
+
+        assert!(is_stale_cursor);
+        let state = task.state.read().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+        assert_eq!(state.dirty_time_windows.len(), 1);
+        assert_eq!(
+            state.dirty_time_windows.window_size(),
+            std::time::Duration::from_secs(10)
+        );
+    }
+
+    #[tokio::test]
     async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
         let task = new_test_task_with_missing_sink().await;
 
@@ -1788,6 +2074,20 @@ mod test {
             .write()
             .unwrap()
             .advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+
+        let extensions = task.build_flow_query_extensions(false).await.unwrap();
+        assert!(extensions.contains(&("flow.return_region_seq", "true".to_string())));
+        assert!(
+            !extensions
+                .iter()
+                .any(|(key, _)| *key == FLOW_INCREMENTAL_MODE)
+        );
+        assert!(
+            !extensions
+                .iter()
+                .any(|(key, _)| *key == FLOW_INCREMENTAL_AFTER_SEQS)
+        );
+
         let extensions = task.build_flow_query_extensions(true).await.unwrap();
 
         assert!(extensions.contains(&("flow.return_region_seq", "true".to_string())));
@@ -1799,6 +2099,20 @@ mod test {
             FLOW_INCREMENTAL_AFTER_SEQS,
             serde_json::json!({"1": 10, "2": 20}).to_string(),
         )));
+
+        task.state.write().unwrap().disable_incremental();
+        let extensions = task.build_flow_query_extensions(true).await.unwrap();
+        assert!(extensions.contains(&("flow.return_region_seq", "true".to_string())));
+        assert!(
+            !extensions
+                .iter()
+                .any(|(key, _)| *key == FLOW_INCREMENTAL_MODE)
+        );
+        assert!(
+            !extensions
+                .iter()
+                .any(|(key, _)| *key == FLOW_INCREMENTAL_AFTER_SEQS)
+        );
     }
 
     #[tokio::test]
@@ -1869,7 +2183,10 @@ mod test {
             CheckpointMode::Incremental
         );
 
-        let (_plan, incremental_safe) = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+        let (_plan, incremental_safe) = task
+            .prepare_plan_for_incremental(&dml_plan, None)
+            .await
+            .unwrap();
         assert!(!incremental_safe);
         let state = task.state.read().unwrap();
         assert!(state.is_incremental_disabled());
@@ -1944,7 +2261,10 @@ mod test {
             CheckpointMode::Incremental
         );
 
-        let (_plan, incremental_safe) = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+        let (_plan, incremental_safe) = task
+            .prepare_plan_for_incremental(&dml_plan, None)
+            .await
+            .unwrap();
         assert!(!incremental_safe);
         let state = task.state.read().unwrap();
         assert!(state.is_incremental_disabled());

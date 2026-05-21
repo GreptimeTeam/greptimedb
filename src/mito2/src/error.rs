@@ -31,6 +31,9 @@ use prost::DecodeError;
 use snafu::{Location, Snafu};
 use store_api::ManifestVersion;
 use store_api::logstore::provider::Provider;
+use store_api::storage::consts::{
+    FLOW_STALE_CURSOR_ERROR_MARKER, FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE,
+};
 use store_api::storage::{FileId, RegionId};
 use tokio::time::error::Elapsed;
 
@@ -222,10 +225,12 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "STALE_CURSOR: incremental query stale, region: {}, given_seq: {}, min_readable_seq: {}, retry_hint: FALLBACK_FULL_RECOMPUTE",
-        region_id,
+        "{} region_id={} given_seq={} min_readable_seq={} retry_hint={}",
+        FLOW_STALE_CURSOR_ERROR_MARKER,
+        region_id.as_u64(),
         given_seq,
-        min_readable_seq
+        min_readable_seq,
+        FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE
     ))]
     IncrementalQueryStale {
         region_id: RegionId,

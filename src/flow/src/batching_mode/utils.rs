@@ -536,7 +536,8 @@ pub fn analyze_incremental_aggregate_plan(
 ///
 /// ```text
 /// delta = SELECT ts, number FROM <delta_plan> AS __flow_delta
-/// sink  = SELECT ts, number FROM <sink_table> AS __flow_sink
+/// sink_scan = SELECT * FROM <sink_table> [WHERE <sink_dirty_filter>]
+/// sink  = SELECT ts, number FROM sink_scan AS __flow_sink
 /// SELECT
 ///   CASE
 ///     WHEN __flow_sink.number IS NULL THEN __flow_delta.number
@@ -548,11 +549,17 @@ pub fn analyze_incremental_aggregate_plan(
 /// LEFT JOIN sink
 ///   ON __flow_delta.ts IS NOT DISTINCT FROM __flow_sink.ts
 /// ```
+///
+/// If `sink_dirty_filter` is provided, it is applied to the sink table scan
+/// before projection, aliasing, and the left join. The predicate must reference
+/// raw sink table columns structurally (unqualified), before the `__flow_sink`
+/// alias exists.
 pub async fn rewrite_incremental_aggregate_with_sink_merge(
     delta_plan: &LogicalPlan,
     analysis: &IncrementalAggregateAnalysis,
     sink_table: TableRef,
     sink_table_name: &TableName,
+    sink_dirty_filter: Option<Expr>,
 ) -> Result<LogicalPlan, Error> {
     ensure!(
         analysis.unsupported_exprs.is_empty(),
@@ -637,7 +644,22 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
         .cloned()
         .map(unqualified_col)
         .collect::<Vec<_>>();
-    let sink_selected = LogicalPlanBuilder::from(sink_scan)
+    let sink_input = if let Some(predicate) = sink_dirty_filter {
+        LogicalPlanBuilder::from(sink_scan)
+            .filter(predicate)
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to filter sink table scan for incremental sink merge".to_string(),
+            })?
+            .build()
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build filtered sink plan for incremental sink merge"
+                    .to_string(),
+            })?
+    } else {
+        sink_scan
+    };
+
+    let sink_selected = LogicalPlanBuilder::from(sink_input)
         .project(sink_selected_exprs)
         .with_context(|_| DatafusionSnafu {
             context: "Failed to project sink table scan for incremental sink merge".to_string(),
