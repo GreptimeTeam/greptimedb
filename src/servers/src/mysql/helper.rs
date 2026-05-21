@@ -23,6 +23,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::types::TimestampType;
 use datatypes::value::{self, Value};
+#[cfg(test)]
 use itertools::Itertools;
 use opensrv_mysql::{ParamValue, ValueInner, to_naive_datetime};
 use snafu::ResultExt;
@@ -38,6 +39,7 @@ pub fn format_placeholder(i: usize) -> String {
 
 /// Replace all the "?" placeholder into "$i" in SQL,
 /// returns the new SQL and the last placeholder index.
+#[cfg(test)]
 pub fn replace_placeholders(query: &str) -> (String, usize) {
     let query_parts = query.split('?').collect::<Vec<_>>();
     let parts_len = query_parts.len();
@@ -60,25 +62,33 @@ pub fn replace_placeholders(query: &str) -> (String, usize) {
 
 /// Transform all the "?" placeholder into "$i".
 /// Only works for Insert,Query and Delete statements.
+#[cfg(test)]
 pub fn transform_placeholders(stmt: Statement) -> Statement {
+    transform_placeholders_with_count(stmt).0
+}
+
+/// Transform all the "?" placeholders into "$i" and return the number of
+/// transformed placeholders.
+/// Only works for Insert,Query and Delete statements.
+pub fn transform_placeholders_with_count(stmt: Statement) -> (Statement, usize) {
     match stmt {
         Statement::Query(mut query) => {
-            visit_placeholders(&mut query.inner);
-            Statement::Query(query)
+            let count = visit_placeholders(&mut query.inner);
+            (Statement::Query(query), count)
         }
         Statement::Insert(mut insert) => {
-            visit_placeholders(&mut insert.inner);
-            Statement::Insert(insert)
+            let count = visit_placeholders(&mut insert.inner);
+            (Statement::Insert(insert), count)
         }
         Statement::Delete(mut delete) => {
-            visit_placeholders(&mut delete.inner);
-            Statement::Delete(delete)
+            let count = visit_placeholders(&mut delete.inner);
+            (Statement::Delete(delete), count)
         }
-        stmt => stmt,
+        stmt => (stmt, 0),
     }
 }
 
-fn visit_placeholders<V>(v: &mut V)
+fn visit_placeholders<V>(v: &mut V) -> usize
 where
     V: VisitMut,
 {
@@ -94,6 +104,7 @@ where
         }
         ControlFlow::<()>::Continue(())
     });
+    index - 1
 }
 
 /// Convert [`ParamValue`] into [`Value`] according to param type.
@@ -367,6 +378,14 @@ mod tests {
             "SELECT * FROM demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3",
             select.inner.to_string()
         );
+
+        let select = parse_sql("select '?', ?");
+        let (stmt, count) = transform_placeholders_with_count(select);
+        let Statement::Query(select) = stmt else {
+            unreachable!()
+        };
+        assert_eq!("SELECT '?', $1", select.inner.to_string());
+        assert_eq!(1, count);
     }
 
     #[test]

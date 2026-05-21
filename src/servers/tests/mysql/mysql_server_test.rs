@@ -548,6 +548,98 @@ async fn test_query_prepared() -> Result<()> {
         assert_eq!(rows.len(), 1, "LIMIT 1 should return 1 row");
     }
 
+    // Untyped placeholders should still be advertised in the MySQL prepare
+    // response. This used to fail on the client side because the server
+    // reported 0 parameters for `SELECT ?`.
+    {
+        let stmt = connection.prep("SELECT ?").await.unwrap();
+        assert_eq!(stmt.num_params(), 1);
+
+        let row: Option<String> = connection
+            .exec_first(stmt, vec![mysql_async::Value::Bytes(b"can't".to_vec())])
+            .await
+            .unwrap();
+        assert_eq!(row, Some("can't".to_string()));
+
+        let stmt = connection.prep("SELECT ?").await.unwrap();
+        let row: Option<String> = connection
+            .exec_first(stmt, vec![mysql_async::Value::Bytes(b"a\\'b".to_vec())])
+            .await
+            .unwrap();
+        assert_eq!(row, Some("a\\'b".to_string()));
+
+        let stmt = connection.prep("SELECT ?").await.unwrap();
+        let row: Option<Vec<u8>> = connection
+            .exec_first(stmt, vec![mysql_async::Value::Bytes(vec![0xFF, 0xFE])])
+            .await
+            .unwrap();
+        assert_eq!(row, Some(vec![0xFF, 0xFE]));
+    }
+
+    // Values inserted into the SQL text must not be processed again while
+    // replacing later placeholders.
+    {
+        let stmt = connection.prep("SELECT ?, ?").await.unwrap();
+        assert_eq!(stmt.num_params(), 2);
+
+        let row: Option<(String, String)> = connection
+            .exec_first(
+                stmt,
+                vec![
+                    mysql_async::Value::Bytes(b"keep $2".to_vec()),
+                    mysql_async::Value::Bytes(b"second".to_vec()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row, Some(("keep $2".to_string(), "second".to_string())));
+    }
+
+    // Non-placeholder question marks inside string literals must not affect
+    // the advertised prepare parameter count.
+    {
+        let stmt = connection.prep("SELECT '?', ?").await.unwrap();
+        assert_eq!(stmt.num_params(), 1);
+
+        let row: Option<(String, String)> = connection
+            .exec_first(stmt, vec![mysql_async::Value::Bytes(b"actual".to_vec())])
+            .await
+            .unwrap();
+        assert_eq!(row, Some(("?".to_string(), "actual".to_string())));
+
+        let stmt = connection.prep("SELECT '$1', ?").await.unwrap();
+        assert_eq!(stmt.num_params(), 1);
+
+        let row: Option<(String, String)> = connection
+            .exec_first(stmt, vec![mysql_async::Value::Bytes(b"actual".to_vec())])
+            .await
+            .unwrap();
+        assert_eq!(row, Some(("$1".to_string(), "actual".to_string())));
+    }
+
+    // Also cover mixed known and unknown placeholders. The projection
+    // placeholder is untyped, while the WHERE placeholder is inferred from the
+    // column type. The prepare response must advertise both parameters.
+    {
+        let stmt = connection
+            .prep("SELECT ?, uint32s FROM all_datatypes WHERE uint32s >= ?")
+            .await
+            .unwrap();
+        assert_eq!(stmt.num_params(), 2);
+
+        let rows: Vec<Row> = connection
+            .exec(
+                stmt,
+                vec![
+                    mysql_async::Value::Bytes(b"unknown".to_vec()),
+                    mysql_async::Value::UInt(0),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(!rows.is_empty());
+    }
+
     Ok(())
 }
 

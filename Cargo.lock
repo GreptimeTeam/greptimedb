@@ -12705,6 +12705,7 @@ dependencies = [
  "metric-engine",
  "mime_guess",
  "mysql_async",
+ "mysql_common 0.34.1",
  "notify",
  "object-pool",
  "once_cell",

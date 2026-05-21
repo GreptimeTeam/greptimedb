@@ -30,6 +30,7 @@ use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::Schema;
 use itertools::Itertools;
+use mysql_common::Value as MysqlValue;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
     StatementMetaWriter, ValueInner,
@@ -51,9 +52,7 @@ use crate::error::{
     self, DataFrameSnafu, InferParameterTypesSnafu, InvalidPrepareStatementSnafu, Result,
 };
 use crate::metrics::METRIC_AUTH_FAILURE;
-use crate::mysql::helper::{
-    self, format_placeholder, replace_placeholders, transform_placeholders,
-};
+use crate::mysql::helper::{self, format_placeholder, transform_placeholders_with_count};
 use crate::mysql::writer;
 use crate::mysql::writer::{create_mysql_column, handle_err};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -192,28 +191,32 @@ impl MysqlInstanceShim {
             return Ok((vec![], vec![]));
         }
 
-        let (query, param_num) = replace_placeholders(raw_query);
-
         let statement = validate_query(raw_query).await?;
 
         // We have to transform the placeholder, because DataFusion only parses placeholders
         // in the form of "$i", it can't process "?" right now.
-        let statement = transform_placeholders(statement);
+        let (statement, placeholder_count) = transform_placeholders_with_count(statement);
+        let query = statement.to_string();
+        let param_num = placeholder_count + 1;
 
         let describe_result = self
             .do_describe(statement.clone(), query_ctx.clone())
             .await?;
         let plan = describe_result.map(|DescribeResult { logical_plan }| logical_plan);
 
-        let params = if let Some(plan) = &plan {
+        let (params, can_cache_as_plan) = if let Some(plan) = &plan {
             let param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
                 .context(InferParameterTypesSnafu)?
                 .into_iter()
                 .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
                 .collect();
-            prepared_params(&param_types)?
+
+            (
+                prepared_params(&param_types, param_num)?,
+                all_params_have_types(&param_types, param_num),
+            )
         } else {
-            dummy_params(param_num)?
+            (dummy_params(param_num)?, false)
         };
 
         let columns =
@@ -239,7 +242,7 @@ impl MysqlInstanceShim {
                 .unwrap_or_default();
 
         match plan {
-            Some(plan) if params.len() == param_num - 1 => {
+            Some(plan) if can_cache_as_plan => {
                 self.save_plan(SqlPlan::Plan(plan, statement), stmt_key)
                     .inspect_err(|e| {
                         error!(e; "Failed to save prepared statement");
@@ -662,7 +665,7 @@ fn convert_param_value_to_string(param: &ParamValue) -> String {
         ValueInner::UInt(u) => u.to_string(),
         ValueInner::Double(u) => u.to_string(),
         ValueInner::NULL => "NULL".to_string(),
-        ValueInner::Bytes(b) => format!("'{}'", &String::from_utf8_lossy(b)),
+        ValueInner::Bytes(b) => MysqlValue::Bytes(b.to_vec()).as_sql(false),
         ValueInner::Date(_) => format!("'{}'", NaiveDate::from(param.value)),
         ValueInner::Datetime(_) => format!("'{}'", NaiveDateTime::from(param.value)),
         ValueInner::Time(_) => format_duration(Duration::from(param.value)),
@@ -670,11 +673,112 @@ fn convert_param_value_to_string(param: &ParamValue) -> String {
 }
 
 fn replace_params(params: Vec<String>, query: String) -> String {
-    let mut query = query;
-    for (index, param) in (1..).zip(params) {
-        query = query.replace(&format_placeholder(index), &param);
+    let mut output = String::with_capacity(query.len());
+    let mut index = 0;
+    let bytes = query.as_bytes();
+
+    while index < bytes.len() {
+        if matches!(bytes[index], b'\'' | b'"' | b'`') {
+            let quote = bytes[index];
+            push_quoted_segment(&mut output, &query, &mut index, quote);
+        } else if index + 1 < bytes.len() && bytes[index] == b'-' && bytes[index + 1] == b'-' {
+            push_line_comment(&mut output, &query, &mut index);
+        } else if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
+            push_block_comment(&mut output, &query, &mut index);
+        } else if bytes[index] == b'$' {
+            let placeholder_start = index;
+            index += 1;
+            let digit_start = index;
+
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+
+            if digit_start < index
+                && let Ok(param_index) = query[digit_start..index].parse::<usize>()
+                && let Some(param) = param_index.checked_sub(1).and_then(|idx| params.get(idx))
+            {
+                output.push_str(param);
+            } else {
+                output.push_str(&query[placeholder_start..index]);
+            }
+        } else {
+            let ch = query[index..]
+                .chars()
+                .next()
+                .expect("index should be on a char boundary");
+            output.push(ch);
+            index += ch.len_utf8();
+        }
     }
-    query
+
+    output
+}
+
+fn push_quoted_segment(output: &mut String, query: &str, index: &mut usize, quote: u8) {
+    let bytes = query.as_bytes();
+    output.push(quote as char);
+    *index += 1;
+
+    while *index < bytes.len() {
+        let ch = query[*index..]
+            .chars()
+            .next()
+            .expect("index should be on a char boundary");
+        output.push(ch);
+        *index += ch.len_utf8();
+
+        if ch == '\\' {
+            if *index < bytes.len() {
+                let next = query[*index..]
+                    .chars()
+                    .next()
+                    .expect("index should be on a char boundary");
+                output.push(next);
+                *index += next.len_utf8();
+            }
+        } else if ch as u8 == quote {
+            if *index < bytes.len() && bytes[*index] == quote {
+                output.push(quote as char);
+                *index += 1;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn push_line_comment(output: &mut String, query: &str, index: &mut usize) {
+    let bytes = query.as_bytes();
+    while *index < bytes.len() {
+        let ch = query[*index..]
+            .chars()
+            .next()
+            .expect("index should be on a char boundary");
+        output.push(ch);
+        *index += ch.len_utf8();
+        if ch == '\n' {
+            break;
+        }
+    }
+}
+
+fn push_block_comment(output: &mut String, query: &str, index: &mut usize) {
+    let bytes = query.as_bytes();
+    while *index < bytes.len() {
+        if *index + 1 < bytes.len() && bytes[*index] == b'*' && bytes[*index + 1] == b'/' {
+            output.push_str("*/");
+            *index += 2;
+            break;
+        }
+
+        let ch = query[*index..]
+            .chars()
+            .next()
+            .expect("index should be on a char boundary");
+        output.push(ch);
+        *index += ch.len_utf8();
+    }
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -778,18 +882,32 @@ fn dummy_params(index: usize) -> Result<Vec<Column>> {
 }
 
 /// Parameters that the client must provide when executing the prepared statement.
-fn prepared_params(param_types: &HashMap<String, Option<ConcreteDataType>>) -> Result<Vec<Column>> {
-    let mut params = Vec::with_capacity(param_types.len());
+fn prepared_params(
+    param_types: &HashMap<String, Option<ConcreteDataType>>,
+    index: usize,
+) -> Result<Vec<Column>> {
+    let mut params = Vec::with_capacity(index - 1);
 
     // Placeholder index starts from 1
-    for index in 1..=param_types.len() {
-        if let Some(Some(t)) = param_types.get(&format_placeholder(index)) {
-            let column = create_mysql_column(t, "")?;
-            params.push(column);
-        }
+    for index in 1..index {
+        let column = if let Some(Some(t)) = param_types.get(&format_placeholder(index)) {
+            create_mysql_column(t, "")?
+        } else {
+            create_mysql_column(&ConcreteDataType::null_datatype(), "")?
+        };
+        params.push(column);
     }
 
     Ok(params)
+}
+
+fn all_params_have_types(
+    param_types: &HashMap<String, Option<ConcreteDataType>>,
+    index: usize,
+) -> bool {
+    param_types.len() == index - 1
+        && (1..index)
+            .all(|index| matches!(param_types.get(&format_placeholder(index)), Some(Some(_))))
 }
 
 #[cfg(test)]
@@ -850,6 +968,47 @@ mod tests {
             1,
             1024,
         )
+    }
+
+    #[test]
+    fn test_prepared_params_keep_unknown_type_placeholders() {
+        let mut param_types = HashMap::new();
+        param_types.insert(format_placeholder(1), None);
+        param_types.insert(
+            format_placeholder(2),
+            Some(ConcreteDataType::int32_datatype()),
+        );
+
+        let params = prepared_params(&param_types, 3).unwrap();
+        assert_eq!(params.len(), 2);
+        assert!(!all_params_have_types(&param_types, 3));
+    }
+
+    #[test]
+    fn test_replace_params_single_pass() {
+        let query = "SELECT $1, $2".to_string();
+        let params = vec!["'$2 should stay'".to_string(), "'value'".to_string()];
+
+        assert_eq!(
+            "SELECT '$2 should stay', 'value'",
+            replace_params(params, query)
+        );
+
+        let query = "SELECT '$1', \"$2\", `$3`, $1, $10".to_string();
+        let params = (1..=10).map(|idx| format!("'{idx}'")).collect();
+
+        assert_eq!(
+            "SELECT '$1', \"$2\", `$3`, '1', '10'",
+            replace_params(params, query)
+        );
+
+        let query = "SELECT /* $1 */ $1 -- $2\n, $2".to_string();
+        let params = vec!["'first'".to_string(), "'second'".to_string()];
+
+        assert_eq!(
+            "SELECT /* $1 */ 'first' -- $2\n, 'second'",
+            replace_params(params, query)
+        );
     }
 
     #[tokio::test]
