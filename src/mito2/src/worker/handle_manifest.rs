@@ -263,6 +263,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id: _,
             mut edit,
             tx: sender,
+            preload_sst_cache,
         } = request;
         let file_sequence = region.version_control.committed_sequence() + 1;
         edit.committed_sequence = Some(file_sequence);
@@ -291,8 +292,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
-            let result =
-                edit_region(&region, edit.clone(), cache_manager, listener, is_staging).await;
+            let result = edit_region(
+                &region,
+                edit.clone(),
+                cache_manager,
+                listener,
+                is_staging,
+                preload_sst_cache,
+            )
+            .await;
             let notify = WorkerRequest::Background {
                 region_id,
                 notify: BackgroundNotify::RegionEdit(RegionEditResult {
@@ -528,9 +536,12 @@ async fn edit_region(
     cache_manager: CacheManagerRef,
     listener: WorkerListener,
     is_staging: bool,
+    preload_sst_cache: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
-    if let Some(write_cache) = cache_manager.write_cache() {
+    if let Some(write_cache) = cache_manager.write_cache()
+        && preload_sst_cache
+    {
         for file_meta in &edit.files_to_add {
             let write_cache = write_cache.clone();
             let layer = region.access_layer.clone();

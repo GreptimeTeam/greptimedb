@@ -459,6 +459,7 @@ impl MitoEngine {
             region_id,
             edit,
             tx,
+            preload_sst_cache: true,
         });
         self.inner
             .workers
