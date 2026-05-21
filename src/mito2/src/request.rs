@@ -1105,6 +1105,8 @@ pub(crate) struct CopyRegionFromFinished {
 pub(crate) struct RegionEditRequest {
     pub(crate) region_id: RegionId,
     pub(crate) edit: RegionEdit,
+    /// Whether to preload SST files into the write cache.
+    pub(crate) preload_sst_cache: bool,
     /// The sender to notify the result to the region engine.
     pub(crate) tx: Sender<Result<()>>,
 }

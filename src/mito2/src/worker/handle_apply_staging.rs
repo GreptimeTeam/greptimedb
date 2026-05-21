@@ -139,6 +139,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     RegionEditRequest {
                         region_id: region.region_id,
                         edit,
+                        // we don't need to preload sst cache during repartition, as it may cause extra network overhead.
+                        preload_sst_cache: false,
                         tx,
                     },
                 )))
