@@ -827,6 +827,36 @@ fn abort_flow_task(flow_id: FlowId, task: Option<BatchingTask>, action: &str) ->
     false
 }
 
+impl FlowEngine for BatchingEngine {
+    async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+        self.create_flow_inner(args).await
+    }
+    async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+        self.remove_flow_inner(flow_id).await
+    }
+    async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
+        self.flush_flow_inner(flow_id).await
+    }
+    async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
+        Ok(self.flow_exist_inner(flow_id).await)
+    }
+    async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
+        Ok(self.tasks.read().await.keys().cloned().collect::<Vec<_>>())
+    }
+    async fn handle_flow_inserts(
+        &self,
+        request: api::v1::region::InsertRequests,
+    ) -> Result<(), Error> {
+        self.handle_inserts_inner(request).await
+    }
+    async fn handle_mark_window_dirty(
+        &self,
+        req: api::v1::flow::DirtyWindowRequests,
+    ) -> Result<(), Error> {
+        self.handle_mark_dirty_time_window(req).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use catalog::memory::new_memory_catalog_manager;
@@ -999,35 +1029,5 @@ mod tests {
             .await;
         assert!(!engine.flow_exist_inner(42).await);
         assert!(!engine.shutdown_txs.read().await.contains_key(&42));
-    }
-}
-
-impl FlowEngine for BatchingEngine {
-    async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
-        self.create_flow_inner(args).await
-    }
-    async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
-        self.remove_flow_inner(flow_id).await
-    }
-    async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
-        self.flush_flow_inner(flow_id).await
-    }
-    async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
-        Ok(self.flow_exist_inner(flow_id).await)
-    }
-    async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
-        Ok(self.tasks.read().await.keys().cloned().collect::<Vec<_>>())
-    }
-    async fn handle_flow_inserts(
-        &self,
-        request: api::v1::region::InsertRequests,
-    ) -> Result<(), Error> {
-        self.handle_inserts_inner(request).await
-    }
-    async fn handle_mark_window_dirty(
-        &self,
-        req: api::v1::flow::DirtyWindowRequests,
-    ) -> Result<(), Error> {
-        self.handle_mark_dirty_time_window(req).await
     }
 }

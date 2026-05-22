@@ -125,6 +125,7 @@ fn expected_left_join_rewrite(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn expected_left_join_rewrite_with_sink_filter(
     delta_plan: &LogicalPlan,
     sink_table: TableRef,
