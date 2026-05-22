@@ -6006,6 +6006,39 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_histogram_quantile_binary_op() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        // Arithmetic applied to a histogram_quantile() result. Regression for #8144:
+        // HistogramFold used to drop the input column qualifiers, so the binary-op
+        // projection failed to resolve the qualified tag column.
+        let case = r#"histogram_quantile(0.5, sum by (le, pod) (rate(http_request_duration_seconds_bucket[5m]))) + 0"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider_with_fields(
+            &[(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "http_request_duration_seconds_bucket".to_string(),
+            )],
+            &["pod", "le"],
+        )
+        .await;
+        // Should plan without a "No field named ..." error.
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_parse_and_operator() {
         let mut eval_stmt = EvalStmt {
             expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
