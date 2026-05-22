@@ -1,0 +1,28 @@
+src/meta-srv/src/service/heartbeat.rs
+  s_a6e448b64af272::t_0b459b102511e9 426,434,437-438,442-526,535-608,611-631,634-680,683-756
+  s_a6e448b64af272::t_1161f03f18c7f3 435
+  s_a6e448b64af272::t_83a75122674f9f 527-534,609-610,632-633,681-682
+src/meta-srv/src/handler.rs
+  h_623774b620da8e 350
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.11",
+  "base_commit_sha": "3f4a18a5729f90f2c7ea6980d7ba3611bca99567",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_a6e448b64af272": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1af81fa5cffePf6pIM9p1JLwkb",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
