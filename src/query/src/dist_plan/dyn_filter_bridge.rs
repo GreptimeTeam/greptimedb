@@ -32,7 +32,7 @@ use store_api::storage::RegionId;
 #[cfg(test)]
 use uuid::Uuid;
 
-use super::filter_id::build_remote_dyn_filter_id;
+use crate::dist_plan::filter_id::build_remote_dyn_filter_id;
 use crate::dist_plan::{FilterId, ProducerScopeId, QueryDynFilterRegistry, Subscriber};
 use crate::query_engine::QueryEngineState;
 
