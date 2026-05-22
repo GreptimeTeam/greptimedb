@@ -791,6 +791,8 @@ fn location_to_byte_offset(query: &str, line: u64, column: u64) -> Option<usize>
         }
     }
 
+    // The exclusive end location of a trailing placeholder points just past
+    // the last character, for example the end span of `SELECT ?`.
     (current_line == line && current_column == column).then_some(query.len())
 }
 
@@ -897,13 +899,13 @@ fn dummy_params(index: usize) -> Result<Vec<Column>> {
 /// Parameters that the client must provide when executing the prepared statement.
 fn prepared_params(
     param_types: &HashMap<String, Option<ConcreteDataType>>,
-    index: usize,
+    param_num: usize,
 ) -> Result<Vec<Column>> {
-    let mut params = Vec::with_capacity(index - 1);
+    let mut params = Vec::with_capacity(param_num - 1);
 
     // Placeholder index starts from 1
-    for index in 1..index {
-        let column = if let Some(Some(t)) = param_types.get(&format_placeholder(index)) {
+    for i in 1..param_num {
+        let column = if let Some(Some(t)) = param_types.get(&format_placeholder(i)) {
             create_mysql_column(t, "")?
         } else {
             create_mysql_column(&ConcreteDataType::null_datatype(), "")?
@@ -916,11 +918,10 @@ fn prepared_params(
 
 fn all_params_have_types(
     param_types: &HashMap<String, Option<ConcreteDataType>>,
-    index: usize,
+    param_num: usize,
 ) -> bool {
-    param_types.len() == index - 1
-        && (1..index)
-            .all(|index| matches!(param_types.get(&format_placeholder(index)), Some(Some(_))))
+    param_types.len() == param_num - 1
+        && (1..param_num).all(|i| matches!(param_types.get(&format_placeholder(i)), Some(Some(_))))
 }
 
 #[cfg(test)]
@@ -1086,6 +1087,15 @@ mod tests {
 
         assert_eq!(
             "SELECT CAST(1 AS INT64), 2 + (SELECT 3)",
+            replace_params(params, stmt, query).unwrap()
+        );
+
+        let query = "SET time_zone = ?".to_string();
+        let stmt = statement_with_transformed_placeholders(&query);
+        let params = vec!["'UTC'".to_string()];
+
+        assert_eq!(
+            "SET time_zone = 'UTC'",
             replace_params(params, stmt, query).unwrap()
         );
     }

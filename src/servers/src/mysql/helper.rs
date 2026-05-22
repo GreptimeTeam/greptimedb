@@ -72,7 +72,6 @@ pub fn replace_placeholders(query: &str) -> (String, usize) {
 }
 
 /// Transform all the "?" placeholder into "$i".
-/// Only works for Insert,Query and Delete statements.
 #[cfg(test)]
 pub fn transform_placeholders(stmt: Statement) -> Statement {
     transform_placeholders_with_count(stmt).0
@@ -80,40 +79,15 @@ pub fn transform_placeholders(stmt: Statement) -> Statement {
 
 /// Transform all the "?" placeholders into "$i" and return the number of
 /// transformed placeholders.
-/// Only works for Insert,Query and Delete statements.
-pub fn transform_placeholders_with_count(stmt: Statement) -> (Statement, usize) {
-    match stmt {
-        Statement::Query(mut query) => {
-            let count = visit_placeholders(&mut query.inner);
-            (Statement::Query(query), count)
-        }
-        Statement::Insert(mut insert) => {
-            let count = visit_placeholders(&mut insert.inner);
-            (Statement::Insert(insert), count)
-        }
-        Statement::Delete(mut delete) => {
-            let count = visit_placeholders(&mut delete.inner);
-            (Statement::Delete(delete), count)
-        }
-        stmt => (stmt, 0),
-    }
+pub fn transform_placeholders_with_count(mut stmt: Statement) -> (Statement, usize) {
+    let count = visit_placeholders(&mut stmt);
+    (stmt, count)
 }
 
 /// Collect spans of "$i" placeholders in a statement.
-/// Only works for Insert, Query and Delete statements.
 pub(crate) fn placeholder_spans(mut stmt: Statement) -> Vec<PlaceholderSpan> {
     let mut spans = Vec::new();
-    match stmt {
-        Statement::Query(ref mut query) => collect_placeholder_spans(&mut query.inner, &mut spans),
-        Statement::Insert(ref mut insert) => {
-            collect_placeholder_spans(&mut insert.inner, &mut spans)
-        }
-        Statement::Delete(ref mut delete) => {
-            collect_placeholder_spans(&mut delete.inner, &mut spans)
-        }
-        _ => {}
-    };
-
+    collect_placeholder_spans(&mut stmt, &mut spans);
     spans
 }
 
@@ -445,6 +419,11 @@ mod tests {
             unreachable!()
         };
         assert_eq!("SELECT '?', $1", select.inner.to_string());
+        assert_eq!(1, count);
+
+        let set = parse_sql("set time_zone = ?");
+        let (stmt, count) = transform_placeholders_with_count(set);
+        assert_eq!("SET time_zone = $1", stmt.to_string());
         assert_eq!(1, count);
     }
 
