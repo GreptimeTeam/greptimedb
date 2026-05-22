@@ -20,9 +20,12 @@ use common_grpc::channel_manager::ClientTlsOption;
 use serde::{Deserialize, Serialize};
 use session::ReadPreference;
 
+mod checkpoint;
 pub(crate) mod engine;
 pub(crate) mod frontend_client;
+mod incremental_filter;
 mod state;
+mod table_creator;
 mod task;
 mod time_window;
 pub(crate) mod utils;
