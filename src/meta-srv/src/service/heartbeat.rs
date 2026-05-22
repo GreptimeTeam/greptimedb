@@ -71,6 +71,21 @@ impl heartbeat_server::Heartbeat for Metasrv {
                             pusher_id =
                                 Some(register_pusher(&handler_group, header, tx.clone()).await);
                         }
+
+                        // A leader transition resets the mailbox pusher map, but an existing heartbeat
+                        // stream may survive if the datanode does not observe the transient not-leader
+                        // response. In that case `pusher_id` is still set, so the stream will not run
+                        // handshake registration again. Reinsert the current stream's pusher to recover
+                        // mailbox delivery.
+                        if let Some(pusher_id) = pusher_id
+                            && !handler_group.contains_pusher(&pusher_id).await
+                            && register_pusher_if_missing(&handler_group, pusher_id, &tx).await
+                        {
+                            info!(
+                                "Re-register pusher for existing heartbeat stream, pusher_id: {pusher_id}"
+                            );
+                        }
+
                         if let Some(k) = &pusher_id {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&[&k.to_string()]);
                         } else {
@@ -110,7 +125,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                 }
 
                 if is_not_leader {
-                    warn!("Quit because it is no longer the leader");
+                    warn!("Quit because it is no longer the leader, pusher_id: {pusher_id:?}");
                     let _ = tx
                         .send(Err(Status::aborted(format!(
                             "The requested metasrv node is not leader, node addr: {}",
@@ -188,6 +203,19 @@ async fn register_pusher(
     let pusher = Pusher::new(sender);
     handler_group.register_pusher(pusher_id, pusher).await;
     pusher_id
+}
+
+/// Registers the heartbeat response [`Pusher`] with the given key to the group if absent,
+/// and returns whether the pusher is inserted.
+async fn register_pusher_if_missing(
+    handler_group: &HeartbeatHandlerGroup,
+    pusher_id: PusherId,
+    sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+) -> bool {
+    let pusher = Pusher::new(sender.clone());
+    handler_group
+        .register_pusher_if_absent(pusher_id, pusher)
+        .await
 }
 
 #[cfg(test)]
