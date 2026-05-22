@@ -1,0 +1,28 @@
+CREATE TABLE IF NOT EXISTS demo_metric_table (
+  label STRING NULL,
+  ts TIMESTAMP(3) NOT NULL,
+  val DOUBLE NULL,
+  TIME INDEX (ts),
+  PRIMARY KEY (label)
+)
+PARTITION ON COLUMNS (label) (
+  label < 'M',
+  label >= 'M'
+)
+ENGINE=metric
+WITH(
+  physical_metric_table = 'true',
+  skip_wal = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO demo_metric_table (label, ts, val)
+VALUES ('A', '2026-05-19 00:00:00', 1.0);
+
+Error: 1001(Unsupported), Write request to physical region is forbidden
+
+DROP TABLE demo_metric_table;
+
+Affected Rows: 0
+
