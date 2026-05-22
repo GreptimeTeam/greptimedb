@@ -482,6 +482,28 @@ pub struct SelectorContext {
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
+
+/// Context passed to a selector factory during metasrv bootstrap.
+///
+/// The factory runs after bootstrap has constructed the selector configured by
+/// [`MetasrvOptions::selector`], so plugins can either decorate `base_selector` or
+/// build a completely different selector using bootstrap-only dependencies like
+/// [`MetaPeerClientRef`].
+pub struct SelectorFactoryContext {
+    pub metasrv_options: MetasrvOptions,
+    pub meta_peer_client: MetaPeerClientRef,
+    pub in_memory: ResettableKvBackendRef,
+    pub election: Option<ElectionRef>,
+    pub base_selector: SelectorRef,
+}
+
+/// Builds the final datanode selector metasrv should use.
+pub trait SelectorFactory: Send + Sync {
+    fn build(&self, ctx: SelectorFactoryContext) -> SelectorRef;
+}
+
+/// Shared selector factory plugin registered through [`common_base::Plugins`].
+pub type SelectorFactoryRef = Arc<dyn SelectorFactory>;
 pub type RegionStatAwareSelectorRef =
     Arc<dyn RegionStatAwareSelector<Context = SelectorContext, Output = Vec<(RegionId, Peer)>>>;
 

@@ -1554,6 +1554,7 @@ enable = true
 
 [influxdb]
 enable = true
+default_merge_mode = "last_non_null"
 
 [jaeger]
 enable = true

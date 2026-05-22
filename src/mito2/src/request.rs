@@ -1100,13 +1100,52 @@ pub(crate) struct CopyRegionFromFinished {
     pub(crate) sender: Sender<Result<MitoCopyRegionFromResponse>>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct Waiters(SmallVec<[Sender<Result<()>>; 1]>);
+
+impl Waiters {
+    pub(crate) fn one(waiter: Sender<Result<()>>) -> Self {
+        let mut waiters = SmallVec::new();
+        waiters.push(waiter);
+        Self(waiters)
+    }
+
+    pub(crate) fn reply_with<F: Fn() -> Result<()>>(self, f: F) {
+        for tx in self.0 {
+            let _ = tx.send(f());
+        }
+    }
+
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.0.extend(other.0);
+    }
+}
+
 /// Request to edit a region directly.
 #[derive(Debug)]
 pub(crate) struct RegionEditRequest {
     pub(crate) region_id: RegionId,
     pub(crate) edit: RegionEdit,
-    /// The sender to notify the result to the region engine.
-    pub(crate) tx: Sender<Result<()>>,
+    /// Whether to preload SST files into the write cache.
+    pub(crate) preload_sst_cache: bool,
+    /// The waiters that are waiting for this region edit's result.
+    pub(crate) waiters: Waiters,
+}
+
+impl RegionEditRequest {
+    pub(crate) fn new(
+        region_id: RegionId,
+        edit: RegionEdit,
+        preload_sst_cache: bool,
+        waiter: Sender<Result<()>>,
+    ) -> Self {
+        Self {
+            region_id,
+            edit,
+            preload_sst_cache,
+            waiters: Waiters::one(waiter),
+        }
+    }
 }
 
 /// Notifies the regin the result of editing region.
@@ -1114,12 +1153,12 @@ pub(crate) struct RegionEditRequest {
 pub(crate) struct RegionEditResult {
     /// Region id.
     pub(crate) region_id: RegionId,
-    /// Result sender.
-    pub(crate) sender: Sender<Result<()>>,
+    /// Result waiters.
+    pub(crate) waiters: Waiters,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
-    pub(crate) result: Result<()>,
+    pub(crate) result: std::result::Result<(), Arc<Error>>,
     /// Whether region state need to be set to Writable after handling this request.
     pub(crate) update_region_state: bool,
     /// The region is in staging mode before handling this request.
@@ -1210,6 +1249,55 @@ mod tests {
         } else {
             panic!("Unexpected error {err}")
         }
+    }
+
+    fn waiter() -> (Sender<Result<()>>, Receiver<Result<()>>) {
+        oneshot::channel()
+    }
+
+    fn assert_waiter_ok(rx: &mut Receiver<Result<()>>) {
+        rx.try_recv().unwrap().unwrap();
+    }
+
+    #[test]
+    fn test_waiters_reply_with_single_waiter() {
+        let (tx, mut rx) = waiter();
+        Waiters::one(tx).reply_with(|| Ok(()));
+        assert_waiter_ok(&mut rx);
+    }
+
+    #[test]
+    fn test_waiters_reply_with_many_waiters() {
+        let (tx1, mut rx1) = waiter();
+        let (tx2, mut rx2) = waiter();
+        let (tx3, mut rx3) = waiter();
+
+        let waiters = Waiters(vec![tx1, tx2, tx3].into());
+        waiters.reply_with(|| Ok(()));
+
+        assert_waiter_ok(&mut rx1);
+        assert_waiter_ok(&mut rx2);
+        assert_waiter_ok(&mut rx3);
+    }
+
+    #[test]
+    fn test_waiters_merge() {
+        let (tx1, mut rx1) = waiter();
+        let (tx2, mut rx2) = waiter();
+        let (tx3, mut rx3) = waiter();
+        let (tx4, mut rx4) = waiter();
+
+        let mut waiters = Waiters::one(tx1);
+        waiters.merge(Waiters::one(tx2));
+        waiters.merge(Waiters(vec![tx3, tx4].into()));
+        assert_eq!(4, waiters.0.len());
+
+        waiters.reply_with(|| Ok(()));
+
+        assert_waiter_ok(&mut rx1);
+        assert_waiter_ok(&mut rx2);
+        assert_waiter_ok(&mut rx3);
+        assert_waiter_ok(&mut rx4);
     }
 
     #[test]

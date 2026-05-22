@@ -1163,8 +1163,7 @@ impl FlatSource {
         }
     }
 
-    #[expect(unused)]
-    fn schema(&self) -> &SchemaRef {
+    pub(crate) fn schema(&self) -> &SchemaRef {
         &self.schema
     }
 

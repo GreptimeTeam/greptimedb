@@ -542,6 +542,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to edit region {}", region_id))]
+    EditRegion {
+        region_id: RegionId,
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Failed to compat readers for region {}, reason: {}",
         region_id,
@@ -1241,6 +1249,27 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to generate Arrow schema from Parquet file: {}", file))]
+    ParquetToArrowSchema {
+        file: String,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} is in {:?} state, expect: Writable, Staging or Downgrading",
+        region_id,
+        state
+    ))]
+    FlushableRegionState {
+        region_id: RegionId,
+        state: RegionRoleState,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1331,7 +1360,8 @@ impl ErrorExt for Error {
             | BuildEntry { .. }
             | Metadata { .. }
             | CastColumn { .. }
-            | MitoManifestInfo { .. } => StatusCode::Internal,
+            | MitoManifestInfo { .. }
+            | ParquetToArrowSchema { .. } => StatusCode::Internal,
 
             FetchManifests { source, .. } => source.status_code(),
 
@@ -1355,6 +1385,7 @@ impl ErrorExt for Error {
             RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
+            EditRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
@@ -1430,6 +1461,8 @@ impl ErrorExt for Error {
             TooManyFilesToRead { .. } | TooManyGcJobs { .. } => StatusCode::RateLimited,
 
             PruneFile { source, .. } => source.status_code(),
+
+            FlushableRegionState { .. } => StatusCode::RegionNotReady,
         }
     }
 

@@ -183,6 +183,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Snapshot verification failed: {} error(s), {} warning(s)",
+        errors,
+        warnings
+    ))]
+    SnapshotVerifyFailed {
+        errors: usize,
+        warnings: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -195,7 +207,8 @@ impl ErrorExt for Error {
             | Error::SchemaOnlyModeMismatch { .. }
             | Error::ResumeConfigMismatch { .. }
             | Error::ManifestVersionMismatch { .. }
-            | Error::SchemaOnlyArgsNotAllowed { .. } => StatusCode::InvalidArguments,
+            | Error::SchemaOnlyArgsNotAllowed { .. }
+            | Error::SnapshotVerifyFailed { .. } => StatusCode::InvalidArguments,
             Error::TimeParseInvalidFormat { .. }
             | Error::TimeParseEndBeforeStart { .. }
             | Error::ChunkTimeWindowRequiresBounds { .. } => StatusCode::InvalidArguments,

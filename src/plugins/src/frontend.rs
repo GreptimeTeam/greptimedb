@@ -14,6 +14,7 @@
 
 use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
 use common_base::Plugins;
+use common_meta::cache::CacheRegistryBuilder;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
 use snafu::ResultExt;
@@ -52,6 +53,11 @@ pub async fn setup_frontend_dynamic_plugins(
 
 pub async fn start_frontend_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
+}
+
+/// Allows frontend plugins to add cache invalidators to the layered registry.
+pub fn configure_cache_registry(_plugins: &Plugins) -> Option<CacheRegistryBuilder> {
+    None
 }
 
 pub mod context {

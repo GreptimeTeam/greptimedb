@@ -165,10 +165,11 @@ impl FlatReadFormat {
     pub fn new(
         metadata: RegionMetadataRef,
         read_cols: ReadColumns,
-        num_columns: Option<usize>,
+        file_schema: Option<SchemaRef>,
         file_path: &str,
         skip_auto_convert: bool,
     ) -> Result<FlatReadFormat> {
+        let num_columns = file_schema.as_ref().map(|x| x.fields().len());
         let is_legacy = match num_columns {
             Some(num) => Self::is_legacy_format(&metadata, num, file_path)?,
             None => metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
@@ -189,7 +190,9 @@ impl FlatReadFormat {
                 ))
             }
         } else {
-            ParquetAdapter::Flat(ParquetFlat::new(metadata, read_cols))
+            let file_schema = file_schema
+                .unwrap_or_else(|| to_flat_sst_arrow_schema(&metadata, &Default::default()));
+            ParquetAdapter::Flat(ParquetFlat::new(metadata, read_cols, file_schema))
         };
 
         Ok(FlatReadFormat {
@@ -248,9 +251,6 @@ impl FlatReadFormat {
     }
 
     /// Gets the arrow schema of the SST file.
-    ///
-    /// This schema is computed from the region metadata but should be the same
-    /// as the arrow schema decoded from the file metadata.
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         match &self.parquet_adapter {
             ParquetAdapter::Flat(p) => &p.arrow_schema,
@@ -483,10 +483,13 @@ struct ParquetFlat {
 
 impl ParquetFlat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    fn new(metadata: RegionMetadataRef, read_cols: ReadColumns) -> ParquetFlat {
+    fn new(
+        metadata: RegionMetadataRef,
+        read_cols: ReadColumns,
+        arrow_schema: SchemaRef,
+    ) -> ParquetFlat {
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(&metadata);
-        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
         let format_projection =

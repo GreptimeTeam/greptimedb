@@ -455,11 +455,7 @@ impl MitoEngine {
         );
 
         let (tx, rx) = oneshot::channel();
-        let request = WorkerRequest::EditRegion(RegionEditRequest {
-            region_id,
-            edit,
-            tx,
-        });
+        let request = WorkerRequest::EditRegion(RegionEditRequest::new(region_id, edit, true, tx));
         self.inner
             .workers
             .submit_to_worker(region_id, request)

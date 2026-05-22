@@ -288,6 +288,14 @@ pub enum CacheIdent {
     SchemaName(SchemaName),
     CreateFlow(CreateFlow),
     DropFlow(DropFlow),
+    /// Indicate change of user metadata.
+    User(UserCacheIdent),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserCacheIdent {
+    pub catalog: String,
+    pub username: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

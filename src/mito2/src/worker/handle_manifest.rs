@@ -20,8 +20,9 @@ use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-use common_telemetry::{info, warn};
+use common_telemetry::{debug, info, warn};
 use parquet::file::metadata::PageIndexPolicy;
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -29,7 +30,7 @@ use store_api::storage::RegionId;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::IndexBuildMode;
-use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
+use crate::error::{EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
@@ -73,19 +74,60 @@ impl RegionEditQueue {
 
     fn enqueue(&mut self, request: RegionEditRequest) {
         if self.requests.len() > Self::QUEUE_MAX_LEN {
-            let _ = request.tx.send(
+            request.waiters.reply_with(|| {
                 RegionBusySnafu {
                     region_id: self.region_id,
                 }
-                .fail(),
-            );
+                .fail()
+            });
             return;
         };
         self.requests.push_back(request);
     }
 
     fn dequeue(&mut self) -> Option<RegionEditRequest> {
-        self.requests.pop_front()
+        fn can_merge(edit: &RegionEdit) -> bool {
+            // Only the `RegionEdit`:
+            // 1. contains the "raw" (file without a sequence) files to add,
+            // 2. and no `committed_sequence`,
+            // 3. and all other fields are empty,
+            // can it be merged.
+            //
+            // However, merging them means they will all share a same sequence, and if there are
+            // overlapping data in the files, the dedup is uncertain. This is a caution that must
+            // be noticed for editing region.
+            edit.files_to_add.iter().all(|f| f.sequence.is_none())
+                && edit.files_to_remove.is_empty()
+                && edit.timestamp_ms.is_none()
+                && edit.compaction_time_window.is_none()
+                && edit.flushed_entry_id.is_none()
+                && edit.flushed_sequence.is_none()
+                && edit.committed_sequence.is_none()
+        }
+
+        let mut merged = self.requests.pop_front()?;
+        if !can_merge(&merged.edit) {
+            return Some(merged);
+        }
+
+        while let Some(request) = self
+            .requests
+            .pop_front_if(|request| can_merge(&request.edit))
+        {
+            merged.edit.files_to_add.extend(request.edit.files_to_add);
+            merged.waiters.merge(request.waiters);
+        }
+        debug!(
+            "the files to add: [{}] are merged in one edit",
+            merged
+                .edit
+                .files_to_add
+                .iter()
+                .map(|x| x.file_id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        Some(merged)
     }
 
     fn is_empty(&self) -> bool {
@@ -94,12 +136,12 @@ impl RegionEditQueue {
 
     fn reject_all_as_not_found(mut self) {
         while let Some(request) = self.requests.pop_front() {
-            let _ = request.tx.send(
+            request.waiters.reply_with(|| {
                 RegionNotFoundSnafu {
                     region_id: self.region_id,
                 }
-                .fail(),
-            );
+                .fail()
+            });
         }
     }
 }
@@ -243,7 +285,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) fn handle_region_edit(&mut self, request: RegionEditRequest) {
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
-            let _ = request.tx.send(RegionNotFoundSnafu { region_id }.fail());
+            request
+                .waiters
+                .reply_with(|| RegionNotFoundSnafu { region_id }.fail());
             return;
         };
 
@@ -254,7 +298,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .or_insert_with(|| RegionEditQueue::new(region_id))
                     .enqueue(request);
             } else {
-                let _ = request.tx.send(RegionBusySnafu { region_id }.fail());
+                request
+                    .waiters
+                    .reply_with(|| RegionBusySnafu { region_id }.fail());
             }
             return;
         }
@@ -262,7 +308,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let RegionEditRequest {
             region_id: _,
             mut edit,
-            tx: sender,
+            waiters,
+            preload_sst_cache,
         } = request;
         let file_sequence = region.version_control.committed_sequence() + 1;
         edit.committed_sequence = Some(file_sequence);
@@ -281,7 +328,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
         // Marks the region as editing.
         if let Err(e) = region.set_editing(expect_state) {
-            let _ = sender.send(Err(e));
+            let e = Arc::new(e);
+            waiters.reply_with(|| Err(e.clone()).context(EditRegionSnafu { region_id }));
             return;
         }
 
@@ -291,13 +339,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
-            let result =
-                edit_region(&region, edit.clone(), cache_manager, listener, is_staging).await;
+            let result = edit_region(
+                &region,
+                edit.clone(),
+                cache_manager,
+                listener,
+                is_staging,
+                preload_sst_cache,
+            )
+            .await
+            .map_err(Arc::new);
             let notify = WorkerRequest::Background {
                 region_id,
                 notify: BackgroundNotify::RegionEdit(RegionEditResult {
                     region_id,
-                    sender,
+                    waiters,
                     edit,
                     result,
                     // we always need to restore region state after region edit
@@ -328,12 +384,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // edit-completion notification reached the worker.
                 self.fail_region_stalled_requests_as_not_found(&edit_result.region_id);
                 self.reject_region_edit_queue_as_not_found(edit_result.region_id);
-                let _ = edit_result.sender.send(
+
+                edit_result.waiters.reply_with(|| {
                     RegionNotFoundSnafu {
                         region_id: edit_result.region_id,
                     }
-                    .fail(),
-                );
+                    .fail()
+                });
                 return;
             }
         };
@@ -365,7 +422,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             need_compaction
         };
 
-        let _ = edit_result.sender.send(edit_result.result);
+        edit_result
+            .waiters
+            .reply_with(|| match &edit_result.result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(e.clone()).context(EditRegionSnafu {
+                    region_id: edit_result.region_id,
+                }),
+            });
 
         if edit_result.update_region_state {
             // Writes stalled specifically by this edit are handled before the next queued edit.
@@ -528,9 +592,12 @@ async fn edit_region(
     cache_manager: CacheManagerRef,
     listener: WorkerListener,
     is_staging: bool,
+    preload_sst_cache: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
-    if let Some(write_cache) = cache_manager.write_cache() {
+    if let Some(write_cache) = cache_manager.write_cache()
+        && preload_sst_cache
+    {
         for file_meta in &edit.files_to_add {
             let write_cache = write_cache.clone();
             let layer = region.access_layer.clone();

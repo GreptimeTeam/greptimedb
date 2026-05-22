@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -239,13 +240,8 @@ async fn test_write_during_region_editing_is_queued() {
     let edit_engine = engine.clone();
     let edit_task = tokio::spawn(async move { edit_engine.edit_region(region_id, edit).await });
 
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_until_region_is_in_editing(&region).await;
+
     drain_worker_recv_events(&mut request_rx);
 
     let write_engine = engine.clone();
@@ -280,12 +276,7 @@ async fn test_write_during_region_editing_is_queued() {
     assert_eq!(1, output.affected_rows);
     second_edit_task.await.unwrap().unwrap();
 
-    let second_file_sequence = region.version().ssts.levels()[0]
-        .files
-        .iter()
-        .find(|(file_id, _)| **file_id == second_file_id)
-        .and_then(|(_, file)| file.meta_ref().sequence)
-        .map(|sequence| sequence.get());
+    let second_file_sequence = region_file_sequence(&region, second_file_id);
     assert_eq!(Some(3), second_file_sequence);
 }
 
@@ -310,13 +301,8 @@ async fn test_bulk_insert_during_region_editing_is_queued() {
     let edit_engine = engine.clone();
     let edit_task = tokio::spawn(async move { edit_engine.edit_region(region_id, edit).await });
 
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_until_region_is_in_editing(&region).await;
+
     drain_worker_recv_events(&mut request_rx);
 
     let bulk_engine = engine.clone();
@@ -344,12 +330,7 @@ async fn test_bulk_insert_during_region_editing_is_queued() {
     assert_eq!(1, output.affected_rows);
     second_edit_task.await.unwrap().unwrap();
 
-    let second_file_sequence = region.version().ssts.levels()[0]
-        .files
-        .iter()
-        .find(|(file_id, _)| **file_id == second_file_id)
-        .and_then(|(_, file)| file.meta_ref().sequence)
-        .map(|sequence| sequence.get());
+    let second_file_sequence = region_file_sequence(&region, second_file_id);
     assert_eq!(Some(3), second_file_sequence);
 }
 
@@ -373,13 +354,7 @@ async fn test_stalled_write_fails_fast_if_region_closed_during_editing() {
     let edit_engine = engine.clone();
     let edit_task = tokio::spawn(async move { edit_engine.edit_region(region_id, edit).await });
 
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_until_region_is_in_editing(&region).await;
 
     drain_worker_recv_events(&mut request_rx);
 
@@ -434,6 +409,142 @@ async fn test_stalled_write_fails_fast_if_region_closed_during_editing() {
         second_edit_task.await.unwrap().unwrap_err().status_code()
     );
     assert!(edit_task.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn test_raw_add_only_region_edits_are_merged() {
+    let mut env = TestEnv::new().await;
+    let (engine, mut request_rx) = create_engine_with_request_listener(&mut env).await;
+
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+
+    // Hold the manifest lock so the first edit keeps the region in `Editing`.
+    // The following two edits will be queued in `RegionEditQueue`.
+    let manifest_guard = region.manifest_ctx.manifest_manager.write().await;
+
+    let first_file_id = FileId::random();
+    let first_edit = test_region_edit(region.region_id, first_file_id);
+    let first_edit_engine = engine.clone();
+    let first_edit_task =
+        tokio::spawn(async move { first_edit_engine.edit_region(region_id, first_edit).await });
+
+    wait_until_region_is_in_editing(&region).await;
+
+    drain_worker_recv_events(&mut request_rx);
+
+    // Both queued edits are raw add-only edits, so they should be merged into
+    // a single edit and share the same committed sequence.
+    let second_file_id = FileId::random();
+    let second_edit = test_region_edit(region.region_id, second_file_id);
+    let second_edit_engine = engine.clone();
+    let second_edit_task =
+        tokio::spawn(async move { second_edit_engine.edit_region(region_id, second_edit).await });
+    wait_worker_recv_event(&mut request_rx).await;
+
+    let third_file_id = FileId::random();
+    let third_edit = test_region_edit(region.region_id, third_file_id);
+    let third_edit_engine = engine.clone();
+    let third_edit_task =
+        tokio::spawn(async move { third_edit_engine.edit_region(region_id, third_edit).await });
+    wait_worker_recv_event(&mut request_rx).await;
+
+    drop(manifest_guard);
+
+    first_edit_task.await.unwrap().unwrap();
+    second_edit_task.await.unwrap().unwrap();
+    third_edit_task.await.unwrap().unwrap();
+
+    // The first edit gets sequence 1. The merged queued edit gets sequence 2,
+    // so both files from the second and third requests share sequence 2.
+    assert_eq!(Some(1), region_file_sequence(&region, first_file_id));
+    assert_eq!(Some(2), region_file_sequence(&region, second_file_id));
+    assert_eq!(Some(2), region_file_sequence(&region, third_file_id));
+}
+
+#[tokio::test]
+async fn test_region_edit_with_file_sequence_is_not_merged() {
+    let mut env = TestEnv::new().await;
+    let (engine, mut request_rx) = create_engine_with_request_listener(&mut env).await;
+
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+
+    // Hold the manifest lock so the first edit keeps the region in `Editing`.
+    // The following two edits will be queued in `RegionEditQueue`.
+    let manifest_guard = region.manifest_ctx.manifest_manager.write().await;
+
+    let first_file_id = FileId::random();
+    let first_edit = test_region_edit(region.region_id, first_file_id);
+    let first_edit_engine = engine.clone();
+    let first_edit_task =
+        tokio::spawn(async move { first_edit_engine.edit_region(region_id, first_edit).await });
+
+    wait_until_region_is_in_editing(&region).await;
+
+    drain_worker_recv_events(&mut request_rx);
+
+    let second_file_id = FileId::random();
+    let mut second_edit = test_region_edit(region.region_id, second_file_id);
+    // A file that already carries a sequence is not a raw add-only edit and
+    // must not be merged with the next queued edit.
+    second_edit.files_to_add[0].sequence = NonZeroU64::new(99);
+    let second_edit_engine = engine.clone();
+    let second_edit_task =
+        tokio::spawn(async move { second_edit_engine.edit_region(region_id, second_edit).await });
+    wait_worker_recv_event(&mut request_rx).await;
+
+    let third_file_id = FileId::random();
+    let third_edit = test_region_edit(region.region_id, third_file_id);
+    let third_edit_engine = engine.clone();
+    let third_edit_task =
+        tokio::spawn(async move { third_edit_engine.edit_region(region_id, third_edit).await });
+    wait_worker_recv_event(&mut request_rx).await;
+
+    drop(manifest_guard);
+
+    first_edit_task.await.unwrap().unwrap();
+    second_edit_task.await.unwrap().unwrap();
+    third_edit_task.await.unwrap().unwrap();
+
+    // Because the second edit is not mergeable, the third edit runs separately
+    // and receives the next committed sequence.
+    assert_eq!(Some(1), region_file_sequence(&region, first_file_id));
+    assert_eq!(Some(2), region_file_sequence(&region, second_file_id));
+    assert_eq!(Some(3), region_file_sequence(&region, third_file_id));
+}
+
+async fn wait_until_region_is_in_editing(region: &MitoRegionRef) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+fn region_file_sequence(region: &MitoRegionRef, file_id: FileId) -> Option<u64> {
+    region.version().ssts.levels()[0]
+        .files
+        .iter()
+        .find(|(id, _)| **id == file_id)
+        .and_then(|(_, file)| file.meta_ref().sequence)
+        .map(|sequence| sequence.get())
 }
 
 struct RecvRequestListener {

@@ -1096,6 +1096,8 @@ pub fn fill_table_options_for_create(
             {
                 table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
                 table_options.insert(MERGE_MODE_KEY.to_string(), "last_row".to_string());
+            } else if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
+                table_options.insert(MERGE_MODE_KEY.to_string(), merge_mode.to_string());
             } else {
                 table_options.insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
             }
@@ -1374,6 +1376,22 @@ mod tests {
             Some("last_non_null"),
             table_options.get(MERGE_MODE_KEY).map(String::as_str)
         );
+    }
+
+    #[test]
+    fn test_last_non_null_create_options_use_configured_merge_mode() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension(MERGE_MODE_KEY, "last_row");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(&mut table_options, &AutoCreateTableType::LastNonNull, &ctx);
+
+        assert_eq!(
+            Some("last_row"),
+            table_options.get(MERGE_MODE_KEY).map(String::as_str)
+        );
+        assert!(!table_options.contains_key(APPEND_MODE_KEY));
     }
 
     #[test]

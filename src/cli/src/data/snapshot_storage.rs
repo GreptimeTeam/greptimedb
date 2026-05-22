@@ -483,9 +483,9 @@ impl OpenDalStorage {
     }
 
     /// Checks if a file exists using stat.
-    async fn file_exists(&self, path: &str) -> Result<bool> {
+    pub(crate) async fn file_exists(&self, path: &str) -> Result<bool> {
         match self.object_store.stat(path).await {
-            Ok(_) => Ok(true),
+            Ok(metadata) => Ok(!metadata.is_dir()),
             Err(e) if e.kind() == object_store::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e).context(StorageOperationSnafu {
                 operation: format!("check exists {}", path),

@@ -166,6 +166,9 @@ enable = true
 [influxdb]
 ## Whether to enable InfluxDB protocol in HTTP API.
 enable = true
+## Default merge mode for tables automatically created by InfluxDB protocol.
+## Available values: "last_non_null", "last_row".
+default_merge_mode = "last_non_null"
 
 ## Jaeger protocol options.
 [jaeger]
