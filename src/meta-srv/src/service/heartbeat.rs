@@ -208,16 +208,10 @@ where
     async fn handle_request(&mut self, req: HeartbeatRequest, is_handshake: bool) -> bool {
         debug!("Receiving heartbeat request: {:?}", req);
 
-        if !self.handler_group.contains_pusher(&self.sender_id).await
-            && register_pusher_if_missing(&self.handler_group, self.sender_id, &self.tx).await
-        {
-            info!(
-                "Re-register sender for existing heartbeat stream, sender: {}",
-                self.sender_id
-            );
-        }
-
-        METRIC_META_HEARTBEAT_RECV.with_label_values(&[&self.sender_id.to_string()]);
+        let sender_id = self.sender_id.to_string();
+        METRIC_META_HEARTBEAT_RECV
+            .with_label_values(&[sender_id.as_str()])
+            .inc();
 
         let res = self
             .handler_group
@@ -406,19 +400,6 @@ async fn register_pusher(
     let pusher = Pusher::new(sender);
     handler_group.register_pusher(pusher_id, pusher).await;
     pusher_id
-}
-
-/// Registers the heartbeat response [`Pusher`] with the given key to the group if absent,
-/// and returns whether the pusher is inserted.
-async fn register_pusher_if_missing(
-    handler_group: &HeartbeatHandlerGroup,
-    pusher_id: PusherId,
-    sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
-) -> bool {
-    let pusher = Pusher::new(sender.clone());
-    handler_group
-        .register_pusher_if_absent(pusher_id, pusher)
-        .await
 }
 
 #[cfg(test)]
@@ -671,36 +652,6 @@ mod tests {
         assert_eq!(Code::Unavailable, status.code());
         assert_eq!("temporary", status.message());
         assert!(!handler_group.contains_pusher(&sender_id).await);
-    }
-
-    #[tokio::test]
-    async fn test_heartbeat_session_reregisters_missing_sender() {
-        let (tx, mut rx) = mpsc::channel(8);
-        let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
-        let requests =
-            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Datanode, 42))]);
-        let mut session = init_session(
-            requests,
-            tx,
-            None::<MockLeaderStepDown>,
-            handler_group.clone(),
-        )
-        .await
-        .unwrap();
-        let _ = recv_response(&mut rx).await.unwrap();
-        handler_group.deregister_push(sender_id).await;
-        assert!(!handler_group.contains_pusher(&sender_id).await);
-
-        assert!(
-            session
-                .handle_request(heartbeat_request(Role::Datanode, 42), false)
-                .await
-        );
-
-        assert!(handler_group.contains_pusher(&sender_id).await);
-        let response = recv_response(&mut rx).await.unwrap();
-        assert!(response.heartbeat_config.is_none());
     }
 
     #[tokio::test]

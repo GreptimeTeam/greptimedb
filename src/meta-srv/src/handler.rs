@@ -275,27 +275,8 @@ impl Pushers {
         self.0.write().await.insert(pusher_id, pusher)
     }
 
-    /// Inserts the pusher with the given key if absent, and returns whether the pusher is inserted.
-    pub(crate) async fn insert_if_absent(&self, pusher_id: String, pusher: Pusher) -> bool {
-        let mut pushers = self.0.write().await;
-        if pushers.contains_key(&pusher_id) {
-            return false;
-        }
-        pushers.insert(pusher_id, pusher);
-        true
-    }
-
     async fn remove(&self, pusher_id: &str) -> Option<Pusher> {
         self.0.write().await.remove(pusher_id)
-    }
-
-    pub(crate) async fn clear(&self) -> Vec<String> {
-        let mut pushers = self.0.write().await;
-        let keys = pushers.keys().cloned().collect::<Vec<_>>();
-        if !keys.is_empty() {
-            pushers.clear();
-        }
-        keys
     }
 }
 
@@ -330,20 +311,6 @@ impl HeartbeatHandlerGroup {
         let _ = self.pushers.insert(pusher_id.string_key(), pusher).await;
     }
 
-    /// Registers the heartbeat response [`Pusher`] with the given key to the group if absent,
-    /// and returns whether the pusher is inserted.
-    pub async fn register_pusher_if_absent(&self, pusher_id: PusherId, pusher: Pusher) -> bool {
-        let inserted = self
-            .pushers
-            .insert_if_absent(pusher_id.string_key(), pusher)
-            .await;
-        if inserted {
-            METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
-            info!("Pusher register: {}", pusher_id);
-        }
-        inserted
-    }
-
     /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
     pub async fn deregister_push(&self, pusher_id: PusherId) {
         if self.pushers.remove(&pusher_id.string_key()).await.is_some() {
@@ -352,6 +319,7 @@ impl HeartbeatHandlerGroup {
         }
     }
 
+    #[cfg(test)]
     /// Returns whether the group contains the heartbeat response [`Pusher`] with the given key.
     pub async fn contains_pusher(&self, pusher_id: &PusherId) -> bool {
         let pushers = self.pushers.0.read().await;
@@ -579,14 +547,6 @@ impl Mailbox for HeartbeatMailbox {
         }
 
         Ok(())
-    }
-
-    async fn reset(&self) {
-        let keys = self.pushers.clear().await;
-        if !keys.is_empty() {
-            info!("Reset mailbox, deregister pushers: {:?}", keys);
-            METRIC_META_HEARTBEAT_CONNECTION_NUM.sub(keys.len() as i64);
-        }
     }
 }
 
