@@ -20,12 +20,14 @@ use common_grpc::channel_manager::ClientTlsOption;
 use serde::{Deserialize, Serialize};
 use session::ReadPreference;
 
+mod checkpoint;
 pub(crate) mod engine;
 pub(crate) mod frontend_client;
 mod state;
+mod table_creator;
 mod task;
 mod time_window;
-mod utils;
+pub(crate) mod utils;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatchingModeOptions {

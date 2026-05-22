@@ -121,8 +121,9 @@ impl GrpcQueryHandler for Instance {
                                 .context(PlanStatementSnafu)?;
 
                             let dummy_catalog_list =
-                                Arc::new(catalog::table_source::dummy_catalog::DummyCatalogList::new(
+                                Arc::new(catalog::table_source::dummy_catalog::DummyCatalogList::new_with_query_ctx(
                                     self.catalog_manager().clone(),
+                                    ctx.clone(),
                                 ));
 
                             let logical_plan = plan_decoder
@@ -416,10 +417,12 @@ impl Instance {
             .new_plan_decoder()
             .context(PlanStatementSnafu)?;
 
-        let dummy_catalog_list =
-            Arc::new(catalog::table_source::dummy_catalog::DummyCatalogList::new(
+        let dummy_catalog_list = Arc::new(
+            catalog::table_source::dummy_catalog::DummyCatalogList::new_with_query_ctx(
                 self.catalog_manager().clone(),
-            ));
+                ctx.clone(),
+            ),
+        );
 
         // no optimize yet since we still need to add stuff
         let logical_plan = plan_decoder
