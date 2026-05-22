@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::fmt::{Display, Formatter};
-use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -69,20 +68,11 @@ pub enum BroadcastChannel {
 }
 
 impl BroadcastChannel {
-    pub(crate) fn pusher_range(&self) -> Range<String> {
+    pub(crate) fn role(&self) -> Role {
         match self {
-            BroadcastChannel::Datanode => Range {
-                start: format!("{}-", Role::Datanode as i32),
-                end: format!("{}-", Role::Frontend as i32),
-            },
-            BroadcastChannel::Frontend => Range {
-                start: format!("{}-", Role::Frontend as i32),
-                end: format!("{}-", Role::Flownode as i32),
-            },
-            BroadcastChannel::Flownode => Range {
-                start: format!("{}-", Role::Flownode as i32),
-                end: format!("{}-", Role::Flownode as i32 + 1),
-            },
+            BroadcastChannel::Datanode => Role::Datanode,
+            BroadcastChannel::Frontend => Role::Frontend,
+            BroadcastChannel::Flownode => Role::Flownode,
         }
     }
 }
@@ -219,19 +209,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_channel_pusher_range() {
-        assert_eq!(
-            BroadcastChannel::Datanode.pusher_range(),
-            ("0-".to_string().."1-".to_string())
-        );
-        assert_eq!(
-            BroadcastChannel::Frontend.pusher_range(),
-            ("1-".to_string().."2-".to_string())
-        );
-        assert_eq!(
-            BroadcastChannel::Flownode.pusher_range(),
-            ("2-".to_string().."3-".to_string())
-        );
+    fn test_broadcast_channel_role() {
+        assert_eq!(BroadcastChannel::Datanode.role(), Role::Datanode);
+        assert_eq!(BroadcastChannel::Frontend.role(), Role::Frontend);
+        assert_eq!(BroadcastChannel::Flownode.role(), Role::Flownode);
     }
 
     #[tokio::test]
