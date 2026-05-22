@@ -346,8 +346,8 @@ impl HeartbeatHandlerGroup {
 
     /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
     pub async fn deregister_push(&self, pusher_id: PusherId) {
-        info!("Pusher unregister: {}", pusher_id);
         if self.pushers.remove(&pusher_id.string_key()).await.is_some() {
+            info!("Pusher unregister: {}", pusher_id);
             METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         }
     }

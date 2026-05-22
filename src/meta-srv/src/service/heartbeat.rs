@@ -423,6 +423,7 @@ async fn register_pusher_if_missing(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Arc;
 
     use api::v1::meta::heartbeat_server::Heartbeat;
@@ -430,11 +431,329 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_telemetry::tracing_context::W3cTrace;
     use servers::grpc::GrpcOptions;
-    use tonic::IntoRequest;
+    use tokio::sync::mpsc;
+    use tonic::{Code, IntoRequest};
 
-    use super::get_node_id;
+    use super::*;
+    use crate::handler::test_utils::TestEnv;
     use crate::metasrv::MetasrvOptions;
     use crate::metasrv::builder::MetasrvBuilder;
+
+    struct MockHeartbeatRequestStream {
+        messages: VecDeque<std::result::Result<HeartbeatRequest, Status>>,
+        pending_when_empty: bool,
+    }
+
+    impl MockHeartbeatRequestStream {
+        fn new(messages: Vec<std::result::Result<HeartbeatRequest, Status>>) -> Self {
+            Self {
+                messages: messages.into(),
+                pending_when_empty: false,
+            }
+        }
+
+        fn pending_after(messages: Vec<std::result::Result<HeartbeatRequest, Status>>) -> Self {
+            Self {
+                messages: messages.into(),
+                pending_when_empty: true,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HeartbeatRequestStream for MockHeartbeatRequestStream {
+        async fn next(&mut self) -> Option<std::result::Result<HeartbeatRequest, Status>> {
+            if let Some(message) = self.messages.pop_front() {
+                return Some(message);
+            }
+
+            if self.pending_when_empty {
+                std::future::pending().await
+            } else {
+                None
+            }
+        }
+    }
+
+    struct MockLeaderStepDown {
+        event: Option<LeaderStepDownEvent>,
+    }
+
+    impl MockLeaderStepDown {
+        fn new(event: LeaderStepDownEvent) -> Self {
+            Self { event: Some(event) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LeaderStepDown for MockLeaderStepDown {
+        async fn wait(&mut self) -> LeaderStepDownEvent {
+            self.event.take().unwrap()
+        }
+    }
+
+    fn heartbeat_request(role: Role, member_id: u64) -> HeartbeatRequest {
+        HeartbeatRequest {
+            header: Some(RequestHeader {
+                role: role.into(),
+                member_id,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn sender_id(role: Role, member_id: u64) -> PusherId {
+        PusherId::new(role, member_id)
+    }
+
+    fn test_context() -> Context {
+        TestEnv::new().ctx()
+    }
+
+    fn test_handler_group() -> Arc<HeartbeatHandlerGroup> {
+        Arc::new(HeartbeatHandlerGroup::default())
+    }
+
+    async fn init_session<L>(
+        requests: MockHeartbeatRequestStream,
+        tx: Sender<HeartbeatResponseResult>,
+        leader_step_down: Option<L>,
+        handler_group: Arc<HeartbeatHandlerGroup>,
+    ) -> Option<HeartbeatSession<MockHeartbeatRequestStream, L>>
+    where
+        L: LeaderStepDown,
+    {
+        HeartbeatSession::init(
+            requests,
+            tx,
+            leader_step_down,
+            handler_group,
+            test_context(),
+        )
+        .await
+    }
+
+    async fn recv_response(
+        rx: &mut mpsc::Receiver<HeartbeatResponseResult>,
+    ) -> HeartbeatResponseResult {
+        rx.recv().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_session_init_returns_none_on_empty_stream() {
+        let (tx, _rx) = mpsc::channel(8);
+        let handler_group = test_handler_group();
+        let requests = MockHeartbeatRequestStream::new(vec![]);
+
+        let session = init_session(
+            requests,
+            tx,
+            None::<MockLeaderStepDown>,
+            handler_group.clone(),
+        )
+        .await;
+
+        assert!(session.is_none());
+        assert!(
+            !handler_group
+                .contains_pusher(&sender_id(Role::Datanode, 42))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_session_init_forwards_first_stream_error() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let handler_group = test_handler_group();
+        let requests = MockHeartbeatRequestStream::new(vec![Err(Status::internal("boom"))]);
+
+        let session = init_session(requests, tx, None::<MockLeaderStepDown>, handler_group).await;
+
+        assert!(session.is_none());
+        let status = recv_response(&mut rx).await.unwrap_err();
+        assert_eq!(Code::Internal, status.code());
+        assert_eq!("boom", status.message());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_session_init_sends_error_on_missing_header() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let handler_group = test_handler_group();
+        let requests = MockHeartbeatRequestStream::new(vec![Ok(HeartbeatRequest::default())]);
+
+        let session = init_session(
+            requests,
+            tx,
+            None::<MockLeaderStepDown>,
+            handler_group.clone(),
+        )
+        .await;
+
+        assert!(session.is_none());
+        assert!(
+            !handler_group
+                .contains_pusher(&sender_id(Role::Datanode, 42))
+                .await
+        );
+
+        let status = recv_response(&mut rx).await.unwrap_err();
+        assert_eq!(Code::InvalidArgument, status.code());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_session_init_registers_sender() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let handler_group = test_handler_group();
+        let sender_id = sender_id(Role::Datanode, 42);
+        let requests =
+            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Datanode, 42))]);
+
+        let session = init_session(
+            requests,
+            tx,
+            None::<MockLeaderStepDown>,
+            handler_group.clone(),
+        )
+        .await;
+
+        assert!(session.is_some());
+        assert!(handler_group.contains_pusher(&sender_id).await);
+
+        let response = recv_response(&mut rx).await.unwrap();
+        assert!(response.heartbeat_config.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_session_run_deregisters_sender_on_stream_close() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let handler_group = test_handler_group();
+        let sender_id = sender_id(Role::Datanode, 42);
+        let requests =
+            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Datanode, 42))]);
+        let session = init_session(
+            requests,
+            tx,
+            None::<MockLeaderStepDown>,
+            handler_group.clone(),
+        )
+        .await
+        .unwrap();
+        let _ = recv_response(&mut rx).await.unwrap();
+
+        session.run().await;
+
+        assert!(!handler_group.contains_pusher(&sender_id).await);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_session_run_forwards_stream_error_after_init() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let handler_group = test_handler_group();
+        let sender_id = sender_id(Role::Datanode, 42);
+        let requests = MockHeartbeatRequestStream::new(vec![
+            Ok(heartbeat_request(Role::Datanode, 42)),
+            Err(Status::unavailable("temporary")),
+        ]);
+        let session = init_session(
+            requests,
+            tx,
+            None::<MockLeaderStepDown>,
+            handler_group.clone(),
+        )
+        .await
+        .unwrap();
+        let _ = recv_response(&mut rx).await.unwrap();
+
+        session.run().await;
+
+        let status = recv_response(&mut rx).await.unwrap_err();
+        assert_eq!(Code::Unavailable, status.code());
+        assert_eq!("temporary", status.message());
+        assert!(!handler_group.contains_pusher(&sender_id).await);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_session_reregisters_missing_sender() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let handler_group = test_handler_group();
+        let sender_id = sender_id(Role::Datanode, 42);
+        let requests =
+            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Datanode, 42))]);
+        let mut session = init_session(
+            requests,
+            tx,
+            None::<MockLeaderStepDown>,
+            handler_group.clone(),
+        )
+        .await
+        .unwrap();
+        let _ = recv_response(&mut rx).await.unwrap();
+        handler_group.deregister_push(sender_id).await;
+        assert!(!handler_group.contains_pusher(&sender_id).await);
+
+        assert!(
+            session
+                .handle_request(heartbeat_request(Role::Datanode, 42), false)
+                .await
+        );
+
+        assert!(handler_group.contains_pusher(&sender_id).await);
+        let response = recv_response(&mut rx).await.unwrap();
+        assert!(response.heartbeat_config.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_session_leader_step_down_sends_aborted_and_deregisters() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let handler_group = test_handler_group();
+        let sender_id = sender_id(Role::Datanode, 42);
+        let requests = MockHeartbeatRequestStream::pending_after(vec![Ok(heartbeat_request(
+            Role::Datanode,
+            42,
+        ))]);
+        let session = init_session(
+            requests,
+            tx,
+            Some(MockLeaderStepDown::new(LeaderStepDownEvent::StepDown)),
+            handler_group.clone(),
+        )
+        .await
+        .unwrap();
+        let _ = recv_response(&mut rx).await.unwrap();
+
+        session.run().await;
+
+        let status = recv_response(&mut rx).await.unwrap_err();
+        assert_eq!(Code::Aborted, status.code());
+        assert!(!handler_group.contains_pusher(&sender_id).await);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_session_leader_watcher_closed_sends_unavailable_and_deregisters() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let handler_group = test_handler_group();
+        let sender_id = sender_id(Role::Datanode, 42);
+        let requests = MockHeartbeatRequestStream::pending_after(vec![Ok(heartbeat_request(
+            Role::Datanode,
+            42,
+        ))]);
+        let session = init_session(
+            requests,
+            tx,
+            Some(MockLeaderStepDown::new(LeaderStepDownEvent::Closed)),
+            handler_group.clone(),
+        )
+        .await
+        .unwrap();
+        let _ = recv_response(&mut rx).await.unwrap();
+
+        session.run().await;
+
+        let status = recv_response(&mut rx).await.unwrap_err();
+        assert_eq!(Code::Unavailable, status.code());
+        assert!(!handler_group.contains_pusher(&sender_id).await);
+    }
 
     #[tokio::test]
     async fn test_ask_leader() {
