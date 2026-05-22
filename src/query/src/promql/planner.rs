@@ -4023,12 +4023,15 @@ impl PromPlanner {
             return Ok(plan);
         }
 
+        // Preserve column qualifiers so downstream plan nodes can keep referencing
+        // the columns by their original qualified names.
         let project_exprs = schema
-            .fields()
             .iter()
-            .filter(|field| field.name() != DATA_SCHEMA_TSID_COLUMN_NAME)
-            .map(|field| Ok(DfExpr::Column(Column::from_name(field.name().clone()))))
-            .collect::<Result<Vec<_>>>()?;
+            .filter(|(_, field)| field.name() != DATA_SCHEMA_TSID_COLUMN_NAME)
+            .map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            })
+            .collect::<Vec<_>>();
 
         LogicalPlanBuilder::from(plan)
             .project(project_exprs)
