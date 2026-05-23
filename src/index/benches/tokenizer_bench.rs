@@ -12,8 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use index::fulltext_index::tokenizer::{EnglishTokenizer, Tokenizer};
+use std::hint::black_box;
+use std::time::Duration;
+
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use index::fulltext_index::create::{FulltextIndexCreator, TantivyFulltextIndexCreator};
+use index::fulltext_index::tokenizer::{ChineseTokenizer, EnglishTokenizer, Tokenizer};
+use index::fulltext_index::{Analyzer, Config};
+
+const CHINESE_TOKENIZER_TEXTS: &[(&str, &str)] = &[
+    ("short", "登录手机号。中国农业银行。"),
+    (
+        "mixed_log",
+        "2025-08-01 21:09:28 用户登录失败 trace_id=abc_123 dynamic_key=mobile_login 中国农业银行接口返回超时。",
+    ),
+    (
+        "product_search",
+        "哈基米哦南北绿豆，噢马自立曼波。装电视台，中国中央广播电视台。压不缩，笑不活。",
+    ),
+    (
+        "long_news",
+        "中国农业银行发布公告称，手机银行登录服务完成升级。多个地区用户反馈查询速度提升，后台监控显示核心链路延迟下降，异常请求自动重试次数减少。系统继续保留 trace_id、request_id 和 dynamic_key 等字段用于排查问题。",
+    ),
+];
+
+const CHINESE_INDEX_DOCS: &[&str] = &[
+    "登录手机号，中国农业银行手机银行接口返回成功。",
+    "用户登录失败，trace_id=abc_123，dynamic_key=mobile_login。",
+    "中国中央广播电视台发布新的节目预告。",
+    "装电视台的时候遇到压不缩的问题。",
+    "哈基米哦南北绿豆，噢马自立曼波。",
+    "后台监控显示核心链路延迟下降。",
+    "系统保留 request_id 用于排查问题。",
+    "中文全文索引需要兼顾召回率和 token 数量。",
+];
 
 fn bench_english_tokenizer(c: &mut Criterion) {
     let tokenizer = EnglishTokenizer;
@@ -86,5 +118,94 @@ fn bench_english_tokenizer(c: &mut Criterion) {
     repeat_group.finish();
 }
 
-criterion_group!(benches, bench_english_tokenizer);
+fn bench_chinese_tokenizer(c: &mut Criterion) {
+    let tokenizer = ChineseTokenizer;
+    let mut group = c.benchmark_group("chinese_tokenizer");
+
+    for (name, text) in CHINESE_TOKENIZER_TEXTS {
+        group.throughput(Throughput::Bytes(text.len() as u64));
+        group.bench_with_input(BenchmarkId::new("tokenize", name), text, |b, text| {
+            b.iter(|| black_box(tokenizer.tokenize(black_box(text))))
+        });
+    }
+
+    group.finish();
+
+    let mut repeat_group = c.benchmark_group("chinese_tokenizer_repeated");
+    let sample_text = CHINESE_TOKENIZER_TEXTS
+        .iter()
+        .find(|(name, _)| *name == "mixed_log")
+        .map(|(_, text)| *text)
+        .expect("mixed_log sample must exist");
+
+    for repeat_count in [10, 100, 1000] {
+        repeat_group.bench_with_input(
+            BenchmarkId::new("repeated_tokenize", repeat_count),
+            &repeat_count,
+            |b, &repeat_count| {
+                b.iter(|| {
+                    for _ in 0..repeat_count {
+                        black_box(tokenizer.tokenize(black_box(sample_text)));
+                    }
+                })
+            },
+        );
+    }
+
+    repeat_group.finish();
+}
+
+fn bench_tantivy_chinese_fulltext_index(c: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create Tokio runtime");
+    let config = Config {
+        analyzer: Analyzer::Chinese,
+        case_sensitive: false,
+    };
+    let mut group = c.benchmark_group("tantivy_chinese_fulltext_index");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+
+    for doc_count in [32usize, 256usize] {
+        group.throughput(Throughput::Elements(doc_count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("build_commit", doc_count),
+            &doc_count,
+            |b, &doc_count| {
+                b.iter_batched(
+                    tempfile::tempdir,
+                    |dir| {
+                        let dir = dir.expect("failed to create temp dir");
+                        runtime.block_on(async {
+                            let mut creator =
+                                TantivyFulltextIndexCreator::new(dir.path(), config, 64 << 20)
+                                    .await
+                                    .expect("failed to create tantivy fulltext index");
+                            for idx in 0..doc_count {
+                                let text = CHINESE_INDEX_DOCS[idx % CHINESE_INDEX_DOCS.len()];
+                                creator
+                                    .push_text(black_box(text))
+                                    .await
+                                    .expect("failed to push text");
+                            }
+                            creator.abort().await.expect("failed to remove temp index");
+                        });
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_english_tokenizer,
+    bench_chinese_tokenizer,
+    bench_tantivy_chinese_fulltext_index
+);
 criterion_main!(benches);
