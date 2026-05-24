@@ -12,13 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::hint::black_box;
+use std::path::PathBuf;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use futures::AsyncRead;
 use index::fulltext_index::create::{FulltextIndexCreator, TantivyFulltextIndexCreator};
 use index::fulltext_index::tokenizer::{ChineseTokenizer, EnglishTokenizer, Tokenizer};
 use index::fulltext_index::{Analyzer, Config};
+use puffin::puffin_manager::{PuffinWriter, PutOptions};
 
 const CHINESE_TOKENIZER_TEXTS: &[(&str, &str)] = &[
     ("short", "登录手机号。中国农业银行。"),
@@ -46,6 +51,40 @@ const CHINESE_INDEX_DOCS: &[&str] = &[
     "系统保留 request_id 用于排查问题。",
     "中文全文索引需要兼顾召回率和 token 数量。",
 ];
+
+struct NoopPuffinWriter;
+
+#[async_trait]
+impl PuffinWriter for NoopPuffinWriter {
+    async fn put_blob<R>(
+        &mut self,
+        _key: &str,
+        _raw_data: R,
+        _options: PutOptions,
+        _properties: HashMap<String, String>,
+    ) -> puffin::error::Result<u64>
+    where
+        R: AsyncRead + Send,
+    {
+        unreachable!("tantivy fulltext benchmark only writes directory blobs")
+    }
+
+    async fn put_dir(
+        &mut self,
+        _key: &str,
+        _dir: PathBuf,
+        _options: PutOptions,
+        _properties: HashMap<String, String>,
+    ) -> puffin::error::Result<u64> {
+        Ok(0)
+    }
+
+    fn set_footer_lz4_compressed(&mut self, _lz4_compressed: bool) {}
+
+    async fn finish(self) -> puffin::error::Result<u64> {
+        Ok(0)
+    }
+}
 
 fn bench_english_tokenizer(c: &mut Criterion) {
     let tokenizer = EnglishTokenizer;
@@ -190,8 +229,18 @@ fn bench_tantivy_chinese_fulltext_index(c: &mut Criterion) {
                                     .await
                                     .expect("failed to push text");
                             }
-                            creator.abort().await.expect("failed to remove temp index");
+                            let mut puffin_writer = NoopPuffinWriter;
+                            creator
+                                .finish(
+                                    &mut puffin_writer,
+                                    "tantivy_chinese_fulltext_index",
+                                    PutOptions::default(),
+                                )
+                                .await
+                                .expect("failed to commit tantivy fulltext index");
                         });
+                        // Return the temp dir so Criterion drops it after timing the routine.
+                        dir
                     },
                     BatchSize::SmallInput,
                 )
