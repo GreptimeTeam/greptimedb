@@ -108,6 +108,7 @@ impl MetasrvInstance {
         if let Some(builder) = self.http_server.as_mut().left()
             && let Some(builder) = builder.take()
         {
+            let builder = builder.with_plugins(self.plugins.clone());
             let mut server = builder.build();
 
             let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
