@@ -447,7 +447,9 @@ impl BloomFilterIndexApplier {
         Ok(())
     }
 
-    /// Returns the predicate key.
+    /// Builds a per-SST apply plan.
+    ///
+    /// Returns `None` when no compatible predicate remains for this SST.
     pub fn plan_for_sst(&self, sst_metadata: &RegionMetadataRef) -> Option<SstApplyPlan> {
         let mut compatible_predicates = BTreeMap::new();
 
