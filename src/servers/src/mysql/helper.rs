@@ -23,6 +23,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::types::TimestampType;
 use datatypes::value::{self, Value};
+#[cfg(test)]
 use itertools::Itertools;
 use opensrv_mysql::{ParamValue, ValueInner, to_naive_datetime};
 use snafu::ResultExt;
@@ -31,6 +32,17 @@ use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
 
+/// Location of a prepared-statement placeholder in the original SQL text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlaceholderSpan {
+    /// 1-based placeholder index.
+    pub(crate) index: usize,
+    pub(crate) start_line: u64,
+    pub(crate) start_column: u64,
+    pub(crate) end_line: u64,
+    pub(crate) end_column: u64,
+}
+
 /// Returns the placeholder string "$i".
 pub fn format_placeholder(i: usize) -> String {
     format!("${}", i)
@@ -38,6 +50,7 @@ pub fn format_placeholder(i: usize) -> String {
 
 /// Replace all the "?" placeholder into "$i" in SQL,
 /// returns the new SQL and the last placeholder index.
+#[cfg(test)]
 pub fn replace_placeholders(query: &str) -> (String, usize) {
     let query_parts = query.split('?').collect::<Vec<_>>();
     let parts_len = query_parts.len();
@@ -58,27 +71,51 @@ pub fn replace_placeholders(query: &str) -> (String, usize) {
     (query, index + 1)
 }
 
-/// Transform all the "?" placeholder into "$i".
-/// Only works for Insert,Query and Delete statements.
-pub fn transform_placeholders(stmt: Statement) -> Statement {
-    match stmt {
-        Statement::Query(mut query) => {
-            visit_placeholders(&mut query.inner);
-            Statement::Query(query)
-        }
-        Statement::Insert(mut insert) => {
-            visit_placeholders(&mut insert.inner);
-            Statement::Insert(insert)
-        }
-        Statement::Delete(mut delete) => {
-            visit_placeholders(&mut delete.inner);
-            Statement::Delete(delete)
-        }
-        stmt => stmt,
-    }
+/// Transform all the "?" placeholders into "$i" and return the number of
+/// transformed placeholders.
+pub fn transform_placeholders_with_count(mut stmt: Statement) -> (Statement, usize) {
+    let count = visit_placeholders(&mut stmt);
+    (stmt, count)
 }
 
-fn visit_placeholders<V>(v: &mut V)
+/// Collect spans of "$i" placeholders in a statement.
+pub(crate) fn placeholder_spans(mut stmt: Statement) -> Vec<PlaceholderSpan> {
+    let mut spans = Vec::new();
+    collect_placeholder_spans(&mut stmt, &mut spans);
+    spans
+}
+
+fn collect_placeholder_spans<V>(v: &mut V, spans: &mut Vec<PlaceholderSpan>)
+where
+    V: VisitMut,
+{
+    let _ = visit_expressions_mut(v, |expr| {
+        if let Expr::Value(ValueWithSpan {
+            value: ValueExpr::Placeholder(s),
+            span,
+        }) = expr
+            && let Some(index) = placeholder_index(s)
+        {
+            spans.push(PlaceholderSpan {
+                index,
+                start_line: span.start.line,
+                start_column: span.start.column,
+                end_line: span.end.line,
+                end_column: span.end.column,
+            });
+        }
+        ControlFlow::<()>::Continue(())
+    });
+}
+
+fn placeholder_index(s: &str) -> Option<usize> {
+    s.strip_prefix('$')?
+        .parse::<usize>()
+        .ok()
+        .filter(|i| *i > 0)
+}
+
+fn visit_placeholders<V>(v: &mut V) -> usize
 where
     V: VisitMut,
 {
@@ -88,12 +125,14 @@ where
             value: ValueExpr::Placeholder(s),
             ..
         }) = expr
+            && s == "?"
         {
             *s = format_placeholder(index);
             index += 1;
         }
         ControlFlow::<()>::Continue(())
     });
+    index - 1
 }
 
 /// Convert [`ParamValue`] into [`Value`] according to param type.
@@ -340,33 +379,52 @@ mod tests {
     #[test]
     fn test_transform_placeholders() {
         let insert = parse_sql("insert into demo values(?,?,?)");
-        let Statement::Insert(insert) = transform_placeholders(insert) else {
+        let (stmt, count) = transform_placeholders_with_count(insert);
+        let Statement::Insert(insert) = stmt else {
             unreachable!()
         };
         assert_eq!(
             "INSERT INTO demo VALUES ($1, $2, $3)",
             insert.inner.to_string()
         );
+        assert_eq!(3, count);
 
         let delete = parse_sql("delete from demo where host=? and idc=?");
-        let Statement::Delete(delete) = transform_placeholders(delete) else {
+        let (stmt, count) = transform_placeholders_with_count(delete);
+        let Statement::Delete(delete) = stmt else {
             unreachable!()
         };
         assert_eq!(
             "DELETE FROM demo WHERE host = $1 AND idc = $2",
             delete.inner.to_string()
         );
+        assert_eq!(2, count);
 
         let select = parse_sql(
             "select * from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?",
         );
-        let Statement::Query(select) = transform_placeholders(select) else {
+        let (stmt, count) = transform_placeholders_with_count(select);
+        let Statement::Query(select) = stmt else {
             unreachable!()
         };
         assert_eq!(
             "SELECT * FROM demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3",
             select.inner.to_string()
         );
+        assert_eq!(3, count);
+
+        let select = parse_sql("select '?', ?");
+        let (stmt, count) = transform_placeholders_with_count(select);
+        let Statement::Query(select) = stmt else {
+            unreachable!()
+        };
+        assert_eq!("SELECT '?', $1", select.inner.to_string());
+        assert_eq!(1, count);
+
+        let set = parse_sql("set time_zone = ?");
+        let (stmt, count) = transform_placeholders_with_count(set);
+        assert_eq!("SET time_zone = $1", stmt.to_string());
+        assert_eq!(1, count);
     }
 
     #[test]
