@@ -14,11 +14,13 @@
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
 
     use api::v1::auth_header::AuthScheme;
-    use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
+    use api::v1::query_request::Query;
+    use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, QueryRequest, SemanticType};
     use arrow_flight::FlightDescriptor;
     use auth::user_provider_from_option;
     use client::{Client, Database};
@@ -33,6 +35,10 @@ mod test {
     use datatypes::vectors::{Int32Vector, StringVector, TimestampMillisecondVector};
     use futures_util::StreamExt;
     use itertools::Itertools;
+    use query::options::{
+        FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+        FLOW_RETURN_REGION_SEQ,
+    };
     use servers::grpc::builder::GrpcServerBuilder;
     use servers::grpc::greptime_handler::GreptimeRequestHandler;
     use servers::grpc::{FlightCompression, GrpcServerConfig};
@@ -227,6 +233,112 @@ mod test {
         assert_eq!(
             result.region_watermark_map(),
             Some(std::collections::HashMap::from([previous_watermark]))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_distributed_flight_flow_incremental_extensions() {
+        common_telemetry::init_default_ut_logging();
+
+        let db =
+            GreptimeDbClusterBuilder::new("test_distributed_flight_flow_incremental_extensions")
+                .await
+                .build(false)
+                .await;
+
+        let runtime = common_runtime::global_runtime().clone();
+        let greptime_request_handler = GreptimeRequestHandler::new(
+            db.frontend.instance.clone(),
+            user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").ok(),
+            Some(runtime.clone()),
+            FlightCompression::default(),
+        );
+        let mut grpc_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
+            .flight_handler(Arc::new(greptime_request_handler))
+            .build();
+        grpc_server
+            .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .await
+            .unwrap();
+        let addr = grpc_server.bind_addr().unwrap().to_string();
+
+        let client = Client::with_urls(vec![addr]);
+        let mut client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        client.set_auth(AuthScheme::Basic(Basic {
+            username: "greptime_user".to_string(),
+            password: "greptime_pwd".to_string(),
+        }));
+
+        create_table(&client).await;
+        test_put_record_batches(&client, create_record_batches(1)).await;
+
+        let sql = "select ts, a, `B` from foo order by ts";
+        let first_result = client
+            .query_with_terminal_metrics_and_flow_extensions(
+                QueryRequest {
+                    query: Some(Query::Sql(sql.to_string())),
+                },
+                &[],
+                &[(FLOW_RETURN_REGION_SEQ, "true")],
+            )
+            .await
+            .unwrap();
+        let first_metrics = first_result.metrics.clone();
+        let OutputData::Stream(mut stream) = first_result.output.data else {
+            panic!("expected stream output");
+        };
+        let mut row_count = 0;
+        while let Some(batch) = stream.next().await {
+            row_count += batch.unwrap().num_rows();
+        }
+        assert_eq!(row_count, 9);
+
+        let first_watermarks = first_metrics
+            .region_watermark_map()
+            .expect("expected first flow watermark");
+        assert_eq!(first_watermarks.len(), 1);
+        let (&region_id, &first_watermark) = first_watermarks.iter().next().unwrap();
+
+        test_put_record_batches(&client, create_record_batches(10)).await;
+
+        let incremental_after_seqs =
+            serde_json::json!({ region_id.to_string(): first_watermark }).to_string();
+        let incremental_extensions = [
+            (FLOW_RETURN_REGION_SEQ, "true"),
+            (FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY),
+            (FLOW_INCREMENTAL_AFTER_SEQS, incremental_after_seqs.as_str()),
+        ];
+        let incremental_result = client
+            .query_with_terminal_metrics_and_flow_extensions(
+                QueryRequest {
+                    query: Some(Query::Sql(sql.to_string())),
+                },
+                &[],
+                &incremental_extensions,
+            )
+            .await
+            .unwrap();
+        let incremental_metrics = incremental_result.metrics.clone();
+        let OutputData::Stream(mut stream) = incremental_result.output.data else {
+            panic!("expected stream output");
+        };
+        let mut row_count = 0;
+        while let Some(batch) = stream.next().await {
+            row_count += batch.unwrap().num_rows();
+        }
+
+        assert_eq!(row_count, 9);
+        let latest_region = db
+            .list_all_regions()
+            .await
+            .into_iter()
+            .find(|(id, _)| id.as_u64() == region_id)
+            .expect("expected test region");
+        let expected_watermark = latest_region.1.find_committed_sequence();
+        assert!(expected_watermark > first_watermark);
+        assert_eq!(
+            incremental_metrics.region_watermark_map(),
+            Some(HashMap::from([(region_id, expected_watermark)]))
         );
     }
 

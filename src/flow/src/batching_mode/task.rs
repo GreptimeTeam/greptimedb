@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::CreateTableExpr;
 use catalog::CatalogManagerRef;
+use client::OutputWithMetrics;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::breakup_insert_plan;
 use common_telemetry::tracing::warn;
@@ -28,10 +29,12 @@ use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::DFSchemaRef;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp};
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
-use operator::expr_helper::column_schemas_to_defs;
+use datatypes::schema::Schema;
 use query::QueryEngineRef;
+use query::options::{
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+    FLOW_SINK_TABLE_ID,
+};
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -43,22 +46,28 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::Instant;
 
-use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::BatchingModeOptions;
+use crate::batching_mode::checkpoint::{
+    FlowCheckpointDecision, FlowQueryFallbackReason, checkpoint_mode_label,
+};
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::{FilterExprInfo, TaskState};
+use crate::batching_mode::incremental_filter::build_sink_dirty_time_window_filter_expr;
+use crate::batching_mode::state::{CheckpointMode, FilterExprInfo, TaskState};
+use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    AddFilterRewriter, ColumnMatcherRewriter, FindGroupByFinalName, gen_plan_with_matching_schema,
-    get_table_info_df_schema, sql_to_df_plan,
+    AddFilterRewriter, ColumnMatcherRewriter, analyze_incremental_aggregate_plan,
+    gen_plan_with_matching_schema, get_table_info_df_schema,
+    rewrite_incremental_aggregate_with_sink_merge, sql_to_df_plan,
 };
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
-    ConvertColumnSchemaSnafu, DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu,
-    SubstraitEncodeLogicalPlanSnafu, UnexpectedSnafu,
+    DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu, SubstraitEncodeLogicalPlanSnafu,
+    UnexpectedSnafu,
 };
 use crate::metrics::{
-    METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
+    METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT, METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT,
+    METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
     METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY, METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT,
     METRIC_FLOW_ROWS,
 };
@@ -98,14 +107,6 @@ fn is_merge_mode_last_non_null(options: &HashMap<String, String>) -> bool {
         .get(MERGE_MODE_KEY)
         .map(|mode| mode.eq_ignore_ascii_case("last_non_null"))
         .unwrap_or(false)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueryType {
-    /// query is a tql query
-    Tql,
-    /// query is a sql query
-    Sql,
 }
 
 #[derive(Clone)]
@@ -244,8 +245,16 @@ impl BatchingTask {
     ) -> Result<Option<(u32, Duration)>, Error> {
         if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
             debug!("Generate new query: {}", new_query.plan);
-            self.execute_logical_plan(frontend_client, &new_query.plan)
+            match self
+                .execute_logical_plan(frontend_client, &new_query.plan, new_query.filter.as_ref())
                 .await
+            {
+                Ok(result) => Ok(result),
+                Err(err) => {
+                    self.handle_executed_query_failure(&err, Some(&new_query));
+                    Err(err)
+                }
+            }
         } else {
             debug!("Generate no query");
             Ok(None)
@@ -345,10 +354,129 @@ impl BatchingTask {
         Ok(())
     }
 
+    /// For incremental-mode SQL queries, attempt to rewrite the delta aggregate
+    /// plan into a safe delta-LEFT-JOIN-sink merge plan. Returns `(plan, true)`
+    /// if the rewrite succeeded and incremental extensions are safe;
+    /// `(plan, false)` if incremental is not applicable (non-SQL, non-aggregate,
+    /// or unsupported aggregates).
+    async fn prepare_plan_for_incremental(
+        &self,
+        plan: &LogicalPlan,
+        dirty_filter: Option<&FilterExprInfo>,
+    ) -> Result<(LogicalPlan, bool), Error> {
+        let is_incremental_sql = {
+            let state = self.state.read().unwrap();
+            if state.is_incremental_disabled() {
+                return Ok((plan.clone(), false));
+            }
+            state.checkpoint_mode() == CheckpointMode::Incremental
+                && matches!(self.config.query_type, QueryType::Sql)
+        };
+
+        if !is_incremental_sql {
+            return Ok((plan.clone(), false));
+        }
+
+        // Extract inner query plan from the DML wrapper.
+        // Non-DML or non-SQL plans bypass the rewrite and keep checkpoint mode;
+        // non-aggregate TQL or non-INSERT plans do not need incremental scan extensions.
+        let inner_plan = match plan {
+            LogicalPlan::Dml(dml) => dml.input.as_ref().clone(),
+            _ => return Ok((plan.clone(), false)),
+        };
+
+        // Analyze the plan for incremental rewritability.
+        // PR3 only enables incremental reads for aggregate / group-by plans via
+        // the PR4 delta-left-join rewrite. Non-aggregate SQL (projection, filter,
+        // or other non-aggregate shapes) stays full-snapshot until separately
+        // supported, and incremental mode is permanently disabled for this flow.
+        let Some(analysis) = analyze_incremental_aggregate_plan(&inner_plan)? else {
+            warn!(
+                "Flow {} incremental mode but plan is not an aggregate query; \
+                 permanently disabling incremental for this flow",
+                self.config.flow_id
+            );
+            self.state.write().unwrap().disable_incremental();
+            return Ok((plan.clone(), false));
+        };
+
+        if !analysis.unsupported_exprs.is_empty() {
+            warn!(
+                "Flow {} incremental aggregate contains unsupported expressions {:?}; \
+                 permanently disabling incremental for this flow",
+                self.config.flow_id, analysis.unsupported_exprs
+            );
+            self.state.write().unwrap().disable_incremental();
+            return Ok((plan.clone(), false));
+        }
+
+        // Plain GROUP BY without aggregate expressions has no values to
+        // merge between delta and sink. The incremental delta scan emits
+        // changed groups, and sink primary-key write semantics make this
+        // idempotent; no explicit left-join rewrite is needed.
+        if analysis.merge_columns.is_empty() {
+            return Ok((plan.clone(), true));
+        }
+
+        // Fetch sink table for the merge rewrite
+        let (sink_table, _) = get_table_info_df_schema(
+            self.config.catalog_manager.clone(),
+            self.config.sink_table_name.clone(),
+        )
+        .await?;
+        let sink_schema = sink_table.table_info().meta.schema.clone();
+        let sink_dirty_filter = build_sink_dirty_time_window_filter_expr(
+            self.config.flow_id,
+            &analysis,
+            &sink_schema,
+            dirty_filter,
+        )?;
+
+        let rewritten_inner = match rewrite_incremental_aggregate_with_sink_merge(
+            &inner_plan,
+            &analysis,
+            sink_table,
+            &self.config.sink_table_name,
+            sink_dirty_filter,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(err) => {
+                warn!(
+                    "Flow {} failed to rewrite incremental aggregate with sink merge; \
+                     permanently disabling incremental for this flow: {:?}",
+                    self.config.flow_id, err
+                );
+                self.state.write().unwrap().disable_incremental();
+                return Ok((plan.clone(), false));
+            }
+        };
+
+        // Reconstruct DML plan with the rewritten inner plan
+        let rewritten = match plan {
+            LogicalPlan::Dml(dml) => LogicalPlan::Dml(DmlStatement::new(
+                dml.table_name.clone(),
+                dml.target.clone(),
+                dml.op.clone(),
+                Arc::new(rewritten_inner),
+            )),
+            _ => unreachable!("already matched Dml above"),
+        };
+
+        debug!(
+            "Flow {} rewrote incremental SQL aggregate query with sink merge",
+            self.config.flow_id
+        );
+
+        Ok((rewritten, true))
+    }
+
     pub async fn execute_logical_plan(
         &self,
         frontend_client: &Arc<FrontendClient>,
         plan: &LogicalPlan,
+        dirty_filter: Option<&FilterExprInfo>,
     ) -> Result<Option<(u32, Duration)>, Error> {
         let instant = Instant::now();
         let flow_id = self.config.flow_id;
@@ -378,81 +506,355 @@ impl BatchingTask {
             })?
             .data;
 
-        let mut peer_desc = None;
+        // For incremental-mode SQL queries, attempt to rewrite the delta aggregate
+        // plan into a safe delta-LEFT-JOIN-sink form before deciding on extensions.
+        let (plan, incremental_safe) = self
+            .prepare_plan_for_incremental(&plan, dirty_filter)
+            .await?;
+
+        let extensions = self.build_flow_query_extensions(incremental_safe).await?;
+        let extension_refs = extensions
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        let query_mode = self.state.read().unwrap().checkpoint_mode();
+        Self::record_query_mode(flow_id, query_mode);
+        debug!(
+            "Flow {flow_id} executing batching query with checkpoint_mode={}, extension_count={}",
+            checkpoint_mode_label(query_mode),
+            extensions.len()
+        );
 
         let res = {
             let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
                 .with_label_values(&[flow_id.to_string().as_str()])
                 .start_timer();
 
-            // hack and special handling the insert logical plan
             let req = if let Some((insert_to, insert_plan)) =
                 breakup_insert_plan(&plan, catalog, schema)
             {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&insert_plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
-                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::InsertIntoPlan(
                         api::v1::InsertIntoPlan {
                             table_name: Some(insert_to),
                             logical_plan: message.to_vec(),
                         },
                     )),
-                })
+                }
             } else {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
 
-                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
-                })
+                }
             };
 
             frontend_client
-                .handle(req, catalog, schema, &mut peer_desc)
+                .query_with_terminal_metrics(catalog, schema, req, &extension_refs)
                 .await
         };
 
         let elapsed = instant.elapsed();
-        if let Ok(affected_rows) = &res {
-            debug!(
-                "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}",
-                elapsed
-            );
-            METRIC_FLOW_ROWS
-                .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
-                .inc_by(*affected_rows as _);
-        } else if let Err(err) = &res {
+        if let Err(err) = &res {
             warn!(
-                "Failed to execute Flow {flow_id} on frontend {:?}, result: {err:?}, elapsed: {:?} with query: {}",
-                peer_desc, elapsed, &plan
+                "Failed to execute Flow {flow_id}, result: {err:?}, elapsed: {:?} with query: {}",
+                elapsed, &plan
             );
+            self.state.write().unwrap().after_query_exec(elapsed, false);
         }
 
         // record slow query
         if elapsed >= self.config.batch_opts.slow_query_threshold {
             warn!(
-                "Flow {flow_id} on frontend {:?} executed for {:?} before complete, query: {}",
-                peer_desc, elapsed, &plan
+                "Flow {flow_id} executed for {:?} before complete, query: {}",
+                elapsed, &plan
             );
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
-                .with_label_values(&[
-                    flow_id.to_string().as_str(),
-                    &peer_desc.unwrap_or_default().to_string(),
-                ])
+                .with_label_values(&[flow_id.to_string().as_str(), "watermark-path"])
                 .observe(elapsed.as_secs_f64());
         }
 
-        self.state
-            .write()
-            .unwrap()
-            .after_query_exec(elapsed, res.is_ok());
-
         let res = res?;
+        let (affected_rows, _) = res.output.extract_rows_and_cost();
+        debug!(
+            "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
+            elapsed,
+            res.region_watermark_map()
+        );
+        METRIC_FLOW_ROWS
+            .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
+            .inc_by(affected_rows as _);
+        let affected_rows: u32 = affected_rows.try_into().map_err(|_| {
+            UnexpectedSnafu {
+                reason: format!("Failed to convert rows to u32: {}", affected_rows),
+            }
+            .build()
+        })?;
 
-        Ok(Some((res, elapsed)))
+        {
+            let mut state = self.state.write().unwrap();
+            let decision = Self::apply_query_result_to_state(&mut state, &res, elapsed);
+            Self::record_checkpoint_decision(flow_id, decision);
+        }
+
+        Ok(Some((affected_rows, elapsed)))
+    }
+
+    fn apply_query_result_to_state(
+        state: &mut TaskState,
+        res: &OutputWithMetrics,
+        elapsed: Duration,
+    ) -> FlowCheckpointDecision {
+        state.after_query_exec(elapsed, true);
+        let checkpoint_mode = state.checkpoint_mode();
+        if checkpoint_mode == CheckpointMode::Incremental && state.is_incremental_disabled() {
+            state.mark_full_snapshot();
+            return FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: CheckpointMode::Incremental,
+                reason: FlowQueryFallbackReason::IncrementalDisabled,
+            };
+        }
+
+        if let (Some(participating_regions), Some(watermark_map)) =
+            (res.participating_regions(), res.region_watermark_map())
+        {
+            let can_advance = match checkpoint_mode {
+                CheckpointMode::FullSnapshot => state
+                    .can_advance_full_snapshot_checkpoints(&participating_regions, &watermark_map),
+                CheckpointMode::Incremental => state
+                    .can_advance_incremental_checkpoints_with_participation(
+                        &participating_regions,
+                        &watermark_map,
+                    ),
+            };
+
+            if can_advance {
+                let participating_region_count = participating_regions.len();
+                let watermark_count = watermark_map.len();
+                match checkpoint_mode {
+                    CheckpointMode::FullSnapshot => {
+                        state.advance_checkpoints(watermark_map);
+                        if state.is_incremental_disabled() {
+                            FlowCheckpointDecision::FallbackToFullSnapshot {
+                                previous_mode: CheckpointMode::FullSnapshot,
+                                reason: FlowQueryFallbackReason::IncrementalDisabled,
+                            }
+                        } else {
+                            FlowCheckpointDecision::AdvancedFromFullSnapshot {
+                                participating_regions: participating_region_count,
+                                watermarks: watermark_count,
+                            }
+                        }
+                    }
+                    CheckpointMode::Incremental => {
+                        state.advance_incremental_checkpoints_with_participation(
+                            &participating_regions,
+                            watermark_map,
+                        );
+                        FlowCheckpointDecision::AdvancedIncremental {
+                            participating_regions: participating_region_count,
+                            watermarks: watermark_count,
+                        }
+                    }
+                }
+            } else {
+                state.mark_full_snapshot();
+                FlowCheckpointDecision::FallbackToFullSnapshot {
+                    previous_mode: checkpoint_mode,
+                    reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+                }
+            }
+        } else {
+            state.mark_full_snapshot();
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: checkpoint_mode,
+                reason: FlowQueryFallbackReason::MissingRegionWatermark,
+            }
+        }
+    }
+
+    fn record_checkpoint_decision(flow_id: FlowId, decision: FlowCheckpointDecision) {
+        let flow_id = flow_id.to_string();
+        METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT
+            .with_label_values(&[
+                flow_id.as_str(),
+                decision.mode_label(),
+                decision.decision_label(),
+                decision.reason_label(),
+            ])
+            .inc();
+
+        match decision {
+            FlowCheckpointDecision::AdvancedFromFullSnapshot {
+                participating_regions,
+                watermarks,
+            } => {
+                info!(
+                    "Flow {flow_id} switched to incremental mode after full snapshot, participating_regions={participating_regions}, watermarks={watermarks}"
+                );
+            }
+            FlowCheckpointDecision::AdvancedIncremental {
+                participating_regions,
+                watermarks,
+            } => {
+                debug!(
+                    "Flow {flow_id} advanced incremental checkpoints, participating_regions={participating_regions}, watermarks={watermarks}"
+                );
+            }
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode,
+                reason,
+            } => {
+                warn!(
+                    "Flow {flow_id} switched to full snapshot mode, previous_mode={}, reason={}",
+                    checkpoint_mode_label(previous_mode),
+                    reason.as_label()
+                );
+            }
+        }
+    }
+
+    fn record_query_mode(flow_id: FlowId, mode: CheckpointMode) {
+        let flow_id = flow_id.to_string();
+        METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT
+            .with_label_values(&[flow_id.as_str(), checkpoint_mode_label(mode)])
+            .inc();
+    }
+
+    fn record_failure_fallback(
+        &self,
+        previous_mode: CheckpointMode,
+        reason: FlowQueryFallbackReason,
+    ) {
+        Self::record_checkpoint_decision(
+            self.config.flow_id,
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode,
+                reason,
+            },
+        );
+    }
+
+    fn handle_flow_query_failure(&self, err: &Error, query: Option<&PlanInfo>) -> bool {
+        let failure = FrontendClient::inspect_query_error(err);
+        let previous_mode = { self.state.read().unwrap().checkpoint_mode() };
+        let was_incremental = previous_mode == CheckpointMode::Incremental;
+        if failure.is_stale_cursor() {
+            warn!(
+                "Flow {} detected stale incremental query failure, switching to non-incremental recompute semantics for current query scope: {:?}",
+                self.config.flow_id, failure.stale_cursor
+            );
+            self.state.write().unwrap().mark_full_snapshot();
+            self.record_failure_fallback(previous_mode, FlowQueryFallbackReason::StaleCursor);
+
+            if query.is_none_or(|query| query.filter.is_none())
+                && let Err(mark_err) = self.mark_all_windows_as_dirty()
+            {
+                warn!(
+                    "Flow {} failed to mark all windows dirty after stale incremental query without time-window scope: {}",
+                    self.config.flow_id, mark_err
+                );
+            }
+
+            true
+        } else {
+            if was_incremental {
+                warn!(
+                    "Flow {} incremental query failed without stale-cursor detail, switching to non-incremental recompute semantics for current query scope",
+                    self.config.flow_id
+                );
+                self.state.write().unwrap().mark_full_snapshot();
+                self.record_failure_fallback(
+                    previous_mode,
+                    FlowQueryFallbackReason::IncrementalQueryFailure,
+                );
+
+                if query.is_none_or(|query| query.filter.is_none())
+                    && let Err(mark_err) = self.mark_all_windows_as_dirty()
+                {
+                    warn!(
+                        "Flow {} failed to mark all windows dirty after incremental query failure without time-window scope: {}",
+                        self.config.flow_id, mark_err
+                    );
+                }
+            }
+
+            false
+        }
+    }
+
+    fn restore_dirty_windows_after_failure(&self, query: &PlanInfo, is_stale_cursor: bool) {
+        if is_stale_cursor && query.filter.is_none() {
+            return;
+        }
+
+        self.state.write().unwrap().dirty_time_windows.add_windows(
+            query
+                .filter
+                .as_ref()
+                .map(|f| f.time_ranges.clone())
+                .unwrap_or_default(),
+        );
+    }
+
+    fn handle_executed_query_failure(&self, err: &Error, query: Option<&PlanInfo>) -> bool {
+        let is_stale_cursor = self.handle_flow_query_failure(err, query);
+        if let Some(query) = query {
+            self.restore_dirty_windows_after_failure(query, is_stale_cursor);
+        }
+        is_stale_cursor
+    }
+
+    async fn build_flow_query_extensions(
+        &self,
+        incremental_safe: bool,
+    ) -> Result<Vec<(&'static str, String)>, Error> {
+        let mut extensions = vec![("flow.return_region_seq", "true".to_string())];
+
+        if let Some(table) = self
+            .config
+            .catalog_manager
+            .table(
+                &self.config.sink_table_name[0],
+                &self.config.sink_table_name[1],
+                &self.config.sink_table_name[2],
+                None,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+        {
+            extensions.push((
+                FLOW_SINK_TABLE_ID,
+                table.table_info().table_id().to_string(),
+            ));
+        }
+
+        let state = self.state.read().unwrap();
+        if incremental_safe
+            && !state.is_incremental_disabled()
+            && state.checkpoint_mode() == CheckpointMode::Incremental
+            && !state.checkpoints().is_empty()
+        {
+            let checkpoints_json = serde_json::to_string(state.checkpoints()).map_err(|err| {
+                UnexpectedSnafu {
+                    reason: format!("Failed to serialize checkpoint map: {err}"),
+                }
+                .build()
+            })?;
+            extensions.push((
+                FLOW_INCREMENTAL_MODE,
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+            ));
+            extensions.push((FLOW_INCREMENTAL_AFTER_SEQS, checkpoints_json));
+        }
+
+        Ok(extensions)
     }
 
     /// start executing query in a loop, break when receive shutdown signal
@@ -506,8 +908,12 @@ impl BatchingTask {
             };
 
             let res = if let Some(new_query) = &new_query {
-                self.execute_logical_plan(&frontend_client, &new_query.plan)
-                    .await
+                self.execute_logical_plan(
+                    &frontend_client,
+                    &new_query.plan,
+                    new_query.filter.as_ref(),
+                )
+                .await
             } else {
                 Ok(None)
             };
@@ -558,16 +964,13 @@ impl BatchingTask {
                 }
                 // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
                 Err(err) => {
+                    self.handle_executed_query_failure(&err, new_query.as_ref());
                     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT
                         .with_label_values(&[&flow_id_str])
                         .inc();
                     match new_query {
                         Some(query) => {
                             common_telemetry::error!(err; "Failed to execute query for flow={} with query: {}", self.config.flow_id, query.plan);
-                            // Re-add dirty windows back since query failed
-                            self.state.write().unwrap().dirty_time_windows.add_windows(
-                                query.filter.map(|f| f.time_ranges).unwrap_or_default(),
-                            );
                             // TODO(discord9): add some backoff here? half the query time window or what
                             // backoff meaning use smaller `max_window_cnt` for next query
 
@@ -641,8 +1044,12 @@ impl BatchingTask {
                         self.config.flow_id
                     );
                     // clean dirty time window too, this could be from create flow's check_execute
-                    let is_dirty = !self.state.read().unwrap().dirty_time_windows.is_empty();
-                    self.state.write().unwrap().dirty_time_windows.clean();
+                    let is_dirty = {
+                        let mut state = self.state.write().unwrap();
+                        let is_dirty = !state.dirty_time_windows.is_empty();
+                        state.dirty_time_windows.clean();
+                        is_dirty
+                    };
 
                     if !is_dirty {
                         // no dirty data, hence no need to update
@@ -650,7 +1057,7 @@ impl BatchingTask {
                         return Ok(None);
                     }
 
-                    let plan = gen_plan_with_matching_schema(
+                    let plan = match gen_plan_with_matching_schema(
                         &self.config.query,
                         query_ctx,
                         engine,
@@ -658,15 +1065,27 @@ impl BatchingTask {
                         primary_key_indices,
                         allow_partial,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(plan) => plan,
+                        Err(err) => {
+                            self.state.write().unwrap().dirty_time_windows.set_dirty();
+                            return Err(err);
+                        }
+                    };
 
                     return Ok(Some(PlanInfo { plan, filter: None }));
                 }
                 _ => {
                     // clean for tql have no use for time window
-                    self.state.write().unwrap().dirty_time_windows.clean();
+                    let had_dirty_windows = {
+                        let mut state = self.state.write().unwrap();
+                        let had_dirty_windows = !state.dirty_time_windows.is_empty();
+                        state.dirty_time_windows.clean();
+                        had_dirty_windows
+                    };
 
-                    let plan = gen_plan_with_matching_schema(
+                    let plan = match gen_plan_with_matching_schema(
                         &self.config.query,
                         query_ctx,
                         engine,
@@ -674,7 +1093,16 @@ impl BatchingTask {
                         primary_key_indices,
                         allow_partial,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(plan) => plan,
+                        Err(err) => {
+                            if had_dirty_windows {
+                                self.state.write().unwrap().dirty_time_windows.set_dirty();
+                            }
+                            return Err(err);
+                        }
+                    };
 
                     return Ok(Some(PlanInfo { plan, filter: None }));
                 }
@@ -769,341 +1197,5 @@ impl BatchingTask {
     }
 }
 
-// auto created table have a auto added column `update_at`, and optional have a `AUTO_CREATED_PLACEHOLDER_TS_COL` column for time index placeholder if no timestamp column is specified
-// TODO(discord9): for now no default value is set for auto added column for compatibility reason with streaming mode, but this might change in favor of simpler code?
-fn create_table_with_expr(
-    plan: &LogicalPlan,
-    sink_table_name: &[String; 3],
-    query_type: &QueryType,
-) -> Result<CreateTableExpr, Error> {
-    let table_def = match query_type {
-        &QueryType::Sql => {
-            if let Some(def) = build_pk_from_aggr(plan)? {
-                def
-            } else {
-                build_by_sql_schema(plan)?
-            }
-        }
-        QueryType::Tql => {
-            // first try build from aggr, then from tql schema because tql query might not have aggr node
-            if let Some(table_def) = build_pk_from_aggr(plan)? {
-                table_def
-            } else {
-                build_by_tql_schema(plan)?
-            }
-        }
-    };
-    let first_time_stamp = table_def.ts_col;
-    let primary_keys = table_def.pks;
-
-    let mut column_schemas = Vec::new();
-    for field in plan.schema().fields() {
-        let name = field.name();
-        let ty = ConcreteDataType::from_arrow_type(field.data_type());
-        let col_schema = if first_time_stamp == Some(name.clone()) {
-            ColumnSchema::new(name, ty, false).with_time_index(true)
-        } else {
-            ColumnSchema::new(name, ty, true)
-        };
-
-        match query_type {
-            QueryType::Sql => {
-                column_schemas.push(col_schema);
-            }
-            QueryType::Tql => {
-                // if is val column, need to rename as val DOUBLE NULL
-                // if is tag column, need to cast type as STRING NULL
-                let is_tag_column = primary_keys.contains(name);
-                let is_val_column = !is_tag_column && first_time_stamp.as_ref() != Some(name);
-                if is_val_column {
-                    let col_schema =
-                        ColumnSchema::new(name, ConcreteDataType::float64_datatype(), true);
-                    column_schemas.push(col_schema);
-                } else if is_tag_column {
-                    let col_schema =
-                        ColumnSchema::new(name, ConcreteDataType::string_datatype(), true);
-                    column_schemas.push(col_schema);
-                } else {
-                    // time index column
-                    column_schemas.push(col_schema);
-                }
-            }
-        }
-    }
-
-    if query_type == &QueryType::Sql {
-        let update_at_schema = ColumnSchema::new(
-            AUTO_CREATED_UPDATE_AT_TS_COL,
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            true,
-        );
-        column_schemas.push(update_at_schema);
-    }
-
-    let time_index = if let Some(time_index) = first_time_stamp {
-        time_index
-    } else {
-        column_schemas.push(
-            ColumnSchema::new(
-                AUTO_CREATED_PLACEHOLDER_TS_COL,
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true),
-        );
-        AUTO_CREATED_PLACEHOLDER_TS_COL.to_string()
-    };
-
-    let column_defs =
-        column_schemas_to_defs(column_schemas, &primary_keys).context(ConvertColumnSchemaSnafu)?;
-    Ok(CreateTableExpr {
-        catalog_name: sink_table_name[0].clone(),
-        schema_name: sink_table_name[1].clone(),
-        table_name: sink_table_name[2].clone(),
-        desc: "Auto created table by flow engine".to_string(),
-        column_defs,
-        time_index,
-        primary_keys,
-        create_if_not_exists: true,
-        table_options: Default::default(),
-        table_id: None,
-        engine: "mito".to_string(),
-    })
-}
-
-/// simply build by schema, return first timestamp column and no primary key
-fn build_by_sql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
-    let first_time_stamp = plan.schema().fields().iter().find_map(|f| {
-        if ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp() {
-            Some(f.name().clone())
-        } else {
-            None
-        }
-    });
-    Ok(TableDef {
-        ts_col: first_time_stamp,
-        pks: vec![],
-    })
-}
-
-/// Return first timestamp column found in output schema and all string columns
-fn build_by_tql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
-    let first_time_stamp = plan.schema().fields().iter().find_map(|f| {
-        if ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp() {
-            Some(f.name().clone())
-        } else {
-            None
-        }
-    });
-    let string_columns = plan
-        .schema()
-        .fields()
-        .iter()
-        .filter_map(|f| {
-            if ConcreteDataType::from_arrow_type(f.data_type()).is_string() {
-                Some(f.name().clone())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-
-    Ok(TableDef {
-        ts_col: first_time_stamp,
-        pks: string_columns,
-    })
-}
-
-struct TableDef {
-    ts_col: Option<String>,
-    pks: Vec<String>,
-}
-
-/// Return first timestamp column which is in group by clause and other columns which are also in group by clause
-///
-/// # Returns
-///
-/// * `Option<String>` - first timestamp column which is in group by clause
-/// * `Vec<String>` - other columns which are also in group by clause
-///
-/// if no aggregation found, return None
-fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
-    let fields = plan.schema().fields();
-    let mut pk_names = FindGroupByFinalName::default();
-
-    plan.visit(&mut pk_names)
-        .with_context(|_| DatafusionSnafu {
-            context: format!("Can't find aggr expr in plan {plan:?}"),
-        })?;
-
-    // if no group by clause, return empty with first timestamp column found in output schema
-    let Some(pk_final_names) = pk_names.get_group_expr_names() else {
-        return Ok(None);
-    };
-    if pk_final_names.is_empty() {
-        let first_ts_col = fields
-            .iter()
-            .find(|f| ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp())
-            .map(|f| f.name().clone());
-        return Ok(Some(TableDef {
-            ts_col: first_ts_col,
-            pks: vec![],
-        }));
-    }
-
-    let all_pk_cols: Vec<_> = fields
-        .iter()
-        .filter(|f| pk_final_names.contains(f.name()))
-        .map(|f| f.name().clone())
-        .collect();
-    // auto create table use first timestamp column in group by clause as time index
-    let first_time_stamp = fields
-        .iter()
-        .find(|f| {
-            all_pk_cols.contains(&f.name().clone())
-                && ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp()
-        })
-        .map(|f| f.name().clone());
-
-    let all_pk_cols: Vec<_> = all_pk_cols
-        .into_iter()
-        .filter(|col| first_time_stamp.as_ref() != Some(col))
-        .collect();
-
-    Ok(Some(TableDef {
-        ts_col: first_time_stamp,
-        pks: all_pk_cols,
-    }))
-}
-
 #[cfg(test)]
-mod test {
-    use api::v1::column_def::try_as_column_schema;
-    use pretty_assertions::assert_eq;
-    use session::context::QueryContext;
-
-    use super::*;
-    use crate::test_utils::create_test_query_engine;
-
-    #[tokio::test]
-    async fn test_gen_create_table_sql() {
-        let query_engine = create_test_query_engine();
-        let ctx = QueryContext::arc();
-        struct TestCase {
-            sql: String,
-            sink_table_name: String,
-            column_schemas: Vec<ColumnSchema>,
-            primary_keys: Vec<String>,
-            time_index: String,
-        }
-
-        let update_at_schema = ColumnSchema::new(
-            AUTO_CREATED_UPDATE_AT_TS_COL,
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            true,
-        );
-
-        let ts_placeholder_schema = ColumnSchema::new(
-            AUTO_CREATED_PLACEHOLDER_TS_COL,
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-        )
-        .with_time_index(true);
-
-        let testcases = vec![
-            TestCase {
-                sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
-                sink_table_name: "new_table".to_string(),
-                column_schemas: vec![
-                    ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                    update_at_schema.clone(),
-                ],
-                primary_keys: vec![],
-                time_index: "ts".to_string(),
-            },
-            TestCase {
-                sql: "SELECT number, max(ts) FROM numbers_with_ts GROUP BY number".to_string(),
-                sink_table_name: "new_table".to_string(),
-                column_schemas: vec![
-                    ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-                    ColumnSchema::new(
-                        "max(numbers_with_ts.ts)",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        true,
-                    ),
-                    update_at_schema.clone(),
-                    ts_placeholder_schema.clone(),
-                ],
-                primary_keys: vec!["number".to_string()],
-                time_index: AUTO_CREATED_PLACEHOLDER_TS_COL.to_string(),
-            },
-            TestCase {
-                sql: "SELECT max(number), ts FROM numbers_with_ts GROUP BY ts".to_string(),
-                sink_table_name: "new_table".to_string(),
-                column_schemas: vec![
-                    ColumnSchema::new(
-                        "max(numbers_with_ts.number)",
-                        ConcreteDataType::uint32_datatype(),
-                        true,
-                    ),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                    update_at_schema.clone(),
-                ],
-                primary_keys: vec![],
-                time_index: "ts".to_string(),
-            },
-            TestCase {
-                sql: "SELECT number, ts FROM numbers_with_ts GROUP BY ts, number".to_string(),
-                sink_table_name: "new_table".to_string(),
-                column_schemas: vec![
-                    ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                    update_at_schema.clone(),
-                ],
-                primary_keys: vec!["number".to_string()],
-                time_index: "ts".to_string(),
-            },
-        ];
-
-        for tc in testcases {
-            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), &tc.sql, true)
-                .await
-                .unwrap();
-            let expr = create_table_with_expr(
-                &plan,
-                &[
-                    "greptime".to_string(),
-                    "public".to_string(),
-                    tc.sink_table_name.clone(),
-                ],
-                &QueryType::Sql,
-            )
-            .unwrap();
-            // TODO(discord9): assert expr
-            let column_schemas = expr
-                .column_defs
-                .iter()
-                .map(|c| try_as_column_schema(c).unwrap())
-                .collect::<Vec<_>>();
-            assert_eq!(tc.column_schemas, column_schemas, "{:?}", tc.sql);
-            assert_eq!(tc.primary_keys, expr.primary_keys, "{:?}", tc.sql);
-            assert_eq!(tc.time_index, expr.time_index, "{:?}", tc.sql);
-        }
-    }
-}
+mod test;

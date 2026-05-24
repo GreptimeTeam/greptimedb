@@ -87,6 +87,20 @@ lazy_static! {
             &["flow_id"],
         )
         .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_flow_batching_checkpoint_decision_count",
+            "flow batching checkpoint state-machine decisions",
+            &["flow_id", "mode", "decision", "reason"],
+        )
+        .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_flow_batching_query_mode_count",
+            "flow batching query attempts by checkpoint mode",
+            &["flow_id", "mode"],
+        )
+        .unwrap();
     pub static ref METRIC_FLOW_RUN_INTERVAL_MS: IntGauge =
         register_int_gauge!("greptime_flow_run_interval_ms", "flow run interval in ms").unwrap();
     pub static ref METRIC_FLOW_ROWS: IntCounterVec = register_int_counter_vec!(

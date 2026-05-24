@@ -101,6 +101,15 @@ pub fn is_internal_column(name: &str) -> bool {
     INTERNAL_COLUMN_VEC.contains(&name)
 }
 
+/// Stable marker embedded in storage errors when an incremental scan cursor is
+/// too old to serve. Consumers may lose typed error information after the error
+/// crosses frontend/query boundaries, so they identify the machine-readable
+/// key-value payload following this marker.
+pub const FLOW_STALE_CURSOR_ERROR_MARKER: &str = "GREPTIMEDB_FLOW_STALE_CURSOR_V1";
+
+/// Retry hint value in the stale-cursor key-value payload.
+pub const FLOW_STALE_CURSOR_RETRY_HINT_FULL_RECOMPUTE: &str = "FALLBACK_FULL_RECOMPUTE";
+
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]

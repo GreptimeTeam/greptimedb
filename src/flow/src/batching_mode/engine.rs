@@ -521,17 +521,63 @@ impl BatchingEngine {
         // check execute once first to detect any error early
         task.check_or_create_sink_table(&engine, &frontend).await?;
 
+        let (start_tx, start_rx) = oneshot::channel();
+
         // TODO(discord9): use time wheel or what for better
         let handle = common_runtime::spawn_global(async move {
-            task_inner.start_executing_loop(engine, frontend).await;
+            if start_rx.await.is_ok() {
+                task_inner.start_executing_loop(engine, frontend).await;
+            }
         });
         task.state.write().unwrap().task_handle = Some(handle);
+        let task_for_rollback = task.clone();
 
-        // only replace here not earlier because we want the old one intact if something went wrong before this line
-        let replaced_old_task_opt = self.tasks.write().await.insert(flow_id, task);
-        drop(replaced_old_task_opt);
+        // Only replace here, not earlier, because we want the old one intact if
+        // something went wrong before this line. Hold both registry locks while
+        // re-checking existence and updating the two maps so create/remove can't
+        // observe a task without its matching shutdown sender, or vice versa.
+        let (replaced_old_task_opt, replaced_old_shutdown_tx) = {
+            let mut tasks = self.tasks.write().await;
+            let mut shutdown_txs = self.shutdown_txs.write().await;
 
-        self.shutdown_txs.write().await.insert(flow_id, tx);
+            let is_exist = tasks.contains_key(&flow_id);
+            match (create_if_not_exists, or_replace, is_exist) {
+                (_, true, true) => {
+                    info!(
+                        "Replacing flow with id={} after final registry check",
+                        flow_id
+                    );
+                }
+                (false, false, true) => {
+                    abort_flow_task(flow_id, Some(task), "unregistered");
+                    return FlowAlreadyExistSnafu { id: flow_id }.fail();
+                }
+                (true, false, true) => {
+                    info!(
+                        "Flow with id={} already exists at final registry check, do nothing",
+                        flow_id
+                    );
+                    abort_flow_task(flow_id, Some(task), "unregistered");
+                    return Ok(None);
+                }
+                (_, _, false) => (),
+            }
+
+            let replaced_old_task_opt = tasks.insert(flow_id, task);
+            let replaced_old_shutdown_tx = shutdown_txs.insert(flow_id, tx);
+            (replaced_old_task_opt, replaced_old_shutdown_tx)
+        };
+
+        notify_flow_shutdown(flow_id, replaced_old_shutdown_tx, "replaced");
+        abort_flow_task(flow_id, replaced_old_task_opt, "replaced");
+        if start_tx.send(()).is_err() {
+            self.rollback_flow_runtime_if_current(flow_id, &task_for_rollback)
+                .await;
+            UnexpectedSnafu {
+                reason: format!("Failed to start flow {flow_id} due to task already dropped"),
+            }
+            .fail()?;
+        }
 
         Ok(Some(flow_id))
     }
@@ -662,21 +708,28 @@ impl BatchingEngine {
     }
 
     pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
-        if self.tasks.write().await.remove(&flow_id).is_none() {
-            warn!("Flow {flow_id} not found in tasks");
-            FlowNotFoundSnafu { id: flow_id }.fail()?;
-        }
-        let Some(tx) = self.shutdown_txs.write().await.remove(&flow_id) else {
+        let (task, shutdown_tx) = {
+            let mut tasks = self.tasks.write().await;
+            let mut shutdown_txs = self.shutdown_txs.write().await;
+
+            let Some(task) = tasks.remove(&flow_id) else {
+                warn!("Flow {flow_id} not found in tasks");
+                FlowNotFoundSnafu { id: flow_id }.fail()?
+            };
+            let shutdown_tx = shutdown_txs.remove(&flow_id);
+            (task, shutdown_tx)
+        };
+
+        let had_shutdown_tx = notify_flow_shutdown(flow_id, shutdown_tx, "removed");
+        abort_flow_task(flow_id, Some(task), "removed");
+
+        if !had_shutdown_tx {
             UnexpectedSnafu {
                 reason: format!("Can't found shutdown tx for flow {flow_id}"),
             }
             .fail()?
-        };
-        if tx.send(()).is_err() {
-            warn!(
-                "Fail to shutdown flow {flow_id} due to receiver already dropped, maybe flow {flow_id} is already dropped?"
-            )
         }
+
         Ok(())
     }
 
@@ -725,6 +778,53 @@ impl BatchingEngine {
     pub async fn flow_exist_inner(&self, flow_id: FlowId) -> bool {
         self.tasks.read().await.contains_key(&flow_id)
     }
+
+    async fn rollback_flow_runtime_if_current(&self, flow_id: FlowId, task: &BatchingTask) {
+        let (removed_task, removed_shutdown_tx) = {
+            let mut tasks = self.tasks.write().await;
+            let mut shutdown_txs = self.shutdown_txs.write().await;
+
+            if tasks
+                .get(&flow_id)
+                .is_some_and(|current| Arc::ptr_eq(&current.state, &task.state))
+            {
+                (tasks.remove(&flow_id), shutdown_txs.remove(&flow_id))
+            } else {
+                (None, None)
+            }
+        };
+
+        notify_flow_shutdown(flow_id, removed_shutdown_tx, "rolled back");
+        abort_flow_task(flow_id, removed_task, "rolled back");
+    }
+}
+
+fn notify_flow_shutdown(flow_id: FlowId, tx: Option<oneshot::Sender<()>>, action: &str) -> bool {
+    let Some(tx) = tx else {
+        return false;
+    };
+
+    if tx.send(()).is_err() {
+        warn!(
+            "Fail to shutdown {action} flow {flow_id} due to receiver already dropped, maybe flow {flow_id} is already dropped?"
+        );
+    }
+
+    true
+}
+
+fn abort_flow_task(flow_id: FlowId, task: Option<BatchingTask>, action: &str) -> bool {
+    let Some(task) = task else {
+        return false;
+    };
+
+    if let Some(handle) = task.state.write().unwrap().task_handle.take() {
+        handle.abort();
+        debug!("Aborted {action} flow task {flow_id}");
+        return true;
+    }
+
+    false
 }
 
 impl FlowEngine for BatchingEngine {
@@ -754,5 +854,180 @@ impl FlowEngine for BatchingEngine {
         req: api::v1::flow::DirtyWindowRequests,
     ) -> Result<(), Error> {
         self.handle_mark_dirty_time_window(req).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use catalog::memory::new_memory_catalog_manager;
+    use common_meta::key::TableMetadataManager;
+    use common_meta::key::flow::FlowMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use query::options::QueryOptions;
+    use session::context::QueryContext;
+
+    use super::*;
+    use crate::test_utils::create_test_query_engine;
+
+    struct DropNotify(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropNotify {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    async fn new_test_engine() -> BatchingEngine {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        table_meta.init().await.unwrap();
+        let flow_meta = Arc::new(FlowMetadataManager::new(kv_backend));
+        let catalog_manager = new_memory_catalog_manager().unwrap();
+        let query_engine = create_test_query_engine();
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+
+        BatchingEngine::new(
+            Arc::new(frontend_client),
+            query_engine,
+            flow_meta,
+            table_meta,
+            catalog_manager,
+            BatchingModeOptions::default(),
+        )
+    }
+
+    async fn new_test_task(flow_id: FlowId) -> (BatchingTask, oneshot::Sender<()>) {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+        let (tx, rx) = oneshot::channel();
+
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        (task, tx)
+    }
+
+    async fn install_abort_observed_handle(task: &BatchingTask) -> oneshot::Receiver<()> {
+        let (drop_tx, drop_rx) = oneshot::channel();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _guard = DropNotify(Some(drop_tx));
+            let _ = entered_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        task.state.write().unwrap().task_handle = Some(handle);
+        tokio::time::timeout(Duration::from_secs(1), entered_rx)
+            .await
+            .expect("test task handle should start")
+            .expect("test task handle should report start");
+        drop_rx
+    }
+
+    #[tokio::test]
+    async fn test_notify_flow_shutdown_sends_signal() {
+        let (tx, rx) = oneshot::channel();
+
+        assert!(notify_flow_shutdown(42, Some(tx), "test"));
+
+        rx.await.expect("replaced flow should receive shutdown");
+    }
+
+    #[test]
+    fn test_notify_flow_shutdown_accepts_missing_sender() {
+        assert!(!notify_flow_shutdown(42, None, "test"));
+    }
+
+    #[tokio::test]
+    async fn test_abort_flow_task_aborts_handle() {
+        let (task, _shutdown_tx) = new_test_task(42).await;
+        let drop_rx = install_abort_observed_handle(&task).await;
+
+        assert!(abort_flow_task(42, Some(task), "test"));
+
+        tokio::time::timeout(Duration::from_secs(1), drop_rx)
+            .await
+            .expect("aborted task should be dropped")
+            .expect("drop notifier should fire");
+    }
+
+    #[tokio::test]
+    async fn test_remove_flow_inner_aborts_registered_task() {
+        let engine = new_test_engine().await;
+        let (task, shutdown_tx) = new_test_task(42).await;
+        let drop_rx = install_abort_observed_handle(&task).await;
+
+        engine.tasks.write().await.insert(42, task);
+        engine.shutdown_txs.write().await.insert(42, shutdown_tx);
+
+        engine.remove_flow_inner(42).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), drop_rx)
+            .await
+            .expect("removed task should be dropped")
+            .expect("drop notifier should fire");
+        assert!(!engine.flow_exist_inner(42).await);
+        assert!(!engine.shutdown_txs.read().await.contains_key(&42));
+    }
+
+    #[tokio::test]
+    async fn test_rollback_flow_runtime_if_current_removes_matching_task_only() {
+        let engine = new_test_engine().await;
+        let (old_task, _old_shutdown_tx) = new_test_task(42).await;
+        let (current_task, current_shutdown_tx) = new_test_task(42).await;
+        let current_task_identity = current_task.clone();
+
+        engine.tasks.write().await.insert(42, current_task);
+        engine
+            .shutdown_txs
+            .write()
+            .await
+            .insert(42, current_shutdown_tx);
+
+        engine.rollback_flow_runtime_if_current(42, &old_task).await;
+
+        let registered_task = engine.tasks.read().await.get(&42).cloned().unwrap();
+        assert!(Arc::ptr_eq(
+            &registered_task.state,
+            &current_task_identity.state
+        ));
+        assert!(engine.shutdown_txs.read().await.contains_key(&42));
+
+        engine
+            .rollback_flow_runtime_if_current(42, &current_task_identity)
+            .await;
+        assert!(!engine.flow_exist_inner(42).await);
+        assert!(!engine.shutdown_txs.read().await.contains_key(&42));
     }
 }
