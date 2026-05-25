@@ -134,7 +134,7 @@ pub struct BloomFilterIndexApplier {
 
     /// Bloom filter predicates.
     /// For each column, the value will be retained only if it contains __all__ predicates.
-    predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
+    default_predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
 
     /// Expected predicate column types from the latest region metadata.
     expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
@@ -152,7 +152,7 @@ impl BloomFilterIndexApplier {
         predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
         expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
     ) -> Self {
-        let predicates = Arc::new(predicates);
+        let default_predicates = Arc::new(predicates);
         Self {
             table_dir,
             path_type,
@@ -161,7 +161,7 @@ impl BloomFilterIndexApplier {
             puffin_manager_factory,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
-            predicates,
+            default_predicates,
             expected_predicate_col_types,
         }
     }
@@ -459,7 +459,7 @@ impl BloomFilterIndexApplier {
                 continue;
             }
 
-            if self.predicates.contains_key(col_id) {
+            if self.default_predicates.contains_key(col_id) {
                 compatible_col_ids.push(*col_id);
             }
         }
@@ -469,12 +469,12 @@ impl BloomFilterIndexApplier {
         }
 
         if !has_type_mismatch {
-            return Some(self.predicates.clone());
+            return Some(self.default_predicates.clone());
         }
 
         let mut compatible_predicates = BTreeMap::new();
         for col_id in compatible_col_ids {
-            if let Some(predicates) = self.predicates.get(&col_id) {
+            if let Some(predicates) = self.default_predicates.get(&col_id) {
                 compatible_predicates.insert(col_id, predicates.clone());
             }
         }
@@ -513,7 +513,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn test_plan_for_sst() {
+    async fn test_compatible_predicate_for_sst() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_basic_").await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_plan_for_sst_type_mismatch() {
+    async fn test_compatible_predicate_for_sst_type_mismatch() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_type_mismatch_").await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();

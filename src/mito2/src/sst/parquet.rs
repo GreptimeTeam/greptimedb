@@ -138,9 +138,9 @@ mod tests {
 
     use super::*;
     use crate::access_layer::{FilePathProvider, Metrics, RegionFilePathFactory, WriteType};
+    use crate::cache::index::result_cache::PredicateKey;
     use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
-    use crate::cache::index::result_cache::PredicateKey;
     use crate::config::IndexConfig;
     use crate::read::FlatSource;
     use crate::region::options::{IndexOptions, InvertedIndexOptions};

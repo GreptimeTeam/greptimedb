@@ -417,7 +417,7 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         assert_eq!(predicates.len(), 1);
 
         let column_predicates = predicates.get(&1).unwrap();
@@ -456,7 +456,7 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         let column_predicates = predicates.get(&2).unwrap();
         assert_eq!(column_predicates.len(), 1);
         assert_eq!(column_predicates[0].list.len(), 3);
@@ -486,7 +486,7 @@ mod tests {
         let result = builder().build(&[expr]).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         let column_predicates = predicates.get(&1).unwrap();
         assert_eq!(column_predicates.len(), 1);
         assert_eq!(column_predicates[0].list.len(), 4);
@@ -550,7 +550,7 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         assert_eq!(predicates.len(), 2);
         assert!(predicates.contains_key(&1));
         assert!(predicates.contains_key(&2));
@@ -588,7 +588,7 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         assert!(!predicates.contains_key(&1)); // Null equality should be ignored
         let column2_predicates = predicates.get(&2).unwrap();
         assert_eq!(column2_predicates[0].list.len(), 2);
@@ -657,7 +657,7 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         let column_predicates = predicates.get(&1).unwrap();
         assert_eq!(column_predicates.len(), 2);
     }
