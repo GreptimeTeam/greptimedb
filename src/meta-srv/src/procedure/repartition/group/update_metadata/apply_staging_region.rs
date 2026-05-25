@@ -22,7 +22,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{self, Result};
 use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::{Context, GroupId, region_routes};
-use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
 
 impl UpdateMetadata {
     /// Applies the new partition expressions for staging regions.
@@ -32,8 +32,8 @@ impl UpdateMetadata {
     /// - Source region not found.
     pub(crate) fn apply_staging_region_routes(
         group_id: GroupId,
-        sources: &[RegionDescriptor],
-        targets: &[RegionDescriptor],
+        sources: &[SourceRegionDescriptor],
+        targets: &[TargetRegionDescriptor],
         pending_deallocate_region_ids: &[store_api::storage::RegionId],
         current_region_routes: &[RegionRoute],
     ) -> Result<Vec<RegionRoute>> {
@@ -61,15 +61,16 @@ impl UpdateMetadata {
         }
 
         for source in sources {
-            let region_route = region_routes_map.get_mut(&source.region_id).context(
+            let region_id = source.region_id();
+            let region_route = region_routes_map.get_mut(&region_id).context(
                 error::RepartitionSourceRegionMissingSnafu {
                     group_id,
-                    region_id: source.region_id,
+                    region_id,
                 },
             )?;
             // Set leader staging state for the source region route.
             region_route.set_leader_staging();
-            if pending_deallocate_region_ids.contains(&source.region_id) {
+            if pending_deallocate_region_ids.contains(&region_id) {
                 // When a region is pending deallocation, it should ignore all writes.
                 region_route.set_ignore_all_writes();
             }
@@ -130,7 +131,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
-    use crate::procedure::repartition::plan::RegionDescriptor;
+    use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
     use crate::procedure::repartition::test_util::range_expr;
 
     #[test]
@@ -166,11 +167,11 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let source_region = RegionDescriptor {
-            region_id: RegionId::new(table_id, 1),
-            partition_expr: range_expr("x", 0, 100),
-        };
-        let target_region = RegionDescriptor {
+        let source_region = SourceRegionDescriptor::partitioned(
+            RegionId::new(table_id, 1),
+            range_expr("x", 0, 100),
+        );
+        let target_region = TargetRegionDescriptor {
             region_id: RegionId::new(table_id, 2),
             partition_expr: range_expr("x", 0, 10),
         };
@@ -221,11 +222,11 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let source_region = RegionDescriptor {
-            region_id: pending_deallocate_region_id,
-            partition_expr: range_expr("x", 0, 100),
-        };
-        let target_region = RegionDescriptor {
+        let source_region = SourceRegionDescriptor::partitioned(
+            pending_deallocate_region_id,
+            range_expr("x", 0, 100),
+        );
+        let target_region = TargetRegionDescriptor {
             region_id: RegionId::new(table_id, 2),
             partition_expr: range_expr("x", 0, 10),
         };

@@ -17,16 +17,88 @@ use std::cmp::Ordering;
 use common_meta::rpc::router::RegionRoute;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
+use crate::error::{self, Result};
 use crate::procedure::repartition::group::GroupId;
 
-/// Metadata describing a region involved in the plan.
+/// Metadata describing a source region involved in the plan.
+///
+/// Source regions may represent either an existing partitioned region or the
+/// default region of an unpartitioned table. PR 1 only migrates the type model;
+/// default-source behavior is introduced by a later PR.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RegionDescriptor {
-    /// The region id of the region involved in the plan.
+pub enum SourceRegionDescriptor {
+    /// A regular partitioned source region.
+    Partitioned {
+        /// The region id of the source region.
+        region_id: RegionId,
+        /// The partition expression of the source region.
+        partition_expr: PartitionExpr,
+    },
+    /// The default source region of an unpartitioned table.
+    Default {
+        /// The region id of the default source region.
+        region_id: RegionId,
+    },
+}
+
+impl SourceRegionDescriptor {
+    /// Creates a partitioned source region descriptor.
+    pub fn partitioned(region_id: RegionId, partition_expr: PartitionExpr) -> Self {
+        Self::Partitioned {
+            region_id,
+            partition_expr,
+        }
+    }
+
+    /// Returns the region id of this source descriptor.
+    pub fn region_id(&self) -> RegionId {
+        match self {
+            Self::Partitioned { region_id, .. } => *region_id,
+            Self::Default { region_id } => *region_id,
+        }
+    }
+
+    /// Returns the partition expression if this source is partitioned.
+    pub fn partition_expr(&self) -> Option<&PartitionExpr> {
+        match self {
+            Self::Partitioned { partition_expr, .. } => Some(partition_expr),
+            Self::Default { .. } => None,
+        }
+    }
+
+    /// Returns true if this source descriptor matches the route partition expression.
+    pub fn matches_route_expr(&self, route_expr: &str) -> Result<bool> {
+        match self {
+            Self::Partitioned { partition_expr, .. } => {
+                let expected = partition_expr
+                    .as_json_str()
+                    .context(error::SerializePartitionExprSnafu)?;
+                Ok(route_expr == expected)
+            }
+            Self::Default { .. } => Ok(route_expr.is_empty()),
+        }
+    }
+
+    /// Returns the route partition expression to restore during rollback.
+    pub fn route_expr_for_rollback(&self) -> Result<String> {
+        match self {
+            Self::Partitioned { partition_expr, .. } => partition_expr
+                .as_json_str()
+                .context(error::SerializePartitionExprSnafu),
+            Self::Default { .. } => Ok(String::new()),
+        }
+    }
+}
+
+/// Metadata describing a target region involved in the plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TargetRegionDescriptor {
+    /// The region id of the target region.
     pub region_id: RegionId,
-    /// The partition expression of the region.
+    /// The partition expression of the target region.
     pub partition_expr: PartitionExpr,
 }
 
@@ -37,7 +109,7 @@ pub struct AllocationPlanEntry {
     /// The group id for this plan entry.
     pub group_id: GroupId,
     /// Source region descriptors involved in the plan.
-    pub source_regions: Vec<RegionDescriptor>,
+    pub source_regions: Vec<SourceRegionDescriptor>,
     /// The target partition expressions for the new or changed regions.
     pub target_partition_exprs: Vec<PartitionExpr>,
     /// For each `source_regions[k]`, the corresponding vector contains global
@@ -52,9 +124,9 @@ pub struct RepartitionPlanEntry {
     /// The group id for this plan entry.
     pub group_id: GroupId,
     /// The source region descriptors involved in the plan.
-    pub source_regions: Vec<RegionDescriptor>,
+    pub source_regions: Vec<SourceRegionDescriptor>,
     /// The target region descriptors involved in the plan.
-    pub target_regions: Vec<RegionDescriptor>,
+    pub target_regions: Vec<TargetRegionDescriptor>,
     /// The region ids of the allocated regions.
     pub allocated_region_ids: Vec<RegionId>,
     /// The region ids of the regions that are pending deallocation.
@@ -69,7 +141,7 @@ pub struct RepartitionPlanEntry {
 
 impl RepartitionPlanEntry {
     /// Returns the target regions that are newly allocated.
-    pub(crate) fn allocate_regions(&self) -> Vec<&RegionDescriptor> {
+    pub(crate) fn allocate_regions(&self) -> Vec<&TargetRegionDescriptor> {
         self.target_regions
             .iter()
             .filter(|r| self.allocated_region_ids.contains(&r.region_id))
@@ -111,7 +183,7 @@ pub fn convert_allocation_plan_to_repartition_plan(
                 .iter()
                 .skip(source_regions.len())
                 .map(|target_partition_expr| {
-                    let desc = RegionDescriptor {
+                    let desc = TargetRegionDescriptor {
                         region_id: RegionId::new(table_id, *next_region_number),
                         partition_expr: target_partition_expr.clone(),
                     };
@@ -128,10 +200,12 @@ pub fn convert_allocation_plan_to_repartition_plan(
             let target_regions = source_regions
                 .iter()
                 .zip(target_partition_exprs.iter())
-                .map(|(source_region, target_partition_expr)| RegionDescriptor {
-                    region_id: source_region.region_id,
-                    partition_expr: target_partition_expr.clone(),
-                })
+                .map(
+                    |(source_region, target_partition_expr)| TargetRegionDescriptor {
+                        region_id: source_region.region_id(),
+                        partition_expr: target_partition_expr.clone(),
+                    },
+                )
                 .chain(pending_allocate_target_partition_exprs)
                 .collect::<Vec<_>>();
 
@@ -149,10 +223,12 @@ pub fn convert_allocation_plan_to_repartition_plan(
             let target_regions = source_regions
                 .iter()
                 .zip(target_partition_exprs.iter())
-                .map(|(source_region, target_partition_expr)| RegionDescriptor {
-                    region_id: source_region.region_id,
-                    partition_expr: target_partition_expr.clone(),
-                })
+                .map(
+                    |(source_region, target_partition_expr)| TargetRegionDescriptor {
+                        region_id: source_region.region_id(),
+                        partition_expr: target_partition_expr.clone(),
+                    },
+                )
                 .collect::<Vec<_>>();
 
             RepartitionPlanEntry {
@@ -171,16 +247,18 @@ pub fn convert_allocation_plan_to_repartition_plan(
                 .iter()
                 .take(target_partition_exprs.len())
                 .zip(target_partition_exprs.iter())
-                .map(|(source_region, target_partition_expr)| RegionDescriptor {
-                    region_id: source_region.region_id,
-                    partition_expr: target_partition_expr.clone(),
-                })
+                .map(
+                    |(source_region, target_partition_expr)| TargetRegionDescriptor {
+                        region_id: source_region.region_id(),
+                        partition_expr: target_partition_expr.clone(),
+                    },
+                )
                 .collect::<Vec<_>>();
 
             let pending_deallocate_region_ids = source_regions
                 .iter()
                 .skip(target_partition_exprs.len())
-                .map(|source_region| source_region.region_id)
+                .map(|source_region| source_region.region_id())
                 .collect::<Vec<_>>();
 
             RepartitionPlanEntry {
@@ -210,11 +288,11 @@ mod tests {
         col: &str,
         start: i64,
         end: i64,
-    ) -> RegionDescriptor {
-        RegionDescriptor {
-            region_id: RegionId::new(table_id, region_number),
-            partition_expr: range_expr(col, start, end),
-        }
+    ) -> SourceRegionDescriptor {
+        SourceRegionDescriptor::partitioned(
+            RegionId::new(table_id, region_number),
+            range_expr(col, start, end),
+        )
     }
 
     #[test]

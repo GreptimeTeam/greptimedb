@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::error::{self, Result};
 use crate::procedure::repartition::allocate_region::AllocateRegion;
-use crate::procedure::repartition::plan::{AllocationPlanEntry, RegionDescriptor};
+use crate::procedure::repartition::plan::{AllocationPlanEntry, SourceRegionDescriptor};
 use crate::procedure::repartition::repartition_end::RepartitionEnd;
 use crate::procedure::repartition::{Context, State};
 
@@ -123,7 +123,7 @@ impl RepartitionStart {
 
     fn build_plan_entries(
         subtasks: Vec<RepartitionSubtask>,
-        source_index: &[RegionDescriptor],
+        source_index: &[SourceRegionDescriptor],
         target_exprs: &[PartitionExpr],
     ) -> Vec<AllocationPlanEntry> {
         subtasks
@@ -154,7 +154,7 @@ impl RepartitionStart {
     fn source_region_descriptors(
         from_exprs: &[PartitionExpr],
         physical_route: &PhysicalTableRouteValue,
-    ) -> Result<Vec<RegionDescriptor>> {
+    ) -> Result<Vec<SourceRegionDescriptor>> {
         let existing_regions = physical_route
             .region_routes
             .iter()
@@ -178,10 +178,10 @@ impl RepartitionStart {
                         debug!("Failed to find matching region for partition expression: {}, existing regions: {:?}", expr_json, existing_regions);
                     })?;
 
-                Ok(RegionDescriptor {
-                    region_id: matched_region_id,
-                    partition_expr: expr.clone(),
-                })
+                Ok(SourceRegionDescriptor::partitioned(
+                    matched_region_id,
+                    expr.clone(),
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
 

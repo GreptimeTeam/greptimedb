@@ -25,22 +25,22 @@ use store_api::storage::RegionId;
 use crate::error::Result;
 use crate::procedure::repartition::collect::{Collect, ProcedureMeta};
 use crate::procedure::repartition::group::RepartitionGroupProcedure;
-use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
 use crate::procedure::repartition::{self, Context, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dispatch;
 
 pub(crate) fn build_region_mapping(
-    source_regions: &[RegionDescriptor],
-    target_regions: &[RegionDescriptor],
+    source_regions: &[SourceRegionDescriptor],
+    target_regions: &[TargetRegionDescriptor],
     transition_map: &[Vec<usize>],
 ) -> HashMap<RegionId, Vec<RegionId>> {
     transition_map
         .iter()
         .enumerate()
         .map(|(source_idx, indices)| {
-            let source_region = source_regions[source_idx].region_id;
+            let source_region = source_regions[source_idx].region_id();
             let target_regions = indices
                 .iter()
                 .map(|&target_idx| target_regions[target_idx].region_id)

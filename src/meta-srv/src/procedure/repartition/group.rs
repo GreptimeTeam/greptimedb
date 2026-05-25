@@ -49,7 +49,7 @@ use uuid::Uuid;
 
 use crate::error::{self, Result};
 use crate::procedure::repartition::group::repartition_start::RepartitionStart;
-use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
 use crate::procedure::repartition::utils::get_datanode_table_value;
 use crate::procedure::repartition::{self};
 use crate::service::mailbox::MailboxRef;
@@ -330,9 +330,9 @@ pub struct PersistentContext {
     /// The schema name of the repartition group.
     pub schema_name: String,
     /// The source regions of the repartition group.
-    pub sources: Vec<RegionDescriptor>,
+    pub sources: Vec<SourceRegionDescriptor>,
     /// The target regions of the repartition group.
-    pub targets: Vec<RegionDescriptor>,
+    pub targets: Vec<TargetRegionDescriptor>,
     /// For each `source region`, the corresponding
     /// `target regions` that overlap with it.
     pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
@@ -360,8 +360,8 @@ impl PersistentContext {
         table_id: TableId,
         catalog_name: String,
         schema_name: String,
-        sources: Vec<RegionDescriptor>,
-        targets: Vec<RegionDescriptor>,
+        sources: Vec<SourceRegionDescriptor>,
+        targets: Vec<TargetRegionDescriptor>,
         region_mapping: HashMap<RegionId, Vec<RegionId>>,
         sync_region: bool,
         allocated_region_ids: Vec<RegionId>,
@@ -392,7 +392,7 @@ impl PersistentContext {
             SchemaLock::read(&self.catalog_name, &self.schema_name).into(),
         ]);
         for source in &self.sources {
-            lock_keys.push(RegionLock::Write(source.region_id).into());
+            lock_keys.push(RegionLock::Write(source.region_id()).into());
         }
         lock_keys
     }

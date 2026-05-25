@@ -42,7 +42,7 @@ use uuid::Uuid;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::metasrv::MetasrvInfo;
 use crate::procedure::repartition::group::{Context, PersistentContext, VolatileContext};
-use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
 use crate::procedure::repartition::{
     Context as ParentContext, PersistentContext as ParentPersistentContext, RepartitionProcedure,
 };
@@ -177,8 +177,8 @@ pub fn test_region_wal_options(region_numbers: &[RegionNumber]) -> HashMap<Regio
 
 pub fn new_persistent_context(
     table_id: TableId,
-    sources: Vec<RegionDescriptor>,
-    targets: Vec<RegionDescriptor>,
+    sources: Vec<SourceRegionDescriptor>,
+    targets: Vec<TargetRegionDescriptor>,
 ) -> PersistentContext {
     PersistentContext {
         group_id: Uuid::new_v4(),
