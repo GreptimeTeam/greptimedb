@@ -71,10 +71,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("I/O error while {}", operation))]
+    #[snafu(display("I/O error while {}: {}", operation, error))]
     Io {
         operation: &'static str,
-        #[snafu(source)]
         error: std::io::Error,
         #[snafu(implicit)]
         location: Location,
@@ -230,8 +229,9 @@ impl ErrorExt for Error {
 
             Error::EmptyResult { .. }
             | Error::UnexpectedValueType { .. }
-            | Error::Io { .. }
             | Error::UrlParse { .. } => StatusCode::Internal,
+
+            Error::Io { .. } => StatusCode::External,
 
             Error::Database { error, .. } => error.status_code(),
 

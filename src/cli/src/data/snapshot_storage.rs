@@ -141,6 +141,7 @@ pub fn validate_uri(uri: &str) -> Result<StorageScheme> {
 /// two non-root path segments to avoid deleting broad system directories.
 pub fn validate_snapshot_uri(uri: &str) -> Result<StorageScheme> {
     let scheme = validate_uri(uri)?;
+    reject_query_or_fragment(uri)?;
     match scheme {
         StorageScheme::File => validate_file_snapshot_uri(uri)?,
         StorageScheme::S3 | StorageScheme::Oss | StorageScheme::Gcs | StorageScheme::Azblob => {
@@ -148,6 +149,19 @@ pub fn validate_snapshot_uri(uri: &str) -> Result<StorageScheme> {
         }
     }
     Ok(scheme)
+}
+
+fn reject_query_or_fragment(uri: &str) -> Result<()> {
+    let url = Url::parse(uri).context(UrlParseSnafu)?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return InvalidUriSnafu {
+            uri,
+            reason: "snapshot URI must not include query or fragment",
+        }
+        .fail();
+    }
+
+    Ok(())
 }
 
 fn validate_file_snapshot_uri(uri: &str) -> Result<()> {
@@ -788,6 +802,8 @@ mod tests {
         assert!(validate_snapshot_uri("oss://bucket").is_err());
         assert!(validate_snapshot_uri("gs://bucket").is_err());
         assert!(validate_snapshot_uri("azblob://container").is_err());
+        assert!(validate_snapshot_uri("s3://bucket/snapshot?version=1").is_err());
+        assert!(validate_snapshot_uri("file:///tmp/backup#fragment").is_err());
         assert!(validate_snapshot_uri("file:///").is_err());
         assert!(validate_snapshot_uri("file:///tmp").is_err());
         assert!(validate_snapshot_uri("file:///tmp/backup/.").is_err());

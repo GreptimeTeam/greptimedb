@@ -1333,7 +1333,7 @@ fn format_delete_chunks(manifest: &Manifest) -> String {
 
     let summary = summarize_chunks(manifest);
     if manifest.is_complete() {
-        format!("{} (all completed)", summary.total)
+        format!("{} (all processed)", summary.total)
     } else {
         format!(
             "{} ({} completed, {} skipped, {} pending, {} in_progress, {} failed)",
@@ -1355,13 +1355,21 @@ fn confirm_delete(snapshot: &str) -> Result<bool> {
     println!("This will permanently delete all data under:");
     println!("  {}", display_snapshot_prefix(snapshot));
     print!("Type 'yes' to confirm deletion: ");
-    io::stdout().flush().context(IoSnafu {
-        operation: "flushing delete confirmation prompt",
+    io::stdout().flush().map_err(|error| {
+        IoSnafu {
+            operation: "flushing delete confirmation prompt",
+            error,
+        }
+        .build()
     })?;
 
     let mut input = String::new();
-    io::stdin().read_line(&mut input).context(IoSnafu {
-        operation: "reading delete confirmation",
+    io::stdin().read_line(&mut input).map_err(|error| {
+        IoSnafu {
+            operation: "reading delete confirmation",
+            error,
+        }
+        .build()
     })?;
 
     Ok(delete_confirmation_matches(&input))
@@ -1703,6 +1711,7 @@ mod tests {
         );
         assert_eq!(snapshot_status(&complete), "complete");
         assert_eq!(format_list_chunks(&complete), "2/2");
+        assert_eq!(format_delete_chunks(&complete), "2 (all processed)");
 
         let incomplete = test_manifest(
             chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
@@ -1711,6 +1720,10 @@ mod tests {
         );
         assert_eq!(snapshot_status(&incomplete), "incomplete");
         assert_eq!(format_list_chunks(&incomplete), "1/2");
+        assert_eq!(
+            format_delete_chunks(&incomplete),
+            "2 (1 completed, 0 skipped, 1 pending, 0 in_progress, 0 failed)"
+        );
     }
 
     #[tokio::test]
