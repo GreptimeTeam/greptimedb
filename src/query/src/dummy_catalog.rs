@@ -620,7 +620,10 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::options::{FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_SINK_TABLE_ID};
+    use crate::options::{
+        FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_RETURN_REGION_SEQ,
+        FLOW_SINK_TABLE_ID,
+    };
 
     fn test_region_id() -> RegionId {
         RegionId::new(1024, 1)
@@ -649,6 +652,53 @@ mod tests {
         assert!(!request.snapshot_on_scan);
         assert_eq!(request.memtable_max_sequence, Some(42));
         assert_eq!(request.sst_min_sequence, Some(7));
+    }
+
+    #[test]
+    fn test_terminal_watermark_context_uses_snapshot_upper_bound_for_source_scan() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                FLOW_RETURN_REGION_SEQ.to_string(),
+                "true".to_string(),
+            )]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(request.snapshot_on_scan);
+        assert_eq!(request.memtable_min_sequence, None);
+        assert_eq!(request.memtable_max_sequence, None);
+        assert_eq!(request.sst_min_sequence, None);
+    }
+
+    #[test]
+    fn test_terminal_watermark_context_skips_sink_scan_semantics() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (FLOW_RETURN_REGION_SEQ.to_string(), "true".to_string()),
+                (
+                    FLOW_SINK_TABLE_ID.to_string(),
+                    region_id.table_id().to_string(),
+                ),
+            ]))
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                88_u64,
+            )]))))
+            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                77_u64,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(!request.snapshot_on_scan);
+        assert_eq!(request.memtable_min_sequence, None);
+        assert_eq!(request.memtable_max_sequence, None);
+        assert_eq!(request.sst_min_sequence, None);
     }
 
     #[test]

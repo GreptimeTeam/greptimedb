@@ -216,7 +216,7 @@ impl BatchingTask {
         &self,
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
-    ) -> Result<Option<(u32, Duration)>, Error> {
+    ) -> Result<Option<(usize, Duration)>, Error> {
         if !self.is_table_exist(&self.config.sink_table_name).await? {
             let create_table = self.gen_create_table_expr(engine.clone()).await?;
             info!(
@@ -247,7 +247,7 @@ impl BatchingTask {
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
         max_window_cnt: Option<usize>,
-    ) -> Result<Option<(u32, Duration)>, Error> {
+    ) -> Result<Option<(usize, Duration)>, Error> {
         if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
             debug!("Generate new query: {}", new_query.plan);
             match self
@@ -376,7 +376,7 @@ impl BatchingTask {
         frontend_client: &Arc<FrontendClient>,
         plan: &LogicalPlan,
         _dirty_filter: Option<&FilterExprInfo>,
-    ) -> Result<Option<(u32, Duration)>, Error> {
+    ) -> Result<Option<(usize, Duration)>, Error> {
         let instant = Instant::now();
         let flow_id = self.config.flow_id;
 
@@ -482,12 +482,6 @@ impl BatchingTask {
         METRIC_FLOW_ROWS
             .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
             .inc_by(affected_rows as _);
-        let affected_rows: u32 = affected_rows.try_into().map_err(|_| {
-            UnexpectedSnafu {
-                reason: format!("Failed to convert rows to u32: {}", affected_rows),
-            }
-            .build()
-        })?;
 
         {
             let mut state = self.state.write().unwrap();
@@ -675,13 +669,17 @@ impl BatchingTask {
             return;
         }
 
-        self.state.write().unwrap().dirty_time_windows.add_windows(
-            query
-                .filter
-                .as_ref()
-                .map(|f| f.time_ranges.clone())
-                .unwrap_or_default(),
-        );
+        if let Some(filter) = query.filter.as_ref() {
+            self.restore_scoped_dirty_windows(filter);
+        }
+    }
+
+    fn restore_scoped_dirty_windows(&self, filter: &FilterExprInfo) {
+        self.state
+            .write()
+            .unwrap()
+            .dirty_time_windows
+            .add_windows(filter.time_ranges.clone());
     }
 
     fn handle_executed_query_failure(&self, err: &Error, query: Option<&PlanInfo>) -> bool {
@@ -1024,24 +1022,20 @@ impl BatchingTask {
                 Some(self),
             )?;
 
-        debug!(
-            "Flow id={:?}, Generated filter expr: {:?}",
-            self.config.flow_id,
-            expr.as_ref()
-                .map(
-                    |expr| expr_to_sql(&expr.expr).with_context(|_| DatafusionSnafu {
-                        context: format!("Failed to generate filter expr from {expr:?}"),
-                    })
-                )
-                .transpose()?
-                .map(|s| s.to_string())
-        );
-
         let Some(expr) = expr else {
             // no new data, hence no need to update
             debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
             return Ok(None);
         };
+
+        let filter_sql = expr_to_sql(&expr.expr)
+            .map(|sql| sql.to_string())
+            .unwrap_or_else(|err| format!("<failed to format filter expr: {err}>"));
+
+        debug!(
+            "Flow id={:?}, Generated filter expr: {:?}",
+            self.config.flow_id, filter_sql
+        );
 
         let mut add_filter = AddFilterRewriter::new(expr.expr.clone());
         let mut add_auto_column = ColumnMatcherRewriter::new(
@@ -1050,18 +1044,41 @@ impl BatchingTask {
             allow_partial,
         );
 
-        let plan =
-            sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false).await?;
-        let rewrite = plan
+        let plan = match sql_to_df_plan(
+            query_ctx.clone(),
+            engine.clone(),
+            &self.config.query,
+            false,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(err) => {
+                self.restore_scoped_dirty_windows(&expr);
+                return Err(err);
+            }
+        };
+        let rewrite = match plan
             .clone()
             .rewrite(&mut add_filter)
             .and_then(|p| p.data.rewrite(&mut add_auto_column))
             .with_context(|_| DatafusionSnafu {
                 context: format!("Failed to rewrite plan:\n {}\n", plan),
-            })?
-            .data;
+            }) {
+            Ok(rewrite) => rewrite.data,
+            Err(err) => {
+                self.restore_scoped_dirty_windows(&expr);
+                return Err(err);
+            }
+        };
         // only apply optimize after complex rewrite is done
-        let new_plan = apply_df_optimizer(rewrite, &query_ctx).await?;
+        let new_plan = match apply_df_optimizer(rewrite, &query_ctx).await {
+            Ok(new_plan) => new_plan,
+            Err(err) => {
+                self.restore_scoped_dirty_windows(&expr);
+                return Err(err);
+            }
+        };
 
         let info = PlanInfo {
             plan: new_plan.clone(),

@@ -26,11 +26,15 @@ use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::ColumnSchema;
 use datatypes::vectors::{UInt32Vector, VectorRef};
 use pretty_assertions::assert_eq;
+use query::options::{
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
+};
 use session::context::QueryContext;
 use snafu::GenerateImplicitData;
 use table::test_util::MemTable;
 
 use super::*;
+use crate::batching_mode::time_window::find_time_window_expr;
 use crate::test_utils::create_test_query_engine;
 
 fn output_with_region_watermarks(
@@ -120,6 +124,62 @@ async fn new_test_task_engine_and_plan_with_query(query: &str, sink_table: &str)
     }
 }
 
+async fn new_time_window_test_task_with_query(query: &str) -> TestTaskParts {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let plan_query = "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number";
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), plan_query, true)
+        .await
+        .unwrap();
+    let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+        &plan,
+        query_engine.engine_state().catalog_manager().clone(),
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let time_window_expr = time_window_expr.map(|expr| {
+        TimeWindowExpr::from_expr(
+            &expr,
+            &column_name,
+            &df_schema,
+            &query_engine.engine_state().session_state(),
+        )
+        .unwrap()
+    });
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query,
+        plan: plan.clone(),
+        time_window_expr,
+        expire_after: None,
+        sink_table_name: [
+            "greptime".to_string(),
+            "public".to_string(),
+            "missing_sink".to_string(),
+        ],
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx: rx,
+        batch_opts: Arc::new(BatchingModeOptions::default()),
+        flow_eval_interval: None,
+    })
+    .unwrap();
+
+    TestTaskParts {
+        task,
+        query_engine,
+        plan,
+    }
+}
+
 fn register_number_only_sink(query_engine: &QueryEngineRef, table_name: &str) {
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
         "number",
@@ -152,6 +212,19 @@ fn ordinary_query_error() -> Error {
         )),
         location: snafu::Location::generate(),
     }
+}
+
+fn assert_no_incremental_scan_extensions(extensions: &[(&'static str, String)]) {
+    assert!(
+        !extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_MODE)
+    );
+    assert!(
+        !extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_AFTER_SEQS)
+    );
 }
 
 #[test]
@@ -461,6 +534,41 @@ async fn test_filterless_plan_generation_failure_restores_consumed_dirty_marker(
 }
 
 #[tokio::test]
+async fn test_scoped_plan_generation_failure_restores_consumed_dirty_windows() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT missing_column, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, missing_column",
+    )
+    .await;
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("time_window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+    ]));
+
+    let result = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, None)
+        .await;
+
+    assert!(result.is_err());
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.dirty_time_windows.len(), 1);
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(5)
+    );
+}
+
+#[tokio::test]
 async fn test_insert_plan_matching_failure_restores_consumed_dirty_marker() {
     let sink_table = "partial_sink";
     let TestTaskParts {
@@ -526,8 +634,9 @@ async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
     let extensions = task.build_flow_query_extensions().await.unwrap();
     assert_eq!(
         extensions,
-        vec![("flow.return_region_seq", "true".to_string())]
+        vec![(FLOW_RETURN_REGION_SEQ, "true".to_string())]
     );
+    assert_no_incremental_scan_extensions(&extensions);
 
     task.state
         .write()
@@ -539,6 +648,28 @@ async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
     let extensions = task.build_flow_query_extensions().await.unwrap();
     assert_eq!(
         extensions,
-        vec![("flow.return_region_seq", "true".to_string())]
+        vec![(FLOW_RETURN_REGION_SEQ, "true".to_string())]
     );
+    assert_no_incremental_scan_extensions(&extensions);
+}
+
+#[tokio::test]
+async fn test_build_flow_query_extensions_include_sink_id_without_incremental_scan() {
+    let sink_table = "extension_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        sink_table,
+    )
+    .await;
+    register_number_only_sink(&query_engine, sink_table);
+
+    let extensions = task.build_flow_query_extensions().await.unwrap();
+
+    assert!(extensions.contains(&(FLOW_RETURN_REGION_SEQ, "true".to_string())));
+    assert!(extensions.iter().any(|(key, value)| {
+        *key == FLOW_SINK_TABLE_ID && value.parse::<table::metadata::TableId>().is_ok()
+    }));
+    assert_no_incremental_scan_extensions(&extensions);
 }

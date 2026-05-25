@@ -766,7 +766,7 @@ impl BatchingEngine {
             )
             .await?;
 
-        let affected_rows = res.map(|(r, _)| r).unwrap_or_default() as usize;
+        let affected_rows = res.map(|(r, _)| r).unwrap_or_default();
         debug!(
             "Successfully flush flow {flow_id}, affected rows={}",
             affected_rows
