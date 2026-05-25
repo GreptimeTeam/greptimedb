@@ -33,6 +33,7 @@ use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
 use datatypes::schema::ext::ArrowSchemaExt;
 use futures::StreamExt;
+use itertools::Itertools;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::ResultExt;
@@ -436,7 +437,16 @@ impl ScanRegion {
             .schema
             .arrow_schema()
             .has_json_extension_field()
-            .then_some(&self.request.json_type_hint);
+            .then_some(&self.request.json_type_hint)
+            .inspect(|json_type_hint| {
+                debug!(
+                    "Concretized JSON type: {{{}}}",
+                    json_type_hint
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .join(", ")
+                );
+            });
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &self.version.metadata,
             projection,
