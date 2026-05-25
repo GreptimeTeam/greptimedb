@@ -274,6 +274,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         let version = version_builder.build();
         region.version_control.overwrite_current(Arc::new(version));
+        region.observe_committed_sequence();
 
         let updated = manifest.manifest_version > original_manifest_version;
         let _ = sender.send(Ok((manifest.manifest_version, updated)));
@@ -418,6 +419,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             if edit_result.update_region_state {
                 region.switch_state_to_writable(RegionLeaderState::Editing);
             }
+            region.observe_committed_sequence();
 
             need_compaction
         };

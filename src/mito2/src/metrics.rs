@@ -29,6 +29,10 @@ pub const FLUSH_REASON: &str = "reason";
 pub const FILE_TYPE_LABEL: &str = "file_type";
 /// Region worker id label.
 pub const WORKER_LABEL: &str = "worker";
+/// Region id label.
+pub const REGION_LABEL: &str = "region";
+/// Region role label.
+pub const ROLE_LABEL: &str = "role";
 /// Partition label.
 pub const PARTITION_LABEL: &str = "partition";
 /// Staging dir type label.
@@ -51,6 +55,13 @@ lazy_static! {
             "mito region count in each worker",
             &[WORKER_LABEL],
         ).unwrap();
+    /// Gauge for region committed sequence by role.
+    pub static ref REGION_SEQUENCE: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_region_sequence",
+        "mito region committed sequence by role",
+        &[REGION_LABEL, ROLE_LABEL],
+    )
+    .unwrap();
     /// Elapsed time to handle requests.
     pub static ref HANDLE_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_handle_request_elapsed",

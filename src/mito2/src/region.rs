@@ -52,6 +52,7 @@ use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
+use crate::metrics::REGION_SEQUENCE;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::sst::file::FileMeta;
@@ -190,6 +191,45 @@ impl StagingPartitionInfo {
 }
 
 impl MitoRegion {
+    /// Observes the region sequence for leader/follower sync.
+    pub(crate) fn observe_committed_sequence(&self) {
+        let committed_sequence = self.version_control.current().committed_sequence;
+        if let Ok(sequence) = i64::try_from(committed_sequence) {
+            let region_id = self.region_id.to_string();
+            let role_label = Self::role_state_label(self.state());
+            REGION_SEQUENCE
+                .with_label_values(&[&region_id, role_label])
+                .set(sequence);
+        } else {
+            warn!(
+                "Region ({}) sequence overflows, skip reporting to metrics",
+                self.region_id
+            );
+        }
+    }
+
+    fn role_state_label(state: RegionRoleState) -> &'static str {
+        match state {
+            RegionRoleState::Leader(_) => "leader",
+            RegionRoleState::Follower => "follower",
+        }
+    }
+
+    /// Removes committed_sequence metrics in given role
+    fn remove_committed_sequence_metrics_for_role(&self, role: RegionRoleState) {
+        let region_id = self.region_id.to_string();
+        let role_label = Self::role_state_label(role);
+        let _ = REGION_SEQUENCE.remove_label_values(&[&region_id, role_label]);
+    }
+
+    /// Removes the committed_sequence metrics of all roles
+    pub(crate) fn remove_committed_sequence_metrics(&self) {
+        let region_id = self.region_id.to_string();
+        for role in ["leader", "follower"] {
+            let _ = REGION_SEQUENCE.remove_label_values(&[&region_id, role]);
+        }
+    }
+
     /// Stop background managers for this region.
     pub(crate) async fn stop(&self) {
         self.manifest_ctx
@@ -554,6 +594,13 @@ impl MitoRegion {
         }
 
         drop(manager);
+
+        let new_state = self.state();
+        if current_state != new_state {
+            // Role changed, remove previous role metrics.
+            self.remove_committed_sequence_metrics_for_role(current_state);
+        }
+        self.observe_committed_sequence();
 
         Ok(())
     }
@@ -1598,7 +1645,7 @@ mod tests {
     use object_store::ObjectStore;
     use object_store::services::Fs;
     use store_api::logstore::provider::Provider;
-    use store_api::region_engine::RegionRole;
+    use store_api::region_engine::{RegionRole, SettableRegionRoleState};
     use store_api::region_request::PathType;
     use store_api::storage::{FileId, RegionId};
 
@@ -1608,6 +1655,7 @@ mod tests {
         RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange,
     };
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+    use crate::metrics::REGION_SEQUENCE;
     use crate::region::{
         ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
     };
@@ -1713,6 +1761,78 @@ mod tests {
                 .await
                 .files
                 .contains_key(&file_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_observe_sync_status_metrics() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let region_id = region.region_id.to_string();
+        let has_sequence_metric = |role: &str, value: f64| {
+            prometheus::gather().iter().any(|metric_family| {
+                metric_family.name() == "greptime_mito_region_sequence"
+                    && metric_family.get_metric().iter().any(|metric| {
+                        metric.gauge.value() == value
+                            && metric
+                                .label
+                                .iter()
+                                .any(|label| label.name() == "region" && label.value() == region_id)
+                            && metric
+                                .label
+                                .iter()
+                                .any(|label| label.name() == "role" && label.value() == role)
+                    })
+            })
+        };
+
+        region.version_control.apply_edit(
+            Some(RegionEdit {
+                flushed_entry_id: Some(7),
+                flushed_sequence: Some(42),
+                committed_sequence: Some(42),
+                ..empty_edit()
+            }),
+            &[],
+            region.file_purger.clone(),
+        );
+        region.observe_committed_sequence();
+
+        assert_eq!(
+            42,
+            REGION_SEQUENCE
+                .with_label_values(&[&region_id, "leader"])
+                .get()
+        );
+        assert!(has_sequence_metric("leader", 42.0));
+        assert!(!has_sequence_metric("follower", 0.0));
+
+        REGION_SEQUENCE
+            .with_label_values(&[&region_id, "follower"])
+            .set(24);
+        region.observe_committed_sequence();
+        assert!(has_sequence_metric("follower", 24.0));
+
+        region
+            .set_role_state_gracefully(SettableRegionRoleState::Follower)
+            .await
+            .unwrap();
+        region.observe_committed_sequence();
+
+        assert_eq!(
+            42,
+            REGION_SEQUENCE
+                .with_label_values(&[&region_id, "follower"])
+                .get()
+        );
+        assert!(has_sequence_metric("follower", 42.0));
+        assert!(!has_sequence_metric("leader", 0.0));
+
+        assert!(
+            !prometheus::gather()
+                .iter()
+                .any(|metric_family| metric_family.name()
+                    == "greptime_mito_region_last_flushed_entry_id")
         );
     }
 

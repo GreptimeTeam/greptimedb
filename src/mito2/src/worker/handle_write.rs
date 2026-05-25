@@ -161,6 +161,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         WRITE_ROWS_TOTAL
             .with_label_values(&["delete"])
             .inc_by(delete_rows as u64);
+        self.observe_region_sync_status_metrics();
     }
 
     /// Handles all stalled write requests.

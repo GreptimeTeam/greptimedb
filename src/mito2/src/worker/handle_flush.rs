@@ -273,6 +273,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         region.update_flush_millis();
+        region.observe_committed_sequence();
 
         // Delete wal.
         info!(

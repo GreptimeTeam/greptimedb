@@ -80,6 +80,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
 
         self.region_count.inc();
+        region.observe_committed_sequence();
 
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(region);

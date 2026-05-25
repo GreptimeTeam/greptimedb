@@ -88,6 +88,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                             error!(err; "Failed to set region {region_id} to leader");
                         }
                     }
+                    region.observe_committed_sequence();
                     catchup_regions.remove_region(region_id);
                     sender.send(Ok(0));
                 }
@@ -130,6 +131,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .open(&self.config, &self.wal)
         .await?;
         debug_assert!(!reopened_region.is_writable());
+        reopened_region.observe_committed_sequence();
         self.regions.insert_region(reopened_region.clone());
 
         Ok(reopened_region)

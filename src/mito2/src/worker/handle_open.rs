@@ -139,6 +139,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         now.elapsed()
                     );
                     region_count.inc();
+                    region.observe_committed_sequence();
 
                     // Insert the Region into the RegionMap.
                     regions.insert_region(region);

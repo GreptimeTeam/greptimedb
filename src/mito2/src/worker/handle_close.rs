@@ -79,6 +79,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.compaction_scheduler.on_region_closed(region_id);
         // clean index build status.
         self.index_build_scheduler.on_region_closed(region_id).await;
+        region.remove_committed_sequence_metrics();
         self.region_count.dec();
     }
 }

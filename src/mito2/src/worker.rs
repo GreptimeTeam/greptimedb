@@ -1214,6 +1214,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if let Err(e) = self.flush_periodically() {
             error!(e; "Failed to flush regions periodically");
         }
+        self.observe_region_sync_status_metrics();
+    }
+
+    fn observe_region_sync_status_metrics(&self) {
+        for region in self.regions.list_regions() {
+            region.observe_committed_sequence();
+        }
     }
 
     /// Handles region background request
