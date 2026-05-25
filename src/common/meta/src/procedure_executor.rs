@@ -26,7 +26,8 @@ use crate::error::{
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{
     self, GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
-    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    MigrateFlowRequest, MigrateFlowResponse, MigrateRegionRequest, MigrateRegionResponse,
+    ProcedureStateResponse,
 };
 
 /// The context of procedure executor.
@@ -63,6 +64,18 @@ pub trait ProcedureExecutor: Send + Sync {
         ctx: &ExecutorContext,
         request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse>;
+
+    /// Submit a flow migration task.
+    async fn migrate_flow(
+        &self,
+        _ctx: &ExecutorContext,
+        _request: MigrateFlowRequest,
+    ) -> Result<MigrateFlowResponse> {
+        UnsupportedSnafu {
+            operation: "migrate_flow",
+        }
+        .fail()
+    }
 
     /// Submit a reconcile task.
     async fn reconcile(

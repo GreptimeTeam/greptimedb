@@ -20,8 +20,8 @@ use catalog::CatalogManagerRef;
 use common_base::AffectedRows;
 use common_meta::rpc::procedure::{
     GcRegionsRequest as MetaGcRegionsRequest, GcResponse as MetaGcResponse,
-    GcTableRequest as MetaGcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest,
-    ProcedureStateResponse,
+    GcTableRequest as MetaGcTableRequest, ManageRegionFollowerRequest, MigrateFlowRequest,
+    MigrateRegionRequest, ProcedureStateResponse,
 };
 use common_query::Output;
 use common_query::error::Result;
@@ -75,6 +75,9 @@ pub trait TableMutationHandler: Send + Sync {
 pub trait ProcedureServiceHandler: Send + Sync {
     /// Migrate a region from source peer to target peer, returns the procedure id if success.
     async fn migrate_region(&self, request: MigrateRegionRequest) -> Result<Option<String>>;
+
+    /// Migrate a flow partition from source flownode to target flownode.
+    async fn migrate_flow(&self, request: MigrateFlowRequest) -> Result<Option<String>>;
 
     /// Reconcile a table, database or catalog, returns the procedure id if success.
     async fn reconcile(&self, request: ReconcileRequest) -> Result<Option<String>>;

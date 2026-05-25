@@ -49,8 +49,9 @@ use common_meta::rpc::KeyValue;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
     AddRegionFollowerRequest, AddTableFollowerRequest, GcRegionsRequest, GcResponse,
-    GcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureStateResponse, RemoveRegionFollowerRequest, RemoveTableFollowerRequest,
+    GcTableRequest, ManageRegionFollowerRequest, MigrateFlowRequest, MigrateFlowResponse,
+    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    RemoveRegionFollowerRequest, RemoveTableFollowerRequest,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -90,6 +91,7 @@ pub struct MetaClientBuilder {
     enable_procedure: bool,
     enable_access_cluster_info: bool,
     region_follower: Option<RegionFollowerClientRef>,
+    flow_migration: Option<FlowMigrationClientRef>,
     channel_manager: Option<ChannelManager>,
     ddl_channel_manager: Option<ChannelManager>,
     /// The default ddl timeout for each request.
@@ -195,6 +197,13 @@ impl MetaClientBuilder {
         }
     }
 
+    pub fn with_flow_migration(self, flow_migration: FlowMigrationClientRef) -> Self {
+        Self {
+            flow_migration: Some(flow_migration),
+            ..self
+        }
+    }
+
     pub fn build(self) -> MetaClient {
         let mgr = self.channel_manager.unwrap_or_default();
         let heartbeat_channel_manager = self
@@ -229,6 +238,7 @@ impl MetaClientBuilder {
             .enable_access_cluster_info
             .then(|| ClusterClient::new(mgr.clone(), DEFAULT_CLUSTER_CLIENT_MAX_RETRY));
         let region_follower = self.region_follower.clone();
+        let flow_migration = self.flow_migration.clone();
 
         MetaClient {
             id: self.id,
@@ -245,6 +255,7 @@ impl MetaClientBuilder {
             procedure,
             cluster,
             region_follower,
+            flow_migration,
         }
     }
 }
@@ -260,6 +271,7 @@ pub struct MetaClient {
     procedure: Option<ProcedureClient>,
     cluster: Option<ClusterClient>,
     region_follower: Option<RegionFollowerClientRef>,
+    flow_migration: Option<FlowMigrationClientRef>,
 }
 
 impl MetaClient {
@@ -279,6 +291,7 @@ impl MetaClient {
             procedure: None,
             cluster: None,
             region_follower: None,
+            flow_migration: None,
         }
     }
 }
@@ -295,6 +308,18 @@ pub trait RegionFollowerClient: Sync + Send + Debug {
     async fn add_table_follower(&self, request: AddTableFollowerRequest) -> Result<()>;
 
     async fn remove_table_follower(&self, request: RemoveTableFollowerRequest) -> Result<()>;
+
+    async fn start(&self, urls: &[&str]) -> Result<()>;
+
+    async fn start_with(&self, leader_provider: LeaderProviderRef) -> Result<()>;
+}
+
+pub type FlowMigrationClientRef = Arc<dyn FlowMigrationClient>;
+
+/// A trait for clients that can migrate flow partitions.
+#[async_trait::async_trait]
+pub trait FlowMigrationClient: Sync + Send + Debug {
+    async fn migrate_flow(&self, request: MigrateFlowRequest) -> Result<MigrateFlowResponse>;
 
     async fn start(&self, urls: &[&str]) -> Result<()>;
 
@@ -371,6 +396,25 @@ impl ProcedureExecutor for MetaClient {
         } else {
             UnsupportedSnafu {
                 operation: "manage_region_follower",
+            }
+            .fail()
+        }
+    }
+
+    async fn migrate_flow(
+        &self,
+        _ctx: &ExecutorContext,
+        request: MigrateFlowRequest,
+    ) -> MetaResult<MigrateFlowResponse> {
+        if let Some(flow_migration) = &self.flow_migration {
+            flow_migration
+                .migrate_flow(request)
+                .await
+                .map_err(BoxedError::new)
+                .context(meta_error::ExternalSnafu)
+        } else {
+            UnsupportedSnafu {
+                operation: "migrate_flow",
             }
             .fail()
         }
@@ -585,6 +629,11 @@ impl MetaClient {
     {
         if let Some(client) = &self.region_follower {
             info!("Starting region follower client ...");
+            client.start_with(leader_provider.clone()).await?;
+        }
+
+        if let Some(client) = &self.flow_migration {
+            info!("Starting flow migration client ...");
             client.start_with(leader_provider.clone()).await?;
         }
 
@@ -804,9 +853,12 @@ impl MetaClient {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use api::v1::meta::{HeartbeatRequest, Peer};
+    use common_meta::error as meta_error;
     use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+    use common_meta::rpc::procedure::pb_pid_to_pid;
     use rand::Rng;
 
     use super::*;
@@ -814,6 +866,41 @@ mod tests {
     use crate::mocks::{self, MockMetaContext};
 
     const TEST_KEY_PREFIX: &str = "__unit_test__meta__";
+
+    #[derive(Debug)]
+    struct MockFlowMigrationClient {
+        calls: Arc<AtomicUsize>,
+        last_request: Arc<Mutex<Option<MigrateFlowRequest>>>,
+        response: MigrateFlowResponse,
+    }
+
+    #[async_trait::async_trait]
+    impl FlowMigrationClient for MockFlowMigrationClient {
+        async fn migrate_flow(&self, request: MigrateFlowRequest) -> Result<MigrateFlowResponse> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            *self.last_request.lock().unwrap() = Some(request);
+            Ok(self.response.clone())
+        }
+
+        async fn start(&self, _urls: &[&str]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn start_with(&self, _leader_provider: LeaderProviderRef) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn mock_migrate_flow_request() -> MigrateFlowRequest {
+        MigrateFlowRequest {
+            catalog: "greptime".to_string(),
+            flow_id: 1,
+            partition_id: 0,
+            from_flownode: 1,
+            to_flownode: 2,
+            timeout: Duration::from_secs(300),
+        }
+    }
 
     struct TestClient {
         ns: String,
@@ -902,6 +989,61 @@ mod tests {
         let _ = meta_client.heartbeat_client().unwrap();
         let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_migrate_flow_returns_unsupported_without_flow_client() {
+        let meta_client = MetaClientBuilder::frontend_default_options().build();
+
+        let err = ProcedureExecutor::migrate_flow(
+            &meta_client,
+            &ExecutorContext::default(),
+            mock_migrate_flow_request(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            meta_error::Error::Unsupported { operation, .. } if operation == "migrate_flow"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_migrate_flow_forwards_to_flow_client() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let last_request = Arc::new(Mutex::new(None));
+        let pid = pb_pid_to_pid(&api::v1::meta::ProcedureId {
+            key: b"00000000-0000-0000-0000-000000000001".to_vec(),
+        })
+        .unwrap();
+        let flow_migration: FlowMigrationClientRef = Arc::new(MockFlowMigrationClient {
+            calls: calls.clone(),
+            last_request: last_request.clone(),
+            response: MigrateFlowResponse { pid: Some(pid) },
+        });
+        let meta_client = MetaClientBuilder::frontend_default_options()
+            .with_flow_migration(flow_migration)
+            .build();
+        let request = mock_migrate_flow_request();
+
+        let response = ProcedureExecutor::migrate_flow(
+            &meta_client,
+            &ExecutorContext::default(),
+            request.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(Some(pid), response.pid);
+        assert_eq!(1, calls.load(Ordering::Relaxed));
+        let forwarded_request = last_request.lock().unwrap().clone().unwrap();
+        assert_eq!(request.catalog, forwarded_request.catalog);
+        assert_eq!(request.flow_id, forwarded_request.flow_id);
+        assert_eq!(request.partition_id, forwarded_request.partition_id);
+        assert_eq!(request.from_flownode, forwarded_request.from_flownode);
+        assert_eq!(request.to_flownode, forwarded_request.to_flownode);
+        assert_eq!(request.timeout, forwarded_request.timeout);
     }
 
     #[tokio::test]

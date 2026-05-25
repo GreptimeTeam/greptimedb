@@ -25,7 +25,9 @@ use common_procedure::{ProcedureId, ProcedureInfo, ProcedureState};
 use snafu::ResultExt;
 use table::metadata::TableId;
 
+use crate::FlownodeId;
 use crate::error::{ParseProcedureIdSnafu, Result};
+use crate::key::{FlowId, FlowPartitionId};
 
 /// A request to migrate region.
 #[derive(Clone)]
@@ -34,6 +36,23 @@ pub struct MigrateRegionRequest {
     pub from_peer: u64,
     pub to_peer: u64,
     pub timeout: Duration,
+}
+
+/// A request to migrate a flow partition from one flownode to another.
+#[derive(Debug, Clone)]
+pub struct MigrateFlowRequest {
+    pub catalog: String,
+    pub flow_id: FlowId,
+    pub partition_id: FlowPartitionId,
+    pub from_flownode: FlownodeId,
+    pub to_flownode: FlownodeId,
+    pub timeout: Duration,
+}
+
+/// A response for flow migration procedure submission.
+#[derive(Debug, Clone, Default)]
+pub struct MigrateFlowResponse {
+    pub pid: Option<ProcedureId>,
 }
 
 /// A request to add region follower.

@@ -20,8 +20,8 @@ use common_function::handlers::ProcedureServiceHandler;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutorRef};
 use common_meta::rpc::procedure::{
     GcRegionsRequest as MetaGcRegionsRequest, GcResponse as MetaGcResponse,
-    GcTableRequest as MetaGcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest,
-    ProcedureStateResponse,
+    GcTableRequest as MetaGcTableRequest, ManageRegionFollowerRequest, MigrateFlowRequest,
+    MigrateRegionRequest, ProcedureStateResponse,
 };
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
@@ -57,6 +57,17 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
             .context(query_error::ProcedureServiceSnafu)?
             .pid
             .map(|pid| String::from_utf8_lossy(&pid.key).to_string()))
+    }
+
+    async fn migrate_flow(&self, request: MigrateFlowRequest) -> QueryResult<Option<String>> {
+        Ok(self
+            .procedure_executor
+            .migrate_flow(&ExecutorContext::default(), request)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::ProcedureServiceSnafu)?
+            .pid
+            .map(|pid| pid.to_string()))
     }
 
     async fn reconcile(&self, request: ReconcileRequest) -> QueryResult<Option<String>> {

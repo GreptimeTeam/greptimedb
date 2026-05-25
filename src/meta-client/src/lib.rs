@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use client::RegionFollowerClientRef;
+use client::{FlowMigrationClientRef, RegionFollowerClientRef};
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::distributed_time_constants::{
@@ -116,6 +116,12 @@ pub async fn create_meta_client(
             if let Some(region_follower) = region_follower {
                 debug!("Region follower client found in plugins");
                 builder = builder.with_region_follower(region_follower);
+            }
+
+            let flow_migration = plugins.get::<FlowMigrationClientRef>();
+            if let Some(flow_migration) = flow_migration {
+                debug!("Flow migration client found in plugins");
+                builder = builder.with_flow_migration(flow_migration);
             }
         }
     }

@@ -38,7 +38,7 @@ impl FunctionState {
         use common_base::AffectedRows;
         use common_meta::rpc::procedure::{
             GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
-            MigrateRegionRequest, ProcedureStateResponse,
+            MigrateFlowRequest, MigrateRegionRequest, ProcedureStateResponse,
         };
         use common_query::Output;
         use common_query::error::Result;
@@ -61,6 +61,10 @@ impl FunctionState {
                 &self,
                 _request: MigrateRegionRequest,
             ) -> Result<Option<String>> {
+                Ok(Some("test_pid".to_string()))
+            }
+
+            async fn migrate_flow(&self, _request: MigrateFlowRequest) -> Result<Option<String>> {
                 Ok(Some("test_pid".to_string()))
             }
 

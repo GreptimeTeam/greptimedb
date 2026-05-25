@@ -236,4 +236,13 @@ mod tests {
         let _ = registry.get_function("test_and").unwrap();
         assert_eq!(1, registry.scalar_functions().len());
     }
+
+    #[test]
+    fn test_admin_registers_migrate_flow() {
+        let registry = FunctionRegistry::default();
+
+        AdminFunction::register(&registry);
+
+        assert!(registry.get_function("migrate_flow").is_some());
+    }
 }
