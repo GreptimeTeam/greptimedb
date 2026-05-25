@@ -18,7 +18,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::CreateTableExpr;
 use catalog::CatalogManagerRef;
-use client::OutputWithMetrics;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::breakup_insert_plan;
 use common_telemetry::tracing::warn;
@@ -31,7 +30,6 @@ use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp};
 use datatypes::schema::Schema;
 use query::QueryEngineRef;
-use query::options::FLOW_SINK_TABLE_ID;
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
@@ -44,9 +42,8 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
-use crate::batching_mode::checkpoint::{FlowCheckpointDecision, FlowQueryFallbackReason};
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::{CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState};
+use crate::batching_mode::state::{DirtyTimeWindows, FilterExprInfo, TaskState};
 use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
@@ -59,13 +56,7 @@ use crate::error::{
     UnexpectedSnafu,
 };
 use crate::metrics::{
-    FLOW_CHECKPOINT_DECISION_ADVANCE_LABEL, FLOW_CHECKPOINT_DECISION_FALLBACK_LABEL,
-    FLOW_CHECKPOINT_MODE_FULL_SNAPSHOT_LABEL, FLOW_CHECKPOINT_MODE_INCREMENTAL_LABEL,
-    FLOW_CHECKPOINT_REASON_INCOMPLETE_WATERMARK_LABEL,
-    FLOW_CHECKPOINT_REASON_MISSING_WATERMARK_LABEL, FLOW_CHECKPOINT_REASON_NONE_LABEL,
-    FLOW_CHECKPOINT_REASON_QUERY_FAILURE_LABEL,
-    METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT, METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT,
-    METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
+    METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
     METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY, METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT,
     METRIC_FLOW_ROWS,
 };
@@ -256,7 +247,7 @@ impl BatchingTask {
             {
                 Ok(result) => Ok(result),
                 Err(err) => {
-                    self.handle_executed_query_failure(&err, Some(&new_query));
+                    self.handle_executed_query_failure(Some(&new_query));
                     Err(err)
                 }
             }
@@ -404,18 +395,7 @@ impl BatchingTask {
             })?
             .data;
 
-        let extensions = self.build_flow_query_extensions().await?;
-        let extension_refs = extensions
-            .iter()
-            .map(|(key, value)| (*key, value.as_str()))
-            .collect::<Vec<_>>();
-        let query_mode = self.state.read().unwrap().checkpoint_mode();
-        Self::record_query_mode(flow_id, query_mode);
-        debug!(
-            "Flow {flow_id} executing batching query with checkpoint_mode={}, extension_count={}",
-            checkpoint_mode_label(query_mode),
-            extensions.len()
-        );
+        let mut peer_desc = None;
 
         let res = {
             let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
@@ -428,229 +408,66 @@ impl BatchingTask {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&insert_plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
-                api::v1::QueryRequest {
+                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::InsertIntoPlan(
                         api::v1::InsertIntoPlan {
                             table_name: Some(insert_to),
                             logical_plan: message.to_vec(),
                         },
                     )),
-                }
+                })
             } else {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
 
-                api::v1::QueryRequest {
+                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
-                }
+                })
             };
 
             frontend_client
-                .query_with_terminal_metrics(catalog, schema, req, &extension_refs)
+                .handle(req, catalog, schema, &mut peer_desc)
                 .await
         };
 
         let elapsed = instant.elapsed();
-        if let Err(err) = &res {
-            warn!(
-                "Failed to execute Flow {flow_id}, result: {err:?}, elapsed: {:?} with query: {}",
-                elapsed, &plan
+        if let Ok(affected_rows) = &res {
+            debug!(
+                "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}",
+                elapsed
             );
-            self.state.write().unwrap().after_query_exec(elapsed, false);
+            METRIC_FLOW_ROWS
+                .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
+                .inc_by(*affected_rows as _);
+        } else if let Err(err) = &res {
+            warn!(
+                "Failed to execute Flow {flow_id} on frontend {:?}, result: {err:?}, elapsed: {:?} with query: {}",
+                peer_desc, elapsed, &plan
+            );
         }
 
         // record slow query
         if elapsed >= self.config.batch_opts.slow_query_threshold {
             warn!(
-                "Flow {flow_id} executed for {:?} before complete, query: {}",
-                elapsed, &plan
+                "Flow {flow_id} on frontend {:?} executed for {:?} before complete, query: {}",
+                peer_desc, elapsed, &plan
             );
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
-                .with_label_values(&[flow_id.to_string().as_str(), "watermark-path"])
+                .with_label_values(&[
+                    flow_id.to_string().as_str(),
+                    &peer_desc.unwrap_or_default().to_string(),
+                ])
                 .observe(elapsed.as_secs_f64());
         }
 
+        self.state
+            .write()
+            .unwrap()
+            .after_query_exec(elapsed, res.is_ok());
+
         let res = res?;
-        let (affected_rows, _) = res.output.extract_rows_and_cost();
-        debug!(
-            "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
-            elapsed,
-            res.region_watermark_map()
-        );
-        METRIC_FLOW_ROWS
-            .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
-            .inc_by(affected_rows as _);
-
-        {
-            let mut state = self.state.write().unwrap();
-            let decision = Self::apply_query_result_to_state(&mut state, &res, elapsed);
-            Self::record_checkpoint_decision(flow_id, decision);
-        }
-
-        Ok(Some((affected_rows, elapsed)))
-    }
-
-    fn apply_query_result_to_state(
-        state: &mut TaskState,
-        res: &OutputWithMetrics,
-        elapsed: Duration,
-    ) -> FlowCheckpointDecision {
-        state.after_query_exec(elapsed, true);
-        let checkpoint_mode = state.checkpoint_mode();
-
-        if let (Some(participating_regions), Some(watermark_map)) =
-            (res.participating_regions(), res.region_watermark_map())
-        {
-            let can_advance = match checkpoint_mode {
-                CheckpointMode::FullSnapshot => state
-                    .can_advance_full_snapshot_checkpoints(&participating_regions, &watermark_map),
-                CheckpointMode::Incremental => state
-                    .can_advance_incremental_checkpoints_with_participation(
-                        &participating_regions,
-                        &watermark_map,
-                    ),
-            };
-
-            if can_advance {
-                let participating_region_count = participating_regions.len();
-                let watermark_count = watermark_map.len();
-                match checkpoint_mode {
-                    CheckpointMode::FullSnapshot => {
-                        state.advance_checkpoints(watermark_map);
-                        FlowCheckpointDecision::AdvancedFromFullSnapshot {
-                            participating_region_count,
-                            watermark_count,
-                        }
-                    }
-                    CheckpointMode::Incremental => {
-                        state.advance_incremental_checkpoints_with_participation(
-                            &participating_regions,
-                            watermark_map,
-                        );
-                        FlowCheckpointDecision::AdvancedIncremental {
-                            participating_region_count,
-                            watermark_count,
-                        }
-                    }
-                }
-            } else {
-                state.mark_full_snapshot();
-                FlowCheckpointDecision::FallbackToFullSnapshot {
-                    previous_mode: checkpoint_mode,
-                    reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
-                }
-            }
-        } else {
-            state.mark_full_snapshot();
-            FlowCheckpointDecision::FallbackToFullSnapshot {
-                previous_mode: checkpoint_mode,
-                reason: FlowQueryFallbackReason::MissingRegionWatermark,
-            }
-        }
-    }
-
-    fn record_checkpoint_decision(flow_id: FlowId, decision: FlowCheckpointDecision) {
-        let flow_id = flow_id.to_string();
-        let labels = checkpoint_decision_metric_labels(decision);
-        METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT
-            .with_label_values(&[
-                flow_id.as_str(),
-                labels.mode,
-                labels.decision,
-                labels.reason,
-            ])
-            .inc();
-
-        match decision {
-            FlowCheckpointDecision::AdvancedFromFullSnapshot {
-                participating_region_count,
-                watermark_count,
-            } => {
-                info!(
-                    "Flow {flow_id} is now checkpoint-ready after full snapshot, participating_region_count={participating_region_count}, watermark_count={watermark_count}"
-                );
-            }
-            FlowCheckpointDecision::AdvancedIncremental {
-                participating_region_count,
-                watermark_count,
-            } => {
-                debug!(
-                    "Flow {flow_id} advanced checkpoint-readiness, participating_region_count={participating_region_count}, watermark_count={watermark_count}"
-                );
-            }
-            FlowCheckpointDecision::FallbackToFullSnapshot {
-                previous_mode,
-                reason,
-            } => {
-                warn!(
-                    "Flow {flow_id} switched to full snapshot mode, previous_mode={}, reason={}",
-                    checkpoint_mode_label(previous_mode),
-                    checkpoint_fallback_reason_metric_label(reason)
-                );
-            }
-        }
-    }
-
-    fn record_query_mode(flow_id: FlowId, mode: CheckpointMode) {
-        let flow_id = flow_id.to_string();
-        METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT
-            .with_label_values(&[flow_id.as_str(), checkpoint_mode_label(mode)])
-            .inc();
-    }
-
-    fn record_failure_fallback(
-        &self,
-        previous_mode: CheckpointMode,
-        reason: FlowQueryFallbackReason,
-    ) {
-        Self::record_checkpoint_decision(
-            self.config.flow_id,
-            FlowCheckpointDecision::FallbackToFullSnapshot {
-                previous_mode,
-                reason,
-            },
-        );
-    }
-
-    /// Handle a query failure. Returns true if the task was in
-    /// checkpoint-ready (`Incremental`) mode before the failure and therefore
-    /// fell back to full-snapshot mode.
-    ///
-    /// Current failure semantics:
-    /// - If the task was checkpoint-ready, fall back to full snapshot and
-    ///   record the fallback decision. Dirty windows consumed by a planned
-    ///   query are restored by `restore_dirty_windows_after_failure`.
-    /// - If the task was already in full-snapshot mode, the failure
-    ///   does not require additional state change.
-    fn handle_flow_query_failure(&self, _err: &Error, query: Option<&PlanInfo>) -> bool {
-        let previous_mode = { self.state.read().unwrap().checkpoint_mode() };
-        let checkpoint_was_ready = previous_mode == CheckpointMode::Incremental;
-        if checkpoint_was_ready {
-            warn!(
-                "Flow {} query failed while checkpoint-ready, falling back to full snapshot",
-                self.config.flow_id
-            );
-            self.state.write().unwrap().mark_full_snapshot();
-            self.record_failure_fallback(
-                previous_mode,
-                FlowQueryFallbackReason::CheckpointReadyQueryFailure,
-            );
-
-            // If no plan info is available, there is no consumed dirty
-            // snapshot to restore. Conservatively mark the full dirty range
-            // so the next execution can rebuild from full-snapshot mode.
-            if query.is_none()
-                && let Err(mark_err) = self.mark_all_windows_as_dirty()
-            {
-                warn!(
-                    "Flow {} failed to mark all windows dirty after checkpoint-ready query failure without plan info: {}",
-                    self.config.flow_id, mark_err
-                );
-            }
-        }
-
-        checkpoint_was_ready
+        Ok(Some((res as usize, elapsed)))
     }
 
     /// Restore dirty windows consumed by a failed query so they are retried on
@@ -691,37 +508,10 @@ impl BatchingTask {
         })
     }
 
-    fn handle_executed_query_failure(&self, err: &Error, query: Option<&PlanInfo>) -> bool {
-        let checkpoint_was_ready = self.handle_flow_query_failure(err, query);
+    fn handle_executed_query_failure(&self, query: Option<&PlanInfo>) {
         if let Some(query) = query {
             self.restore_dirty_windows_after_failure(query);
         }
-        checkpoint_was_ready
-    }
-
-    async fn build_flow_query_extensions(&self) -> Result<Vec<(&'static str, String)>, Error> {
-        let mut extensions = vec![("flow.return_region_seq", "true".to_string())];
-
-        if let Some(table) = self
-            .config
-            .catalog_manager
-            .table(
-                &self.config.sink_table_name[0],
-                &self.config.sink_table_name[1],
-                &self.config.sink_table_name[2],
-                None,
-            )
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?
-        {
-            extensions.push((
-                FLOW_SINK_TABLE_ID,
-                table.table_info().table_id().to_string(),
-            ));
-        }
-
-        Ok(extensions)
     }
 
     /// start executing query in a loop, break when receive shutdown signal
@@ -827,7 +617,7 @@ impl BatchingTask {
                 }
                 // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
                 Err(err) => {
-                    self.handle_executed_query_failure(&err, new_query.as_ref());
+                    self.handle_executed_query_failure(new_query.as_ref());
                     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT
                         .with_label_values(&[&flow_id_str])
                         .inc();
@@ -1076,58 +866,6 @@ impl BatchingTask {
         };
 
         Ok(Some(info))
-    }
-}
-
-struct CheckpointDecisionMetricLabels {
-    mode: &'static str,
-    decision: &'static str,
-    reason: &'static str,
-}
-
-fn checkpoint_decision_metric_labels(
-    decision: FlowCheckpointDecision,
-) -> CheckpointDecisionMetricLabels {
-    match decision {
-        FlowCheckpointDecision::AdvancedFromFullSnapshot { .. } => CheckpointDecisionMetricLabels {
-            mode: checkpoint_mode_label(CheckpointMode::FullSnapshot),
-            decision: FLOW_CHECKPOINT_DECISION_ADVANCE_LABEL,
-            reason: FLOW_CHECKPOINT_REASON_NONE_LABEL,
-        },
-        FlowCheckpointDecision::AdvancedIncremental { .. } => CheckpointDecisionMetricLabels {
-            mode: checkpoint_mode_label(CheckpointMode::Incremental),
-            decision: FLOW_CHECKPOINT_DECISION_ADVANCE_LABEL,
-            reason: FLOW_CHECKPOINT_REASON_NONE_LABEL,
-        },
-        FlowCheckpointDecision::FallbackToFullSnapshot {
-            previous_mode,
-            reason,
-        } => CheckpointDecisionMetricLabels {
-            mode: checkpoint_mode_label(previous_mode),
-            decision: FLOW_CHECKPOINT_DECISION_FALLBACK_LABEL,
-            reason: checkpoint_fallback_reason_metric_label(reason),
-        },
-    }
-}
-
-fn checkpoint_fallback_reason_metric_label(reason: FlowQueryFallbackReason) -> &'static str {
-    match reason {
-        FlowQueryFallbackReason::MissingRegionWatermark => {
-            FLOW_CHECKPOINT_REASON_MISSING_WATERMARK_LABEL
-        }
-        FlowQueryFallbackReason::IncompleteRegionWatermark => {
-            FLOW_CHECKPOINT_REASON_INCOMPLETE_WATERMARK_LABEL
-        }
-        FlowQueryFallbackReason::CheckpointReadyQueryFailure => {
-            FLOW_CHECKPOINT_REASON_QUERY_FAILURE_LABEL
-        }
-    }
-}
-
-fn checkpoint_mode_label(mode: CheckpointMode) -> &'static str {
-    match mode {
-        CheckpointMode::FullSnapshot => FLOW_CHECKPOINT_MODE_FULL_SNAPSHOT_LABEL,
-        CheckpointMode::Incremental => FLOW_CHECKPOINT_MODE_INCREMENTAL_LABEL,
     }
 }
 

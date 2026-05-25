@@ -12,59 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::batching_mode::state::CheckpointMode;
-
-/// Why the task fell back to full snapshot mode.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FlowQueryFallbackReason {
-    /// The query result did not include a region-watermark map at all.
-    MissingRegionWatermark,
-    /// Some participating regions could not prove safe advancement against
-    /// both the returned watermarks and the checkpoint map.
-    IncompleteRegionWatermark,
-    /// A query failure while the task was checkpoint-ready; the Flow resets
-    /// to full snapshot to avoid cascading errors.
-    CheckpointReadyQueryFailure,
-}
-
-/// Decision produced by `BatchingTask::apply_query_result_to_state` after
-/// each Flow query execution. Describes whether the task advanced its
-/// checkpoint-readiness state or fell back to full snapshot, and why.
-///
-/// The task tracks checkpoint readiness internally so that subsequent queries
-/// can prove that all participating regions have valid watermarks. This
-/// decision only records readiness/fallback state; it does not by itself imply
-/// that a query emitted incremental scan extensions (`FLOW_INCREMENTAL_MODE` /
-/// `FLOW_INCREMENTAL_AFTER_SEQS`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FlowCheckpointDecision {
-    /// FullSnapshot → Incremental (checkpoint-readiness) transition.
-    ///
-    /// The query exercised every participating region, all returned valid
-    /// watermarks, and the checkpoint map was populated from scratch.
-    /// The task is now checkpoint-ready. These checkpoints can be used by
-    /// incremental scan extension generation when that execution mode is
-    /// enabled.
-    AdvancedFromFullSnapshot {
-        participating_region_count: usize,
-        watermark_count: usize,
-    },
-    /// Existing Incremental (checkpoint-ready) → Incremental (in-place advancement).
-    ///
-    /// A subset of participating regions advanced their watermarks. The
-    /// task stays checkpoint-ready with an updated checkpoint map.
-    AdvancedIncremental {
-        participating_region_count: usize,
-        watermark_count: usize,
-    },
-    /// Any mode → FullSnapshot.
-    ///
-    /// Watermark information was incomplete, a participating region was
-    /// absent from the existing checkpoint map, or the query itself
-    /// failed. The task resets to full snapshot semantics for the next
-    /// execution.
-    FallbackToFullSnapshot {
-        previous_mode: CheckpointMode,
-        reason: FlowQueryFallbackReason,
-    },
+pub(super) enum CheckpointMode {
+    /// Full-snapshot reads over the source tables.
+    FullSnapshot,
+    /// Incremental reads driven by explicitly emitted incremental scan
+    /// extensions.
+    Incremental,
 }
