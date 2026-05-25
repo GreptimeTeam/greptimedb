@@ -167,4 +167,40 @@ mod tests {
         assert!(!new_region_routes[1].is_leader_staging());
         assert!(new_region_routes[1].is_ignore_all_writes());
     }
+
+    #[test]
+    fn test_exit_staging_region_routes_with_reused_default_source_region() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let default_region_id = RegionId::new(table_id, 1);
+        let source_region = SourceRegionDescriptor::Default {
+            region_id: default_region_id,
+        };
+        let target_region = TargetRegionDescriptor {
+            region_id: default_region_id,
+            partition_expr: range_expr("x", 0, 50),
+        };
+        let target_expr = target_region.partition_expr.as_json_str().unwrap();
+        let region_route = RegionRoute {
+            region: Region {
+                id: default_region_id,
+                partition_expr: target_expr.clone(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(1)),
+            leader_state: Some(LeaderState::Staging),
+            ..Default::default()
+        };
+
+        let new_region_routes = UpdateMetadata::exit_staging_region_routes(
+            group_id,
+            &[source_region],
+            &[target_region],
+            &[region_route],
+        )
+        .unwrap();
+
+        assert!(!new_region_routes[0].is_leader_staging());
+        assert_eq!(new_region_routes[0].region.partition_expr, target_expr);
+    }
 }

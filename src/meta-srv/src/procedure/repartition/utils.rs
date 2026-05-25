@@ -153,6 +153,7 @@ pub fn rollback_group_metadata_routes(
             },
         )?;
         region_route.clear_leader_staging();
+        region_route.region.partition_expr = source.route_expr_for_rollback()?;
         if pending_deallocate_region_ids.contains(&region_id) {
             region_route.clear_ignore_all_writes();
         }
@@ -419,6 +420,60 @@ mod tests {
         .unwrap();
 
         assert_eq!(applied_region_routes, original_region_routes);
+    }
+
+    #[test]
+    fn test_rollback_group_metadata_routes_default_source_restores_empty_expr() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let default_region_id = RegionId::new(table_id, 1);
+        let allocated_region_id = RegionId::new(table_id, 2);
+        let source_regions = vec![SourceRegionDescriptor::Default {
+            region_id: default_region_id,
+        }];
+        let target_regions = vec![
+            TargetRegionDescriptor {
+                region_id: default_region_id,
+                partition_expr: range_expr("x", 0, 50),
+            },
+            TargetRegionDescriptor {
+                region_id: allocated_region_id,
+                partition_expr: range_expr("x", 50, 100),
+            },
+        ];
+        let current_region_routes = vec![
+            new_staged_region_route(default_region_id, "", None, false),
+            new_staged_region_route(allocated_region_id, "", None, false),
+        ];
+        let original_target_routes = vec![current_region_routes[0].clone()];
+        let mut applied_region_routes = UpdateMetadata::apply_staging_region_routes(
+            group_id,
+            &source_regions,
+            &target_regions,
+            &[],
+            &current_region_routes,
+        )
+        .unwrap();
+        assert_eq!(
+            applied_region_routes[0].region.partition_expr,
+            range_expr("x", 0, 50).as_json_str().unwrap()
+        );
+
+        rollback_group_metadata_routes(
+            group_id,
+            &source_regions,
+            &original_target_routes,
+            &[allocated_region_id],
+            &[],
+            &mut applied_region_routes
+                .iter_mut()
+                .map(|route| (route.region.id, route))
+                .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(applied_region_routes[0].region.partition_expr, "");
+        assert!(!applied_region_routes[0].is_leader_staging());
     }
 
     #[test]

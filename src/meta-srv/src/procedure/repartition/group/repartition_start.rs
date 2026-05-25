@@ -32,15 +32,15 @@ use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDe
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RepartitionStart;
 
-/// Ensures that the partition expression of the region route matches the partition expression of the region descriptor.
-fn ensure_region_route_expr_match(
+/// Ensures that the partition expression of the source region route matches the source descriptor.
+fn ensure_source_region_route_expr_match(
     region_route: &RegionRoute,
-    region_descriptor: &SourceRegionDescriptor,
+    source: &SourceRegionDescriptor,
 ) -> Result<RegionRoute> {
     let actual = region_route.region.partition_expr();
-    let expected = region_descriptor.route_expr_for_rollback()?;
+    let expected = source.route_expr_for_rollback()?;
     ensure!(
-        actual == expected,
+        source.matches_route_expr(&actual)?,
         error::PartitionExprMismatchSnafu {
             region_id: region_route.region.id,
             expected,
@@ -80,7 +80,7 @@ impl RepartitionStart {
                         group_id,
                         region_id: s.region_id(),
                     })
-                    .and_then(|r| ensure_region_route_expr_match(r, s))
+                    .and_then(|r| ensure_source_region_route_expr_match(r, s))
             })
             .collect::<Result<Vec<_>>>()?;
         let target_region_routes = targets
@@ -266,6 +266,65 @@ mod tests {
             &[target_region],
         )
         .unwrap_err();
+        assert_matches!(err, Error::PartitionExprMismatch { .. });
+    }
+
+    #[test]
+    fn test_ensure_route_present_default_source_matches_empty_partition_expr() {
+        let source_region = SourceRegionDescriptor::Default {
+            region_id: RegionId::new(1024, 1),
+        };
+        let target_region = TargetRegionDescriptor {
+            region_id: RegionId::new(1024, 1),
+            partition_expr: range_expr("x", 0, 10),
+        };
+        let region_routes = vec![RegionRoute {
+            region: Region {
+                id: RegionId::new(1024, 1),
+                partition_expr: String::new(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(1)),
+            ..Default::default()
+        }];
+
+        let result = RepartitionStart::ensure_route_present(
+            Uuid::new_v4(),
+            &region_routes,
+            &[source_region],
+            &[target_region],
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ensure_route_present_default_source_rejects_non_empty_partition_expr() {
+        let source_region = SourceRegionDescriptor::Default {
+            region_id: RegionId::new(1024, 1),
+        };
+        let target_region = TargetRegionDescriptor {
+            region_id: RegionId::new(1024, 1),
+            partition_expr: range_expr("x", 0, 10),
+        };
+        let region_routes = vec![RegionRoute {
+            region: Region {
+                id: RegionId::new(1024, 1),
+                partition_expr: range_expr("x", 0, 100).as_json_str().unwrap(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(1)),
+            ..Default::default()
+        }];
+
+        let err = RepartitionStart::ensure_route_present(
+            Uuid::new_v4(),
+            &region_routes,
+            &[source_region],
+            &[target_region],
+        )
+        .unwrap_err();
+
         assert_matches!(err, Error::PartitionExprMismatch { .. });
     }
 

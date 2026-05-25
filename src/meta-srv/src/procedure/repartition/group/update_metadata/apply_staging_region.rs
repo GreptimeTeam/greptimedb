@@ -198,6 +198,68 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_region_routes_with_reused_default_source_region() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let default_region_id = RegionId::new(table_id, 1);
+        let region_routes = vec![
+            RegionRoute {
+                region: Region {
+                    id: default_region_id,
+                    partition_expr: String::new(),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, 2),
+                    partition_expr: String::new(),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+        ];
+        let source_region = SourceRegionDescriptor::Default {
+            region_id: default_region_id,
+        };
+        let reused_target_expr = range_expr("x", 0, 10);
+        let target_regions = vec![
+            TargetRegionDescriptor {
+                region_id: default_region_id,
+                partition_expr: reused_target_expr.clone(),
+            },
+            TargetRegionDescriptor {
+                region_id: RegionId::new(table_id, 2),
+                partition_expr: range_expr("x", 10, 20),
+            },
+        ];
+
+        let new_region_routes = UpdateMetadata::apply_staging_region_routes(
+            group_id,
+            &[source_region],
+            &target_regions,
+            &[],
+            &region_routes,
+        )
+        .unwrap();
+
+        assert_eq!(
+            new_region_routes[0].region.partition_expr,
+            reused_target_expr.as_json_str().unwrap()
+        );
+        assert!(new_region_routes[0].is_leader_staging());
+        assert!(!new_region_routes[0].is_ignore_all_writes());
+        assert_eq!(
+            new_region_routes[1].region.partition_expr,
+            range_expr("x", 10, 20).as_json_str().unwrap()
+        );
+        assert!(new_region_routes[1].is_leader_staging());
+    }
+
+    #[test]
     fn test_generate_region_routes_mark_pending_deallocate_reject_all_writes() {
         let group_id = Uuid::new_v4();
         let table_id = 1024;
