@@ -40,7 +40,6 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
 };
-use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
     ApplyBloomFilterIndexSnafu, Error, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu,
     Result,
@@ -135,19 +134,10 @@ pub struct BloomFilterIndexApplier {
 
     /// Bloom filter predicates.
     /// For each column, the value will be retained only if it contains __all__ predicates.
-    predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
-
-    /// Default apply plan built from all collected predicates.
-    default_plan: SstApplyPlan,
+    predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
 
     /// Expected predicate column types from the latest region metadata.
     expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
-}
-
-#[derive(Clone)]
-pub(crate) struct SstApplyPlan {
-    pub predicate_key: PredicateKey,
-    pub predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
 }
 
 impl BloomFilterIndexApplier {
@@ -162,7 +152,7 @@ impl BloomFilterIndexApplier {
         predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
         expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
     ) -> Self {
-        let default_plan = Self::build_apply_plan(predicates.clone());
+        let predicates = Arc::new(predicates);
         Self {
             table_dir,
             path_type,
@@ -172,7 +162,6 @@ impl BloomFilterIndexApplier {
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
             predicates,
-            default_plan,
             expected_predicate_col_types,
         }
     }
@@ -452,10 +441,13 @@ impl BloomFilterIndexApplier {
         Ok(())
     }
 
-    /// Builds a per-SST apply plan.
+    /// Returns compatible bloom filter predicates with the given SST metadata.
     ///
     /// Returns `None` when no compatible predicate remains for this SST.
-    pub fn plan_for_sst(&self, sst_metadata: &RegionMetadataRef) -> Option<SstApplyPlan> {
+    pub fn compatible_predicate_for_sst(
+        &self,
+        sst_metadata: &RegionMetadataRef,
+    ) -> Option<Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>> {
         let mut has_type_mismatch = false;
         let mut compatible_col_ids = Vec::new();
 
@@ -477,7 +469,7 @@ impl BloomFilterIndexApplier {
         }
 
         if !has_type_mismatch {
-            return Some(self.default_plan.clone());
+            return Some(self.predicates.clone());
         }
 
         let mut compatible_predicates = BTreeMap::new();
@@ -487,16 +479,7 @@ impl BloomFilterIndexApplier {
             }
         }
 
-        Some(Self::build_apply_plan(compatible_predicates))
-    }
-
-    fn build_apply_plan(predicates: BTreeMap<ColumnId, Vec<InListPredicate>>) -> SstApplyPlan {
-        let predicates = Arc::new(predicates);
-        let predicate_key = PredicateKey::new_bloom(predicates.clone());
-        SstApplyPlan {
-            predicate_key,
-            predicates,
-        }
+        Some(Arc::new(compatible_predicates))
     }
 }
 
@@ -553,8 +536,8 @@ mod tests {
             predicates,
             expected_predicate_col_types,
         );
-        let plan = applier.plan_for_sst(&mock_region_metadata());
-        assert!(plan.is_some());
+        let predicates = applier.compatible_predicate_for_sst(&mock_region_metadata());
+        assert!(predicates.is_some());
     }
 
     #[tokio::test]
@@ -581,8 +564,8 @@ mod tests {
             predicates,
             expected_predicate_col_types,
         );
-        let plan = applier.plan_for_sst(&mock_region_metadata());
-        assert!(plan.is_none());
+        let predicates = applier.compatible_predicate_for_sst(&mock_region_metadata());
+        assert!(predicates.is_none());
     }
 
     #[allow(clippy::type_complexity)]
@@ -611,15 +594,11 @@ mod tests {
                 );
 
                 let applier = builder.build(&exprs).unwrap().unwrap();
-                let plan = applier.plan_for_sst(&Arc::new(metadata.clone())).unwrap();
+                let predicates = applier
+                    .compatible_predicate_for_sst(&Arc::new(metadata.clone()))
+                    .unwrap();
                 applier
-                    .apply(
-                        file_id,
-                        None,
-                        &plan.predicates,
-                        row_groups.into_iter(),
-                        None,
-                    )
+                    .apply(file_id, None, &predicates, row_groups.into_iter(), None)
                     .await
                     .unwrap()
                     .into_iter()

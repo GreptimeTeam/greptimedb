@@ -955,13 +955,16 @@ impl ParquetReaderBuilder {
             &self.bloom_filter_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
-            let Some(plan) = index_applier.plan_for_sst(sst_metadata) else {
+            let Some(compatible_predicates) =
+                index_applier.compatible_predicate_for_sst(sst_metadata)
+            else {
                 continue;
             };
+            let predicate_key = PredicateKey::new_bloom(compatible_predicates.clone());
             // Fast path: return early if the result is in the cache.
             let cached = self.cache_strategy.index_result_cache().and_then(|cache| {
                 let file_id = self.file_handle.file_id().file_id();
-                cache.get(&plan.predicate_key, file_id)
+                cache.get(&predicate_key, file_id)
             });
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
@@ -990,7 +993,7 @@ impl ParquetReaderBuilder {
                 .apply(
                     self.file_handle.index_id(),
                     Some(file_size_hint),
-                    &plan.predicates,
+                    &compatible_predicates,
                     rgs,
                     metrics.bloom_filter_apply_metrics.as_mut(),
                 )
@@ -1011,7 +1014,7 @@ impl ParquetReaderBuilder {
             }
 
             self.apply_index_result_and_update_cache(
-                &plan.predicate_key,
+                &predicate_key,
                 self.file_handle.file_id().file_id(),
                 selection,
                 output,
