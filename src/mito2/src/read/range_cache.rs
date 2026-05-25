@@ -477,7 +477,11 @@ pub(crate) fn build_range_cache_key(
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     let (file_min, file_max) = range_meta.time_range;
     let covers = match &stream_ctx.scan_implied_time_range {
-        Some(implied) => {
+        // An empty implied range can never cover a non-empty file range, so
+        // short-circuit. We also skip the unit asserts because
+        // `TimestampRange::empty()` uses `Timestamp::default()` (millisecond),
+        // which would falsely trip the asserts for non-ms time index columns.
+        Some(implied) if !implied.is_empty() => {
             // The `contains` check is sound only when `file_min`/`file_max`
             // share the implied range's unit (the time index column's unit).
             // Mito stores time index values in that unit; assert to catch any
@@ -488,7 +492,7 @@ pub(crate) fn build_range_cache_key(
             }
             implied.contains(&file_min) && implied.contains(&file_max)
         }
-        None => false,
+        _ => false,
     };
     let scan = if covers {
         fingerprint.without_time_filters()
@@ -1117,6 +1121,35 @@ mod tests {
             key_a.scan.time_filters(),
             normalized_exprs([or_a]).as_slice()
         );
+    }
+
+    #[tokio::test]
+    async fn empty_implied_range_does_not_panic_on_non_ms_file_range() {
+        // Contradictory time predicates make the implied range empty. The
+        // empty range's sentinel timestamps use `Timestamp::default()` (ms),
+        // so without the `is_empty()` short-circuit the unit asserts would
+        // panic against a non-ms `range_meta.time_range`.
+        let partition = (
+            Timestamp::new_millisecond(1000),
+            Timestamp::new_millisecond(2000),
+        );
+
+        let (mut ctx, part_range) = new_stream_context(
+            vec![col("ts").gt_eq(ts_lit(1500)), col("k0").eq(lit("foo"))],
+            TimestampRange::with_unit(1500, 3000, TimeUnit::Millisecond),
+            partition,
+        )
+        .await;
+
+        ctx.scan_implied_time_range = Some(TimestampRange::empty());
+        ctx.ranges[0].time_range = (
+            Timestamp::new(1_000_000_000, TimeUnit::Nanosecond),
+            Timestamp::new(2_000_000_000, TimeUnit::Nanosecond),
+        );
+
+        let key = build_range_cache_key(&ctx, &part_range).unwrap();
+        // Empty implied range cannot cover, so time filters stay in the key.
+        assert!(!key.scan.time_filters().is_empty());
     }
 
     fn ms_ts(v: i64) -> Timestamp {
