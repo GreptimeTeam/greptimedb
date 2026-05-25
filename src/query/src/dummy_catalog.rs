@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn test_terminal_watermark_context_uses_snapshot_upper_bound_for_source_scan() {
+    fn test_terminal_watermark_context_source_and_sink_scan_semantics() {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
             .extensions(HashMap::from([(
@@ -670,11 +670,7 @@ mod tests {
         assert_eq!(request.memtable_min_sequence, None);
         assert_eq!(request.memtable_max_sequence, None);
         assert_eq!(request.sst_min_sequence, None);
-    }
 
-    #[test]
-    fn test_terminal_watermark_context_skips_sink_scan_semantics() {
-        let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
             .extensions(HashMap::from([
                 (FLOW_RETURN_REGION_SEQ.to_string(), "true".to_string()),

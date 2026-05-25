@@ -227,111 +227,151 @@ fn assert_no_incremental_scan_extensions(extensions: &[(&'static str, String)]) 
     );
 }
 
-#[test]
-fn test_apply_query_result_to_state_advances_full_snapshot_to_incremental() {
-    let query_ctx = QueryContext::arc();
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let mut state = TaskState::new(query_ctx, rx);
-    let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]);
-
-    let decision = BatchingTask::apply_query_result_to_state(
-        &mut state,
-        &result,
-        std::time::Duration::from_millis(1),
-    );
-
-    assert_eq!(
-        decision,
-        FlowCheckpointDecision::AdvancedFromFullSnapshot {
-            participating_region_count: 2,
-            watermark_count: 2,
-        }
-    );
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
-    assert_eq!(
-        state.checkpoints(),
-        &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
-    );
+fn dirty_marker() -> DirtyTimeWindows {
+    let mut dirty = DirtyTimeWindows::default();
+    dirty.set_dirty();
+    dirty
 }
 
-#[test]
-fn test_apply_query_result_to_state_rejects_unproved_watermark() {
-    let query_ctx = QueryContext::arc();
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let mut state = TaskState::new(query_ctx, rx);
-    let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, None)]);
-
-    let decision = BatchingTask::apply_query_result_to_state(
-        &mut state,
-        &result,
-        std::time::Duration::from_millis(1),
+fn dirty_range(start: i64, end: i64) -> DirtyTimeWindows {
+    let mut dirty = DirtyTimeWindows::default();
+    dirty.add_window(
+        Timestamp::new_second(start),
+        Some(Timestamp::new_second(end)),
     );
+    dirty
+}
 
-    assert_eq!(
-        decision,
-        FlowCheckpointDecision::FallbackToFullSnapshot {
-            previous_mode: CheckpointMode::FullSnapshot,
-            reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+async fn assert_filterless_failure_restore(
+    consumed_dirty_windows: DirtyTimeWindows,
+    current_dirty_windows: DirtyTimeWindows,
+    checkpoint_ready: bool,
+    expected_len: usize,
+    expected_window_size_secs: u64,
+) {
+    let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
+    {
+        let mut state = task.state.write().unwrap();
+        if checkpoint_ready {
+            state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
         }
-    );
+        state.dirty_time_windows.clean();
+        state
+            .dirty_time_windows
+            .add_dirty_windows(&current_dirty_windows);
+    }
+    let filterless_query = PlanInfo {
+        plan,
+        filter: None,
+        filterless_dirty_windows_to_restore: Some(consumed_dirty_windows),
+    };
+
+    let checkpoint_was_ready =
+        task.handle_executed_query_failure(&ordinary_query_error(), Some(&filterless_query));
+
+    assert_eq!(checkpoint_was_ready, checkpoint_ready);
+    let state = task.state.read().unwrap();
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert!(state.checkpoints().is_empty());
+    if checkpoint_ready {
+        assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+    }
+    assert_eq!(state.dirty_time_windows.len(), expected_len);
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(expected_window_size_secs)
+    );
 }
 
 #[test]
-fn test_apply_query_result_to_state_reports_missing_watermark() {
-    let query_ctx = QueryContext::arc();
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let mut state = TaskState::new(query_ctx, rx);
-    let result = OutputWithMetrics::from_output(Output::new_with_affected_rows(0));
+fn test_apply_query_result_to_state_checkpoint_decisions() {
+    let elapsed = std::time::Duration::from_millis(1);
 
-    let decision = BatchingTask::apply_query_result_to_state(
-        &mut state,
-        &result,
-        std::time::Duration::from_millis(1),
-    );
+    {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]);
 
-    assert_eq!(
-        decision,
-        FlowCheckpointDecision::FallbackToFullSnapshot {
-            previous_mode: CheckpointMode::FullSnapshot,
-            reason: FlowQueryFallbackReason::MissingRegionWatermark,
-        }
-    );
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert!(state.checkpoints().is_empty());
-}
+        let decision = BatchingTask::apply_query_result_to_state(&mut state, &result, elapsed);
 
-#[test]
-fn test_apply_query_result_to_state_advances_incremental_subset() {
-    let query_ctx = QueryContext::arc();
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let mut state = TaskState::new(query_ctx, rx);
-    state.advance_checkpoints(HashMap::from([
-        (1_u64, 10_u64),
-        (2_u64, 20_u64),
-        (3_u64, 30_u64),
-    ]));
-    let result = output_with_region_watermarks([(1_u64, Some(12_u64)), (3_u64, Some(35_u64))]);
+        assert_eq!(
+            decision,
+            FlowCheckpointDecision::AdvancedFromFullSnapshot {
+                participating_region_count: 2,
+                watermark_count: 2,
+            }
+        );
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+    }
 
-    let decision = BatchingTask::apply_query_result_to_state(
-        &mut state,
-        &result,
-        std::time::Duration::from_millis(1),
-    );
+    {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, None)]);
 
-    assert_eq!(
-        decision,
-        FlowCheckpointDecision::AdvancedIncremental {
-            participating_region_count: 2,
-            watermark_count: 2,
-        }
-    );
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
-    assert_eq!(
-        state.checkpoints(),
-        &BTreeMap::from([(1_u64, 12_u64), (2_u64, 20_u64), (3_u64, 35_u64)])
-    );
+        let decision = BatchingTask::apply_query_result_to_state(&mut state, &result, elapsed);
+
+        assert_eq!(
+            decision,
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: CheckpointMode::FullSnapshot,
+                reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+            }
+        );
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(state.checkpoints().is_empty());
+    }
+
+    {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        let result = OutputWithMetrics::from_output(Output::new_with_affected_rows(0));
+
+        let decision = BatchingTask::apply_query_result_to_state(&mut state, &result, elapsed);
+
+        assert_eq!(
+            decision,
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: CheckpointMode::FullSnapshot,
+                reason: FlowQueryFallbackReason::MissingRegionWatermark,
+            }
+        );
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(state.checkpoints().is_empty());
+    }
+
+    {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([
+            (1_u64, 10_u64),
+            (2_u64, 20_u64),
+            (3_u64, 30_u64),
+        ]));
+        let result = output_with_region_watermarks([(1_u64, Some(12_u64)), (3_u64, Some(35_u64))]);
+
+        let decision = BatchingTask::apply_query_result_to_state(&mut state, &result, elapsed);
+
+        assert_eq!(
+            decision,
+            FlowCheckpointDecision::AdvancedIncremental {
+                participating_region_count: 2,
+                watermark_count: 2,
+            }
+        );
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 12_u64), (2_u64, 20_u64), (3_u64, 35_u64)])
+        );
+    }
 }
 
 #[test]
@@ -356,23 +396,7 @@ fn test_checkpoint_decision_metric_labels_are_stable() {
 }
 
 #[tokio::test]
-async fn test_incremental_failure_falls_back_to_full_snapshot() {
-    let task = new_test_task_with_missing_sink().await;
-    task.state
-        .write()
-        .unwrap()
-        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
-
-    let checkpoint_was_ready = task.handle_flow_query_failure(&ordinary_query_error(), None);
-
-    assert!(checkpoint_was_ready);
-    let state = task.state.read().unwrap();
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
-}
-
-#[tokio::test]
-async fn test_incremental_failure_without_query_scope_marks_full_flow_dirty() {
+async fn test_incremental_failure_without_query_scope_falls_back_and_marks_dirty() {
     let task = new_test_task_with_missing_sink().await;
     {
         let mut state = task.state.write().unwrap();
@@ -385,6 +409,7 @@ async fn test_incremental_failure_without_query_scope_marks_full_flow_dirty() {
     assert!(checkpoint_was_ready);
     let state = task.state.read().unwrap();
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
     assert_eq!(state.dirty_time_windows.len(), 1);
 }
 
@@ -417,91 +442,19 @@ async fn test_executed_query_failure_restores_scoped_dirty_windows_for_flush_pat
 }
 
 #[tokio::test]
-async fn test_filterless_full_snapshot_failure_restores_consumed_dirty_marker() {
-    let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
-    let mut consumed_dirty_windows = DirtyTimeWindows::default();
-    consumed_dirty_windows.set_dirty();
-    task.state.write().unwrap().dirty_time_windows.clean();
-    let filterless_query = PlanInfo {
-        plan,
-        filter: None,
-        filterless_dirty_windows_to_restore: Some(consumed_dirty_windows),
-    };
-
-    let checkpoint_was_ready =
-        task.handle_executed_query_failure(&ordinary_query_error(), Some(&filterless_query));
-
-    assert!(!checkpoint_was_ready);
-    let state = task.state.read().unwrap();
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert_eq!(state.dirty_time_windows.len(), 1);
-    // A filterless dirty marker should be restored as-is, not expanded into
-    // a mark-all time range.
-    assert_eq!(
-        state.dirty_time_windows.window_size(),
-        std::time::Duration::from_secs(0)
-    );
-}
-
-#[tokio::test]
-async fn test_filterless_full_snapshot_failure_merges_consumed_dirty_windows() {
-    let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
-    let mut consumed_dirty_windows = DirtyTimeWindows::default();
-    consumed_dirty_windows.add_window(Timestamp::new_second(30), Some(Timestamp::new_second(40)));
-    {
-        let mut state = task.state.write().unwrap();
-        state.dirty_time_windows.clean();
-        // Simulate new dirty data arriving while the failed query was running.
-        state
-            .dirty_time_windows
-            .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(20)));
-    }
-    let filterless_query = PlanInfo {
-        plan,
-        filter: None,
-        filterless_dirty_windows_to_restore: Some(consumed_dirty_windows),
-    };
-
-    task.handle_executed_query_failure(&ordinary_query_error(), Some(&filterless_query));
-
-    let state = task.state.read().unwrap();
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert_eq!(state.dirty_time_windows.len(), 2);
-    assert_eq!(
-        state.dirty_time_windows.window_size(),
-        std::time::Duration::from_secs(20)
-    );
-}
-
-#[tokio::test]
-async fn test_filterless_failure_keeps_larger_same_start_dirty_window() {
-    let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
-    let mut consumed_dirty_windows = DirtyTimeWindows::default();
-    consumed_dirty_windows.add_window(Timestamp::new_second(30), Some(Timestamp::new_second(40)));
-    {
-        let mut state = task.state.write().unwrap();
-        state.dirty_time_windows.clean();
-        // Simulate new dirty data with the same start but a wider end arriving
-        // while the failed query was running.
-        state
-            .dirty_time_windows
-            .add_window(Timestamp::new_second(30), Some(Timestamp::new_second(50)));
-    }
-    let filterless_query = PlanInfo {
-        plan,
-        filter: None,
-        filterless_dirty_windows_to_restore: Some(consumed_dirty_windows),
-    };
-
-    task.handle_executed_query_failure(&ordinary_query_error(), Some(&filterless_query));
-
-    let state = task.state.read().unwrap();
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert_eq!(state.dirty_time_windows.len(), 1);
-    assert_eq!(
-        state.dirty_time_windows.window_size(),
-        std::time::Duration::from_secs(20)
-    );
+async fn test_filterless_failure_restores_consumed_dirty_windows() {
+    assert_filterless_failure_restore(dirty_marker(), DirtyTimeWindows::default(), false, 1, 0)
+        .await;
+    assert_filterless_failure_restore(dirty_range(30, 40), dirty_range(10, 20), false, 2, 20).await;
+    assert_filterless_failure_restore(dirty_range(30, 40), dirty_range(30, 50), false, 1, 20).await;
+    assert_filterless_failure_restore(
+        dirty_range(30, 40),
+        DirtyTimeWindows::default(),
+        true,
+        1,
+        10,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -598,39 +551,9 @@ async fn test_insert_plan_matching_failure_restores_consumed_dirty_marker() {
 }
 
 #[tokio::test]
-async fn test_filterless_incremental_failure_restores_consumed_dirty_windows_after_fallback() {
-    let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
-    let mut consumed_dirty_windows = DirtyTimeWindows::default();
-    consumed_dirty_windows.add_window(Timestamp::new_second(30), Some(Timestamp::new_second(40)));
-    {
-        let mut state = task.state.write().unwrap();
-        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
-        state.dirty_time_windows.clean();
-    }
-    let filterless_query = PlanInfo {
-        plan,
-        filter: None,
-        filterless_dirty_windows_to_restore: Some(consumed_dirty_windows),
-    };
-
-    let checkpoint_was_ready =
-        task.handle_executed_query_failure(&ordinary_query_error(), Some(&filterless_query));
-
-    assert!(checkpoint_was_ready);
-    let state = task.state.read().unwrap();
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert_eq!(state.dirty_time_windows.len(), 1);
-    assert_eq!(
-        state.dirty_time_windows.window_size(),
-        std::time::Duration::from_secs(10)
-    );
-}
-
-#[tokio::test]
-async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
+async fn test_build_flow_query_extensions_do_not_emit_incremental_scan_keys() {
     let task = new_test_task_with_missing_sink().await;
 
-    // Checkpoint readiness alone does not send incremental scan extensions.
     let extensions = task.build_flow_query_extensions().await.unwrap();
     assert_eq!(
         extensions,
@@ -643,21 +566,18 @@ async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
         .unwrap()
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
 
-    // Even after advancing to Incremental mode, checkpoint readiness alone
-    // still does not send incremental scan extensions.
     let extensions = task.build_flow_query_extensions().await.unwrap();
     assert_eq!(
         extensions,
         vec![(FLOW_RETURN_REGION_SEQ, "true".to_string())]
     );
     assert_no_incremental_scan_extensions(&extensions);
-}
 
-#[tokio::test]
-async fn test_build_flow_query_extensions_include_sink_id_without_incremental_scan() {
     let sink_table = "extension_sink";
     let TestTaskParts {
-        task, query_engine, ..
+        task: task_with_sink,
+        query_engine,
+        ..
     } = new_test_task_engine_and_plan_with_query(
         "SELECT number, ts FROM numbers_with_ts",
         sink_table,
@@ -665,7 +585,7 @@ async fn test_build_flow_query_extensions_include_sink_id_without_incremental_sc
     .await;
     register_number_only_sink(&query_engine, sink_table);
 
-    let extensions = task.build_flow_query_extensions().await.unwrap();
+    let extensions = task_with_sink.build_flow_query_extensions().await.unwrap();
 
     assert!(extensions.contains(&(FLOW_RETURN_REGION_SEQ, "true".to_string())));
     assert!(extensions.iter().any(|(key, value)| {

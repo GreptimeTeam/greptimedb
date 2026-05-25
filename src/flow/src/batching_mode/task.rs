@@ -251,7 +251,7 @@ impl BatchingTask {
         if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
             debug!("Generate new query: {}", new_query.plan);
             match self
-                .execute_logical_plan(frontend_client, &new_query.plan, new_query.filter.as_ref())
+                .execute_logical_plan(frontend_client, &new_query.plan)
                 .await
             {
                 Ok(result) => Ok(result),
@@ -375,7 +375,6 @@ impl BatchingTask {
         &self,
         frontend_client: &Arc<FrontendClient>,
         plan: &LogicalPlan,
-        _dirty_filter: Option<&FilterExprInfo>,
     ) -> Result<Option<(usize, Duration)>, Error> {
         let instant = Instant::now();
         let flow_id = self.config.flow_id;
@@ -682,6 +681,17 @@ impl BatchingTask {
             .add_windows(filter.time_ranges.clone());
     }
 
+    fn restore_scoped_dirty_windows_on_err<T>(
+        &self,
+        filter: &FilterExprInfo,
+        result: Result<T, Error>,
+    ) -> Result<T, Error> {
+        result.map_err(|err| {
+            self.restore_scoped_dirty_windows(filter);
+            err
+        })
+    }
+
     fn handle_executed_query_failure(&self, err: &Error, query: Option<&PlanInfo>) -> bool {
         let checkpoint_was_ready = self.handle_flow_query_failure(err, query);
         if let Some(query) = query {
@@ -766,12 +776,8 @@ impl BatchingTask {
             };
 
             let res = if let Some(new_query) = &new_query {
-                self.execute_logical_plan(
-                    &frontend_client,
-                    &new_query.plan,
-                    new_query.filter.as_ref(),
-                )
-                .await
+                self.execute_logical_plan(&frontend_client, &new_query.plan)
+                    .await
             } else {
                 Ok(None)
             };
@@ -1044,41 +1050,25 @@ impl BatchingTask {
             allow_partial,
         );
 
-        let plan = match sql_to_df_plan(
-            query_ctx.clone(),
-            engine.clone(),
-            &self.config.query,
-            false,
-        )
-        .await
-        {
-            Ok(plan) => plan,
-            Err(err) => {
-                self.restore_scoped_dirty_windows(&expr);
-                return Err(err);
-            }
-        };
-        let rewrite = match plan
-            .clone()
-            .rewrite(&mut add_filter)
-            .and_then(|p| p.data.rewrite(&mut add_auto_column))
-            .with_context(|_| DatafusionSnafu {
-                context: format!("Failed to rewrite plan:\n {}\n", plan),
-            }) {
-            Ok(rewrite) => rewrite.data,
-            Err(err) => {
-                self.restore_scoped_dirty_windows(&expr);
-                return Err(err);
-            }
-        };
+        let plan = self.restore_scoped_dirty_windows_on_err(
+            &expr,
+            sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false).await,
+        )?;
+        let rewrite = self.restore_scoped_dirty_windows_on_err(
+            &expr,
+            plan.clone()
+                .rewrite(&mut add_filter)
+                .and_then(|p| p.data.rewrite(&mut add_auto_column))
+                .with_context(|_| DatafusionSnafu {
+                    context: format!("Failed to rewrite plan:\n {}\n", plan),
+                })
+                .map(|rewrite| rewrite.data),
+        )?;
         // only apply optimize after complex rewrite is done
-        let new_plan = match apply_df_optimizer(rewrite, &query_ctx).await {
-            Ok(new_plan) => new_plan,
-            Err(err) => {
-                self.restore_scoped_dirty_windows(&expr);
-                return Err(err);
-            }
-        };
+        let new_plan = self.restore_scoped_dirty_windows_on_err(
+            &expr,
+            apply_df_optimizer(rewrite, &query_ctx).await,
+        )?;
 
         let info = PlanInfo {
             plan: new_plan.clone(),
