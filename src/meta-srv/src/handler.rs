@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::ops::Range;
@@ -275,6 +276,18 @@ impl Pushers {
         self.0.write().await.insert(pusher_id, pusher)
     }
 
+    /// Inserts the pusher with the given key if absent, and returns whether the pusher is inserted.
+    pub(crate) async fn insert_if_absent(&self, pusher_id: String, pusher: Pusher) -> bool {
+        let mut pushers = self.0.write().await;
+        match pushers.entry(pusher_id) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(entry) => {
+                entry.insert(pusher);
+                true
+            }
+        }
+    }
+
     async fn remove(&self, pusher_id: &str) -> Option<Pusher> {
         self.0.write().await.remove(pusher_id)
     }
@@ -320,12 +333,32 @@ impl HeartbeatHandlerGroup {
         let _ = self.pushers.insert(pusher_id.string_key(), pusher).await;
     }
 
+    /// Registers the heartbeat response [`Pusher`] with the given key to the group if absent,
+    /// and returns whether the pusher is inserted.
+    pub async fn register_pusher_if_absent(&self, pusher_id: PusherId, pusher: Pusher) -> bool {
+        let inserted = self
+            .pushers
+            .insert_if_absent(pusher_id.string_key(), pusher)
+            .await;
+        if inserted {
+            METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
+            info!("Pusher register: {}", pusher_id);
+        }
+        inserted
+    }
+
     /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
     pub async fn deregister_push(&self, pusher_id: PusherId) {
         info!("Pusher unregister: {}", pusher_id);
         if self.pushers.remove(&pusher_id.string_key()).await.is_some() {
             METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         }
+    }
+
+    /// Checks if the group contains the pusher with the given key.
+    pub async fn contains_pusher(&self, pusher_id: &PusherId) -> bool {
+        let pushers = self.pushers.0.read().await;
+        pushers.contains_key(&pusher_id.string_key())
     }
 
     /// Returns the [`Pushers`] of the group.

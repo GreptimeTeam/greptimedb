@@ -71,6 +71,18 @@ impl heartbeat_server::Heartbeat for Metasrv {
                             pusher_id =
                                 Some(register_pusher(&handler_group, header, tx.clone()).await);
                         }
+
+                        if let Some(pusher_id) = pusher_id
+                            && !handler_group.contains_pusher(&pusher_id).await
+                            && register_pusher_if_absent(&handler_group, pusher_id, tx.clone())
+                                .await
+                        {
+                            info!(
+                                "Re-register sender for existing heartbeat stream, pusher: {}",
+                                pusher_id
+                            );
+                        }
+
                         if let Some(k) = &pusher_id {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&[&k.to_string()]);
                         } else {
@@ -188,6 +200,17 @@ async fn register_pusher(
     let pusher = Pusher::new(sender);
     handler_group.register_pusher(pusher_id, pusher).await;
     pusher_id
+}
+
+async fn register_pusher_if_absent(
+    handler_group: &HeartbeatHandlerGroup,
+    pusher_id: PusherId,
+    sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+) -> bool {
+    let pusher = Pusher::new(sender);
+    handler_group
+        .register_pusher_if_absent(pusher_id, pusher)
+        .await
 }
 
 #[cfg(test)]
