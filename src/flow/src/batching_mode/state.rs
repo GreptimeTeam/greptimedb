@@ -14,15 +14,13 @@
 
 //! Batching mode task state, which changes frequently
 //!
-//! PR3a checkpoint-readiness model:
+//! Checkpoint-readiness model:
 //! - `CheckpointMode::FullSnapshot`: the task executes full-snapshot queries
 //!   and collects region watermarks to prove safe advancement.
 //! - `CheckpointMode::Incremental`: the task has populated a complete
-//!   checkpoint map covering all participating regions.  In PR3a this is
-//!   an **internal readiness state** only — query execution continues to
-//!   use full-snapshot semantics.  PR3b will additionally emit incremental
-//!   scan extensions (`FLOW_INCREMENTAL_MODE` /
-//!   `FLOW_INCREMENTAL_AFTER_SEQS`) when the task is checkpoint-ready.
+//!   checkpoint map covering all participating regions. This mode records
+//!   readiness; actual incremental scan reads are only used when the query
+//!   execution path explicitly emits incremental scan extensions.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
@@ -275,12 +273,42 @@ impl DirtyTimeWindows {
     }
 
     pub fn add_window(&mut self, start: Timestamp, end: Option<Timestamp>) {
-        self.windows.insert(start, end);
+        self.add_or_merge_window(start, end);
     }
 
     pub fn add_windows(&mut self, time_ranges: Vec<(Timestamp, Timestamp)>) {
         for (start, end) in time_ranges {
-            self.windows.insert(start, Some(end));
+            self.add_or_merge_window(start, Some(end));
+        }
+    }
+
+    /// Add all dirty markers from another dirty-window set.
+    pub fn add_dirty_windows(&mut self, dirty_windows: &DirtyTimeWindows) {
+        for (start, end) in &dirty_windows.windows {
+            self.add_or_merge_window(*start, *end);
+        }
+    }
+
+    fn add_or_merge_window(&mut self, start: Timestamp, end: Option<Timestamp>) {
+        self.windows
+            .entry(start)
+            .and_modify(|current_end| {
+                *current_end = Self::union_window_end(*current_end, end);
+            })
+            .or_insert(end);
+    }
+
+    fn union_window_end(
+        current_end: Option<Timestamp>,
+        incoming_end: Option<Timestamp>,
+    ) -> Option<Timestamp> {
+        match (current_end, incoming_end) {
+            (Some(current), Some(incoming)) => Some(current.max(incoming)),
+            // `None` is a dirty marker without a known upper bound.  When one
+            // side has a concrete end, keep it so merging a restored snapshot
+            // never shrinks an already-known dirty range with the same start.
+            (Some(end), None) | (None, Some(end)) => Some(end),
+            (None, None) => None,
         }
     }
 
@@ -292,7 +320,7 @@ impl DirtyTimeWindows {
     /// Set windows to be dirty, only useful for full aggr without time window
     /// to mark some new data is inserted
     pub fn set_dirty(&mut self) {
-        self.windows.insert(Timestamp::new_second(0), None);
+        self.add_or_merge_window(Timestamp::new_second(0), None);
     }
 
     /// Number of dirty windows.
@@ -641,10 +669,9 @@ pub enum CheckpointMode {
     /// region watermarks to build a checkpoint map.
     FullSnapshot,
     /// Incremental: the task has populated a complete checkpoint map and is
-    /// **checkpoint-ready**. PR3a tracks this readiness internally but does
-    /// NOT emit incremental scan extensions (`FLOW_INCREMENTAL_MODE` /
-    /// `FLOW_INCREMENTAL_AFTER_SEQS`); actual incremental reads are deferred
-    /// to PR3b.
+    /// **checkpoint-ready**. This mode records readiness; it does not by
+    /// itself imply that a query emitted incremental scan extensions
+    /// (`FLOW_INCREMENTAL_MODE` / `FLOW_INCREMENTAL_AFTER_SEQS`).
     Incremental,
 }
 

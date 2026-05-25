@@ -34,7 +34,7 @@ use query::QueryEngineRef;
 use query::options::FLOW_SINK_TABLE_ID;
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use sql::parsers::utils::is_tql;
 use store_api::mito_engine_options::MERGE_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -48,7 +48,7 @@ use crate::batching_mode::checkpoint::{
     FlowCheckpointDecision, FlowQueryFallbackReason, checkpoint_mode_label,
 };
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::{CheckpointMode, FilterExprInfo, TaskState};
+use crate::batching_mode::state::{CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState};
 use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
@@ -129,6 +129,13 @@ pub struct TaskArgs<'a> {
 pub struct PlanInfo {
     pub plan: LogicalPlan,
     pub filter: Option<FilterExprInfo>,
+    /// Dirty windows consumed while building a filterless query.
+    ///
+    /// Scoped queries restore failed work from `filter.time_ranges`.  A
+    /// filterless query has no such scope, so keep the exact dirty markers
+    /// that were cleaned before planning and merge them back if execution
+    /// fails.
+    pub filterless_dirty_windows_to_restore: Option<DirtyTimeWindows>,
 }
 
 impl BatchingTask {
@@ -282,57 +289,69 @@ impl BatchingTask {
             )
             .await?;
 
-        let insert_into_info = if let Some(new_query) = new_query {
-            // first check if all columns in input query exists in sink table
-            // since insert into ref to names in record batch generate by given query
-            let table_columns = df_schema
-                .columns()
-                .into_iter()
-                .map(|c| c.name)
-                .collect::<BTreeSet<_>>();
-            for column in new_query.plan.schema().columns() {
-                ensure!(
-                    table_columns.contains(column.name()),
-                    InvalidQuerySnafu {
-                        reason: format!(
-                            "Column {} not found in sink table with columns {:?}",
-                            column, table_columns
-                        ),
-                    }
-                );
-            }
-
-            let table_provider = Arc::new(DfTableProviderAdapter::new(table));
-            let table_source = Arc::new(DefaultTableSource::new(table_provider));
-
-            // update_at& time index placeholder (if exists) should have default value
-            let plan = LogicalPlan::Dml(DmlStatement::new(
-                datafusion_common::TableReference::Full {
-                    catalog: self.config.sink_table_name[0].clone().into(),
-                    schema: self.config.sink_table_name[1].clone().into(),
-                    table: self.config.sink_table_name[2].clone().into(),
-                },
-                table_source,
-                WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
-                Arc::new(new_query.plan),
-            ));
-            PlanInfo {
-                plan,
-                filter: new_query.filter,
-            }
-        } else {
+        let Some(new_query) = new_query else {
             return Ok(None);
         };
-        let insert_into = insert_into_info
-            .plan
-            .recompute_schema()
-            .context(DatafusionSnafu {
-                context: "Failed to recompute schema",
-            })?;
+
+        // first check if all columns in input query exists in sink table
+        // since insert into ref to names in record batch generate by given query
+        let table_columns = df_schema
+            .columns()
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<BTreeSet<_>>();
+        for column in new_query.plan.schema().columns() {
+            if !table_columns.contains(column.name()) {
+                self.restore_dirty_windows_after_failure(&new_query);
+                return InvalidQuerySnafu {
+                    reason: format!(
+                        "Column {} not found in sink table with columns {:?}",
+                        column, table_columns
+                    ),
+                }
+                .fail();
+            }
+        }
+
+        let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
+
+        // update_at& time index placeholder (if exists) should have default value
+        let plan = LogicalPlan::Dml(DmlStatement::new(
+            datafusion_common::TableReference::Full {
+                catalog: self.config.sink_table_name[0].clone().into(),
+                schema: self.config.sink_table_name[1].clone().into(),
+                table: self.config.sink_table_name[2].clone().into(),
+            },
+            table_source,
+            WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+            Arc::new(new_query.plan.clone()),
+        ));
+        let insert_into_info = PlanInfo {
+            plan,
+            filter: new_query.filter,
+            filterless_dirty_windows_to_restore: new_query.filterless_dirty_windows_to_restore,
+        };
+        let insert_into =
+            match insert_into_info
+                .plan
+                .clone()
+                .recompute_schema()
+                .context(DatafusionSnafu {
+                    context: "Failed to recompute schema",
+                }) {
+                Ok(insert_into) => insert_into,
+                Err(err) => {
+                    self.restore_dirty_windows_after_failure(&insert_into_info);
+                    return Err(err);
+                }
+            };
 
         Ok(Some(PlanInfo {
             plan: insert_into,
             filter: insert_into_info.filter,
+            filterless_dirty_windows_to_restore: insert_into_info
+                .filterless_dirty_windows_to_restore,
         }))
     }
 
@@ -391,7 +410,7 @@ impl BatchingTask {
         let query_mode = self.state.read().unwrap().checkpoint_mode();
         Self::record_query_mode(flow_id, query_mode);
         debug!(
-            "Flow {flow_id} executing batching query with checkpoint_mode={}, extension_count={} (PR3a: no incremental scan extensions)",
+            "Flow {flow_id} executing batching query with checkpoint_mode={}, extension_count={}",
             checkpoint_mode_label(query_mode),
             extensions.len()
         );
@@ -552,7 +571,7 @@ impl BatchingTask {
                 watermarks,
             } => {
                 info!(
-                    "Flow {flow_id} is now checkpoint-ready after full snapshot (PR3a: no incremental scan), participating_regions={participating_regions}, watermarks={watermarks}"
+                    "Flow {flow_id} is now checkpoint-ready after full snapshot, participating_regions={participating_regions}, watermarks={watermarks}"
                 );
             }
             FlowCheckpointDecision::AdvancedIncremental {
@@ -560,7 +579,7 @@ impl BatchingTask {
                 watermarks,
             } => {
                 debug!(
-                    "Flow {flow_id} advanced checkpoint-readiness (PR3a: no incremental scan), participating_regions={participating_regions}, watermarks={watermarks}"
+                    "Flow {flow_id} advanced checkpoint-readiness, participating_regions={participating_regions}, watermarks={watermarks}"
                 );
             }
             FlowCheckpointDecision::FallbackToFullSnapshot {
@@ -598,13 +617,13 @@ impl BatchingTask {
     }
 
     /// Handle a query failure. Returns true if the task was in
-    /// checkpoint-ready (`Incremental`) mode before the failure, which
-    /// means a full fallback + dirty-window restore is needed.
+    /// checkpoint-ready (`Incremental`) mode before the failure and therefore
+    /// fell back to full-snapshot mode.
     ///
-    /// PR3a semantics (no stale-cursor handling):
-    /// - If the task was checkpoint-ready, fall back to full snapshot,
-    ///   record the fallback decision, and conservatively mark all
-    ///   windows dirty when the failure did not carry a scoped query.
+    /// Current failure semantics:
+    /// - If the task was checkpoint-ready, fall back to full snapshot and
+    ///   record the fallback decision. Dirty windows consumed by a planned
+    ///   query are restored by `restore_dirty_windows_after_failure`.
     /// - If the task was already in full-snapshot mode, the failure
     ///   does not require additional state change.
     fn handle_flow_query_failure(&self, _err: &Error, query: Option<&PlanInfo>) -> bool {
@@ -621,15 +640,14 @@ impl BatchingTask {
                 FlowQueryFallbackReason::CheckpointReadyQueryFailure,
             );
 
-            // Conservatively mark all windows dirty when the failure
-            // was not scoped to a specific time-window filter (i.e. no
-            // scoped query), so the next full-snapshot execution covers
-            // the full dirty range.
-            if query.is_none_or(|query| query.filter.is_none())
+            // If no plan info is available, there is no consumed dirty
+            // snapshot to restore. Conservatively mark the full dirty range
+            // so the next execution can rebuild from full-snapshot mode.
+            if query.is_none()
                 && let Err(mark_err) = self.mark_all_windows_as_dirty()
             {
                 warn!(
-                    "Flow {} failed to mark all windows dirty after checkpoint-ready query failure without time-window scope: {}",
+                    "Flow {} failed to mark all windows dirty after checkpoint-ready query failure without plan info: {}",
                     self.config.flow_id, mark_err
                 );
             }
@@ -638,14 +656,18 @@ impl BatchingTask {
         checkpoint_was_ready
     }
 
-    /// Restore the scoped dirty time windows from a failed query so they
-    /// are retried on the next execution.
+    /// Restore dirty windows consumed by a failed query so they are retried on
+    /// the next execution.
     ///
-    /// If the task was checkpoint-ready and the query carried no
-    /// time-window filter, the dirty windows were already marked
-    /// conservatively by `handle_flow_query_failure`; skip double-add.
-    fn restore_dirty_windows_after_failure(&self, query: &PlanInfo, checkpoint_was_ready: bool) {
-        if checkpoint_was_ready && query.filter.is_none() {
+    fn restore_dirty_windows_after_failure(&self, query: &PlanInfo) {
+        if query.filter.is_none() {
+            if let Some(dirty_windows) = &query.filterless_dirty_windows_to_restore {
+                self.state
+                    .write()
+                    .unwrap()
+                    .dirty_time_windows
+                    .add_dirty_windows(dirty_windows);
+            }
             return;
         }
 
@@ -661,7 +683,7 @@ impl BatchingTask {
     fn handle_executed_query_failure(&self, err: &Error, query: Option<&PlanInfo>) -> bool {
         let checkpoint_was_ready = self.handle_flow_query_failure(err, query);
         if let Some(query) = query {
-            self.restore_dirty_windows_after_failure(query, checkpoint_was_ready);
+            self.restore_dirty_windows_after_failure(query);
         }
         checkpoint_was_ready
     }
@@ -878,11 +900,12 @@ impl BatchingTask {
                         self.config.flow_id
                     );
                     // clean dirty time window too, this could be from create flow's check_execute
-                    let is_dirty = {
+                    let (is_dirty, dirty_windows_to_restore) = {
                         let mut state = self.state.write().unwrap();
-                        let is_dirty = !state.dirty_time_windows.is_empty();
+                        let dirty_windows_to_restore = state.dirty_time_windows.clone();
+                        let is_dirty = !dirty_windows_to_restore.is_empty();
                         state.dirty_time_windows.clean();
-                        is_dirty
+                        (is_dirty, dirty_windows_to_restore)
                     };
 
                     if !is_dirty {
@@ -903,20 +926,28 @@ impl BatchingTask {
                     {
                         Ok(plan) => plan,
                         Err(err) => {
-                            self.state.write().unwrap().dirty_time_windows.set_dirty();
+                            self.state
+                                .write()
+                                .unwrap()
+                                .dirty_time_windows
+                                .add_dirty_windows(&dirty_windows_to_restore);
                             return Err(err);
                         }
                     };
 
-                    return Ok(Some(PlanInfo { plan, filter: None }));
+                    return Ok(Some(PlanInfo {
+                        plan,
+                        filter: None,
+                        filterless_dirty_windows_to_restore: Some(dirty_windows_to_restore),
+                    }));
                 }
                 _ => {
                     // clean for tql have no use for time window
-                    let had_dirty_windows = {
+                    let dirty_windows_to_restore = {
                         let mut state = self.state.write().unwrap();
-                        let had_dirty_windows = !state.dirty_time_windows.is_empty();
+                        let dirty_windows_to_restore = state.dirty_time_windows.clone();
                         state.dirty_time_windows.clean();
-                        had_dirty_windows
+                        dirty_windows_to_restore
                     };
 
                     let plan = match gen_plan_with_matching_schema(
@@ -931,14 +962,20 @@ impl BatchingTask {
                     {
                         Ok(plan) => plan,
                         Err(err) => {
-                            if had_dirty_windows {
-                                self.state.write().unwrap().dirty_time_windows.set_dirty();
-                            }
+                            self.state
+                                .write()
+                                .unwrap()
+                                .dirty_time_windows
+                                .add_dirty_windows(&dirty_windows_to_restore);
                             return Err(err);
                         }
                     };
 
-                    return Ok(Some(PlanInfo { plan, filter: None }));
+                    return Ok(Some(PlanInfo {
+                        plan,
+                        filter: None,
+                        filterless_dirty_windows_to_restore: Some(dirty_windows_to_restore),
+                    }));
                 }
             };
 
@@ -1025,6 +1062,7 @@ impl BatchingTask {
         let info = PlanInfo {
             plan: new_plan.clone(),
             filter: Some(expr),
+            filterless_dirty_windows_to_restore: None,
         };
 
         Ok(Some(info))

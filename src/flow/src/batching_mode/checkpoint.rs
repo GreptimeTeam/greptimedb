@@ -45,19 +45,20 @@ impl FlowQueryFallbackReason {
 /// each Flow query execution. Describes whether the task advanced its
 /// checkpoint-readiness state or fell back to full snapshot, and why.
 ///
-/// In PR3a, the task tracks checkpoint readiness internally (so that
-/// subsequent queries can prove that all participating regions have valid
-/// watermarks), but the query execution path **never** emits incremental
-/// scan extensions (`FLOW_INCREMENTAL_MODE` / `FLOW_INCREMENTAL_AFTER_SEQS`).
-/// Those remain deferred to PR3b.
+/// The task tracks checkpoint readiness internally so that subsequent queries
+/// can prove that all participating regions have valid watermarks. This
+/// decision only records readiness/fallback state; it does not by itself imply
+/// that a query emitted incremental scan extensions (`FLOW_INCREMENTAL_MODE` /
+/// `FLOW_INCREMENTAL_AFTER_SEQS`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FlowCheckpointDecision {
     /// FullSnapshot → Incremental (checkpoint-readiness) transition.
     ///
     /// The query exercised every participating region, all returned valid
     /// watermarks, and the checkpoint map was populated from scratch.
-    /// The task is now checkpoint-ready. PR3b will additionally use those
-    /// checkpoints to drive actual incremental scan extensions.
+    /// The task is now checkpoint-ready. These checkpoints can be used by
+    /// incremental scan extension generation when that execution mode is
+    /// enabled.
     AdvancedFromFullSnapshot {
         participating_regions: usize,
         watermarks: usize,

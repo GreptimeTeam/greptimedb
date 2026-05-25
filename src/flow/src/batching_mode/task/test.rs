@@ -14,13 +14,21 @@
 
 use std::collections::BTreeMap;
 
+use catalog::RegisterTableRequest;
+use catalog::memory::MemoryCatalogManager;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::PlainError;
 use common_error::status_code::StatusCode;
 use common_query::Output;
+use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use datatypes::data_type::ConcreteDataType as CDT;
+use datatypes::schema::ColumnSchema;
+use datatypes::vectors::{UInt32Vector, VectorRef};
 use pretty_assertions::assert_eq;
 use session::context::QueryContext;
 use snafu::GenerateImplicitData;
+use table::test_util::MemTable;
 
 use super::*;
 use crate::batching_mode::checkpoint::{
@@ -51,6 +59,27 @@ async fn new_test_task_with_missing_sink() -> BatchingTask {
 }
 
 async fn new_test_task_and_plan_with_missing_sink() -> (BatchingTask, LogicalPlan) {
+    new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "missing_sink",
+    )
+    .await
+    .into_task_and_plan()
+}
+
+struct TestTaskParts {
+    task: BatchingTask,
+    query_engine: QueryEngineRef,
+    plan: LogicalPlan,
+}
+
+impl TestTaskParts {
+    fn into_task_and_plan(self) -> (BatchingTask, LogicalPlan) {
+        (self.task, self.plan)
+    }
+}
+
+async fn new_test_task_engine_and_plan_with_query(query: &str, sink_table: &str) -> TestTaskParts {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let plan = sql_to_df_plan(
@@ -65,14 +94,14 @@ async fn new_test_task_and_plan_with_missing_sink() -> (BatchingTask, LogicalPla
 
     let task = BatchingTask::try_new(TaskArgs {
         flow_id: 1,
-        query: "SELECT number, ts FROM numbers_with_ts",
+        query,
         plan: plan.clone(),
         time_window_expr: None,
         expire_after: None,
         sink_table_name: [
             "greptime".to_string(),
             "public".to_string(),
-            "missing_sink".to_string(),
+            sink_table.to_string(),
         ],
         source_table_names: vec![[
             "greptime".to_string(),
@@ -87,7 +116,35 @@ async fn new_test_task_and_plan_with_missing_sink() -> (BatchingTask, LogicalPla
     })
     .unwrap();
 
-    (task, plan)
+    TestTaskParts {
+        task,
+        query_engine,
+        plan,
+    }
+}
+
+fn register_number_only_sink(query_engine: &QueryEngineRef, table_name: &str) {
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "number",
+        CDT::uint32_datatype(),
+        false,
+    )]));
+    let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice([1_u32]))];
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    let table = MemTable::table(table_name, recordbatch);
+    let request = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        table_id: 9001,
+        table,
+    };
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog.register_table_sync(request).unwrap();
 }
 
 fn ordinary_query_error() -> Error {
@@ -275,6 +332,7 @@ async fn test_executed_query_failure_restores_scoped_dirty_windows_for_flush_pat
             time_ranges: vec![(Timestamp::new_second(10), Timestamp::new_second(20))],
             window_size: chrono::Duration::seconds(10),
         }),
+        filterless_dirty_windows_to_restore: None,
     };
 
     let checkpoint_was_ready =
@@ -287,10 +345,185 @@ async fn test_executed_query_failure_restores_scoped_dirty_windows_for_flush_pat
 }
 
 #[tokio::test]
+async fn test_filterless_full_snapshot_failure_restores_consumed_dirty_marker() {
+    let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
+    let mut consumed_dirty_windows = DirtyTimeWindows::default();
+    consumed_dirty_windows.set_dirty();
+    task.state.write().unwrap().dirty_time_windows.clean();
+    let filterless_query = PlanInfo {
+        plan,
+        filter: None,
+        filterless_dirty_windows_to_restore: Some(consumed_dirty_windows),
+    };
+
+    let checkpoint_was_ready =
+        task.handle_executed_query_failure(&ordinary_query_error(), Some(&filterless_query));
+
+    assert!(!checkpoint_was_ready);
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.dirty_time_windows.len(), 1);
+    // A filterless dirty marker should be restored as-is, not expanded into
+    // a mark-all time range.
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(0)
+    );
+}
+
+#[tokio::test]
+async fn test_filterless_full_snapshot_failure_merges_consumed_dirty_windows() {
+    let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
+    let mut consumed_dirty_windows = DirtyTimeWindows::default();
+    consumed_dirty_windows.add_window(Timestamp::new_second(30), Some(Timestamp::new_second(40)));
+    {
+        let mut state = task.state.write().unwrap();
+        state.dirty_time_windows.clean();
+        // Simulate new dirty data arriving while the failed query was running.
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(20)));
+    }
+    let filterless_query = PlanInfo {
+        plan,
+        filter: None,
+        filterless_dirty_windows_to_restore: Some(consumed_dirty_windows),
+    };
+
+    task.handle_executed_query_failure(&ordinary_query_error(), Some(&filterless_query));
+
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.dirty_time_windows.len(), 2);
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(20)
+    );
+}
+
+#[tokio::test]
+async fn test_filterless_failure_keeps_larger_same_start_dirty_window() {
+    let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
+    let mut consumed_dirty_windows = DirtyTimeWindows::default();
+    consumed_dirty_windows.add_window(Timestamp::new_second(30), Some(Timestamp::new_second(40)));
+    {
+        let mut state = task.state.write().unwrap();
+        state.dirty_time_windows.clean();
+        // Simulate new dirty data with the same start but a wider end arriving
+        // while the failed query was running.
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(30), Some(Timestamp::new_second(50)));
+    }
+    let filterless_query = PlanInfo {
+        plan,
+        filter: None,
+        filterless_dirty_windows_to_restore: Some(consumed_dirty_windows),
+    };
+
+    task.handle_executed_query_failure(&ordinary_query_error(), Some(&filterless_query));
+
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.dirty_time_windows.len(), 1);
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(20)
+    );
+}
+
+#[tokio::test]
+async fn test_filterless_plan_generation_failure_restores_consumed_dirty_marker() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT missing_column FROM numbers_with_ts",
+        "missing_sink",
+    )
+    .await;
+    task.state.write().unwrap().dirty_time_windows.set_dirty();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), false).with_time_index(true),
+    ]));
+
+    let result = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, None)
+        .await;
+
+    assert!(result.is_err());
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.dirty_time_windows.len(), 1);
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(0)
+    );
+}
+
+#[tokio::test]
+async fn test_insert_plan_matching_failure_restores_consumed_dirty_marker() {
+    let sink_table = "partial_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        sink_table,
+    )
+    .await;
+    register_number_only_sink(&query_engine, sink_table);
+    task.state.write().unwrap().dirty_time_windows.set_dirty();
+
+    let result = task.gen_insert_plan(&query_engine, None).await;
+
+    assert!(result.is_err());
+    let _err = match result {
+        Ok(_) => panic!("gen_insert_plan should fail with a sink column mismatch"),
+        Err(err) => err,
+    };
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.dirty_time_windows.len(), 1);
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(0)
+    );
+}
+
+#[tokio::test]
+async fn test_filterless_incremental_failure_restores_consumed_dirty_windows_after_fallback() {
+    let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
+    let mut consumed_dirty_windows = DirtyTimeWindows::default();
+    consumed_dirty_windows.add_window(Timestamp::new_second(30), Some(Timestamp::new_second(40)));
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state.dirty_time_windows.clean();
+    }
+    let filterless_query = PlanInfo {
+        plan,
+        filter: None,
+        filterless_dirty_windows_to_restore: Some(consumed_dirty_windows),
+    };
+
+    let checkpoint_was_ready =
+        task.handle_executed_query_failure(&ordinary_query_error(), Some(&filterless_query));
+
+    assert!(checkpoint_was_ready);
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.dirty_time_windows.len(), 1);
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(10)
+    );
+}
+
+#[tokio::test]
 async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
     let task = new_test_task_with_missing_sink().await;
 
-    // PR3a only sends plumbing extensions.
+    // Checkpoint readiness alone does not send incremental scan extensions.
     let extensions = task.build_flow_query_extensions().await.unwrap();
     assert_eq!(
         extensions,
@@ -302,7 +535,8 @@ async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
         .unwrap()
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
 
-    // Even after advancing to Incremental mode, still only plumbing extensions.
+    // Even after advancing to Incremental mode, checkpoint readiness alone
+    // still does not send incremental scan extensions.
     let extensions = task.build_flow_query_extensions().await.unwrap();
     assert_eq!(
         extensions,
