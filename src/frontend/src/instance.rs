@@ -303,7 +303,7 @@ impl Instance {
                     .await
             }
             _ => {
-                query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
+                query_interceptor.pre_execute(Some(&stmt), None, query_ctx.clone())?;
                 self.statement_executor
                     .execute_sql(stmt, query_ctx)
                     .await
@@ -326,7 +326,7 @@ impl Instance {
         let QueryStatement::Sql(stmt) = stmt else {
             unreachable!()
         };
-        query_interceptor.pre_execute(&stmt, Some(&plan), query_ctx.clone())?;
+        query_interceptor.pre_execute(Some(&stmt), Some(&plan), query_ctx.clone())?;
 
         self.statement_executor
             .exec_plan(plan, query_ctx.clone())
@@ -344,7 +344,11 @@ impl Instance {
             .statement_executor
             .plan_tql(tql.clone(), query_ctx)
             .await?;
-        query_interceptor.pre_execute(&Statement::Tql(tql), Some(&plan), query_ctx.clone())?;
+        query_interceptor.pre_execute(
+            Some(&Statement::Tql(tql)),
+            Some(&plan),
+            query_ctx.clone(),
+        )?;
         self.statement_executor
             .exec_plan(plan, query_ctx.clone())
             .await
@@ -649,9 +653,7 @@ impl Instance {
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
 
-        if let Some(ref s) = stmt {
-            query_interceptor.pre_execute(s, Some(&plan), query_ctx.clone())?;
-        }
+        query_interceptor.pre_execute(stmt.as_ref(), Some(&plan), query_ctx.clone())?;
 
         let query = stmt
             .as_ref()
@@ -880,7 +882,11 @@ impl PrometheusHandler for Instance {
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
-        interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
+        let QueryStatement::Promql(eval_stmt, _) = &stmt else {
+            unreachable!("query is parsed from promql");
+        };
+
+        interceptor.pre_execute(query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
 
         // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
         let query_statement = if let QueryStatement::Promql(eval_stmt, alias) = stmt {
@@ -892,7 +898,7 @@ impl PrometheusHandler for Instance {
             }
             .fail();
         };
-        let query = query_statement.to_string();
+        let raw_query = query_statement.to_string();
 
         let slow_query_timer = self
             .slow_query_options
@@ -912,7 +918,7 @@ impl PrometheusHandler for Instance {
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
             vec![query_ctx.current_schema()],
-            query,
+            raw_query,
             query_ctx.conn_info().to_string(),
             Some(query_ctx.process_id()),
             slow_query_timer,
@@ -1394,11 +1400,11 @@ mod tests {
 
         fn pre_execute(
             &self,
-            statement: &Statement,
+            statement: Option<&Statement>,
             _plan: Option<&LogicalPlan>,
             _query_ctx: QueryContextRef,
         ) -> Result<()> {
-            let Statement::Insert(insert) = statement else {
+            let Some(Statement::Insert(insert)) = statement else {
                 return Ok(());
             };
             if !insert.has_non_values_query_source() {
