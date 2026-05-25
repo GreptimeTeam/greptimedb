@@ -452,16 +452,17 @@ impl BloomFilterIndexApplier {
         let mut compatible_col_ids = Vec::new();
 
         for (col_id, expected) in &self.expected_predicate_col_types {
-            if let Some(sst_col) = sst_metadata.column_by_id(*col_id)
-                && sst_col.column_schema.data_type != *expected
-            {
+            let Some(sst_col) = sst_metadata.column_by_id(*col_id) else {
+                has_type_mismatch = true;
+                continue;
+            };
+
+            if sst_col.column_schema.data_type != *expected {
                 has_type_mismatch = true;
                 continue;
             }
 
-            if self.default_predicates.contains_key(col_id) {
-                compatible_col_ids.push(*col_id);
-            }
+            compatible_col_ids.push(*col_id);
         }
 
         if compatible_col_ids.is_empty() {
@@ -566,6 +567,57 @@ mod tests {
         );
         let predicates = applier.compatible_predicate_for_sst(&mock_region_metadata());
         assert!(predicates.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compatible_predicate_for_sst_partial_type_mismatch() {
+        let (_d, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_plan_for_sst_partial_mismatch_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "table_dir".to_string();
+
+        // Column 1 (tag_str): expected string — matches SST (compatible).
+        // Column 3 (field_u64): expected int64 — SST has uint64 (mismatched).
+        let predicates = BTreeMap::from_iter([
+            (
+                1,
+                vec![InListPredicate {
+                    list: BTreeSet::from_iter([Bytes::from("foo")]),
+                }],
+            ),
+            (
+                3,
+                vec![InListPredicate {
+                    list: BTreeSet::from_iter([Bytes::from("bar")]),
+                }],
+            ),
+        ]);
+        let expected_predicate_col_types = BTreeMap::from_iter([
+            (1, ConcreteDataType::string_datatype()),
+            (3, ConcreteDataType::int64_datatype()), // intentional mismatch
+        ]);
+
+        let applier = BloomFilterIndexApplier::new(
+            table_dir,
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            predicates,
+            expected_predicate_col_types,
+        );
+        let result = applier.compatible_predicate_for_sst(&mock_region_metadata());
+
+        // The subset containing only the compatible column must be returned.
+        let result = result.expect("expected Some with compatible subset");
+        assert!(
+            result.contains_key(&1),
+            "compatible column 1 must be present"
+        );
+        assert!(
+            !result.contains_key(&3),
+            "mismatched column 3 must be absent"
+        );
+        assert_eq!(result.len(), 1, "only the compatible predicate must remain");
     }
 
     #[allow(clippy::type_complexity)]
