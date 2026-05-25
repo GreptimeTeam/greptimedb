@@ -686,9 +686,8 @@ impl BatchingTask {
         filter: &FilterExprInfo,
         result: Result<T, Error>,
     ) -> Result<T, Error> {
-        result.map_err(|err| {
+        result.inspect_err(|_| {
             self.restore_scoped_dirty_windows(filter);
-            err
         })
     }
 
