@@ -71,6 +71,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("I/O error while {}", operation))]
+    Io {
+        operation: &'static str,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Cannot resume snapshot with a different schema_only mode (existing: {}, requested: {}). Use --force to recreate.",
         existing_schema_only,
@@ -221,6 +230,7 @@ impl ErrorExt for Error {
 
             Error::EmptyResult { .. }
             | Error::UnexpectedValueType { .. }
+            | Error::Io { .. }
             | Error::UrlParse { .. } => StatusCode::Internal,
 
             Error::Database { error, .. } => error.status_code(),
