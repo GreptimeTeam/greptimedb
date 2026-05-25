@@ -322,16 +322,18 @@ impl HistogramFold {
     /// Transform the schema
     ///
     /// - `le` will be removed
+    ///
+    /// Column qualifiers are preserved so downstream plan nodes can keep
+    /// referencing the columns by their original qualified names.
     fn convert_schema(
         input_schema: &DFSchemaRef,
         le_column: &str,
     ) -> DataFusionResult<DFSchemaRef> {
-        let fields = input_schema.fields();
         // safety: those fields are checked in `check_schema()`
-        let mut new_fields = Vec::with_capacity(fields.len() - 1);
-        for f in fields {
-            if f.name() != le_column {
-                new_fields.push((None, f.clone()));
+        let mut new_fields = Vec::with_capacity(input_schema.fields().len() - 1);
+        for (qualifier, field) in input_schema.iter() {
+            if field.name() != le_column {
+                new_fields.push((qualifier.cloned(), field.clone()));
             }
         }
         Ok(Arc::new(DFSchema::new_with_metadata(
