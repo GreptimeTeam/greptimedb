@@ -98,7 +98,8 @@ impl Tokenizer for ChineseTokenizer {
             let mut tokens = JIEBA
                 .cut_for_search(text, true)
                 .into_iter()
-                .filter(|s| is_indexable_token(s))
+                .map(|token| token.word)
+                .filter(|token| is_indexable_token(token))
                 .collect::<Vec<_>>();
 
             let english = EnglishTokenizer {};
@@ -336,10 +337,26 @@ mod tests {
         let text = "哈基米哦南北绿豆，噢马自立曼波。登录手机号。中国农业银行。装电视台，中国中央广播电视台。压不缩，笑不活。";
 
         let default_tokens = tokenizer.tokenize(text);
-        let cut_hmm_false = JIEBA.cut(text, false);
-        let cut_hmm_true = JIEBA.cut(text, true);
-        let cut_for_search_hmm_false = JIEBA.cut_for_search(text, false);
-        let cut_for_search_hmm_true = JIEBA.cut_for_search(text, true);
+        let cut_hmm_false = JIEBA
+            .cut(text, false)
+            .into_iter()
+            .map(|token| token.word)
+            .collect::<Vec<_>>();
+        let cut_hmm_true = JIEBA
+            .cut(text, true)
+            .into_iter()
+            .map(|token| token.word)
+            .collect::<Vec<_>>();
+        let cut_for_search_hmm_false = JIEBA
+            .cut_for_search(text, false)
+            .into_iter()
+            .map(|token| token.word)
+            .collect::<Vec<_>>();
+        let cut_for_search_hmm_true = JIEBA
+            .cut_for_search(text, true)
+            .into_iter()
+            .map(|token| token.word)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             default_tokens,

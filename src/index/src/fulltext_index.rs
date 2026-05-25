@@ -52,7 +52,7 @@ impl Config {
     fn build_tantivy_tokenizer(&self) -> TokenizerManager {
         let mut builder = match self.analyzer {
             Analyzer::English => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
-            Analyzer::Chinese => TextAnalyzer::builder(JiebaTokenizer {}).dynamic(),
+            Analyzer::Chinese => TextAnalyzer::builder(JiebaTokenizer::new()).dynamic(),
         };
 
         if !self.case_sensitive {
