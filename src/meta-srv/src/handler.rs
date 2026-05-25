@@ -278,15 +278,6 @@ impl Pushers {
     async fn remove(&self, pusher_id: &str) -> Option<Pusher> {
         self.0.write().await.remove(pusher_id)
     }
-
-    pub(crate) async fn clear(&self) -> Vec<String> {
-        let mut pushers = self.0.write().await;
-        let keys = pushers.keys().cloned().collect::<Vec<_>>();
-        if !keys.is_empty() {
-            pushers.clear();
-        }
-        keys
-    }
 }
 
 #[derive(Clone)]
@@ -322,10 +313,17 @@ impl HeartbeatHandlerGroup {
 
     /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
     pub async fn deregister_push(&self, pusher_id: PusherId) {
-        info!("Pusher unregister: {}", pusher_id);
         if self.pushers.remove(&pusher_id.string_key()).await.is_some() {
+            info!("Pusher unregister: {}", pusher_id);
             METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         }
+    }
+
+    #[cfg(test)]
+    /// Returns whether the group contains the heartbeat response [`Pusher`] with the given key.
+    pub async fn contains_pusher(&self, pusher_id: &PusherId) -> bool {
+        let pushers = self.pushers.0.read().await;
+        pushers.contains_key(&pusher_id.string_key())
     }
 
     /// Returns the [`Pushers`] of the group.
@@ -549,14 +547,6 @@ impl Mailbox for HeartbeatMailbox {
         }
 
         Ok(())
-    }
-
-    async fn reset(&self) {
-        let keys = self.pushers.clear().await;
-        if !keys.is_empty() {
-            info!("Reset mailbox, deregister pushers: {:?}", keys);
-            METRIC_META_HEARTBEAT_CONNECTION_NUM.sub(keys.len() as i64);
-        }
     }
 }
 

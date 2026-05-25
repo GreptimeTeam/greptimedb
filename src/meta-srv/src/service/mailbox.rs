@@ -207,9 +207,6 @@ pub trait Mailbox: Send + Sync {
     async fn broadcast(&self, ch: &BroadcastChannel, msg: &MailboxMessage) -> Result<()>;
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()>;
-
-    /// Reset all pushers of the mailbox.
-    async fn reset(&self);
 }
 
 #[cfg(test)]
