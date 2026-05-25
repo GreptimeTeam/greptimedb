@@ -31,9 +31,6 @@ use snafu::GenerateImplicitData;
 use table::test_util::MemTable;
 
 use super::*;
-use crate::batching_mode::checkpoint::{
-    CHECKPOINT_DECISION_ADVANCE, CHECKPOINT_DECISION_FALLBACK, CHECKPOINT_REASON_NONE,
-};
 use crate::test_utils::create_test_query_engine;
 
 fn output_with_region_watermarks(
@@ -173,8 +170,8 @@ fn test_apply_query_result_to_state_advances_full_snapshot_to_incremental() {
     assert_eq!(
         decision,
         FlowCheckpointDecision::AdvancedFromFullSnapshot {
-            participating_regions: 2,
-            watermarks: 2,
+            participating_region_count: 2,
+            watermark_count: 2,
         }
     );
     assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
@@ -253,8 +250,8 @@ fn test_apply_query_result_to_state_advances_incremental_subset() {
     assert_eq!(
         decision,
         FlowCheckpointDecision::AdvancedIncremental {
-            participating_regions: 2,
-            watermarks: 2,
+            participating_region_count: 2,
+            watermark_count: 2,
         }
     );
     assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
@@ -265,22 +262,24 @@ fn test_apply_query_result_to_state_advances_incremental_subset() {
 }
 
 #[test]
-fn test_checkpoint_decision_labels_are_stable() {
+fn test_checkpoint_decision_metric_labels_are_stable() {
     let advance = FlowCheckpointDecision::AdvancedIncremental {
-        participating_regions: 1,
-        watermarks: 1,
+        participating_region_count: 1,
+        watermark_count: 1,
     };
     let fallback = FlowCheckpointDecision::FallbackToFullSnapshot {
         previous_mode: CheckpointMode::Incremental,
         reason: FlowQueryFallbackReason::CheckpointReadyQueryFailure,
     };
+    let advance_labels = checkpoint_decision_metric_labels(advance);
+    let fallback_labels = checkpoint_decision_metric_labels(fallback);
 
-    assert_eq!(advance.mode_label(), "incremental");
-    assert_eq!(advance.decision_label(), CHECKPOINT_DECISION_ADVANCE);
-    assert_eq!(advance.reason_label(), CHECKPOINT_REASON_NONE);
-    assert_eq!(fallback.mode_label(), "incremental");
-    assert_eq!(fallback.decision_label(), CHECKPOINT_DECISION_FALLBACK);
-    assert_eq!(fallback.reason_label(), "checkpoint_ready_query_failure");
+    assert_eq!(advance_labels.mode, "incremental");
+    assert_eq!(advance_labels.decision, "advance");
+    assert_eq!(advance_labels.reason, "none");
+    assert_eq!(fallback_labels.mode, "incremental");
+    assert_eq!(fallback_labels.decision, "fallback");
+    assert_eq!(fallback_labels.reason, "checkpoint_ready_query_failure");
 }
 
 #[tokio::test]

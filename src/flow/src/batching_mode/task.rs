@@ -44,9 +44,7 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
-use crate::batching_mode::checkpoint::{
-    FlowCheckpointDecision, FlowQueryFallbackReason, checkpoint_mode_label,
-};
+use crate::batching_mode::checkpoint::{FlowCheckpointDecision, FlowQueryFallbackReason};
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::state::{CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState};
 use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
@@ -61,6 +59,11 @@ use crate::error::{
     UnexpectedSnafu,
 };
 use crate::metrics::{
+    FLOW_CHECKPOINT_DECISION_ADVANCE_LABEL, FLOW_CHECKPOINT_DECISION_FALLBACK_LABEL,
+    FLOW_CHECKPOINT_MODE_FULL_SNAPSHOT_LABEL, FLOW_CHECKPOINT_MODE_INCREMENTAL_LABEL,
+    FLOW_CHECKPOINT_REASON_INCOMPLETE_WATERMARK_LABEL,
+    FLOW_CHECKPOINT_REASON_MISSING_WATERMARK_LABEL, FLOW_CHECKPOINT_REASON_NONE_LABEL,
+    FLOW_CHECKPOINT_REASON_QUERY_FAILURE_LABEL,
     METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT, METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT,
     METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
     METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY, METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT,
@@ -523,8 +526,8 @@ impl BatchingTask {
                     CheckpointMode::FullSnapshot => {
                         state.advance_checkpoints(watermark_map);
                         FlowCheckpointDecision::AdvancedFromFullSnapshot {
-                            participating_regions: participating_region_count,
-                            watermarks: watermark_count,
+                            participating_region_count,
+                            watermark_count,
                         }
                     }
                     CheckpointMode::Incremental => {
@@ -533,8 +536,8 @@ impl BatchingTask {
                             watermark_map,
                         );
                         FlowCheckpointDecision::AdvancedIncremental {
-                            participating_regions: participating_region_count,
-                            watermarks: watermark_count,
+                            participating_region_count,
+                            watermark_count,
                         }
                     }
                 }
@@ -556,30 +559,31 @@ impl BatchingTask {
 
     fn record_checkpoint_decision(flow_id: FlowId, decision: FlowCheckpointDecision) {
         let flow_id = flow_id.to_string();
+        let labels = checkpoint_decision_metric_labels(decision);
         METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT
             .with_label_values(&[
                 flow_id.as_str(),
-                decision.mode_label(),
-                decision.decision_label(),
-                decision.reason_label(),
+                labels.mode,
+                labels.decision,
+                labels.reason,
             ])
             .inc();
 
         match decision {
             FlowCheckpointDecision::AdvancedFromFullSnapshot {
-                participating_regions,
-                watermarks,
+                participating_region_count,
+                watermark_count,
             } => {
                 info!(
-                    "Flow {flow_id} is now checkpoint-ready after full snapshot, participating_regions={participating_regions}, watermarks={watermarks}"
+                    "Flow {flow_id} is now checkpoint-ready after full snapshot, participating_region_count={participating_region_count}, watermark_count={watermark_count}"
                 );
             }
             FlowCheckpointDecision::AdvancedIncremental {
-                participating_regions,
-                watermarks,
+                participating_region_count,
+                watermark_count,
             } => {
                 debug!(
-                    "Flow {flow_id} advanced checkpoint-readiness, participating_regions={participating_regions}, watermarks={watermarks}"
+                    "Flow {flow_id} advanced checkpoint-readiness, participating_region_count={participating_region_count}, watermark_count={watermark_count}"
                 );
             }
             FlowCheckpointDecision::FallbackToFullSnapshot {
@@ -589,7 +593,7 @@ impl BatchingTask {
                 warn!(
                     "Flow {flow_id} switched to full snapshot mode, previous_mode={}, reason={}",
                     checkpoint_mode_label(previous_mode),
-                    reason.as_label()
+                    checkpoint_fallback_reason_metric_label(reason)
                 );
             }
         }
@@ -1066,6 +1070,58 @@ impl BatchingTask {
         };
 
         Ok(Some(info))
+    }
+}
+
+struct CheckpointDecisionMetricLabels {
+    mode: &'static str,
+    decision: &'static str,
+    reason: &'static str,
+}
+
+fn checkpoint_decision_metric_labels(
+    decision: FlowCheckpointDecision,
+) -> CheckpointDecisionMetricLabels {
+    match decision {
+        FlowCheckpointDecision::AdvancedFromFullSnapshot { .. } => CheckpointDecisionMetricLabels {
+            mode: checkpoint_mode_label(CheckpointMode::FullSnapshot),
+            decision: FLOW_CHECKPOINT_DECISION_ADVANCE_LABEL,
+            reason: FLOW_CHECKPOINT_REASON_NONE_LABEL,
+        },
+        FlowCheckpointDecision::AdvancedIncremental { .. } => CheckpointDecisionMetricLabels {
+            mode: checkpoint_mode_label(CheckpointMode::Incremental),
+            decision: FLOW_CHECKPOINT_DECISION_ADVANCE_LABEL,
+            reason: FLOW_CHECKPOINT_REASON_NONE_LABEL,
+        },
+        FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode,
+            reason,
+        } => CheckpointDecisionMetricLabels {
+            mode: checkpoint_mode_label(previous_mode),
+            decision: FLOW_CHECKPOINT_DECISION_FALLBACK_LABEL,
+            reason: checkpoint_fallback_reason_metric_label(reason),
+        },
+    }
+}
+
+fn checkpoint_fallback_reason_metric_label(reason: FlowQueryFallbackReason) -> &'static str {
+    match reason {
+        FlowQueryFallbackReason::MissingRegionWatermark => {
+            FLOW_CHECKPOINT_REASON_MISSING_WATERMARK_LABEL
+        }
+        FlowQueryFallbackReason::IncompleteRegionWatermark => {
+            FLOW_CHECKPOINT_REASON_INCOMPLETE_WATERMARK_LABEL
+        }
+        FlowQueryFallbackReason::CheckpointReadyQueryFailure => {
+            FLOW_CHECKPOINT_REASON_QUERY_FAILURE_LABEL
+        }
+    }
+}
+
+fn checkpoint_mode_label(mode: CheckpointMode) -> &'static str {
+    match mode {
+        CheckpointMode::FullSnapshot => FLOW_CHECKPOINT_MODE_FULL_SNAPSHOT_LABEL,
+        CheckpointMode::Incremental => FLOW_CHECKPOINT_MODE_INCREMENTAL_LABEL,
     }
 }
 

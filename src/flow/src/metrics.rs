@@ -17,6 +17,17 @@
 use lazy_static::lazy_static;
 use prometheus::*;
 
+pub(crate) const FLOW_CHECKPOINT_DECISION_ADVANCE_LABEL: &str = "advance";
+pub(crate) const FLOW_CHECKPOINT_DECISION_FALLBACK_LABEL: &str = "fallback";
+pub(crate) const FLOW_CHECKPOINT_MODE_FULL_SNAPSHOT_LABEL: &str = "full_snapshot";
+pub(crate) const FLOW_CHECKPOINT_MODE_INCREMENTAL_LABEL: &str = "incremental";
+pub(crate) const FLOW_CHECKPOINT_REASON_NONE_LABEL: &str = "none";
+pub(crate) const FLOW_CHECKPOINT_REASON_MISSING_WATERMARK_LABEL: &str = "missing_region_watermark";
+pub(crate) const FLOW_CHECKPOINT_REASON_INCOMPLETE_WATERMARK_LABEL: &str =
+    "incomplete_region_watermark";
+pub(crate) const FLOW_CHECKPOINT_REASON_QUERY_FAILURE_LABEL: &str =
+    "checkpoint_ready_query_failure";
+
 lazy_static! {
     pub static ref METRIC_FLOW_TASK_COUNT: IntGauge =
         register_int_gauge!("greptime_flow_task_count", "flow task count").unwrap();

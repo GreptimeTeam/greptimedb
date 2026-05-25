@@ -14,10 +14,6 @@
 
 use crate::batching_mode::state::CheckpointMode;
 
-pub(super) const CHECKPOINT_DECISION_ADVANCE: &str = "advance";
-pub(super) const CHECKPOINT_DECISION_FALLBACK: &str = "fallback";
-pub(super) const CHECKPOINT_REASON_NONE: &str = "none";
-
 /// Why the task fell back to full snapshot mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FlowQueryFallbackReason {
@@ -29,16 +25,6 @@ pub(super) enum FlowQueryFallbackReason {
     /// A query failure while the task was checkpoint-ready; the Flow resets
     /// to full snapshot to avoid cascading errors.
     CheckpointReadyQueryFailure,
-}
-
-impl FlowQueryFallbackReason {
-    pub(super) fn as_label(self) -> &'static str {
-        match self {
-            Self::MissingRegionWatermark => "missing_region_watermark",
-            Self::IncompleteRegionWatermark => "incomplete_region_watermark",
-            Self::CheckpointReadyQueryFailure => "checkpoint_ready_query_failure",
-        }
-    }
 }
 
 /// Decision produced by `BatchingTask::apply_query_result_to_state` after
@@ -60,16 +46,16 @@ pub(super) enum FlowCheckpointDecision {
     /// incremental scan extension generation when that execution mode is
     /// enabled.
     AdvancedFromFullSnapshot {
-        participating_regions: usize,
-        watermarks: usize,
+        participating_region_count: usize,
+        watermark_count: usize,
     },
     /// Existing Incremental (checkpoint-ready) → Incremental (in-place advancement).
     ///
     /// A subset of participating regions advanced their watermarks. The
     /// task stays checkpoint-ready with an updated checkpoint map.
     AdvancedIncremental {
-        participating_regions: usize,
-        watermarks: usize,
+        participating_region_count: usize,
+        watermark_count: usize,
     },
     /// Any mode → FullSnapshot.
     ///
@@ -81,41 +67,4 @@ pub(super) enum FlowCheckpointDecision {
         previous_mode: CheckpointMode,
         reason: FlowQueryFallbackReason,
     },
-}
-
-impl FlowCheckpointDecision {
-    pub(super) fn mode_label(self) -> &'static str {
-        match self {
-            Self::AdvancedFromFullSnapshot { .. } => {
-                checkpoint_mode_label(CheckpointMode::FullSnapshot)
-            }
-            Self::AdvancedIncremental { .. } => checkpoint_mode_label(CheckpointMode::Incremental),
-            Self::FallbackToFullSnapshot { previous_mode, .. } => {
-                checkpoint_mode_label(previous_mode)
-            }
-        }
-    }
-
-    pub(super) fn decision_label(self) -> &'static str {
-        match self {
-            Self::AdvancedFromFullSnapshot { .. } | Self::AdvancedIncremental { .. } => {
-                CHECKPOINT_DECISION_ADVANCE
-            }
-            Self::FallbackToFullSnapshot { .. } => CHECKPOINT_DECISION_FALLBACK,
-        }
-    }
-
-    pub(super) fn reason_label(self) -> &'static str {
-        match self {
-            Self::FallbackToFullSnapshot { reason, .. } => reason.as_label(),
-            _ => CHECKPOINT_REASON_NONE,
-        }
-    }
-}
-
-pub(super) fn checkpoint_mode_label(mode: CheckpointMode) -> &'static str {
-    match mode {
-        CheckpointMode::FullSnapshot => "full_snapshot",
-        CheckpointMode::Incremental => "incremental",
-    }
 }
