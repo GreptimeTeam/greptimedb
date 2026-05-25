@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use common_base::range_read::RangeReader;
 use common_telemetry::{tracing, warn};
+use datatypes::data_type::ConcreteDataType;
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{
     BloomFilterReadMetrics, BloomFilterReader, BloomFilterReaderImpl,
@@ -30,6 +31,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
@@ -38,7 +40,6 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
 };
-use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
     ApplyBloomFilterIndexSnafu, Error, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu,
     Result,
@@ -133,10 +134,10 @@ pub struct BloomFilterIndexApplier {
 
     /// Bloom filter predicates.
     /// For each column, the value will be retained only if it contains __all__ predicates.
-    predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
+    default_predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
 
-    /// Predicate key. Used to identify the predicate and fetch result from cache.
-    predicate_key: PredicateKey,
+    /// Expected predicate column types from the latest region metadata.
+    expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
 }
 
 impl BloomFilterIndexApplier {
@@ -149,8 +150,9 @@ impl BloomFilterIndexApplier {
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
         predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
+        expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
     ) -> Self {
-        let predicates = Arc::new(predicates);
+        let default_predicates = Arc::new(predicates);
         Self {
             table_dir,
             path_type,
@@ -159,8 +161,8 @@ impl BloomFilterIndexApplier {
             puffin_manager_factory,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
-            predicate_key: PredicateKey::new_bloom(predicates.clone()),
-            predicates,
+            default_predicates,
+            expected_predicate_col_types,
         }
     }
 
@@ -207,6 +209,7 @@ impl BloomFilterIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
+        predicates: &BTreeMap<ColumnId, Vec<InListPredicate>>,
         row_groups: impl Iterator<Item = (usize, bool)>,
         mut metrics: Option<&mut BloomFilterIndexApplyMetrics>,
     ) -> Result<Vec<(usize, Vec<Range<usize>>)>> {
@@ -230,7 +233,7 @@ impl BloomFilterIndexApplier {
             .map(|(i, range)| (*i, vec![range.clone()]))
             .collect::<Vec<_>>();
 
-        for (column_id, predicates) in self.predicates.iter() {
+        for (column_id, predicates) in predicates {
             let blob = match self
                 .blob_reader(file_id, *column_id, file_size_hint, metrics.as_deref_mut())
                 .await?
@@ -438,9 +441,46 @@ impl BloomFilterIndexApplier {
         Ok(())
     }
 
-    /// Returns the predicate key.
-    pub fn predicate_key(&self) -> &PredicateKey {
-        &self.predicate_key
+    /// Returns compatible bloom filter predicates with the given SST metadata.
+    ///
+    /// Returns `None` when no compatible predicate remains for this SST.
+    pub fn compatible_predicate_for_sst(
+        &self,
+        sst_metadata: &RegionMetadataRef,
+    ) -> Option<Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>> {
+        let mut has_type_mismatch = false;
+        let mut compatible_col_ids = Vec::new();
+
+        for (col_id, expected) in &self.expected_predicate_col_types {
+            let Some(sst_col) = sst_metadata.column_by_id(*col_id) else {
+                has_type_mismatch = true;
+                continue;
+            };
+
+            if sst_col.column_schema.data_type != *expected {
+                has_type_mismatch = true;
+                continue;
+            }
+
+            compatible_col_ids.push(*col_id);
+        }
+
+        if compatible_col_ids.is_empty() {
+            return None;
+        }
+
+        if !has_type_mismatch {
+            return Some(self.default_predicates.clone());
+        }
+
+        let mut compatible_predicates = BTreeMap::new();
+        for col_id in compatible_col_ids {
+            if let Some(predicates) = self.default_predicates.get(&col_id) {
+                compatible_predicates.insert(col_id, predicates.clone());
+            }
+        }
+
+        Some(Arc::new(compatible_predicates))
     }
 }
 
@@ -456,9 +496,12 @@ fn is_blob_not_found(err: &Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
 
     use datafusion_expr::{Expr, col, lit};
     use futures::future::BoxFuture;
+    use index::Bytes;
+    use object_store::services::Memory;
     use puffin::puffin_manager::PuffinWriter;
     use store_api::metadata::RegionMetadata;
     use store_api::storage::FileId;
@@ -469,6 +512,113 @@ mod tests {
     use crate::sst::index::bloom_filter::creator::tests::{
         mock_object_store, mock_region_metadata, new_batch, new_intm_mgr,
     };
+
+    #[tokio::test]
+    async fn test_compatible_predicate_for_sst() {
+        let (_d, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_plan_for_sst_basic_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "table_dir".to_string();
+
+        let predicates = BTreeMap::from_iter([(
+            1,
+            vec![InListPredicate {
+                list: BTreeSet::from_iter([Bytes::from("foo")]),
+            }],
+        )]);
+        let expected_predicate_col_types =
+            BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]);
+
+        let applier = BloomFilterIndexApplier::new(
+            table_dir,
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            predicates,
+            expected_predicate_col_types,
+        );
+        let predicates = applier.compatible_predicate_for_sst(&mock_region_metadata());
+        assert!(predicates.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_compatible_predicate_for_sst_type_mismatch() {
+        let (_d, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_plan_for_sst_type_mismatch_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "table_dir".to_string();
+
+        let predicates = BTreeMap::from_iter([(
+            1,
+            vec![InListPredicate {
+                list: BTreeSet::from_iter([Bytes::from("foo")]),
+            }],
+        )]);
+        let expected_predicate_col_types =
+            BTreeMap::from_iter([(1, ConcreteDataType::int64_datatype())]);
+
+        let applier = BloomFilterIndexApplier::new(
+            table_dir,
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            predicates,
+            expected_predicate_col_types,
+        );
+        let predicates = applier.compatible_predicate_for_sst(&mock_region_metadata());
+        assert!(predicates.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compatible_predicate_for_sst_partial_type_mismatch() {
+        let (_d, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_plan_for_sst_partial_mismatch_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "table_dir".to_string();
+
+        // Column 1 (tag_str): expected string — matches SST (compatible).
+        // Column 3 (field_u64): expected int64 — SST has uint64 (mismatched).
+        let predicates = BTreeMap::from_iter([
+            (
+                1,
+                vec![InListPredicate {
+                    list: BTreeSet::from_iter([Bytes::from("foo")]),
+                }],
+            ),
+            (
+                3,
+                vec![InListPredicate {
+                    list: BTreeSet::from_iter([Bytes::from("bar")]),
+                }],
+            ),
+        ]);
+        let expected_predicate_col_types = BTreeMap::from_iter([
+            (1, ConcreteDataType::string_datatype()),
+            (3, ConcreteDataType::int64_datatype()), // intentional mismatch
+        ]);
+
+        let applier = BloomFilterIndexApplier::new(
+            table_dir,
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            predicates,
+            expected_predicate_col_types,
+        );
+        let result = applier.compatible_predicate_for_sst(&mock_region_metadata());
+
+        // The subset containing only the compatible column must be returned.
+        let result = result.expect("expected Some with compatible subset");
+        assert!(
+            result.contains_key(&1),
+            "compatible column 1 must be present"
+        );
+        assert!(
+            !result.contains_key(&3),
+            "mismatched column 3 must be absent"
+        );
+        assert_eq!(result.len(), 1, "only the compatible predicate must remain");
+    }
 
     #[allow(clippy::type_complexity)]
     fn tester(
@@ -496,8 +646,11 @@ mod tests {
                 );
 
                 let applier = builder.build(&exprs).unwrap().unwrap();
+                let predicates = applier
+                    .compatible_predicate_for_sst(&Arc::new(metadata.clone()))
+                    .unwrap();
                 applier
-                    .apply(file_id, None, row_groups.into_iter(), None)
+                    .apply(file_id, None, &predicates, row_groups.into_iter(), None)
                     .await
                     .unwrap()
                     .into_iter()
