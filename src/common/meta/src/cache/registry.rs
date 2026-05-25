@@ -67,6 +67,13 @@ impl CacheInvalidator for LayeredCacheRegistry {
         }
         results.into_iter().collect::<Result<Vec<_>>>().map(|_| ())
     }
+
+    fn invalidate_all(&self) -> Result<()> {
+        for registry in &self.layers {
+            registry.invalidate_all()?;
+        }
+        Ok(())
+    }
 }
 
 impl LayeredCacheRegistry {
@@ -122,6 +129,13 @@ impl CacheInvalidator for CacheRegistry {
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
+        Ok(())
+    }
+
+    fn invalidate_all(&self) -> Result<()> {
+        for invalidator in &self.indexes {
+            invalidator.invalidate_all()?;
+        }
         Ok(())
     }
 }

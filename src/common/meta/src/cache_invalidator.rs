@@ -55,6 +55,10 @@ pub struct Context {
 pub trait CacheInvalidator: Send + Sync {
     async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()>;
 
+    fn invalidate_all(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         std::any::type_name::<Self>()
     }

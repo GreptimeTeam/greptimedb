@@ -407,6 +407,39 @@ impl ManagerContext {
         self.running.load(Ordering::Relaxed)
     }
 
+    /// Clears in-memory procedure state so recovery reloads from persisted metadata.
+    pub(crate) fn reset(&self) {
+        match self.procedures.write() {
+            Ok(mut procedures) => procedures.clear(),
+            Err(poisoned) => {
+                common_telemetry::warn!(
+                    "Procedure map lock was poisoned while resetting procedure manager"
+                );
+                poisoned.into_inner().clear();
+            }
+        }
+
+        match self.running_procedures.lock() {
+            Ok(mut running_procedures) => running_procedures.clear(),
+            Err(poisoned) => {
+                common_telemetry::warn!(
+                    "Running procedure set lock was poisoned while resetting procedure manager"
+                );
+                poisoned.into_inner().clear();
+            }
+        }
+
+        match self.finished_procedures.lock() {
+            Ok(mut finished_procedures) => finished_procedures.clear(),
+            Err(poisoned) => {
+                common_telemetry::warn!(
+                    "Finished procedure queue lock was poisoned while resetting procedure manager"
+                );
+                poisoned.into_inner().clear();
+            }
+        }
+    }
+
     /// Returns true if the procedure with specific `procedure_id` exists.
     fn contains_procedure(&self, procedure_id: ProcedureId) -> bool {
         let procedures = self.procedures.read().unwrap();
@@ -955,6 +988,12 @@ impl ProcedureManager for LocalManager {
 
     async fn list_procedures(&self) -> Result<Vec<ProcedureInfo>> {
         Ok(self.manager_ctx.list_procedure())
+    }
+
+    async fn reset_before_recover(&self) -> Result<()> {
+        self.manager_ctx.reset();
+        info!("LocalManager in-memory procedure state cleared before recovery");
+        Ok(())
     }
 }
 

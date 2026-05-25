@@ -465,6 +465,11 @@ impl FlowDualEngine {
         Ok(())
     }
 
+    /// Reconciles in-memory flow tasks from persisted metadata.
+    pub async fn reconcile_flows_from_metadata(&self) -> Result<(), Error> {
+        self.check_flow_consistent(true, true).await
+    }
+
     /// TODO(discord9): also add a `exists` api using flow metadata manager's `exists` method
     async fn flow_exist_in_metadata(&self, flow_id: FlowId) -> Result<bool, Error> {
         self.flow_metadata_manager
