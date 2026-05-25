@@ -161,7 +161,7 @@ impl App for Instance {
         self.datanode.start_telemetry();
 
         self.leader_services_controller
-            .start_with_context(self.leader_services_context.clone())
+            .start(self.leader_services_context.clone())
             .await?;
 
         plugins::start_frontend_plugins(self.frontend.instance.plugins().clone())
@@ -753,29 +753,11 @@ impl ProcedureExecutorCreator for DefaultProcedureExecutorCreator {
 
 #[async_trait]
 pub trait StandaloneLeaderServicesController: Send + Sync {
-    /// Starts services that manage standalone metadata or WAL state.
+    /// Starts leader services that manage standalone metadata or WAL state.
     ///
     /// The default implementation starts the procedure manager and WAL provider
     /// during instance startup.
-    async fn start(
-        &self,
-        procedure_manager: ProcedureManagerRef,
-        wal_provider: WalProviderRef,
-        region_server: RegionServer,
-    ) -> Result<()>;
-
-    /// Starts leader services with additional standalone runtime context.
-    ///
-    /// Custom controllers can override this when role transitions need to
-    /// reconcile metadata-backed runtime state before publishing readiness.
-    async fn start_with_context(&self, context: LeaderServicesContext) -> Result<()> {
-        self.start(
-            context.procedure_manager,
-            context.wal_provider,
-            context.region_server,
-        )
-        .await
-    }
+    async fn start(&self, context: LeaderServicesContext) -> Result<()>;
 
     /// Stops services started by [`StandaloneLeaderServicesController::start`].
     async fn stop(
@@ -813,17 +795,14 @@ pub struct DefaultStandaloneLeaderServicesController;
 
 #[async_trait]
 impl StandaloneLeaderServicesController for DefaultStandaloneLeaderServicesController {
-    async fn start(
-        &self,
-        procedure_manager: ProcedureManagerRef,
-        wal_provider: WalProviderRef,
-        _region_server: RegionServer,
-    ) -> Result<()> {
-        procedure_manager
+    async fn start(&self, context: LeaderServicesContext) -> Result<()> {
+        context
+            .procedure_manager
             .start()
             .await
             .context(error::StartProcedureManagerSnafu)?;
-        wal_provider
+        context
+            .wal_provider
             .start()
             .await
             .context(error::StartWalProviderSnafu)
