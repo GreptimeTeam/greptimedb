@@ -547,6 +547,55 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_plan_allocate_default_source_region() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let mut next_region_number = 5;
+        let source_regions = vec![SourceRegionDescriptor::Default {
+            region_id: RegionId::new(table_id, 1),
+        }];
+        let target_partition_exprs = vec![range_expr("x", 0, 50), range_expr("x", 50, 100)];
+        let allocation_plan = AllocationPlanEntry {
+            group_id,
+            source_regions: source_regions.clone(),
+            target_partition_exprs: target_partition_exprs.clone(),
+            transition_map: vec![vec![0, 1]],
+        };
+
+        let result = convert_allocation_plan_to_repartition_plan(
+            table_id,
+            &mut next_region_number,
+            &allocation_plan,
+        );
+
+        assert_eq!(result.source_regions, source_regions);
+        assert_eq!(result.target_regions.len(), 2);
+        assert_eq!(
+            result.target_regions[0].region_id,
+            RegionId::new(table_id, 1)
+        );
+        assert_eq!(
+            result.target_regions[0].partition_expr,
+            target_partition_exprs[0]
+        );
+        assert_eq!(
+            result.target_regions[1].region_id,
+            RegionId::new(table_id, 5)
+        );
+        assert_eq!(
+            result.target_regions[1].partition_expr,
+            target_partition_exprs[1]
+        );
+        assert_eq!(
+            result.allocated_region_ids,
+            vec![RegionId::new(table_id, 5)]
+        );
+        assert!(result.pending_deallocate_region_ids.is_empty());
+        assert_eq!(result.transition_map, vec![vec![0, 1]]);
+        assert_eq!(next_region_number, 6);
+    }
+
+    #[test]
     fn test_convert_plan_deallocate_to_single_region() {
         let group_id = Uuid::new_v4();
         let table_id = 1024;
