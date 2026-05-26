@@ -351,6 +351,37 @@ pub fn setup_pg(pg_port: u16, pg_version: Option<&str>) {
             panic!("Failed to start PostgreSQL: {:?}", status);
         }
     }
+
+    // Wait until PostgreSQL is ready to accept connections. The container
+    // accepts TCP connections before the database system has finished
+    // initializing, so a plain TCP port check is not sufficient. Use
+    // `pg_isready` (bundled in the official postgres image) instead.
+    wait_for_pg_ready("greptimedb_pg", pg_user, Duration::from_secs(60));
+}
+
+/// Poll `pg_isready` inside the named container until it reports that the
+/// server is accepting connections, or until `timeout` is reached.
+fn wait_for_pg_ready(container_name: &str, user: &str, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    println!("Waiting for PostgreSQL container \"{container_name}\" to be ready...");
+    loop {
+        let ready = std::process::Command::new("docker")
+            .args(["exec", container_name, "pg_isready", "-U", user])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ready {
+            println!("PostgreSQL is ready");
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "PostgreSQL container \"{container_name}\" did not become ready within {:?}",
+                timeout
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// Set up a MySql server in docker.
