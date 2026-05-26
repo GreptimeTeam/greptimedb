@@ -17,6 +17,7 @@ use std::any::Any;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::debug;
+use partition::collider::Collider;
 use partition::expr::PartitionExpr;
 use partition::subtask::{self, RepartitionSubtask};
 use serde::{Deserialize, Serialize};
@@ -108,7 +109,7 @@ impl RepartitionStart {
         to_exprs: &[PartitionExpr],
     ) -> Result<Vec<AllocationPlanEntry>> {
         let subtasks = if from_exprs.is_empty() {
-            Self::default_source_subtasks(to_exprs)
+            Self::default_source_subtasks(to_exprs)?
         } else {
             subtask::create_subtasks(from_exprs, to_exprs)
                 .context(error::RepartitionCreateSubtasksSnafu)?
@@ -155,17 +156,22 @@ impl RepartitionStart {
             .collect::<Vec<_>>()
     }
 
-    fn default_source_subtasks(to_exprs: &[PartitionExpr]) -> Vec<RepartitionSubtask> {
-        if to_exprs.is_empty() {
-            return vec![];
-        }
+    fn default_source_subtasks(to_exprs: &[PartitionExpr]) -> Result<Vec<RepartitionSubtask>> {
+        ensure!(
+            !to_exprs.is_empty(),
+            error::UnexpectedSnafu {
+                violated: "Default source repartition expects non-empty target partition exprs",
+            }
+        );
+
+        Collider::new(to_exprs).context(error::RepartitionCreateSubtasksSnafu)?;
 
         let to_expr_indices = (0..to_exprs.len()).collect::<Vec<_>>();
-        vec![RepartitionSubtask {
+        Ok(vec![RepartitionSubtask {
             from_expr_indices: vec![0],
             to_expr_indices: to_expr_indices.clone(),
             transition_map: vec![to_expr_indices],
-        }]
+        }])
     }
 
     fn source_region_descriptors(
@@ -244,6 +250,8 @@ mod tests {
     use common_meta::key::table_route::PhysicalTableRouteValue;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use datatypes::prelude::Value;
+    use partition::expr::{Operand, RestrictedOp};
     use store_api::storage::RegionId;
 
     use super::*;
@@ -303,14 +311,34 @@ mod tests {
     }
 
     #[test]
-    fn test_build_plan_with_default_source_and_empty_targets_is_noop() {
+    fn test_build_plan_with_default_source_rejects_empty_targets() {
         let table_id = 1024;
         let physical_route =
             physical_route(vec![test_region_route(RegionId::new(table_id, 1), "")]);
 
-        let plans = RepartitionStart::build_plan(&physical_route, &[], &[]).unwrap();
+        let err = RepartitionStart::build_plan(&physical_route, &[], &[]).unwrap_err();
 
-        assert!(plans.is_empty());
+        assert!(err.to_string().contains("non-empty target partition exprs"));
+    }
+
+    #[test]
+    fn test_build_plan_with_default_source_rejects_invalid_targets() {
+        let table_id = 1024;
+        let physical_route =
+            physical_route(vec![test_region_route(RegionId::new(table_id, 1), "")]);
+        let invalid_to_expr = PartitionExpr::new(
+            Operand::Value(Value::Int64(1)),
+            RestrictedOp::Eq,
+            Operand::Value(Value::Int64(2)),
+        );
+
+        let err =
+            RepartitionStart::build_plan(&physical_route, &[], &[invalid_to_expr]).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Failed to create repartition subtasks")
+        );
     }
 
     #[test]
