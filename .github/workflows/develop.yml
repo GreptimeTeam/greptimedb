@@ -675,7 +675,7 @@ jobs:
           - name: "PostgreSQL KvBackend"
             opts: "--setup-pg postgresql://greptimedb:admin@127.0.0.1:5432/postgres"
             kafka: false
-          - name: "MySQL Kvbackend"
+          - name: "MySQL KvBackend"
             opts: "--setup-mysql mysql://greptimedb:admin@127.0.0.1:3306/mysql"
             kafka: false
           - name: "Flat format"
