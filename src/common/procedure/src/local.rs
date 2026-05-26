@@ -342,6 +342,7 @@ impl ManagerContext {
     }
 
     fn insert_runner_task(&self, procedure_id: ProcedureId, handle: JoinHandle<()>) {
+        let mut tasks = self.runner_tasks.lock().unwrap();
         if !self.running() {
             handle.abort();
             return;
@@ -350,11 +351,7 @@ impl ManagerContext {
             return;
         }
 
-        let _ = self
-            .runner_tasks
-            .lock()
-            .unwrap()
-            .insert(procedure_id, handle);
+        let _ = tasks.insert(procedure_id, handle);
     }
 
     pub(crate) fn remove_runner_task(&self, procedure_id: ProcedureId) {
