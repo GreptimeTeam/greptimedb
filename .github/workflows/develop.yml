@@ -701,6 +701,19 @@ jobs:
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
         run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
+      - name: Dump PostgreSQL debug info
+        if: ${{ failure() && contains(matrix.mode.opts, '--setup-pg') }}
+        shell: bash
+        run: |
+          set +e
+          echo "=== docker ps -a ==="
+          docker ps -a
+          echo "=== docker logs greptimedb_pg ==="
+          docker logs --tail 300 greptimedb_pg
+          echo "=== tail sqlness metasrv logs ==="
+          find /tmp -maxdepth 2 -type f -name "greptime-*-sqlness-metasrv.log" -print -exec tail -n 300 {} \;
+          echo "=== find sqlness temp files ==="
+          find /tmp -maxdepth 3 -path "/tmp/sqlness*" -print
       - name: Upload sqlness logs
         if: failure()
         uses: actions/upload-artifact@v4
