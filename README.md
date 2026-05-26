@@ -131,7 +131,7 @@ GreptimeDB can run in two modes:
 For deeper coverage, see the [architecture doc](https://docs.greptime.com/contributor-guide/overview/#architecture) or [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview).
 
 <a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/architecture.png" target="_blank" rel="noopener">
-  <img alt="GreptimeDB System Overview" src="docs/architecture.png">
+  <img alt="GreptimeDB System Overview" src="https://cdn.jsdelivr.net/gh/GreptimeTeam/greptimedb@main/docs/architecture.png">
 </a>
 
 ## Try GreptimeDB
@@ -139,7 +139,8 @@ For deeper coverage, see the [architecture doc](https://docs.greptime.com/contri
 **For AI agents** — paste this prompt into your agent:
 
 ```text
-Read https://docs.greptime.com/SKILL.md and follow the instructions to deploy, configure, ingest, and query GreptimeDB.
+Read https://docs.greptime.com/SKILL.md and follow the instructions
+to deploy, configure, ingest, and query GreptimeDB.
 ```
 
 ```shell
@@ -189,7 +190,7 @@ make test           # unit + integration tests (uses cargo-nextest)
 make sqlness-test   # SQL regression tests
 ```
 
-See the [Contribution Guidelines](https://github.com/GreptimeTeam/greptimedb/blob/main/CONTRIBUTING.md) for the full developer workflow.
+See the [Contribution Guidelines](CONTRIBUTING.md) for the full developer workflow.
 
 ## Tools & Extensions
 
@@ -236,13 +237,13 @@ We offer enterprise add-ons, services, training, and consulting.
 
 ## Contributing
 
-- Read our [Contribution Guidelines](https://github.com/GreptimeTeam/greptimedb/blob/main/CONTRIBUTING.md).
+- Read our [Contribution Guidelines](CONTRIBUTING.md).
 - Explore [Internal Concepts](https://docs.greptime.com/contributor-guide/overview.html) and [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb).
 - Pick up a [good first issue](https://github.com/GreptimeTeam/greptimedb/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) and join the #contributors [Slack](https://greptime.com/slack) channel.
 
 ## Acknowledgement
 
-Special thanks to all contributors! See [AUTHOR.md](https://github.com/GreptimeTeam/greptimedb/blob/main/AUTHOR.md).
+Special thanks to all contributors! See [AUTHOR.md](AUTHOR.md).
 
 - Uses [Apache Arrow™](https://arrow.apache.org/) (memory model)
 - [Apache Parquet™](https://parquet.apache.org/) (file storage)
