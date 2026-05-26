@@ -30,6 +30,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp};
 use datatypes::schema::Schema;
 use query::QueryEngineRef;
+use query::options::FLOW_INCREMENTAL_MODE;
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
@@ -42,8 +43,9 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
+use crate::batching_mode::checkpoint::checkpoint_mode_label;
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::{DirtyTimeWindows, FilterExprInfo, TaskState};
+use crate::batching_mode::state::{CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState};
 use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
@@ -61,6 +63,9 @@ use crate::metrics::{
     METRIC_FLOW_ROWS,
 };
 use crate::{Error, FlowId};
+
+mod ckpt;
+mod inc;
 
 /// The task's config, immutable once created
 #[derive(Clone)]
@@ -123,6 +128,7 @@ pub struct TaskArgs<'a> {
 pub struct PlanInfo {
     pub plan: LogicalPlan,
     pub dirty_restore: DirtyRestore,
+    pub can_advance_checkpoints: bool,
 }
 
 pub enum DirtyRestore {
@@ -247,8 +253,17 @@ impl BatchingTask {
     ) -> Result<Option<(usize, Duration)>, Error> {
         if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
             debug!("Generate new query: {}", new_query.plan);
+            let dirty_filter = match &new_query.dirty_restore {
+                DirtyRestore::Scoped(f) => Some(f),
+                _ => None,
+            };
             match self
-                .execute_logical_plan(frontend_client, &new_query.plan)
+                .execute_logical_plan(
+                    frontend_client,
+                    &new_query.plan,
+                    dirty_filter,
+                    new_query.can_advance_checkpoints,
+                )
                 .await
             {
                 Ok(result) => Ok(result),
@@ -330,6 +345,7 @@ impl BatchingTask {
         let insert_into_info = PlanInfo {
             plan,
             dirty_restore: new_query.dirty_restore,
+            can_advance_checkpoints: new_query.can_advance_checkpoints,
         };
         let insert_into =
             match insert_into_info
@@ -349,6 +365,7 @@ impl BatchingTask {
         Ok(Some(PlanInfo {
             plan: insert_into,
             dirty_restore: insert_into_info.dirty_restore,
+            can_advance_checkpoints: insert_into_info.can_advance_checkpoints,
         }))
     }
 
@@ -369,6 +386,8 @@ impl BatchingTask {
         &self,
         frontend_client: &Arc<FrontendClient>,
         plan: &LogicalPlan,
+        dirty_filter: Option<&FilterExprInfo>,
+        can_advance_checkpoints: bool,
     ) -> Result<Option<(usize, Duration)>, Error> {
         let instant = Instant::now();
         let flow_id = self.config.flow_id;
@@ -398,7 +417,36 @@ impl BatchingTask {
             })?
             .data;
 
-        let mut peer_desc = None;
+        // For incremental-mode SQL queries, attempt to rewrite the delta aggregate
+        // plan into a safe delta-LEFT-JOIN-sink form before deciding on extensions.
+        let (plan, incremental_safe) = if can_advance_checkpoints {
+            self.prepare_plan_for_incremental(&plan, dirty_filter)
+                .await?
+        } else {
+            (plan.clone(), false)
+        };
+
+        let extensions = self
+            .build_flow_query_extensions(incremental_safe, can_advance_checkpoints)
+            .await?;
+        let extension_refs = extensions
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        let query_mode = if extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_MODE)
+        {
+            CheckpointMode::Incremental
+        } else {
+            CheckpointMode::FullSnapshot
+        };
+        Self::record_query_mode(flow_id, query_mode);
+        debug!(
+            "Flow {flow_id} executing batching query with checkpoint_mode={}, extension_count={}",
+            checkpoint_mode_label(query_mode),
+            extensions.len()
+        );
 
         let res = {
             let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
@@ -411,66 +459,78 @@ impl BatchingTask {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&insert_plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
-                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::InsertIntoPlan(
                         api::v1::InsertIntoPlan {
                             table_name: Some(insert_to),
                             logical_plan: message.to_vec(),
                         },
                     )),
-                })
+                }
             } else {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
 
-                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
-                })
+                }
             };
 
             frontend_client
-                .handle(req, catalog, schema, &mut peer_desc)
+                .query_with_terminal_metrics(catalog, schema, req, &extension_refs)
                 .await
         };
 
         let elapsed = instant.elapsed();
-        if let Ok(affected_rows) = &res {
-            debug!(
-                "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}",
-                elapsed
-            );
-            METRIC_FLOW_ROWS
-                .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
-                .inc_by(*affected_rows as _);
-        } else if let Err(err) = &res {
+        if let Err(err) = &res {
             warn!(
-                "Failed to execute Flow {flow_id} on frontend {:?}, result: {err:?}, elapsed: {:?} with query: {}",
-                peer_desc, elapsed, &plan
+                "Failed to execute Flow {flow_id}, result: {err:?}, elapsed: {:?} with query: {}",
+                elapsed, &plan
             );
+            self.state.write().unwrap().after_query_exec(elapsed, false);
         }
 
         // record slow query
         if elapsed >= self.config.batch_opts.slow_query_threshold {
             warn!(
-                "Flow {flow_id} on frontend {:?} executed for {:?} before complete, query: {}",
-                peer_desc, elapsed, &plan
+                "Flow {flow_id} executed for {:?} before complete, query: {}",
+                elapsed, &plan
             );
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
-                .with_label_values(&[
-                    flow_id.to_string().as_str(),
-                    &peer_desc.unwrap_or_default().to_string(),
-                ])
+                .with_label_values(&[flow_id.to_string().as_str(), "watermark-path"])
                 .observe(elapsed.as_secs_f64());
         }
 
-        self.state
-            .write()
-            .unwrap()
-            .after_query_exec(elapsed, res.is_ok());
-
         let res = res?;
-        Ok(Some((res as usize, elapsed)))
+        let (affected_rows, _) = res.output.extract_rows_and_cost();
+        debug!(
+            "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
+            elapsed,
+            res.region_watermark_map()
+        );
+        METRIC_FLOW_ROWS
+            .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
+            .inc_by(affected_rows as _);
+        let affected_rows: usize = affected_rows.try_into().map_err(|_| {
+            UnexpectedSnafu {
+                reason: format!("Failed to convert rows to usize: {}", affected_rows),
+            }
+            .build()
+        })?;
+
+        {
+            let mut state = self.state.write().unwrap();
+            let decision = Self::apply_query_result_to_state(
+                &mut state,
+                &res,
+                elapsed,
+                can_advance_checkpoints,
+            );
+            Self::record_checkpoint_decision(flow_id, decision);
+        }
+
+        Ok(Some((affected_rows, elapsed)))
     }
 
     /// Restore dirty windows consumed by a failed query so they are retried on
@@ -563,8 +623,17 @@ impl BatchingTask {
             };
 
             let res = if let Some(new_query) = &new_query {
-                self.execute_logical_plan(&frontend_client, &new_query.plan)
-                    .await
+                let dirty_filter = match &new_query.dirty_restore {
+                    DirtyRestore::Scoped(f) => Some(f),
+                    _ => None,
+                };
+                self.execute_logical_plan(
+                    &frontend_client,
+                    &new_query.plan,
+                    dirty_filter,
+                    new_query.can_advance_checkpoints,
+                )
+                .await
             } else {
                 Ok(None)
             };
@@ -592,12 +661,17 @@ impl BatchingTask {
                                 .as_ref()
                                 .and_then(|t| *t.time_window_size());
 
+                            let prefer_short_incremental_cadence = state.checkpoint_mode()
+                                == CheckpointMode::Incremental
+                                && !state.is_incremental_disabled();
+
                             state.get_next_start_query_time(
                                 self.config.flow_id,
                                 &time_window_size,
                                 min_refresh,
                                 Some(self.config.batch_opts.query_timeout),
                                 self.config.batch_opts.experimental_max_filter_num_per_query,
+                                prefer_short_incremental_cadence,
                             )
                         };
 
@@ -733,6 +807,7 @@ impl BatchingTask {
                     return Ok(Some(PlanInfo {
                         plan,
                         dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
+                        can_advance_checkpoints: true,
                     }));
                 }
                 _ => {
@@ -769,6 +844,7 @@ impl BatchingTask {
                     return Ok(Some(PlanInfo {
                         plan,
                         dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
+                        can_advance_checkpoints: true,
                     }));
                 }
             };
@@ -799,20 +875,32 @@ impl BatchingTask {
                 ),
             })?;
 
-        let expr = self
-            .state
-            .write()
-            .unwrap()
-            .dirty_time_windows
-            .gen_filter_exprs(
+        let (expr, can_advance_checkpoints) = {
+            let mut state = self.state.write().unwrap();
+            let window_cnt = if state.checkpoint_mode() == CheckpointMode::Incremental
+                && !state.is_incremental_disabled()
+                && matches!(self.config.query_type, QueryType::Sql)
+            {
+                // Incremental scans are bounded by region sequence checkpoints,
+                // so the dirty-window filter only narrows sink-side/time-window
+                // work. Consume all pending dirty windows in one incremental
+                // query to keep checkpoint advancement globally safe.
+                i32::MAX as usize
+            } else {
+                max_window_cnt
+                    .unwrap_or(self.config.batch_opts.experimental_max_filter_num_per_query)
+            };
+            let expr = state.dirty_time_windows.gen_filter_exprs(
                 &col_name,
                 Some(expire_lower_bound),
                 window_size,
-                max_window_cnt
-                    .unwrap_or(self.config.batch_opts.experimental_max_filter_num_per_query),
+                window_cnt,
                 self.config.flow_id,
                 Some(self),
             )?;
+            let can_advance_checkpoints = state.dirty_time_windows.is_empty();
+            (expr, can_advance_checkpoints)
+        };
 
         let Some(expr) = expr else {
             // no new data, hence no need to update
@@ -859,6 +947,7 @@ impl BatchingTask {
         let info = PlanInfo {
             plan: new_plan.clone(),
             dirty_restore: DirtyRestore::Scoped(expr),
+            can_advance_checkpoints,
         };
 
         Ok(Some(info))

@@ -1,0 +1,205 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::sync::Arc;
+
+use common_error::ext::BoxedError;
+use common_telemetry::debug;
+use common_telemetry::tracing::warn;
+use datafusion_expr::{DmlStatement, LogicalPlan};
+use query::options::{
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+    FLOW_SINK_TABLE_ID,
+};
+use snafu::ResultExt;
+
+use crate::Error;
+use crate::batching_mode::incremental_filter::build_sink_dirty_time_window_filter_expr;
+use crate::batching_mode::state::{CheckpointMode, FilterExprInfo};
+use crate::batching_mode::table_creator::QueryType;
+use crate::batching_mode::task::BatchingTask;
+use crate::batching_mode::utils::{
+    analyze_incremental_aggregate_plan, get_table_info_df_schema,
+    rewrite_incremental_aggregate_with_sink_merge,
+};
+use crate::error::{ExternalSnafu, UnexpectedSnafu};
+
+impl BatchingTask {
+    /// For incremental-mode SQL queries, attempt to rewrite the delta aggregate
+    /// plan into a safe delta-LEFT-JOIN-sink merge plan. Returns `(plan, true)`
+    /// if the rewrite succeeded and incremental extensions are safe;
+    /// `(plan, false)` if incremental is not applicable (non-SQL, non-aggregate,
+    /// or unsupported aggregates).
+    pub(super) async fn prepare_plan_for_incremental(
+        &self,
+        plan: &LogicalPlan,
+        dirty_filter: Option<&FilterExprInfo>,
+    ) -> Result<(LogicalPlan, bool), Error> {
+        let is_incremental_sql = {
+            let state = self.state.read().unwrap();
+            if state.is_incremental_disabled() {
+                return Ok((plan.clone(), false));
+            }
+            state.checkpoint_mode() == CheckpointMode::Incremental
+                && matches!(self.config.query_type, QueryType::Sql)
+        };
+
+        if !is_incremental_sql {
+            return Ok((plan.clone(), false));
+        }
+
+        // Extract inner query plan from the DML wrapper.
+        // Non-DML or non-SQL plans bypass the rewrite and keep checkpoint mode;
+        // non-aggregate TQL or non-INSERT plans do not need incremental scan extensions.
+        let inner_plan = match plan {
+            LogicalPlan::Dml(dml) => dml.input.as_ref().clone(),
+            _ => return Ok((plan.clone(), false)),
+        };
+
+        // Analyze the plan for incremental rewritability.
+        // PR3 only enables incremental reads for aggregate / group-by plans via
+        // the PR4 delta-left-join rewrite. Non-aggregate SQL (projection, filter,
+        // or other non-aggregate shapes) stays full-snapshot until separately
+        // supported, and incremental mode is permanently disabled for this flow.
+        let Some(analysis) = analyze_incremental_aggregate_plan(&inner_plan)? else {
+            warn!(
+                "Flow {} incremental mode but plan is not an aggregate query; \
+                 permanently disabling incremental for this flow",
+                self.config.flow_id
+            );
+            self.state.write().unwrap().disable_incremental();
+            return Ok((plan.clone(), false));
+        };
+
+        if !analysis.unsupported_exprs.is_empty() {
+            warn!(
+                "Flow {} incremental aggregate contains unsupported expressions {:?}; \
+                 permanently disabling incremental for this flow",
+                self.config.flow_id, analysis.unsupported_exprs
+            );
+            self.state.write().unwrap().disable_incremental();
+            return Ok((plan.clone(), false));
+        }
+
+        // Plain GROUP BY without aggregate expressions has no values to
+        // merge between delta and sink. The incremental delta scan emits
+        // changed groups, and sink primary-key write semantics make this
+        // idempotent; no explicit left-join rewrite is needed.
+        if analysis.merge_columns.is_empty() {
+            return Ok((plan.clone(), true));
+        }
+
+        // Fetch sink table for the merge rewrite
+        let (sink_table, _) = get_table_info_df_schema(
+            self.config.catalog_manager.clone(),
+            self.config.sink_table_name.clone(),
+        )
+        .await?;
+        let sink_schema = sink_table.table_info().meta.schema.clone();
+        let sink_dirty_filter = build_sink_dirty_time_window_filter_expr(
+            self.config.flow_id,
+            &analysis,
+            &sink_schema,
+            dirty_filter,
+        )?;
+
+        let rewritten_inner = match rewrite_incremental_aggregate_with_sink_merge(
+            &inner_plan,
+            &analysis,
+            sink_table,
+            &self.config.sink_table_name,
+            sink_dirty_filter,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(err) => {
+                warn!(
+                    "Flow {} failed to rewrite incremental aggregate with sink merge; \
+                     permanently disabling incremental for this flow: {:?}",
+                    self.config.flow_id, err
+                );
+                self.state.write().unwrap().disable_incremental();
+                return Ok((plan.clone(), false));
+            }
+        };
+
+        // Reconstruct DML plan with the rewritten inner plan
+        let rewritten = match plan {
+            LogicalPlan::Dml(dml) => LogicalPlan::Dml(DmlStatement::new(
+                dml.table_name.clone(),
+                dml.target.clone(),
+                dml.op.clone(),
+                Arc::new(rewritten_inner),
+            )),
+            _ => unreachable!("already matched Dml above"),
+        };
+
+        debug!(
+            "Flow {} rewrote incremental SQL aggregate query with sink merge",
+            self.config.flow_id
+        );
+
+        Ok((rewritten, true))
+    }
+
+    pub(super) async fn build_flow_query_extensions(
+        &self,
+        incremental_safe: bool,
+        can_advance_checkpoints: bool,
+    ) -> Result<Vec<(&'static str, String)>, Error> {
+        let mut extensions = vec![("flow.return_region_seq", "true".to_string())];
+
+        if let Some(table) = self
+            .config
+            .catalog_manager
+            .table(
+                &self.config.sink_table_name[0],
+                &self.config.sink_table_name[1],
+                &self.config.sink_table_name[2],
+                None,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+        {
+            extensions.push((
+                FLOW_SINK_TABLE_ID,
+                table.table_info().table_id().to_string(),
+            ));
+        }
+
+        let state = self.state.read().unwrap();
+        if incremental_safe
+            && can_advance_checkpoints
+            && !state.is_incremental_disabled()
+            && state.checkpoint_mode() == CheckpointMode::Incremental
+            && !state.checkpoints().is_empty()
+        {
+            let checkpoints_json = serde_json::to_string(state.checkpoints()).map_err(|err| {
+                UnexpectedSnafu {
+                    reason: format!("Failed to serialize checkpoint map: {err}"),
+                }
+                .build()
+            })?;
+            extensions.push((
+                FLOW_INCREMENTAL_MODE,
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+            ));
+            extensions.push((FLOW_INCREMENTAL_AFTER_SEQS, checkpoints_json));
+        }
+
+        Ok(extensions)
+    }
+}

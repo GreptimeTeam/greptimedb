@@ -278,7 +278,7 @@ fn collect_output_projection_info(plan: &LogicalPlan) -> OutputProjectionInfo {
                     let mut col_names = Vec::new();
                     find_column_names(&alias.expr, &mut col_names);
                     match col_names.len() {
-                        0 if matches!(alias.expr.as_ref(), Expr::Literal(_, _)) => {
+                        0 if is_passthrough_output_column(&alias_name, alias.expr.as_ref()) => {
                             projection_info.literal_columns.insert(alias_name);
                         }
                         1 => {
@@ -315,8 +315,36 @@ fn collect_output_projection_info(plan: &LogicalPlan) -> OutputProjectionInfo {
         }
     }
 
+    if projection_info
+        .output_field_names
+        .iter()
+        .any(|name| name == AUTO_CREATED_PLACEHOLDER_TS_COL)
+    {
+        projection_info
+            .literal_columns
+            .insert(AUTO_CREATED_PLACEHOLDER_TS_COL.to_string());
+    }
+
     projection_info.output_aliases = output_aliases;
     projection_info
+}
+
+fn is_passthrough_output_column(alias_name: &str, expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal(_, _))
+        || match alias_name {
+            AUTO_CREATED_UPDATE_AT_TS_COL => expr.to_string().eq_ignore_ascii_case("now()"),
+            AUTO_CREATED_PLACEHOLDER_TS_COL => is_literal_or_cast_literal(expr),
+            _ => false,
+        }
+}
+
+fn is_literal_or_cast_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_, _) => true,
+        Expr::Cast(cast) => is_literal_or_cast_literal(cast.expr.as_ref()),
+        Expr::TryCast(cast) => is_literal_or_cast_literal(cast.expr.as_ref()),
+        _ => false,
+    }
 }
 
 fn merge_op_for_aggregate_expr(aggr_expr: &Expr) -> Result<IncrementalAggregateMergeOp, String> {
@@ -385,6 +413,11 @@ fn find_uncovered_output_fields(
             !group_key_names.contains(*name)
                 && !merge_column_names.contains(*name)
                 && !projection_info.literal_columns.contains(*name)
+                // Auto-created sink columns injected by ColumnMatcherRewriter
+                // are not part of the original aggregate semantics and must
+                // not prevent incremental aggregate rewrites.
+                && name.as_str() != AUTO_CREATED_UPDATE_AT_TS_COL
+                && name.as_str() != AUTO_CREATED_PLACEHOLDER_TS_COL
         })
         .cloned()
         .collect()
@@ -536,7 +569,8 @@ pub fn analyze_incremental_aggregate_plan(
 ///
 /// ```text
 /// delta = SELECT ts, number FROM <delta_plan> AS __flow_delta
-/// sink  = SELECT ts, number FROM <sink_table> AS __flow_sink
+/// sink_scan = SELECT * FROM <sink_table> [WHERE <sink_dirty_filter>]
+/// sink  = SELECT ts, number FROM sink_scan AS __flow_sink
 /// SELECT
 ///   CASE
 ///     WHEN __flow_sink.number IS NULL THEN __flow_delta.number
@@ -548,11 +582,17 @@ pub fn analyze_incremental_aggregate_plan(
 /// LEFT JOIN sink
 ///   ON __flow_delta.ts IS NOT DISTINCT FROM __flow_sink.ts
 /// ```
+///
+/// If `sink_dirty_filter` is provided, it is applied to the sink table scan
+/// before projection, aliasing, and the left join. The predicate must reference
+/// raw sink table columns structurally (unqualified), before the `__flow_sink`
+/// alias exists.
 pub async fn rewrite_incremental_aggregate_with_sink_merge(
     delta_plan: &LogicalPlan,
     analysis: &IncrementalAggregateAnalysis,
     sink_table: TableRef,
     sink_table_name: &TableName,
+    sink_dirty_filter: Option<Expr>,
 ) -> Result<LogicalPlan, Error> {
     ensure!(
         analysis.unsupported_exprs.is_empty(),
@@ -637,7 +677,22 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
         .cloned()
         .map(unqualified_col)
         .collect::<Vec<_>>();
-    let sink_selected = LogicalPlanBuilder::from(sink_scan)
+    let sink_input = if let Some(predicate) = sink_dirty_filter {
+        LogicalPlanBuilder::from(sink_scan)
+            .filter(predicate)
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to filter sink table scan for incremental sink merge".to_string(),
+            })?
+            .build()
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build filtered sink plan for incremental sink merge"
+                    .to_string(),
+            })?
+    } else {
+        sink_scan
+    };
+
+    let sink_selected = LogicalPlanBuilder::from(sink_input)
         .project(sink_selected_exprs)
         .with_context(|_| DatafusionSnafu {
             context: "Failed to project sink table scan for incremental sink merge".to_string(),

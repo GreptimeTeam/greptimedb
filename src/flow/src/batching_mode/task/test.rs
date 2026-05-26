@@ -12,18 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
+use client::OutputWithMetrics;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_query::Output;
 use common_recordbatch::RecordBatch;
+use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::ColumnSchema;
-use datatypes::vectors::{UInt32Vector, VectorRef};
+use datatypes::vectors::{TimestampMillisecondVector, UInt32Vector, VectorRef};
 use pretty_assertions::assert_eq;
+use query::options::{FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY};
 use session::context::QueryContext;
 use table::test_util::MemTable;
 
 use super::*;
+use crate::batching_mode::checkpoint::{
+    CHECKPOINT_DECISION_ADVANCE, CHECKPOINT_DECISION_FALLBACK, CHECKPOINT_REASON_NONE,
+    FlowCheckpointDecision, FlowQueryFallbackReason,
+};
+use crate::batching_mode::state::CheckpointMode;
 use crate::batching_mode::time_window::find_time_window_expr;
 use crate::test_utils::create_test_query_engine;
 
@@ -172,6 +183,34 @@ fn register_number_only_sink(query_engine: &QueryEngineRef, table_name: &str) {
     memory_catalog.register_table_sync(request).unwrap();
 }
 
+fn register_auto_created_aggregate_sink(query_engine: &QueryEngineRef, table_name: &str) {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), true),
+        ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), false).with_time_index(true),
+        ColumnSchema::new("update_at", CDT::timestamp_millisecond_datatype(), true),
+    ]));
+    let columns: Vec<VectorRef> = vec![
+        Arc::new(UInt32Vector::from_slice([1_u32])),
+        Arc::new(TimestampMillisecondVector::from_slice([0_i64])),
+        Arc::new(TimestampMillisecondVector::from_slice([0_i64])),
+    ];
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    let table = MemTable::table(table_name, recordbatch);
+    let request = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        table_id: 9002,
+        table,
+    };
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog.register_table_sync(request).unwrap();
+}
+
 fn dirty_marker() -> DirtyTimeWindows {
     let mut dirty = DirtyTimeWindows::default();
     dirty.set_dirty();
@@ -204,6 +243,7 @@ async fn assert_unscoped_failure_restore(
     let unscoped_query = PlanInfo {
         plan,
         dirty_restore: DirtyRestore::Unscoped(consumed_dirty_windows),
+        can_advance_checkpoints: true,
     };
 
     task.handle_executed_query_failure(Some(&unscoped_query));
@@ -214,6 +254,392 @@ async fn assert_unscoped_failure_restore(
         state.dirty_time_windows.window_size(),
         std::time::Duration::from_secs(expected_window_size_secs)
     );
+}
+
+fn output_with_region_watermarks(
+    watermarks: impl IntoIterator<Item = (u64, Option<u64>)>,
+) -> OutputWithMetrics {
+    let result = OutputWithMetrics::from_output(Output::new_with_affected_rows(0));
+    result.metrics.update(Some(RecordBatchMetrics {
+        region_watermarks: watermarks
+            .into_iter()
+            .map(|(region_id, watermark)| RegionWatermarkEntry {
+                region_id,
+                watermark,
+            })
+            .collect(),
+        ..Default::default()
+    }));
+    result.metrics.mark_ready();
+    result
+}
+
+#[test]
+fn test_apply_query_result_to_state_advances_full_snapshot_to_incremental() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]);
+
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &result,
+        std::time::Duration::from_millis(1),
+        true,
+    );
+
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::AdvancedFromFullSnapshot {
+            participating_regions: 2,
+            watermarks: 2,
+        }
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+    assert_eq!(
+        state.checkpoints(),
+        &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+    );
+}
+
+#[test]
+fn test_apply_query_result_to_state_stays_full_snapshot_when_incremental_disabled() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    state.disable_incremental();
+    assert!(state.is_incremental_disabled());
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+
+    let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]);
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &result,
+        std::time::Duration::from_millis(1),
+        true,
+    );
+
+    // Should NOT claim advancement to incremental; should fallback with correct reason.
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: CheckpointMode::FullSnapshot,
+            reason: FlowQueryFallbackReason::IncrementalDisabled,
+        }
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert!(state.is_incremental_disabled());
+    // Checkpoints are still updated even if mode doesn't advance.
+    assert_eq!(
+        state.checkpoints(),
+        &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+    );
+}
+
+#[test]
+fn test_apply_query_result_to_state_rejects_unproved_watermark() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, None)]);
+
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &result,
+        std::time::Duration::from_millis(1),
+        true,
+    );
+
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: CheckpointMode::FullSnapshot,
+            reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+        }
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert!(state.checkpoints().is_empty());
+}
+
+#[test]
+fn test_apply_query_result_to_state_reports_missing_watermark() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    let result = OutputWithMetrics::from_output(Output::new_with_affected_rows(0));
+
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &result,
+        std::time::Duration::from_millis(1),
+        true,
+    );
+
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: CheckpointMode::FullSnapshot,
+            reason: FlowQueryFallbackReason::MissingRegionWatermark,
+        }
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert!(state.checkpoints().is_empty());
+}
+
+#[test]
+fn test_apply_query_result_to_state_advances_incremental_subset() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    state.advance_checkpoints(HashMap::from([
+        (1_u64, 10_u64),
+        (2_u64, 20_u64),
+        (3_u64, 30_u64),
+    ]));
+    let result = output_with_region_watermarks([(1_u64, Some(12_u64)), (3_u64, Some(35_u64))]);
+
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &result,
+        std::time::Duration::from_millis(1),
+        true,
+    );
+
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::AdvancedIncremental {
+            participating_regions: 2,
+            watermarks: 2,
+        }
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+    assert_eq!(
+        state.checkpoints(),
+        &BTreeMap::from([(1_u64, 12_u64), (2_u64, 20_u64), (3_u64, 35_u64)])
+    );
+}
+
+#[test]
+fn test_apply_query_result_to_state_blocks_full_snapshot_when_scoped_backlog_pending() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]);
+
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &result,
+        std::time::Duration::from_millis(1),
+        false,
+    );
+
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: CheckpointMode::FullSnapshot,
+            reason: FlowQueryFallbackReason::ScopedDirtyBacklogPending,
+        }
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert!(state.checkpoints().is_empty());
+}
+
+#[test]
+fn test_apply_query_result_to_state_blocks_incremental_when_scoped_backlog_pending() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+    let result = output_with_region_watermarks([(1_u64, Some(12_u64)), (2_u64, Some(25_u64))]);
+
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &result,
+        std::time::Duration::from_millis(1),
+        false,
+    );
+
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: CheckpointMode::Incremental,
+            reason: FlowQueryFallbackReason::ScopedDirtyBacklogPending,
+        }
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(
+        state.checkpoints(),
+        &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+    );
+}
+
+#[test]
+fn test_checkpoint_decision_labels_are_stable() {
+    let advance = FlowCheckpointDecision::AdvancedIncremental {
+        participating_regions: 1,
+        watermarks: 1,
+    };
+    let fallback = FlowCheckpointDecision::FallbackToFullSnapshot {
+        previous_mode: CheckpointMode::Incremental,
+        reason: FlowQueryFallbackReason::StaleCursor,
+    };
+
+    assert_eq!(advance.mode_label(), "incremental");
+    assert_eq!(advance.decision_label(), CHECKPOINT_DECISION_ADVANCE);
+    assert_eq!(advance.reason_label(), CHECKPOINT_REASON_NONE);
+    assert_eq!(fallback.mode_label(), "incremental");
+    assert_eq!(fallback.decision_label(), CHECKPOINT_DECISION_FALLBACK);
+    assert_eq!(fallback.reason_label(), "stale_cursor");
+    assert_eq!(
+        FlowQueryFallbackReason::ScopedDirtyBacklogPending.as_label(),
+        "scoped_dirty_backlog_pending"
+    );
+}
+
+#[tokio::test]
+async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
+    let (task, _) = new_test_task_and_plan_with_missing_sink().await;
+
+    let extensions = task.build_flow_query_extensions(false, true).await.unwrap();
+    assert_eq!(
+        extensions,
+        vec![("flow.return_region_seq", "true".to_string())]
+    );
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+
+    let extensions = task.build_flow_query_extensions(false, true).await.unwrap();
+    assert!(extensions.contains(&("flow.return_region_seq", "true".to_string())));
+    assert!(
+        !extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_MODE)
+    );
+    assert!(
+        !extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_AFTER_SEQS)
+    );
+
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+
+    assert!(extensions.contains(&("flow.return_region_seq", "true".to_string())));
+    assert!(extensions.contains(&(
+        FLOW_INCREMENTAL_MODE,
+        FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string()
+    )));
+    assert!(extensions.contains(&(
+        FLOW_INCREMENTAL_AFTER_SEQS,
+        serde_json::json!({"1": 10, "2": 20}).to_string(),
+    )));
+
+    let extensions = task.build_flow_query_extensions(true, false).await.unwrap();
+    assert!(extensions.contains(&("flow.return_region_seq", "true".to_string())));
+    assert!(
+        !extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_MODE)
+    );
+    assert!(
+        !extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_AFTER_SEQS)
+    );
+
+    task.state.write().unwrap().disable_incremental();
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+    assert!(extensions.contains(&("flow.return_region_seq", "true".to_string())));
+    assert!(
+        !extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_MODE)
+    );
+    assert!(
+        !extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_AFTER_SEQS)
+    );
+}
+
+#[tokio::test]
+async fn test_full_snapshot_scoped_plan_marks_checkpoint_advance_safe_only_after_backlog_drained() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+    )
+    .await;
+    {
+        let mut state = task.state.write().unwrap();
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(30), Some(Timestamp::new_second(35)));
+    }
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("time_window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+    ]));
+
+    let first = task
+        .gen_query_with_time_window(query_engine.clone(), &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!first.can_advance_checkpoints);
+    assert_eq!(task.state.read().unwrap().dirty_time_windows.len(), 1);
+
+    let second = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(second.can_advance_checkpoints);
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+}
+
+#[tokio::test]
+async fn test_incremental_scoped_plan_consumes_all_dirty_windows_for_checkpoint_safety() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+    )
+    .await;
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(30), Some(Timestamp::new_second(35)));
+    }
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("time_window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+    ]));
+
+    let plan = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(plan.can_advance_checkpoints);
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
 }
 
 #[tokio::test]
@@ -231,12 +657,220 @@ async fn test_executed_query_failure_restores_scoped_dirty_windows_for_flush_pat
             time_ranges: vec![(Timestamp::new_second(10), Timestamp::new_second(20))],
             window_size: chrono::Duration::seconds(10),
         }),
+        can_advance_checkpoints: true,
     };
 
     task.handle_executed_query_failure(Some(&scoped_query));
 
     let state = task.state.read().unwrap();
     assert_eq!(state.dirty_time_windows.len(), 1);
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(10)
+    );
+}
+
+#[tokio::test]
+async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let plan = sql_to_df_plan(
+        ctx.clone(),
+        query_engine.clone(),
+        "SELECT number, ts FROM numbers_with_ts",
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Build a DML wrapper using a real sink table from the test engine.
+    let (sink_table, _) = get_table_info_df_schema(
+        query_engine.engine_state().catalog_manager().clone(),
+        [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    let table_provider = Arc::new(DfTableProviderAdapter::new(sink_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider));
+    let dml_plan = LogicalPlan::Dml(DmlStatement::new(
+        datafusion_common::TableReference::bare("test"),
+        table_source,
+        WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+        Arc::new(plan),
+    ));
+
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query: "SELECT number, ts FROM numbers_with_ts",
+        plan: dml_plan.clone(),
+        time_window_expr: None,
+        expire_after: None,
+        sink_table_name: [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ],
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx: rx,
+        batch_opts: Arc::new(BatchingModeOptions::default()),
+        flow_eval_interval: None,
+    })
+    .unwrap();
+
+    // Put the state into Incremental mode with checkpoints.
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    assert_eq!(
+        task.state.read().unwrap().checkpoint_mode(),
+        CheckpointMode::Incremental
+    );
+
+    let (_plan, incremental_safe) = task
+        .prepare_plan_for_incremental(&dml_plan, None)
+        .await
+        .unwrap();
+    assert!(!incremental_safe);
+    let state = task.state.read().unwrap();
+    assert!(state.is_incremental_disabled());
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+}
+
+#[tokio::test]
+async fn test_prepare_plan_for_incremental_disables_on_rewrite_error() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let plan = sql_to_df_plan(
+        ctx.clone(),
+        query_engine.clone(),
+        "SELECT sum(number) AS total, ts FROM numbers_with_ts GROUP BY ts",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (sink_table, _) = get_table_info_df_schema(
+        query_engine.engine_state().catalog_manager().clone(),
+        [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    let table_provider = Arc::new(DfTableProviderAdapter::new(sink_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider));
+    let dml_plan = LogicalPlan::Dml(DmlStatement::new(
+        datafusion_common::TableReference::bare("test"),
+        table_source,
+        WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+        Arc::new(plan),
+    ));
+
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query: "SELECT sum(number) AS total, ts FROM numbers_with_ts GROUP BY ts",
+        plan: dml_plan.clone(),
+        time_window_expr: None,
+        expire_after: None,
+        // The sink table exists, but does not have the rewritten aggregate
+        // output column `total`, so the rewrite fails deterministically.
+        sink_table_name: [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ],
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx: rx,
+        batch_opts: Arc::new(BatchingModeOptions::default()),
+        flow_eval_interval: None,
+    })
+    .unwrap();
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    assert_eq!(
+        task.state.read().unwrap().checkpoint_mode(),
+        CheckpointMode::Incremental
+    );
+
+    let (_plan, incremental_safe) = task
+        .prepare_plan_for_incremental(&dml_plan, None)
+        .await
+        .unwrap();
+    assert!(!incremental_safe);
+    let state = task.state.read().unwrap();
+    assert!(state.is_incremental_disabled());
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+}
+
+#[tokio::test]
+async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
+    let sink_table = "auto_created_aggregate_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT max(number) AS number, ts FROM numbers_with_ts GROUP BY ts",
+        sink_table,
+    )
+    .await;
+    register_auto_created_aggregate_sink(&query_engine, sink_table);
+    task.state.write().unwrap().dirty_time_windows.set_dirty();
+
+    let plan_info = task
+        .gen_insert_plan(&query_engine, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(plan_info.can_advance_checkpoints);
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    let (_plan, incremental_safe) = task
+        .prepare_plan_for_incremental(&plan_info.plan, None)
+        .await
+        .unwrap();
+
+    assert!(incremental_safe);
+    assert!(!task.state.read().unwrap().is_incremental_disabled());
+
+    let extensions = task
+        .build_flow_query_extensions(incremental_safe, plan_info.can_advance_checkpoints)
+        .await
+        .unwrap();
+    assert!(extensions.contains(&(
+        FLOW_INCREMENTAL_MODE,
+        FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string()
+    )));
+    assert!(
+        extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_AFTER_SEQS)
+    );
 }
 
 #[tokio::test]
