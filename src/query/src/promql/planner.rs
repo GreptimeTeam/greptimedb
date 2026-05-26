@@ -312,11 +312,13 @@ impl PromPlanner {
         let range_ms = range.as_millis() as _;
         self.ctx.range = Some(range_ms);
 
-        let time_index_column = self
-            .ctx
-            .time_index_column
-            .clone()
-            .expect("time index should be set in `setup_context`");
+        let time_index_column =
+            self.ctx
+                .time_index_column
+                .clone()
+                .with_context(|| TimeIndexNotFoundSnafu {
+                    table: self.ctx.table_name.clone().unwrap_or_default(),
+                })?;
 
         // `RangeManipulate` assumes each input batch holds exactly one series
         // (it takes tag column values from row 0 and applies them to every
