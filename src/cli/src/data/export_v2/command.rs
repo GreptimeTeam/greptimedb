@@ -186,8 +186,8 @@ pub struct ExportDeleteCommand {
     snapshot: String,
 
     /// Skip interactive confirmation.
-    #[clap(long)]
-    yes: bool,
+    #[clap(long = "no-confirm", alias = "yes")]
+    skip_confirmation: bool,
 
     /// Object store configuration for remote storage backends.
     #[clap(flatten)]
@@ -202,7 +202,7 @@ impl ExportDeleteCommand {
 
         Ok(Box::new(ExportDelete {
             snapshot: self.snapshot.clone(),
-            yes: self.yes,
+            skip_confirmation: self.skip_confirmation,
             storage,
         }))
     }
@@ -211,7 +211,7 @@ impl ExportDeleteCommand {
 /// Export delete tool implementation.
 pub struct ExportDelete {
     snapshot: String,
-    yes: bool,
+    skip_confirmation: bool,
     storage: OpenDalStorage,
 }
 
@@ -234,7 +234,7 @@ impl ExportDelete {
         let manifest = self.storage.read_manifest().await?;
         print_delete_summary(&self.snapshot, &manifest);
 
-        if !self.yes && !confirm(&self.snapshot)? {
+        if !self.skip_confirmation && !confirm(&self.snapshot)? {
             println!("Deletion cancelled.");
             return Ok(());
         }
@@ -1732,15 +1732,34 @@ mod tests {
             "export-v2-delete",
             "--snapshot",
             "s3://bucket",
-            "--yes",
+            "--no-confirm",
         ]);
 
         let error = cmd.build().await.err().unwrap().to_string();
         assert!(error.contains("non-empty path"));
     }
 
+    #[test]
+    fn test_delete_skip_confirmation_aliases() {
+        let no_confirm = ExportDeleteCommand::parse_from([
+            "export-v2-delete",
+            "--snapshot",
+            "s3://bucket/snapshot",
+            "--no-confirm",
+        ]);
+        assert!(no_confirm.skip_confirmation);
+
+        let yes = ExportDeleteCommand::parse_from([
+            "export-v2-delete",
+            "--snapshot",
+            "s3://bucket/snapshot",
+            "--yes",
+        ]);
+        assert!(yes.skip_confirmation);
+    }
+
     #[tokio::test]
-    async fn test_delete_snapshot_with_yes_removes_snapshot_contents() {
+    async fn test_delete_snapshot_with_no_confirm_removes_snapshot_contents() {
         let parent = tempdir().unwrap();
         let snapshot = parent.path().join("snapshot");
         let sibling = parent.path().join("sibling");
@@ -1760,7 +1779,7 @@ mod tests {
         let uri = Url::from_directory_path(&snapshot).unwrap().to_string();
         let delete = ExportDelete {
             snapshot: uri,
-            yes: true,
+            skip_confirmation: true,
             storage: file_storage_for_dir(&snapshot),
         };
 
@@ -1780,7 +1799,7 @@ mod tests {
         let uri = Url::from_directory_path(dir.path()).unwrap().to_string();
         let delete = ExportDelete {
             snapshot: uri,
-            yes: true,
+            skip_confirmation: true,
             storage: file_storage_for_dir(dir.path()),
         };
 
@@ -1810,7 +1829,7 @@ mod tests {
         let uri = Url::from_directory_path(dir.path()).unwrap().to_string();
         let delete = ExportDelete {
             snapshot: uri.clone(),
-            yes: false,
+            skip_confirmation: false,
             storage: file_storage_for_dir(dir.path()),
         };
 
