@@ -1,5 +1,5 @@
 name: Setup MySQL
-description: Deploy MySQL on Docker or Kubernetes
+description: Deploy MySQL on Docker
 inputs:
   provider:
     default: "docker"

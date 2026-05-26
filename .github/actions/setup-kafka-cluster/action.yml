@@ -1,5 +1,5 @@
 name: Setup Kafka cluster
-description: Deploy Kafka cluster on Kubernetes
+description: Deploy Kafka cluster on Docker or Kubernetes
 inputs:
   controller-replicas:
     default: 3

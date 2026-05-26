@@ -1,5 +1,5 @@
 name: Setup PostgreSQL
-description: Deploy PostgreSQL on Kubernetes
+description: Deploy PostgreSQL on Docker or Kubernetes
 inputs:
   postgres-replicas:
     default: 1
