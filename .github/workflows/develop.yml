@@ -673,24 +673,76 @@ jobs:
             opts: "-w kafka -k 127.0.0.1:9092"
             kafka: true
           - name: "PostgreSQL KvBackend"
-            opts: "--setup-pg"
+            opts: "--setup-pg postgresql://greptimedb:admin@127.0.0.1:5432/postgres"
             kafka: false
           - name: "MySQL Kvbackend"
-            opts: "--setup-mysql"
+            opts: "--setup-mysql mysql://greptimedb:admin@127.0.0.1:3306/mysql"
             kafka: false
           - name: "Flat format"
             opts: "--enable-flat-format"
             kafka: false
     timeout-minutes: 60
+    services:
+      kafka:
+        image: greptime/kafka:3.9.0-debian-12-r1
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_KRAFT_CLUSTER_ID: Kmp-xkTnSf-WWXhWmiorDg
+          KAFKA_ENABLE_KRAFT: "yes"
+          KAFKA_CFG_NODE_ID: "1"
+          KAFKA_CFG_PROCESS_ROLES: broker,controller
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:2181
+          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:2181
+          ALLOW_PLAINTEXT_LISTENER: "yes"
+          KAFKA_BROKER_ID: "1"
+      postgres:
+        image: docker.io/postgres:14-alpine
+        env:
+          POSTGRES_USER: greptimedb
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U greptimedb -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      mysql:
+        image: greptime/mysql:5.7
+        env:
+          MYSQL_DATABASE: mysql
+          MYSQL_USER: greptimedb
+          MYSQL_PASSWORD: admin
+          MYSQL_ROOT_PASSWORD: admin
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -padmin --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - if: matrix.mode.kafka
-        name: Setup kafka server
-        working-directory: tests-integration/fixtures
-        run:  ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait kafka
+        name: Wait for kafka server
+        shell: bash
+        run: |
+          for _ in {1..30}; do
+            if (echo > /dev/tcp/127.0.0.1/9092) >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Kafka is not ready"
+          exit 1
 
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
