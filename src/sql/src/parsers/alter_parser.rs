@@ -134,6 +134,7 @@ impl ParserContext<'_> {
                     self.parse_alter_table_merge_partition()?
                 } else {
                     match w.keyword {
+                        Keyword::PARTITION => self.parse_alter_table_partition()?,
                         Keyword::ADD => self.parse_alter_table_add()?,
                         Keyword::DROP => {
                             let _ = self.parser.next_token();
@@ -174,7 +175,7 @@ impl ParserContext<'_> {
                             AlterTableOperation::SetTableOptions { options }
                         }
                         _ => self.expected(
-                            "ADD or DROP or MODIFY or RENAME or SET or REPARTITION or SPLIT or MERGE after ALTER TABLE",
+                            "ADD or DROP or MODIFY or RENAME or SET or UNSET or REPARTITION or SPLIT or MERGE or PARTITION after ALTER TABLE",
                             self.parser.peek_token(),
                         )?,
                     }
@@ -216,6 +217,19 @@ impl ParserContext<'_> {
         Ok(AlterTableOperation::Repartition {
             operation: RepartitionOperation::new(from_exprs, into_exprs),
         })
+    }
+
+    fn parse_alter_table_partition(&mut self) -> Result<AlterTableOperation> {
+        let _ = self.parser.next_token();
+        let partitions = self.parse_partition_on_columns()?;
+        if partitions.exprs.is_empty() {
+            return Err(ParserError::ParserError(
+                "PARTITION ON COLUMNS requires at least one partition expression".to_string(),
+            ))
+            .context(error::SyntaxSnafu);
+        }
+
+        Ok(AlterTableOperation::Partition { partitions })
     }
 
     fn parse_alter_table_split_partition(&mut self) -> Result<AlterTableOperation> {
@@ -977,6 +991,100 @@ ALTER TABLE t REPARTITION (
     }
 
     #[test]
+    fn test_parse_alter_table_partition_on_columns() {
+        let sql = r#"
+ALTER TABLE sensor_readings PARTITION ON COLUMNS (device_id, area) (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South',
+  device_id >= 100 AND area <= 'East',
+  device_id >= 100 AND area > 'East'
+);"#;
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        if let Statement::AlterTable(alter_table) = statement {
+            assert_matches!(
+                alter_table.alter_operation(),
+                AlterTableOperation::Partition { .. }
+            );
+
+            if let AlterTableOperation::Partition { partitions } = alter_table.alter_operation() {
+                assert_eq!(partitions.column_list.len(), 2);
+                assert_eq!(partitions.column_list[0].value, "device_id");
+                assert_eq!(partitions.column_list[1].value, "area");
+                assert_eq!(partitions.exprs.len(), 4);
+                assert_eq!(
+                    partitions.exprs[0].to_string(),
+                    "device_id < 100 AND area < 'South'"
+                );
+                assert_eq!(
+                    partitions.exprs[3].to_string(),
+                    "device_id >= 100 AND area > 'East'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_table_partition_on_columns_with_options() {
+        let sql = r#"
+ALTER TABLE sensor_readings PARTITION ON COLUMNS (device_id) (
+  device_id < 100,
+  device_id >= 100
+) WITH (
+  TIMEOUT = '5m',
+  WAIT = false
+);"#;
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        if let Statement::AlterTable(alter_table) = statement {
+            assert_matches!(
+                alter_table.alter_operation(),
+                AlterTableOperation::Partition { .. }
+            );
+            let options = alter_table.options().to_str_map();
+            assert_eq!(options.get("timeout").unwrap(), &"5m");
+            assert_eq!(options.get("wait").unwrap(), &"false");
+            assert_eq!(options.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_table_partition_on_columns_empty_columns() {
+        let sql = r#"
+ALTER TABLE sensor_readings PARTITION ON COLUMNS () (
+  device_id < 100
+);"#;
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_alter_table_partition_on_columns_empty_exprs() {
+        let sql = r#"
+ALTER TABLE sensor_readings PARTITION ON COLUMNS (device_id) ();"#;
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+
+        assert_eq!(
+            result.output_msg(),
+            "Invalid SQL syntax: sql parser error: PARTITION ON COLUMNS requires at least one partition expression"
+        );
+    }
+
+    #[test]
     fn test_parse_alter_table_split_partition() {
         let sql = r#"
 ALTER TABLE metrics SPLIT PARTITION (
@@ -1274,7 +1382,7 @@ ALTER TABLE metrics REPARTITION
         let err = result.output_msg();
         assert_eq!(
             err,
-            "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET or REPARTITION or SPLIT or MERGE after ALTER TABLE, found: table_t"
+            "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET or UNSET or REPARTITION or SPLIT or MERGE or PARTITION after ALTER TABLE, found: table_t"
         );
 
         let sql = "ALTER TABLE test_table RENAME table_t";

@@ -15,8 +15,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::Repartition;
 use api::v1::alter_table_expr::Kind;
+use api::v1::repartition::Source;
+use api::v1::{PartitionExprs, Repartition};
 use common_error::ext::BoxedError;
 use common_procedure::{
     BoxedProcedure, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef,
@@ -48,7 +49,7 @@ use crate::error::{
     self, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu, ProcedureOutputSnafu,
     RegisterProcedureLoaderSnafu, RegisterRepartitionProcedureLoaderSnafu, Result,
     SubmitProcedureSnafu, TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
-    UnexpectedLogicalRouteTableSnafu, WaitProcedureSnafu,
+    UnexpectedLogicalRouteTableSnafu, UnexpectedSnafu, WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
@@ -280,14 +281,29 @@ impl DdlManager {
         &self,
         table_id: TableId,
         table_name: TableName,
-        Repartition {
-            from_partition_exprs,
-            into_partition_exprs,
-        }: Repartition,
+        repartition: Repartition,
         wait: bool,
         timeout: Duration,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
+
+        let into_partition_exprs = repartition.into_partition_exprs;
+        let source = repartition.source;
+
+        let from_partition_exprs = match source {
+            Some(Source::PartitionExprs(PartitionExprs { exprs })) => exprs,
+            Some(Source::Unpartitioned(_)) => {
+                return UnexpectedSnafu {
+                    err_msg: "Unpartitioned repartition source is not supported yet".to_string(),
+                }
+                .fail();
+            }
+            None => {
+                // Reads the deprecated field for backward compatibility with old persisted DDL tasks.
+                #[allow(deprecated)]
+                repartition.from_partition_exprs
+            }
+        };
 
         let procedure = self
             .repartition_procedure_factory
