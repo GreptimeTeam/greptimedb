@@ -160,6 +160,7 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
                     skip_wal_replay: true,
                     path_type: PathType::Bare,
                     checkpoint: None,
+                    required_capabilities: Default::default(),
                 },
             )
         })
@@ -185,6 +186,7 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
                     metadata_entry_id: None,
                     location_id: None,
                     checkpoint: None,
+                    required_capabilities: Default::default(),
                 },
             )
         })
@@ -232,6 +234,7 @@ async fn test_batch_catchup_err_with_format(factory: Option<LogStoreFactory>, fl
                     metadata_entry_id: None,
                     location_id: None,
                     checkpoint: None,
+                    required_capabilities: Default::default(),
                 },
             )
         })

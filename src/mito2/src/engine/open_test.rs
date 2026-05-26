@@ -64,6 +64,7 @@ async fn test_engine_open_empty_with_format(flat_format: bool) {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -110,6 +111,7 @@ async fn test_engine_open_existing_with_format(flat_format: bool) {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -237,6 +239,7 @@ async fn test_engine_region_open_with_options_with_format(flat_format: bool) {
                 options: HashMap::from([("ttl".to_string(), "4d".to_string())]),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -297,6 +300,7 @@ async fn test_engine_region_open_with_custom_store_with_format(flat_format: bool
                 options: HashMap::from([("storage".to_string(), "Gcs".to_string())]),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -392,6 +396,7 @@ async fn test_open_region_skip_wal_replay_with_format(flat_format: bool) {
                 options: Default::default(),
                 skip_wal_replay: true,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -431,6 +436,7 @@ async fn test_open_region_skip_wal_replay_with_format(flat_format: bool) {
                 options: Default::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -484,6 +490,7 @@ async fn test_open_region_wait_for_opening_region_ok_with_format(flat_format: bo
                     options: HashMap::default(),
                     skip_wal_replay: false,
                     checkpoint: None,
+                    required_capabilities: Default::default(),
                 }),
             )
             .await
@@ -535,6 +542,7 @@ async fn test_open_region_wait_for_opening_region_err_with_format(flat_format: b
                     options: HashMap::default(),
                     skip_wal_replay: false,
                     checkpoint: None,
+                    required_capabilities: Default::default(),
                 }),
             )
             .await
@@ -691,6 +699,7 @@ async fn test_open_backfills_partition_expr_with_fetcher() {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -725,6 +734,7 @@ async fn test_open_backfills_partition_expr_with_fetcher() {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -766,6 +776,7 @@ async fn test_open_keeps_none_without_fetcher() {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await

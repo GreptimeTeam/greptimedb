@@ -13,21 +13,24 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::ops::Div;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::RegionIdent;
 use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::instruction::{
-    Instruction, InstructionReply, OpenRegion, OpenRegionReason, SimpleReply,
+    Instruction, InstructionReply, OpenRegion, OpenRegionCapability, OpenRegionReason, SimpleReply,
 };
 use common_meta::key::datanode_table::RegionInfo;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
+use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::RegionRole;
+use store_api::storage::RegionNumber;
 use tokio::time::Instant;
 
 use crate::error::{self, Result};
@@ -62,6 +65,27 @@ impl State for OpenCandidateRegion {
 }
 
 impl OpenCandidateRegion {
+    fn required_capabilities(
+        open_reason: &OpenRegionReason,
+        region_wal_options: &HashMap<RegionNumber, String>,
+        region_number: RegionNumber,
+    ) -> Result<OpenRegionCapability> {
+        let mut required_capabilities = open_reason.default_required_capabilities();
+        if matches!(open_reason, OpenRegionReason::RegionFailover) {
+            let wal_options = region_wal_options
+                .get(&region_number)
+                .map(|wal_options| serde_json::from_str::<WalOptions>(wal_options))
+                .transpose()
+                .context(error::ParseWalOptionsSnafu)?;
+
+            if !matches!(wal_options.unwrap_or_default(), WalOptions::Kafka(_)) {
+                required_capabilities = OpenRegionCapability::OBJECT_STORAGE;
+            }
+        }
+
+        Ok(required_capabilities)
+    }
+
     /// Builds open region instructions
     ///
     /// Abort(non-retry):
@@ -92,6 +116,8 @@ impl OpenCandidateRegion {
                 region_wal_options,
                 engine,
             } = datanode_table_value.region_info.clone();
+            let required_capabilities =
+                Self::required_capabilities(&open_reason, &region_wal_options, region_number)?;
 
             open_regions.push(
                 OpenRegion::new(
@@ -106,7 +132,8 @@ impl OpenCandidateRegion {
                     region_wal_options,
                     true,
                 )
-                .with_reason(open_reason.clone()),
+                .with_reason(open_reason.clone())
+                .with_required_capabilities(required_capabilities),
             );
         }
 
@@ -228,6 +255,7 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use common_wal::options::{KafkaWalOptions, WalOptions};
     use store_api::storage::RegionId;
 
     use super::*;
@@ -255,7 +283,48 @@ mod tests {
             region_wal_options: Default::default(),
             skip_wal_replay: true,
             reason: OpenRegionReason::RegionMigration,
+            required_capabilities: OpenRegionCapability::OBJECT_STORAGE,
         }])
+    }
+
+    #[test]
+    fn test_required_capabilities_for_region_migration() {
+        let capabilities = OpenCandidateRegion::required_capabilities(
+            &OpenRegionReason::RegionMigration,
+            &HashMap::new(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(capabilities, OpenRegionCapability::OBJECT_STORAGE);
+    }
+
+    #[test]
+    fn test_required_capabilities_for_failover_with_remote_wal() {
+        let wal_options = serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+            topic: "test-topic".to_string(),
+        }))
+        .unwrap();
+        let capabilities = OpenCandidateRegion::required_capabilities(
+            &OpenRegionReason::RegionFailover,
+            &HashMap::from([(1, wal_options)]),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            capabilities,
+            OpenRegionCapability::OBJECT_STORAGE | OpenRegionCapability::REMOTE_WAL
+        );
+    }
+
+    #[test]
+    fn test_required_capabilities_for_failover_with_local_wal() {
+        let capabilities = OpenCandidateRegion::required_capabilities(
+            &OpenRegionReason::RegionFailover,
+            &HashMap::new(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(capabilities, OpenRegionCapability::OBJECT_STORAGE);
     }
 
     #[tokio::test]

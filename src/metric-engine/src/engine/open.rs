@@ -211,6 +211,7 @@ impl MetricEngineInner {
     ) -> (RegionOpenRequest, RegionOpenRequest) {
         let metadata_region_options = region_options_for_metadata_region(&request.options);
         let checkpoint = request.checkpoint;
+        let required_capabilities = request.required_capabilities;
 
         let open_metadata_region_request = RegionOpenRequest {
             table_dir: request.table_dir.clone(),
@@ -222,6 +223,7 @@ impl MetricEngineInner {
                 entry_id: checkpoint.metadata_entry_id.unwrap_or_default(),
                 metadata_entry_id: None,
             }),
+            required_capabilities,
         };
 
         let mut data_region_options = request.options;
@@ -239,6 +241,7 @@ impl MetricEngineInner {
                 entry_id: checkpoint.entry_id,
                 metadata_entry_id: None,
             }),
+            required_capabilities,
         };
 
         (open_metadata_region_request, open_data_region_request)

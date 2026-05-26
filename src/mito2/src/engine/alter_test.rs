@@ -277,6 +277,7 @@ async fn test_alter_region_with_format(flat_format: bool) {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -481,6 +482,7 @@ async fn test_put_after_alter_with_format(flat_format: bool) {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -844,6 +846,7 @@ async fn test_alter_column_fulltext_options_with_format(flat_format: bool) {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -979,6 +982,7 @@ async fn test_alter_column_set_inverted_index_with_format(flat_format: bool) {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -1248,6 +1252,7 @@ async fn test_alter_region_sst_format_with_flush() {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -1366,6 +1371,7 @@ async fn test_alter_region_sst_format_without_flush() {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -1492,6 +1498,7 @@ async fn test_alter_region_sst_format_flat_to_pk_with_flush() {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -1610,6 +1617,7 @@ async fn test_alter_region_sst_format_flat_to_pk_without_flush() {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -1725,6 +1733,7 @@ async fn test_alter_region_append_mode_with_flush() {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -1843,6 +1852,7 @@ async fn test_alter_region_append_mode_without_flush() {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await

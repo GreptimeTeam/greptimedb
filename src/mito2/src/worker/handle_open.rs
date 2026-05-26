@@ -18,38 +18,94 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common_telemetry::info;
+use common_wal::options::WalOptions;
 use object_store::util::join_path;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::region_request::RegionOpenRequest;
+use store_api::region_request::{OpenRegionCapability, RegionOpenRequest};
 use store_api::storage::RegionId;
 use table::requests::STORAGE_KEY;
 
 use crate::error::{
-    ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionNotFoundSnafu, Result,
+    InvalidRequestSnafu, ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu,
+    RegionNotFoundSnafu, Result,
 };
 use crate::region::opener::{RegionOpener, sanitize_open_request_options};
+use crate::region::options::parse_wal_options;
 use crate::request::OptionOutputTx;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::handle_drop::remove_region_dir_once;
 use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
 
+fn has_object_storage_capability(object_store: &object_store::ObjectStore) -> bool {
+    object_store.info().scheme() != object_store::services::FS_SCHEME
+}
+
+fn has_remote_wal_capability(request: &RegionOpenRequest) -> Result<bool> {
+    Ok(matches!(
+        parse_wal_options(&request.options).context(crate::error::SerdeJsonSnafu)?,
+        WalOptions::Kafka(_)
+    ))
+}
+
 impl<S: LogStore> RegionWorkerLoop<S> {
+    fn object_store_from_request(
+        &self,
+        request: &RegionOpenRequest,
+    ) -> Result<&object_store::ObjectStore> {
+        if let Some(storage_name) = request.options.get(STORAGE_KEY) {
+            self.object_store_manager
+                .find(storage_name)
+                .with_context(|| ObjectStoreNotFoundSnafu {
+                    object_store: storage_name.clone(),
+                })
+        } else {
+            Ok(self.object_store_manager.default_object_store())
+        }
+    }
+
+    fn validate_open_region_capabilities(
+        &self,
+        region_id: RegionId,
+        request: &RegionOpenRequest,
+        object_store: &object_store::ObjectStore,
+    ) -> Result<()> {
+        let required_capabilities = request.required_capabilities;
+        if required_capabilities.contains(OpenRegionCapability::OBJECT_STORAGE)
+            && !has_object_storage_capability(object_store)
+        {
+            return InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "opening region requires ObjectStorage capability, but storage scheme is {}",
+                    object_store.info().scheme()
+                ),
+            }
+            .fail();
+        }
+
+        if required_capabilities.contains(OpenRegionCapability::REMOTE_WAL)
+            && !has_remote_wal_capability(request)?
+        {
+            return InvalidRequestSnafu {
+                region_id,
+                reason: "opening region requires RemoteWal capability, but wal options are not remote wal"
+                    .to_string(),
+            }
+            .fail();
+        }
+
+        Ok(())
+    }
+
     async fn check_and_cleanup_region(
         &self,
         region_id: RegionId,
         request: &RegionOpenRequest,
     ) -> Result<()> {
-        let object_store = if let Some(storage_name) = request.options.get(STORAGE_KEY) {
-            self.object_store_manager
-                .find(storage_name)
-                .with_context(|| ObjectStoreNotFoundSnafu {
-                    object_store: storage_name.clone(),
-                })?
-        } else {
-            self.object_store_manager.default_object_store()
-        };
+        let object_store = self.object_store_from_request(request)?;
+        self.validate_open_region_capabilities(region_id, request, object_store)?;
         // Check if this region is pending drop. And clean the entire dir if so.
         let region_dir =
             region_dir_from_table_dir(&request.table_dir, region_id, request.path_type);
@@ -157,5 +213,53 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+    use object_store::ObjectStore;
+    use object_store::services::{Fs, Memory};
+    use store_api::region_request::{OpenRegionCapability, PathType, RegionOpenRequest};
+
+    use super::{has_object_storage_capability, has_remote_wal_capability};
+
+    fn new_open_request(options: HashMap<String, String>) -> RegionOpenRequest {
+        RegionOpenRequest {
+            engine: "mito2".to_string(),
+            table_dir: "test".to_string(),
+            path_type: PathType::Bare,
+            options,
+            skip_wal_replay: false,
+            checkpoint: None,
+            required_capabilities: OpenRegionCapability::empty(),
+        }
+    }
+
+    #[test]
+    fn test_has_object_storage_capability() {
+        let dir = common_test_util::temp_dir::create_temp_dir("handle-open");
+        let fs = ObjectStore::new(Fs::default().root(dir.path().to_str().unwrap()))
+            .unwrap()
+            .finish();
+        assert!(!has_object_storage_capability(&fs));
+
+        let memory = ObjectStore::new(Memory::default()).unwrap().finish();
+        assert!(has_object_storage_capability(&memory));
+    }
+
+    #[test]
+    fn test_has_remote_wal_capability() {
+        assert!(!has_remote_wal_capability(&new_open_request(HashMap::new())).unwrap());
+
+        let wal_options = serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+            topic: "test-topic".to_string(),
+        }))
+        .unwrap();
+        let request = new_open_request(HashMap::from([(WAL_OPTIONS_KEY.to_string(), wal_options)]));
+        assert!(has_remote_wal_capability(&request).unwrap());
     }
 }

@@ -14,21 +14,14 @@
 
 use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
 use common_meta::wal_provider::prepare_wal_options;
-use common_telemetry::warn;
 use store_api::path_utils::table_dir;
-use store_api::region_request::{PathType, RegionOpenRequest};
+use store_api::region_request::{OpenRegionCapability, PathType, RegionOpenRequest};
 use store_api::storage::RegionId;
 
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
 
 pub struct OpenRegionsHandler {
     pub open_region_parallelism: usize,
-    /// Whether the datanode is backed by object storage (e.g., S3, OSS, etc.).
-    ///
-    /// When `false`, region migration and failover open requests are rejected
-    /// because the region data only exists on the source node's local storage
-    /// and cannot be accessed by this node.
-    pub is_object_storage: bool,
 }
 
 #[async_trait::async_trait]
@@ -39,38 +32,12 @@ impl InstructionHandler for OpenRegionsHandler {
         ctx: &HandlerContext,
         open_regions: Self::Instruction,
     ) -> Option<InstructionReply> {
-        // Check capability: if this datanode is not backed by object storage, reject
-        // open requests that require shared object storage (migration/failover).
-        if !self.is_object_storage {
-            let rejected: Vec<_> = open_regions
-                .iter()
-                .filter(|r| r.reason.requires_object_storage())
-                .collect();
-            if let Some(first) = rejected.first() {
-                let reason = &first.reason;
-                let regions: Vec<_> = rejected
-                    .iter()
-                    .map(|r| r.region_ident.get_region_id())
-                    .collect();
-                warn!(
-                    "Rejecting open_region instruction for regions {:?}: reason={:?} requires \
-                     object storage, but this datanode uses local file storage.",
-                    regions, reason,
-                );
-                return Some(InstructionReply::OpenRegions(SimpleReply {
-                    result: false,
-                    error: Some(format!(
-                        "Cannot open regions {regions:?} on a datanode without object storage: \
-                         open reason {:?} requires shared object storage.",
-                        reason,
-                    )),
-                }));
-            }
-        }
-
         let requests = open_regions
             .into_iter()
             .map(|open_region| {
+                let required_capabilities = OpenRegionCapability::from_bits_retain(
+                    open_region.required_capabilities().bits(),
+                );
                 let OpenRegion {
                     region_ident,
                     region_storage_path,
@@ -88,6 +55,7 @@ impl InstructionHandler for OpenRegionsHandler {
                     options: region_options,
                     skip_wal_replay,
                     checkpoint: None,
+                    required_capabilities,
                 };
                 (region_id, request)
             })
@@ -147,6 +115,7 @@ mod tests {
                 region_wal_options: HashMap::new(),
                 skip_wal_replay: false,
                 reason: Default::default(),
+                required_capabilities: Default::default(),
             })
             .collect();
 

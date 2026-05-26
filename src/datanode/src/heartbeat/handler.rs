@@ -60,8 +60,6 @@ pub struct RegionHeartbeatResponseHandler {
     open_region_parallelism: usize,
     gc_tasks: TaskTracker<GcReport>,
     kv_backend: KvBackendRef,
-    /// Whether the datanode's default storage is backed by object storage.
-    is_object_storage: bool,
 }
 
 #[async_trait::async_trait]
@@ -107,19 +105,12 @@ impl RegionHeartbeatResponseHandler {
             open_region_parallelism: (num_cpus::get() / 2).max(1),
             gc_tasks: TaskTracker::new(),
             kv_backend,
-            is_object_storage: false,
         }
     }
 
     /// Sets the parallelism for opening regions.
     pub fn with_open_region_parallelism(mut self, parallelism: usize) -> Self {
         self.open_region_parallelism = parallelism;
-        self
-    }
-
-    /// Sets whether the datanode is backed by object storage.
-    pub fn with_is_object_storage(mut self, is_object_storage: bool) -> Self {
-        self.is_object_storage = is_object_storage;
         self
     }
 
@@ -132,7 +123,6 @@ impl RegionHeartbeatResponseHandler {
             Instruction::OpenRegions(_) => Ok(Some(Box::new(
                 OpenRegionsHandler {
                     open_region_parallelism: self.open_region_parallelism,
-                    is_object_storage: self.is_object_storage,
                 }
                 .into(),
             ))),

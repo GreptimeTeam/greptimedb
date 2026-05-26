@@ -181,6 +181,7 @@ mod tests {
             options: HashMap::default(),
             skip_wal_replay: false,
             checkpoint: None,
+            required_capabilities: Default::default(),
         };
 
         let region = FileRegion::open(region_id, request, &object_store)
@@ -238,6 +239,7 @@ mod tests {
             options: HashMap::default(),
             skip_wal_replay: false,
             checkpoint: None,
+            required_capabilities: Default::default(),
         };
         let err = FileRegion::open(region_id, request, &object_store)
             .await

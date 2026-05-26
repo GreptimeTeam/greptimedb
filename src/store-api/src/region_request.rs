@@ -315,6 +315,7 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
             options: open.options,
             skip_wal_replay: false,
             checkpoint: None,
+            required_capabilities: OpenRegionCapability::empty(),
         }),
     )])
 }
@@ -567,6 +568,30 @@ pub struct RegionDropRequest {
 }
 
 /// Open region request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpenRegionCapability(u8);
+
+impl OpenRegionCapability {
+    pub const OBJECT_STORAGE: Self = Self(1 << 0);
+    pub const REMOTE_WAL: Self = Self(1 << 1);
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn from_bits_retain(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RegionOpenRequest {
     /// Region engine name
@@ -581,6 +606,8 @@ pub struct RegionOpenRequest {
     pub skip_wal_replay: bool,
     /// Replay checkpoint.
     pub checkpoint: Option<ReplayCheckpoint>,
+    /// Required capabilities for opening the region.
+    pub required_capabilities: OpenRegionCapability,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

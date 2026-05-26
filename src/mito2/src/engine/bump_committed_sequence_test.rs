@@ -112,6 +112,7 @@ async fn test_bump_committed_sequence_with_format(flat_format: bool) {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -151,6 +152,7 @@ async fn test_bump_committed_sequence_with_format(flat_format: bool) {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await

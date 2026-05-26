@@ -179,9 +179,69 @@ impl Display for OpenRegion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OpenRegion(region_ident={}, region_storage_path={}, reason={:?})",
-            self.region_ident, self.region_storage_path, self.reason
+            "OpenRegion(region_ident={}, region_storage_path={}, reason={:?}, required_capabilities={:?})",
+            self.region_ident,
+            self.region_storage_path,
+            self.reason,
+            self.required_capabilities()
         )
+    }
+}
+
+/// Required capabilities for opening a region.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OpenRegionCapability(u8);
+
+impl OpenRegionCapability {
+    pub const OBJECT_STORAGE: Self = Self(1 << 0);
+    pub const REMOTE_WAL: Self = Self(1 << 1);
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::fmt::Debug for OpenRegionCapability {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.is_empty() {
+            return f.write_str("None");
+        }
+
+        let mut capabilities = Vec::new();
+        if self.contains(Self::OBJECT_STORAGE) {
+            capabilities.push("ObjectStorage");
+        }
+        if self.contains(Self::REMOTE_WAL) {
+            capabilities.push("RemoteWal");
+        }
+        f.write_str(&capabilities.join("|"))
+    }
+}
+
+impl std::ops::BitOr for OpenRegionCapability {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for OpenRegionCapability {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
     }
 }
 
@@ -203,13 +263,15 @@ impl OpenRegionReason {
         matches!(self, Self::Normal)
     }
 
-    /// Returns true if this open reason requires the datanode to be backed by object storage.
-    ///
-    /// When a region is migrated or failed over to this node, the region data must reside in
-    /// a shared object storage that both the source and destination datanodes can access.
-    /// If the datanode only has local file storage, the data would not be accessible.
-    pub fn requires_object_storage(&self) -> bool {
-        matches!(self, Self::RegionMigration | Self::RegionFailover)
+    /// Returns the default required capabilities for this open reason.
+    pub fn default_required_capabilities(&self) -> OpenRegionCapability {
+        match self {
+            Self::Normal => OpenRegionCapability::empty(),
+            Self::RegionMigration => OpenRegionCapability::OBJECT_STORAGE,
+            Self::RegionFailover => {
+                OpenRegionCapability::OBJECT_STORAGE | OpenRegionCapability::REMOTE_WAL
+            }
+        }
     }
 }
 
@@ -227,6 +289,11 @@ pub struct OpenRegion {
     /// The reason why this region is being opened.
     #[serde(default, skip_serializing_if = "OpenRegionReason::is_normal")]
     pub reason: OpenRegionReason,
+    /// Explicit required capabilities for opening this region.
+    ///
+    /// When empty, the receiver falls back to the default capabilities mapped from [`reason`].
+    #[serde(default, skip_serializing_if = "OpenRegionCapability::is_empty")]
+    pub required_capabilities: OpenRegionCapability,
 }
 
 impl OpenRegion {
@@ -244,6 +311,7 @@ impl OpenRegion {
             region_wal_options,
             skip_wal_replay,
             reason: OpenRegionReason::Normal,
+            required_capabilities: OpenRegionCapability::empty(),
         }
     }
 
@@ -251,6 +319,24 @@ impl OpenRegion {
     pub fn with_reason(mut self, reason: OpenRegionReason) -> Self {
         self.reason = reason;
         self
+    }
+
+    /// Sets explicit required capabilities for opening this region.
+    pub fn with_required_capabilities(
+        mut self,
+        required_capabilities: OpenRegionCapability,
+    ) -> Self {
+        self.required_capabilities = required_capabilities;
+        self
+    }
+
+    /// Returns the effective required capabilities for this open request.
+    pub fn required_capabilities(&self) -> OpenRegionCapability {
+        if self.required_capabilities.is_empty() {
+            self.reason.default_required_capabilities()
+        } else {
+            self.required_capabilities
+        }
     }
 }
 
@@ -1407,8 +1493,53 @@ mod tests {
             region_wal_options: HashMap::new(),
             skip_wal_replay: false,
             reason: OpenRegionReason::Normal,
+            required_capabilities: OpenRegionCapability::empty(),
         };
         assert_eq!(expected, deserialized);
+    }
+
+    #[test]
+    fn test_open_region_reason_default_required_capabilities() {
+        assert_eq!(
+            OpenRegionReason::Normal.default_required_capabilities(),
+            OpenRegionCapability::empty()
+        );
+        assert_eq!(
+            OpenRegionReason::RegionMigration.default_required_capabilities(),
+            OpenRegionCapability::OBJECT_STORAGE
+        );
+        assert_eq!(
+            OpenRegionReason::RegionFailover.default_required_capabilities(),
+            OpenRegionCapability::OBJECT_STORAGE | OpenRegionCapability::REMOTE_WAL
+        );
+    }
+
+    #[test]
+    fn test_open_region_required_capabilities_fallback() {
+        let open_region = OpenRegion::new(
+            RegionIdent {
+                datanode_id: 1,
+                table_id: 1024,
+                region_number: 1,
+                engine: "mito2".to_string(),
+            },
+            "test/foo",
+            HashMap::new(),
+            HashMap::new(),
+            false,
+        )
+        .with_reason(OpenRegionReason::RegionFailover);
+        assert_eq!(
+            open_region.required_capabilities(),
+            OpenRegionCapability::OBJECT_STORAGE | OpenRegionCapability::REMOTE_WAL
+        );
+
+        let open_region =
+            open_region.with_required_capabilities(OpenRegionCapability::OBJECT_STORAGE);
+        assert_eq!(
+            open_region.required_capabilities(),
+            OpenRegionCapability::OBJECT_STORAGE
+        );
     }
 
     #[test]

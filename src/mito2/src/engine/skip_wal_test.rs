@@ -87,6 +87,7 @@ async fn test_close_region_skip_wal(insert: bool) {
                 options: request.options.clone(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -154,6 +155,7 @@ async fn test_close_follower_region_skip_wal() {
                 options: request.options.clone(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -271,6 +273,7 @@ async fn test_close_region_after_truncate_skip_wal() {
                 options: request.options,
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await

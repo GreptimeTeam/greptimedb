@@ -1282,6 +1282,7 @@ pub async fn reopen_region(
                 skip_wal_replay: false,
                 path_type: PathType::Bare,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await

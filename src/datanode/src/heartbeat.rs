@@ -98,8 +98,7 @@ impl HeartbeatTask {
             Arc::new(SuspendHandler::new(region_server.suspend_state())),
             Arc::new(
                 RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend)
-                    .with_open_region_parallelism(opts.init_regions_parallelism)
-                    .with_is_object_storage(opts.storage.is_object_storage()),
+                    .with_open_region_parallelism(opts.init_regions_parallelism),
             ),
             Arc::new(InvalidateCacheHandler::new(cache_invalidator)),
         ]));

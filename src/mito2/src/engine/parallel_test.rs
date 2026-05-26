@@ -52,6 +52,7 @@ async fn scan_in_parallel(
                 skip_wal_replay: false,
                 path_type: PathType::Bare,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await

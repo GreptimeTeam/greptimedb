@@ -323,6 +323,7 @@ async fn test_engine_truncate_reopen_with_format(flat_format: bool) {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await
@@ -447,6 +448,7 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
                 options: HashMap::default(),
                 skip_wal_replay: false,
                 checkpoint: None,
+                required_capabilities: Default::default(),
             }),
         )
         .await

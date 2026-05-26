@@ -620,6 +620,7 @@ mod test {
             options: physical_region_option,
             skip_wal_replay: false,
             checkpoint: None,
+            required_capabilities: Default::default(),
         };
         engine
             .handle_request(physical_region_id, RegionRequest::Open(open_request))
@@ -644,6 +645,7 @@ mod test {
             options: HashMap::new(),
             skip_wal_replay: false,
             checkpoint: None,
+            required_capabilities: Default::default(),
         };
         engine
             .handle_request(
@@ -721,6 +723,7 @@ mod test {
             options: physical_region_option,
             skip_wal_replay: false,
             checkpoint: None,
+            required_capabilities: Default::default(),
         };
         // Opening an already opened region should succeed.
         // Since the region is already open, no metadata recovery operations will be performed.
@@ -749,6 +752,7 @@ mod test {
             options: physical_region_option,
             skip_wal_replay: false,
             checkpoint: None,
+            required_capabilities: Default::default(),
         };
         let err = metric_engine
             .handle_request(physical_region_id, RegionRequest::Open(open_request))
@@ -854,6 +858,7 @@ mod test {
                         options: options.clone(),
                         skip_wal_replay: true,
                         checkpoint: None,
+                        required_capabilities: Default::default(),
                     },
                 )
             })

@@ -321,6 +321,7 @@ mod tests {
                     options: physical_region_option,
                     skip_wal_replay: false,
                     checkpoint: None,
+                    required_capabilities: Default::default(),
                 }),
             )
             .await
