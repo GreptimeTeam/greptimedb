@@ -1,5 +1,5 @@
 name: Setup PostgreSQL
-description: Deploy PostgreSQL on Docker or Kubernetes
+description: Deploy PostgreSQL on Kubernetes
 inputs:
   postgres-replicas:
     default: 1
@@ -10,9 +10,6 @@ inputs:
   storage-size:
     default: "1Gi"
     description: "Storage size for PostgreSQL"
-  provider:
-    default: "kubernetes"
-    description: "Deployment provider: kubernetes or docker"
 
 runs:
   using: composite
@@ -20,12 +17,6 @@ runs:
   - name: Install PostgreSQL
     shell: bash
     run: |
-      if [ "${{ inputs.provider }}" = "docker" ]; then
-        REPO_ROOT=$(git rev-parse --show-toplevel)
-        docker compose -f "${REPO_ROOT}/tests-integration/fixtures/docker-compose.yml" up -d --wait postgres
-        exit 0
-      fi
-
       helm upgrade \
         --install postgresql oci://registry-1.docker.io/bitnamicharts/postgresql \
         --set replicaCount=${{ inputs.postgres-replicas }} \

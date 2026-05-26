@@ -1,14 +1,11 @@
 name: Setup Kafka cluster
-description: Deploy Kafka cluster on Docker or Kubernetes
+description: Deploy Kafka cluster on Kubernetes
 inputs:
   controller-replicas:
     default: 3
     description: "Kafka controller replicas"
   namespace:
     default: "kafka-cluster"
-  provider:
-    default: "kubernetes"
-    description: "Deployment provider: kubernetes or docker"
 
 runs:
   using: composite
@@ -16,13 +13,6 @@ runs:
   - name: Install Kafka cluster
     shell: bash
     run: |
-      if [ "${{ inputs.provider }}" = "docker" ]; then
-        REPO_ROOT=$(git rev-parse --show-toplevel)
-        "${REPO_ROOT}/.github/scripts/pull-test-deps-images.sh"
-        docker compose -f "${REPO_ROOT}/tests-integration/fixtures/docker-compose.yml" up -d --wait kafka
-        exit 0
-      fi
-
       helm upgrade \
         --install kafka oci://registry-1.docker.io/bitnamicharts/kafka \
         --set controller.replicaCount=${{ inputs.controller-replicas }} \
