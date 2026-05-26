@@ -1018,7 +1018,6 @@ async fn test_all_region_infos() {
     assert_eq!(region_id.as_u64(), entry.region_id.as_u64());
     assert_eq!(region_id.table_id(), entry.table_id);
     assert_eq!(region_id.region_number(), entry.region_number);
-    assert_eq!(region_id.region_group(), entry.region_group);
     assert_eq!(region_id.region_sequence(), entry.region_sequence);
     assert!(!entry.state.is_empty());
     assert_eq!("Leader", entry.role);

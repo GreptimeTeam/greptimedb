@@ -17,13 +17,13 @@ use std::sync::Arc;
 use common_recordbatch::DfRecordBatch;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, LogicalTableSource};
-use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt8Array, UInt32Array, UInt64Array};
+use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt32Array, UInt64Array};
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow_array::StringArray;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 
-use crate::storage::{RegionGroup, RegionId, RegionNumber, RegionSeq, ScanRequest, TableId};
+use crate::storage::{RegionId, RegionNumber, RegionSeq, ScanRequest, TableId};
 
 /// Runtime and manifest information of a region for inspection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,8 +34,6 @@ pub struct RegionInfoEntry {
     pub table_id: TableId,
     /// The region number inside the table.
     pub region_number: RegionNumber,
-    /// The region group.
-    pub region_group: RegionGroup,
     /// The region sequence inside the group.
     pub region_sequence: RegionSeq,
     /// The full runtime role/state label.
@@ -66,7 +64,6 @@ impl RegionInfoEntry {
             ColumnSchema::new("region_id", Ty::uint64_datatype(), false),
             ColumnSchema::new("table_id", Ty::uint32_datatype(), false),
             ColumnSchema::new("region_number", Ty::uint32_datatype(), false),
-            ColumnSchema::new("region_group", Ty::uint8_datatype(), false),
             ColumnSchema::new("region_sequence", Ty::uint32_datatype(), false),
             ColumnSchema::new("state", Ty::string_datatype(), false),
             ColumnSchema::new("role", Ty::string_datatype(), false),
@@ -86,7 +83,6 @@ impl RegionInfoEntry {
         let region_ids = entries.iter().map(|e| e.region_id.as_u64());
         let table_ids = entries.iter().map(|e| e.table_id);
         let region_numbers = entries.iter().map(|e| e.region_number);
-        let region_groups = entries.iter().map(|e| e.region_group);
         let region_sequences = entries.iter().map(|e| e.region_sequence);
         let states = entries.iter().map(|e| e.state.as_str());
         let roles = entries.iter().map(|e| e.role.as_str());
@@ -102,7 +98,6 @@ impl RegionInfoEntry {
             Arc::new(UInt64Array::from_iter_values(region_ids)),
             Arc::new(UInt32Array::from_iter_values(table_ids)),
             Arc::new(UInt32Array::from_iter_values(region_numbers)),
-            Arc::new(UInt8Array::from_iter_values(region_groups)),
             Arc::new(UInt32Array::from_iter_values(region_sequences)),
             Arc::new(StringArray::from_iter_values(states)),
             Arc::new(StringArray::from_iter_values(roles)),
@@ -150,7 +145,7 @@ impl RegionInfoEntry {
 mod tests {
     use datafusion_common::TableReference;
     use datafusion_expr::{LogicalPlan, Operator, binary_expr, col, lit};
-    use datatypes::arrow::array::{Array, BooleanArray, UInt8Array, UInt32Array, UInt64Array};
+    use datatypes::arrow::array::{Array, BooleanArray, UInt32Array, UInt64Array};
     use datatypes::arrow_array::StringArray;
 
     use super::*;
@@ -168,7 +163,6 @@ mod tests {
                 "region_id",
                 "table_id",
                 "region_number",
-                "region_group",
                 "region_sequence",
                 "state",
                 "role",
@@ -182,9 +176,9 @@ mod tests {
             ]
         );
         assert!(!columns[0].is_nullable());
-        assert!(!columns[9].is_nullable());
-        assert!(columns[10].is_nullable());
-        assert!(columns[13].is_nullable());
+        assert!(!columns[8].is_nullable());
+        assert!(columns[9].is_nullable());
+        assert!(columns[12].is_nullable());
     }
 
     #[test]
@@ -196,7 +190,6 @@ mod tests {
                 region_id: region_id1,
                 table_id: region_id1.table_id(),
                 region_number: region_id1.region_number(),
-                region_group: region_id1.region_group(),
                 region_sequence: region_id1.region_sequence(),
                 state: "Leader(Writable)".to_string(),
                 role: "Leader".to_string(),
@@ -212,7 +205,6 @@ mod tests {
                 region_id: region_id2,
                 table_id: region_id2.table_id(),
                 region_number: region_id2.region_number(),
-                region_group: region_id2.region_group(),
                 region_sequence: region_id2.region_sequence(),
                 state: "Follower".to_string(),
                 role: "Follower".to_string(),
@@ -245,16 +237,8 @@ mod tests {
         assert_eq!(10, table_ids.value(0));
         assert_eq!(11, table_ids.value(1));
 
-        let region_groups = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .unwrap();
-        assert_eq!(1, region_groups.value(0));
-        assert_eq!(0, region_groups.value(1));
-
         let states = batch
-            .column(5)
+            .column(4)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -262,7 +246,7 @@ mod tests {
         assert_eq!("Follower", states.value(1));
 
         let writable = batch
-            .column(7)
+            .column(6)
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
@@ -270,7 +254,7 @@ mod tests {
         assert!(!writable.value(1));
 
         let compaction_time_windows = batch
-            .column(10)
+            .column(9)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -278,7 +262,7 @@ mod tests {
         assert!(compaction_time_windows.is_null(1));
 
         let node_ids = batch
-            .column(13)
+            .column(12)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -288,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_region_info_build_plan() {
-        let projection_input = Some(vec![0, 5, 7, 10].into());
+        let projection_input = Some(vec![0, 4, 6, 9].into());
         let request = ScanRequest {
             projection_input,
             filters: vec![binary_expr(col("writable"), Operator::Eq, lit(true))],
@@ -304,7 +288,7 @@ mod tests {
             scan.table_name,
             TableReference::bare(RegionInfoEntry::reserved_table_name_for_inspection())
         );
-        assert_eq!(scan.projection, Some(vec![0, 5, 7, 10]));
+        assert_eq!(scan.projection, Some(vec![0, 4, 6, 9]));
 
         let fields = scan.projected_schema.fields();
         assert_eq!(fields.len(), 4);

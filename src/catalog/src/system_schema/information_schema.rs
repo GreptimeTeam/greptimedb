@@ -20,6 +20,7 @@ pub mod key_column_usage;
 mod partitions;
 mod procedure_info;
 pub mod process_list;
+mod region_info;
 pub mod region_peers;
 mod region_statistics;
 pub mod schemata;
@@ -47,6 +48,8 @@ use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
 use process_list::InformationSchemaProcessList;
+use region_info::InformationSchemaRegionInfo;
+use store_api::region_info::RegionInfoEntry;
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{ScanRequest, TableId};
 use table::TableRef;
@@ -242,6 +245,9 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                     self.catalog_manager.clone(),
                 ),
             ) as _),
+            REGION_INFO => Some(Arc::new(InformationSchemaRegionInfo::new(
+                self.catalog_manager.clone(),
+            )) as _),
             PROCESS_LIST => self
                 .process_manager
                 .as_ref()
@@ -319,6 +325,10 @@ impl InformationSchemaProvider {
             tables.insert(
                 REGION_STATISTICS.to_string(),
                 self.build_table(REGION_STATISTICS).unwrap(),
+            );
+            tables.insert(
+                REGION_INFO.to_string(),
+                self.build_table(REGION_INFO).unwrap(),
             );
             tables.insert(
                 SSTS_MANIFEST.to_string(),
@@ -447,6 +457,8 @@ pub enum DatanodeInspectKind {
     SstStorage,
     /// List index metadata collected from manifest
     SstIndexMeta,
+    /// List region runtime and manifest info
+    RegionInfo,
 }
 
 impl DatanodeInspectRequest {
@@ -456,6 +468,7 @@ impl DatanodeInspectRequest {
             DatanodeInspectKind::SstManifest => ManifestSstEntry::build_plan(self.scan),
             DatanodeInspectKind::SstStorage => StorageSstEntry::build_plan(self.scan),
             DatanodeInspectKind::SstIndexMeta => PuffinIndexMetaEntry::build_plan(self.scan),
+            DatanodeInspectKind::RegionInfo => RegionInfoEntry::build_plan(self.scan),
         }
     }
 }
@@ -486,5 +499,30 @@ impl InformationExtension for NoopInformationExtension {
         _request: DatanodeInspectRequest,
     ) -> std::result::Result<SendableRecordBatchStream, Self::Error> {
         Ok(common_recordbatch::RecordBatches::empty().as_stream())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use store_api::region_info::RegionInfoEntry;
+
+    use super::*;
+
+    #[test]
+    fn test_datanode_inspect_region_info_build_plan() {
+        let plan = DatanodeInspectRequest {
+            kind: DatanodeInspectKind::RegionInfo,
+            scan: ScanRequest::default(),
+        }
+        .build_plan()
+        .unwrap();
+
+        let LogicalPlan::TableScan(scan) = plan else {
+            panic!("expected table scan");
+        };
+        assert_eq!(
+            scan.table_name.to_string(),
+            RegionInfoEntry::reserved_table_name_for_inspection()
+        );
     }
 }
