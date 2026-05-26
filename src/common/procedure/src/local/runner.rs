@@ -20,6 +20,7 @@ use backon::{BackoffBuilder, ExponentialBuilder};
 use common_error::ext::PlainError;
 use common_error::status_code::StatusCode;
 use common_event_recorder::EventRecorderRef;
+use common_telemetry::tracing::warn;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, tracing};
 use rand::Rng;
@@ -480,6 +481,15 @@ impl Runner {
         procedure_state: ProcedureState,
         procedure: BoxedProcedure,
     ) {
+        if !self.running() {
+            warn!(
+                "ProcedureManager is not running, skip submitting subprocedure {}-{}",
+                procedure.type_name(),
+                procedure_id
+            );
+            return;
+        }
+
         if self.manager_ctx.contains_procedure(procedure_id) {
             // If the parent has already submitted this procedure, don't submit it again.
             return;
@@ -525,7 +535,7 @@ impl Runner {
         let parent_id = self.meta.id;
 
         let tracing_context = TracingContext::from_current_span();
-        let _handle = common_runtime::spawn_global(async move {
+        let handle = common_runtime::spawn_global(async move {
             let span = tracing_context.attach(tracing::info_span!(
                 "LocalManager::submit_subprocedure",
                 procedure_name = %runner.meta.type_name,
@@ -537,6 +547,7 @@ impl Runner {
             // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
             runner.run().trace(span).await
         });
+        self.manager_ctx.insert_runner_task(procedure_id, handle);
     }
 
     /// Extend the retry time to wait for the next retry.
@@ -699,6 +710,12 @@ impl Runner {
 
         // Mark the state of this procedure to done.
         self.meta.set_state(ProcedureState::Done { output });
+    }
+}
+
+impl Drop for Runner {
+    fn drop(&mut self) {
+        self.manager_ctx.remove_runner_task(self.meta.id);
     }
 }
 

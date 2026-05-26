@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use backon::ExponentialBuilder;
 use common_error::ext::BoxedError;
 use common_event_recorder::EventRecorderRef;
-use common_runtime::{RepeatedTask, TaskFunction};
+use common_runtime::{JoinHandle, RepeatedTask, TaskFunction};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, tracing};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -254,6 +254,8 @@ pub(crate) struct ManagerContext {
     running_procedures: Mutex<HashSet<ProcedureId>>,
     /// Ids and finished time of finished procedures.
     finished_procedures: Mutex<VecDeque<(ProcedureId, Instant)>>,
+    /// Runner tasks of procedures.
+    runner_tasks: Mutex<HashMap<ProcedureId, JoinHandle<()>>>,
     /// Running flag.
     running: Arc<AtomicBool>,
     /// Poison manager.
@@ -310,6 +312,7 @@ impl ManagerContext {
             procedures: RwLock::new(HashMap::new()),
             running_procedures: Mutex::new(HashSet::new()),
             finished_procedures: Mutex::new(VecDeque::new()),
+            runner_tasks: Mutex::new(HashMap::new()),
             running: Arc::new(AtomicBool::new(false)),
             poison_manager,
         }
@@ -327,6 +330,62 @@ impl ManagerContext {
 
     pub(crate) fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
+    }
+
+    fn reset_runtime_state(&self) {
+        self.procedures.write().unwrap().clear();
+        self.running_procedures.lock().unwrap().clear();
+        self.finished_procedures.lock().unwrap().clear();
+        self.runner_tasks.lock().unwrap().clear();
+        self.key_lock.clear();
+        self.dynamic_key_lock.clear();
+    }
+
+    fn insert_runner_task(&self, procedure_id: ProcedureId, handle: JoinHandle<()>) {
+        if !self.running() {
+            handle.abort();
+            return;
+        }
+        if handle.is_finished() {
+            return;
+        }
+
+        let _ = self
+            .runner_tasks
+            .lock()
+            .unwrap()
+            .insert(procedure_id, handle);
+    }
+
+    pub(crate) fn remove_runner_task(&self, procedure_id: ProcedureId) {
+        let _ = self.runner_tasks.lock().unwrap().remove(&procedure_id);
+    }
+
+    fn take_runner_tasks(&self) -> Vec<JoinHandle<()>> {
+        self.runner_tasks
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect()
+    }
+
+    async fn abort_runner_tasks(&self) {
+        let handles = self.take_runner_tasks();
+
+        for handle in &handles {
+            handle.abort();
+        }
+
+        for handle in handles {
+            if let Err(e) = handle.await
+                && !e.is_cancelled()
+            {
+                error!(
+                    e; "Procedure runner task exits unexpectedly during stop",
+                );
+            }
+        }
     }
 
     /// Return `ProcedureManager` is running.
@@ -675,7 +734,7 @@ impl LocalManager {
 
         let tracing_context = TracingContext::from_current_span();
 
-        let _handle = common_runtime::spawn_global(async move {
+        let handle = common_runtime::spawn_global(async move {
             let span = tracing_context.attach(tracing::info_span!(
             "LocalManager::submit_root_procedure",
                 procedure_name = %runner.meta.type_name,
@@ -686,6 +745,7 @@ impl LocalManager {
             // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
             runner.run().trace(span).await;
         });
+        self.manager_ctx.insert_runner_task(procedure_id, handle);
 
         Ok(watcher)
     }
@@ -830,13 +890,17 @@ impl ProcedureManager for LocalManager {
     }
 
     async fn stop(&self) -> Result<()> {
-        let mut task = self.remove_outdated_meta_task.lock().await;
-
-        if let Some(task) = task.take() {
-            task.stop().await.context(StopRemoveOutdatedMetaTaskSnafu)?;
-        }
-
         self.manager_ctx.stop();
+
+        let mut task = self.remove_outdated_meta_task.lock().await;
+        if let Some(task) = task.take()
+            && let Err(e) = task.stop().await.context(StopRemoveOutdatedMetaTaskSnafu)
+        {
+            error!(e; "Failed to stop remove outdated meta task");
+        };
+
+        self.manager_ctx.abort_runner_tasks().await;
+        self.manager_ctx.reset_runtime_state();
 
         info!("LocalManager is stopped.");
 
@@ -921,10 +985,12 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use common_test_util::temp_dir::create_temp_dir;
+    use tokio::sync::oneshot;
     use tokio::time::timeout;
 
     use super::*;
@@ -952,6 +1018,63 @@ mod tests {
         assert!(ctx.state(meta.id).unwrap().is_running());
         meta.set_state(ProcedureState::Done { output: None });
         assert!(ctx.state(meta.id).unwrap().is_done());
+    }
+
+    #[test]
+    fn test_reset_runtime_state() {
+        let ctx = new_test_manager_context();
+        ctx.set_running();
+        let mut meta = test_util::procedure_meta_for_test();
+        meta.lock_key = LockKey::single_exclusive("test.reset_runtime_state");
+        let meta = Arc::new(meta);
+        let procedure_id = meta.id;
+
+        assert!(ctx.try_insert_procedure(meta.clone()));
+        ctx.finished_procedures
+            .lock()
+            .unwrap()
+            .push_back((procedure_id, Instant::now()));
+        let handle = common_runtime::spawn_global(async {});
+        ctx.insert_runner_task(procedure_id, handle);
+
+        drop(
+            ctx.key_lock
+                .try_write("test.reset_runtime_state".to_string()),
+        );
+        drop(
+            ctx.dynamic_key_lock
+                .try_write("test.reset_runtime_state.dynamic".to_string()),
+        );
+        assert!(ctx.contains_procedure(procedure_id));
+        assert_eq!(1, ctx.running_procedures.lock().unwrap().len());
+        assert_eq!(1, ctx.finished_procedures.lock().unwrap().len());
+        assert_eq!(1, ctx.runner_tasks.lock().unwrap().len());
+        assert_eq!(1, ctx.key_lock.len());
+        assert_eq!(1, ctx.dynamic_key_lock.len());
+
+        ctx.reset_runtime_state();
+
+        assert!(!ctx.contains_procedure(procedure_id));
+        assert!(ctx.running_procedures.lock().unwrap().is_empty());
+        assert!(ctx.finished_procedures.lock().unwrap().is_empty());
+        assert!(ctx.runner_tasks.lock().unwrap().is_empty());
+        assert!(ctx.key_lock.is_empty());
+        assert!(ctx.dynamic_key_lock.is_empty());
+    }
+
+    #[test]
+    fn test_insert_finished_runner_task() {
+        let ctx = new_test_manager_context();
+        ctx.set_running();
+        let procedure_id = ProcedureId::random();
+
+        let handle = common_runtime::spawn_global(async {});
+        while !handle.is_finished() {
+            std::thread::yield_now();
+        }
+        ctx.insert_runner_task(procedure_id, handle);
+
+        assert!(ctx.runner_tasks.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1044,6 +1167,105 @@ mod tests {
             };
             Box::new(f)
         }
+    }
+
+    #[derive(Debug)]
+    struct BlockingProcedure {
+        started_tx: Option<oneshot::Sender<()>>,
+        dropped: Arc<AtomicBool>,
+        lock_key: LockKey,
+    }
+
+    impl Drop for BlockingProcedure {
+        fn drop(&mut self) {
+            self.dropped.store(true, AtomicOrdering::Relaxed);
+        }
+    }
+
+    #[async_trait]
+    impl Procedure for BlockingProcedure {
+        fn type_name(&self) -> &str {
+            "BlockingProcedure"
+        }
+
+        async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+            if let Some(tx) = self.started_tx.take() {
+                let _ = tx.send(());
+            }
+            std::future::pending::<Result<Status>>().await
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn lock_key(&self) -> LockKey {
+            self.lock_key.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stop_aborts_runner_and_resets_runtime_state() {
+        let dir = create_temp_dir("stop_aborts_runner_and_resets_runtime_state");
+        let config = ManagerConfig::default();
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(config, state_store, poison_manager, None, None);
+        manager.start().await.unwrap();
+
+        let procedure_id = ProcedureId::random();
+        let (started_tx, started_rx) = oneshot::channel();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let procedure = BlockingProcedure {
+            started_tx: Some(started_tx),
+            dropped: dropped.clone(),
+            lock_key: LockKey::single_exclusive("test.stop_aborts_runner"),
+        };
+
+        manager
+            .submit(ProcedureWithId {
+                id: procedure_id,
+                procedure: Box::new(procedure),
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(manager.manager_ctx.contains_procedure(procedure_id));
+        assert_eq!(
+            1,
+            manager.manager_ctx.running_procedures.lock().unwrap().len()
+        );
+        assert_eq!(1, manager.manager_ctx.runner_tasks.lock().unwrap().len());
+        assert_eq!(1, manager.manager_ctx.key_lock.len());
+
+        manager.stop().await.unwrap();
+
+        assert!(dropped.load(AtomicOrdering::Relaxed));
+        assert!(!manager.manager_ctx.running());
+        assert!(!manager.manager_ctx.contains_procedure(procedure_id));
+        assert!(
+            manager
+                .manager_ctx
+                .running_procedures
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            manager
+                .manager_ctx
+                .finished_procedures
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(manager.manager_ctx.runner_tasks.lock().unwrap().is_empty());
+        assert!(manager.manager_ctx.key_lock.is_empty());
+        assert!(manager.manager_ctx.dynamic_key_lock.is_empty());
     }
 
     #[test]
