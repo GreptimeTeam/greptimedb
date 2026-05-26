@@ -3,7 +3,7 @@ description: Deploy MySQL on Docker
 inputs:
   provider:
     default: "docker"
-    description: "Deployment provider (currently only docker is supported)"
+    description: "Deployment provider: docker"
 
 runs:
   using: composite
