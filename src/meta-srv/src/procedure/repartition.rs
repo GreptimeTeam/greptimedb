@@ -20,6 +20,7 @@ pub mod group;
 pub mod plan;
 pub mod repartition_end;
 pub mod repartition_start;
+pub mod update_partition_metadata;
 pub mod utils;
 
 use std::any::Any;
@@ -63,6 +64,7 @@ use crate::procedure::repartition::group::{
 };
 use crate::procedure::repartition::plan::RepartitionPlanEntry;
 use crate::procedure::repartition::repartition_start::RepartitionStart;
+use crate::procedure::repartition::update_partition_metadata::PartitionMetadataUpdate;
 use crate::procedure::repartition::utils::{
     get_datanode_table_value, rollback_group_metadata_routes,
 };
@@ -93,6 +95,9 @@ pub struct PersistentContext {
     /// The timeout for repartition operations.
     #[serde(with = "humantime_serde", default = "default_timeout")]
     pub timeout: Duration,
+    #[serde(default)]
+    /// Records table-level partition metadata added by this repartition.
+    pub partition_metadata_update: Option<PartitionMetadataUpdate>,
 }
 
 fn default_timeout() -> Duration {
@@ -121,6 +126,7 @@ impl PersistentContext {
             failed_procedures: vec![],
             unknown_procedures: vec![],
             timeout: timeout.unwrap_or_else(default_timeout),
+            partition_metadata_update: None,
         }
     }
 
@@ -317,7 +323,9 @@ impl Context {
     ///
     /// Abort:
     /// - Table info not found.
-    pub async fn get_table_info_value(&self) -> Result<TableInfoValue> {
+    pub async fn get_raw_table_info_value(
+        &self,
+    ) -> Result<DeserializedValueWithBytes<TableInfoValue>> {
         let table_id = self.persistent_ctx.table_id;
         let table_info_value = self
             .table_metadata_manager
@@ -328,9 +336,34 @@ impl Context {
             .with_context(|_| error::RetryLaterWithSourceSnafu {
                 reason: format!("Failed to get table info for table: {}", table_id),
             })?
-            .context(error::TableInfoNotFoundSnafu { table_id })?
-            .into_inner();
+            .context(error::TableInfoNotFoundSnafu { table_id })?;
+
         Ok(table_info_value)
+    }
+
+    pub async fn get_table_info_value(&self) -> Result<TableInfoValue> {
+        let table_info_value = self.get_raw_table_info_value().await?.into_inner();
+        Ok(table_info_value)
+    }
+
+    /// Updates the table info.
+    pub async fn update_table_info(
+        &self,
+        current_table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
+        new_table_info_value: TableInfoValue,
+    ) -> Result<()> {
+        let table_id = self.persistent_ctx.table_id;
+        self.table_metadata_manager
+            .update_table_info(
+                current_table_info_value,
+                None,
+                new_table_info_value.table_info,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to update table info for table: {}", table_id),
+            })
     }
 
     /// Updates the table route.
@@ -492,24 +525,24 @@ impl RepartitionProcedure {
         Ok(Self { state, context })
     }
 
-    /// Returns whether parent rollback should remove this repartition's allocated regions.
+    /// Returns whether parent rollback should run.
     ///
-    /// This uses an "after AllocateRegion" semantic: once execution reaches
-    /// `AllocateRegion` or any later state, rollback must try to remove this round's
-    /// `allocated_region_ids` from table-route metadata when they exist.
-    ///
-    /// State flow:
-    /// `RepartitionStart -> AllocateRegion -> Dispatch -> Collect -> DeallocateRegion -> RepartitionEnd`
-    ///                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    ///                     rollback allocated regions in metadata
+    /// This uses an "after repartition metadata update" semantic: once execution
+    /// reaches `UpdatePartitionMetadata` or any later rollback-active state,
+    /// rollback must try to clean metadata written by the repartition procedure.
     ///
     /// Notes:
-    /// - `RepartitionStart`: no-op, because allocation has not happened yet.
-    /// - `AllocateRegion` / `Dispatch` / `Collect`  rollback-active.
+    /// - `RepartitionStart`: no-op, because no metadata has been updated yet.
+    /// - `UpdatePartitionMetadata`: rollback table partition metadata.
+    /// - `AllocateRegion` / `Dispatch` / `Collect`: rollback table partition metadata
+    ///   and allocated region metadata.
     /// - `DeallocateRegion`: is not rollback-active.
     /// - `RepartitionEnd`: no-op.
-    fn should_rollback_allocated_regions(&self) -> bool {
-        self.state.as_any().is::<allocate_region::AllocateRegion>()
+    fn should_rollback(&self) -> bool {
+        self.state
+            .as_any()
+            .is::<update_partition_metadata::UpdatePartitionMetadata>()
+            || self.state.as_any().is::<allocate_region::AllocateRegion>()
             || self.state.as_any().is::<dispatch::Dispatch>()
             || self.state.as_any().is::<collect::Collect>()
     }
@@ -526,7 +559,7 @@ impl RepartitionProcedure {
 
     /// Returns allocated region ids that parent rollback should remove.
     ///
-    /// Rollback uses an "after AllocateRegion" semantic:
+    /// Rollback uses an "after region allocation" semantic:
     /// - in `AllocateRegion` and `Dispatch`, all allocated regions belong to the
     ///   current repartition attempt and must be cleaned up.
     /// - in `Collect`, only the plans referenced by failed or unknown
@@ -586,8 +619,44 @@ impl RepartitionProcedure {
         Ok(())
     }
 
+    async fn rollback_partition_metadata(&mut self) -> Result<()> {
+        let Some(update) = self
+            .context
+            .persistent_ctx
+            .partition_metadata_update
+            .as_ref()
+        else {
+            return Ok(());
+        };
+        if !update.applied || update.partition_key_indices.is_empty() {
+            return Ok(());
+        }
+
+        let table_info_value = self.context.get_raw_table_info_value().await?;
+        let mut new_partition_key_indices = table_info_value
+            .table_info
+            .meta
+            .partition_key_indices
+            .clone();
+        new_partition_key_indices.retain(|idx| !update.partition_key_indices.contains(idx));
+        if new_partition_key_indices == table_info_value.table_info.meta.partition_key_indices {
+            return Ok(());
+        }
+
+        let mut new_table_info = table_info_value.table_info.clone();
+        new_table_info.meta.partition_key_indices = new_partition_key_indices;
+        self.context
+            .update_table_info(&table_info_value, table_info_value.update(new_table_info))
+            .await?;
+        if let Err(err) = self.context.invalidate_table_cache().await {
+            warn!(err; "Failed to invalidate table cache during repartition partition metadata rollback, table_id: {}", self.context.persistent_ctx.table_id);
+        }
+
+        Ok(())
+    }
+
     async fn rollback_inner(&mut self, procedure_ctx: &ProcedureContext) -> Result<()> {
-        if !self.should_rollback_allocated_regions() {
+        if !self.should_rollback() {
             return Ok(());
         }
 
@@ -596,6 +665,8 @@ impl RepartitionProcedure {
 
         let table_lock = TableLock::Write(table_id).into();
         let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
+
+        self.rollback_partition_metadata().await?;
         let table_route_value = self.context.get_table_route_value().await?;
         let original_region_routes = region_routes(table_id, table_route_value.get_inner_ref())?;
         let mut current_region_routes = original_region_routes.clone();
@@ -860,6 +931,9 @@ mod tests {
         new_parent_context, procedure_context_with_receivers, procedure_state_receiver, range_expr,
         test_region_route, test_region_wal_options,
     };
+    use crate::procedure::repartition::update_partition_metadata::{
+        PartitionMetadataUpdate, UpdatePartitionMetadata,
+    };
 
     fn test_plan(table_id: TableId) -> RepartitionPlanEntry {
         RepartitionPlanEntry {
@@ -973,26 +1047,26 @@ mod tests {
             Box::new(RepartitionStart::new(vec![], vec![])),
             test_context(&env, table_id),
         );
-        assert!(!procedure.should_rollback_allocated_regions());
+        assert!(!procedure.should_rollback());
 
         let procedure = test_procedure(
             Box::new(AllocateRegion::new(vec![])),
             test_context(&env, table_id),
         );
-        assert!(procedure.should_rollback_allocated_regions());
+        assert!(procedure.should_rollback());
 
         let procedure = test_procedure(Box::new(Dispatch), test_context(&env, table_id));
-        assert!(procedure.should_rollback_allocated_regions());
+        assert!(procedure.should_rollback());
 
         let procedure =
             test_procedure(Box::new(Collect::new(vec![])), test_context(&env, table_id));
-        assert!(procedure.should_rollback_allocated_regions());
+        assert!(procedure.should_rollback());
 
         let procedure = test_procedure(Box::new(DeallocateRegion), test_context(&env, table_id));
-        assert!(!procedure.should_rollback_allocated_regions());
+        assert!(!procedure.should_rollback());
 
         let procedure = test_procedure(Box::new(RepartitionEnd), test_context(&env, table_id));
-        assert!(!procedure.should_rollback_allocated_regions());
+        assert!(!procedure.should_rollback());
     }
 
     #[test]
@@ -1045,6 +1119,116 @@ mod tests {
         assert_eq!(
             downgrading_roles.get(&RegionId::new(1024, 3)),
             Some(&RegionRole::DowngradingLeader)
+        );
+    }
+
+    #[test]
+    fn test_persistent_context_partition_metadata_update_serde_default() {
+        let json = r#"{
+            "catalog_name":"test_catalog",
+            "schema_name":"test_schema",
+            "table_name":"test_table",
+            "table_id":1024,
+            "plans":[],
+            "timeout":"120s"
+        }"#;
+
+        let persistent_ctx: PersistentContext = serde_json::from_str(json).unwrap();
+
+        assert!(persistent_ctx.partition_metadata_update.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_repartition_rollback_removes_partition_metadata_indices() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![test_region_route(RegionId::new(table_id, 1), "")],
+            test_region_wal_options(&[1]),
+        )
+        .await;
+
+        let mut context = new_parent_context(&env, node_manager, table_id);
+        let current = context.get_raw_table_info_value().await.unwrap();
+        let mut table_info = current.table_info.clone();
+        table_info.meta.partition_key_indices = vec![0, 1];
+        context
+            .update_table_info(&current, current.update(table_info))
+            .await
+            .unwrap();
+        context.persistent_ctx.partition_metadata_update = Some(PartitionMetadataUpdate {
+            partition_key_indices: vec![0],
+            applied: true,
+        });
+        let mut procedure = RepartitionProcedure {
+            state: Box::new(UpdatePartitionMetadata::new(vec![])),
+            context,
+        };
+
+        procedure
+            .rollback(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            procedure
+                .context
+                .get_table_info_value()
+                .await
+                .unwrap()
+                .table_info
+                .meta
+                .partition_key_indices,
+            vec![1]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repartition_rollback_preserves_partition_metadata_if_not_applied() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![test_region_route(RegionId::new(table_id, 1), "")],
+            test_region_wal_options(&[1]),
+        )
+        .await;
+
+        let mut context = new_parent_context(&env, node_manager, table_id);
+        let current = context.get_raw_table_info_value().await.unwrap();
+        let mut table_info = current.table_info.clone();
+        table_info.meta.partition_key_indices = vec![0, 1];
+        context
+            .update_table_info(&current, current.update(table_info))
+            .await
+            .unwrap();
+        context.persistent_ctx.partition_metadata_update = Some(PartitionMetadataUpdate {
+            partition_key_indices: vec![0],
+            applied: false,
+        });
+        let mut procedure = RepartitionProcedure {
+            state: Box::new(UpdatePartitionMetadata::new(vec![])),
+            context,
+        };
+
+        procedure
+            .rollback(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            procedure
+                .context
+                .get_table_info_value()
+                .await
+                .unwrap()
+                .table_info
+                .meta
+                .partition_key_indices,
+            vec![0, 1]
         );
     }
 

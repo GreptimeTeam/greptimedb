@@ -29,6 +29,7 @@ use crate::error::{self, Result};
 use crate::procedure::repartition::allocate_region::AllocateRegion;
 use crate::procedure::repartition::plan::{AllocationPlanEntry, SourceRegionDescriptor};
 use crate::procedure::repartition::repartition_end::RepartitionEnd;
+use crate::procedure::repartition::update_partition_metadata::UpdatePartitionMetadata;
 use crate::procedure::repartition::{Context, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,10 +92,17 @@ impl State for RepartitionStart {
             return Ok((Box::new(RepartitionEnd), Status::done()));
         }
 
-        Ok((
-            Box::new(AllocateRegion::new(plans)),
-            Status::executing(false),
-        ))
+        if ctx.persistent_ctx.partition_metadata_update.is_some() {
+            Ok((
+                Box::new(UpdatePartitionMetadata::new(plans)),
+                Status::executing(true),
+            ))
+        } else {
+            Ok((
+                Box::new(AllocateRegion::new(plans)),
+                Status::executing(false),
+            ))
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
