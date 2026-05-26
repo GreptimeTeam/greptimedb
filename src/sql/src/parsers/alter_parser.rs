@@ -1382,7 +1382,7 @@ ALTER TABLE metrics REPARTITION
         let err = result.output_msg();
         assert_eq!(
             err,
-            "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET or REPARTITION or SPLIT or MERGE after ALTER TABLE, found: table_t"
+            "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET or UNSET or REPARTITION or SPLIT or MERGE or PARTITION after ALTER TABLE, found: table_t"
         );
 
         let sql = "ALTER TABLE test_table RENAME table_t";

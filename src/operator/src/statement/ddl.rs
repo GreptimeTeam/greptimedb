@@ -19,9 +19,10 @@ use std::time::Duration;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_table_expr::Kind;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
+use api::v1::repartition::Source;
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    Repartition, column_def,
+    PartitionExprs, Repartition, UnpartitionedSource, column_def,
 };
 #[cfg(feature = "enterprise")]
 use api::v1::{
@@ -102,7 +103,7 @@ use crate::error::{
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
     ViewAlreadyExistsSnafu,
 };
-use crate::expr_helper::{self, RepartitionRequest};
+use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 use crate::utils::{to_meta_query_context, to_meta_query_context_with_origin_frontend};
@@ -1408,7 +1409,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         if matches!(
             alter_table.alter_operation(),
-            AlterTableOperation::Repartition { .. }
+            AlterTableOperation::Repartition { .. } | AlterTableOperation::Partition { .. }
         ) {
             let request = expr_helper::to_repartition_request(alter_table, &query_context)?;
             return self.repartition_table(request, &query_context).await;
@@ -1468,32 +1469,59 @@ impl StatementExecutor {
         );
 
         let table_info = table.table_info();
-        // Get partition column names from the table metadata.
         let existing_partition_columns = table_info.meta.partition_columns().collect::<Vec<_>>();
-        // Repartition requires the table to have partition columns.
-        ensure!(
-            !existing_partition_columns.is_empty(),
-            InvalidPartitionRuleSnafu {
-                reason: format!(
-                    "table {} does not have partition columns, cannot repartition",
-                    table_ref
-                )
+        let partition_columns = match &request.source {
+            RepartitionSource::Partitions { .. } => {
+                ensure!(
+                    !existing_partition_columns.is_empty(),
+                    InvalidPartitionRuleSnafu {
+                        reason: format!(
+                            "table {} does not have partition columns, cannot repartition",
+                            table_ref
+                        )
+                    }
+                );
+                existing_partition_columns
             }
-        );
+            RepartitionSource::Unpartitioned { partition_columns } => {
+                ensure!(
+                    !partition_columns.is_empty(),
+                    InvalidPartitionRuleSnafu {
+                        reason: "PARTITION ON COLUMNS requires at least one partition column"
+                    }
+                );
+                ensure!(
+                    existing_partition_columns.is_empty(),
+                    InvalidPartitionRuleSnafu {
+                        reason: format!("table {} already has partition columns", table_ref)
+                    }
+                );
+                let column_schemas = table_info.meta.schema.column_schemas();
+                partition_columns
+                    .iter()
+                    .map(|column_name| {
+                        column_schemas
+                            .iter()
+                            .find(|column| &column.name == column_name)
+                            .with_context(|| ColumnNotFoundSnafu { msg: column_name })
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            }
+        };
 
-        // Repartition operations involving columns outside the existing partition columns are not supported.
-        // This restriction ensures repartition only applies to current partition columns.
-        let column_name_and_type = existing_partition_columns
+        let column_name_and_type = partition_columns
             .iter()
             .map(|column| (&column.name, column.data_type.clone()))
             .collect();
         let timezone = query_context.timezone();
         // Convert SQL Exprs to PartitionExprs.
-        let from_partition_exprs = request
-            .from_exprs
-            .iter()
-            .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
-            .collect::<Result<Vec<_>>>()?;
+        let from_partition_exprs = match &request.source {
+            RepartitionSource::Partitions { from_exprs } => from_exprs
+                .iter()
+                .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
+                .collect::<Result<Vec<_>>>()?,
+            RepartitionSource::Unpartitioned { .. } => vec![],
+        };
 
         let mut into_partition_exprs = request
             .into_exprs
@@ -1503,7 +1531,8 @@ impl StatementExecutor {
 
         // `MERGE PARTITION` (and some `REPARTITION`) generates a single `OR` expression from
         // multiple source partitions; try to simplify it for better readability and stability.
-        if from_partition_exprs.len() > 1
+        if matches!(&request.source, RepartitionSource::Partitions { .. })
+            && from_partition_exprs.len() > 1
             && into_partition_exprs.len() == 1
             && let Some(expr) = into_partition_exprs.pop()
         {
@@ -1530,34 +1559,36 @@ impl StatementExecutor {
 
         // Validate that from_partition_exprs are a subset of existing partition exprs.
         // We compare PartitionExpr directly since it implements Eq.
-        for from_expr in &from_partition_exprs {
-            ensure!(
-                existing_partition_exprs.contains(from_expr),
-                InvalidPartitionRuleSnafu {
-                    reason: format!(
-                        "partition expression '{}' does not exist in table {}",
-                        from_expr, table_ref
-                    )
-                }
-            );
+        if matches!(&request.source, RepartitionSource::Partitions { .. }) {
+            for from_expr in &from_partition_exprs {
+                ensure!(
+                    existing_partition_exprs.contains(from_expr),
+                    InvalidPartitionRuleSnafu {
+                        reason: format!(
+                            "partition expression '{}' does not exist in table {}",
+                            from_expr, table_ref
+                        )
+                    }
+                );
+            }
         }
 
         // Build the new partition expressions:
         // new_exprs = existing_exprs - from_exprs + into_exprs
-        let new_partition_exprs: Vec<PartitionExpr> = existing_partition_exprs
-            .into_iter()
-            .filter(|expr| !from_partition_exprs.contains(expr))
-            .chain(into_partition_exprs.clone().into_iter())
-            .collect();
+        let new_partition_exprs: Vec<PartitionExpr> = match &request.source {
+            RepartitionSource::Partitions { .. } => existing_partition_exprs
+                .into_iter()
+                .filter(|expr| !from_partition_exprs.contains(expr))
+                .chain(into_partition_exprs.clone().into_iter())
+                .collect(),
+            RepartitionSource::Unpartitioned { .. } => into_partition_exprs.clone(),
+        };
         let new_partition_exprs_len = new_partition_exprs.len();
         let from_partition_exprs_len = from_partition_exprs.len();
 
         // Validate the new partition expressions using MultiDimPartitionRule and PartitionChecker.
         let _ = MultiDimPartitionRule::try_new(
-            existing_partition_columns
-                .iter()
-                .map(|c| c.name.clone())
-                .collect(),
+            partition_columns.iter().map(|c| c.name.clone()).collect(),
             vec![],
             new_partition_exprs,
             true,
@@ -1574,16 +1605,28 @@ impl StatementExecutor {
         };
         let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
         let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
+        let source = match &request.source {
+            RepartitionSource::Partitions { .. } => Source::PartitionExprs(PartitionExprs {
+                exprs: from_partition_exprs_json,
+            }),
+            RepartitionSource::Unpartitioned { partition_columns } => {
+                Source::Unpartitioned(UnpartitionedSource {
+                    partition_columns: partition_columns.clone(),
+                })
+            }
+        };
+        let repartition = Repartition {
+            into_partition_exprs: into_partition_exprs_json,
+            source: Some(source),
+            ..Default::default()
+        };
         let mut req = SubmitDdlTaskRequest::new(
             to_meta_query_context(query_context.clone()),
             DdlTask::new_alter_table(AlterTableExpr {
                 catalog_name: request.catalog_name.clone(),
                 schema_name: request.schema_name.clone(),
                 table_name: request.table_name.clone(),
-                kind: Some(Kind::Repartition(Repartition {
-                    from_partition_exprs: from_partition_exprs_json,
-                    into_partition_exprs: into_partition_exprs_json,
-                })),
+                kind: Some(Kind::Repartition(repartition)),
             }),
         );
         req.wait = ddl_options.wait;

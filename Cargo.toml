@@ -158,7 +158,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "dfd2a6d7d3d9c718cb159fcf9abae144b74fc503" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "9f08044aaa5eeddde35c46ffc2b97665eec91ab2" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
