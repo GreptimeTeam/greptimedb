@@ -712,6 +712,8 @@ jobs:
       - if: matrix.mode.mysql
         name: Setup MySQL
         uses: ./.github/actions/setup-mysql-cluster
+        with:
+          provider: docker
 
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
