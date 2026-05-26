@@ -1,0 +1,32 @@
+src/meta-srv/src/procedure/repartition/group/repartition_start.rs
+  s_cb30d61f84a023::t_0e359af9e85b50 43
+src/meta-srv/src/procedure/repartition/plan.rs
+  s_cb30d61f84a023::t_0e359af9e85b50 19,30,46-60,63-64,76,83,88,90-92
+  s_cb30d61f84a023::t_51ad1a7b758d55 417-424,426
+  s_cb30d61f84a023::t_33a789e14fa6ff 62,67-73,81-82,84-87,89
+  s_cb30d61f84a023::t_b64eebc33b653f 61,65-66,74-75
+  s_cb30d61f84a023::t_467da4526c0579 365,371-373
+  s_cb30d61f84a023::t_b16005d5e938b6 377-416
+  s_cb30d61f84a023::t_1796c4f501c199 77-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.1",
+  "base_commit_sha": "1f7df066000a07701ba3f41b18879884f56d44f1",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_cb30d61f84a023": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_19cd64a0cffeUo5vb4H0v2DZac",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
