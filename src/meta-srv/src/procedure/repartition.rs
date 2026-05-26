@@ -997,6 +997,15 @@ mod tests {
             .unwrap()
     }
 
+    async fn table_partition_key_indices(ctx: &Context) -> Vec<usize> {
+        ctx.get_table_info_value()
+            .await
+            .unwrap()
+            .table_info
+            .meta
+            .partition_key_indices
+    }
+
     fn test_procedure(state: Box<dyn State>, context: Context) -> RepartitionProcedure {
         RepartitionProcedure { state, context }
     }
@@ -1035,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_rollback_allocated_regions() {
+    fn test_should_rollback_after_metadata_update() {
         let env = TestingEnv::new();
         let table_id = 1024;
 
@@ -1047,6 +1056,12 @@ mod tests {
             test_context(&env, table_id),
         );
         assert!(!procedure.should_rollback());
+
+        let procedure = test_procedure(
+            Box::new(UpdatePartitionMetadata::new(vec![])),
+            test_context(&env, table_id),
+        );
+        assert!(procedure.should_rollback());
 
         let procedure = test_procedure(
             Box::new(AllocateRegion::new(vec![])),
@@ -1992,6 +2007,226 @@ mod tests {
                     &range_expr("x", 100, 200).as_json_str().unwrap(),
                 ),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repartition_procedure_flow_unpartitioned_failed_and_full_rollback() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![test_region_route(RegionId::new(table_id, 1), "")],
+            test_region_wal_options(&[1]),
+        )
+        .await;
+
+        let context = new_parent_context(&env, node_manager, table_id);
+        let to_exprs = vec![range_expr("col1", 0, 50), range_expr("col1", 50, 100)];
+        let mut procedure = RepartitionProcedure::new(
+            RepartitionFrom::Unpartitioned {
+                partition_columns: vec!["col1".to_string()],
+            },
+            to_exprs.clone(),
+            context,
+        );
+
+        let start_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(start_status.need_persist());
+        assert_parent_state::<UpdatePartitionMetadata>(&procedure);
+        assert_eq!(
+            procedure
+                .context
+                .persistent_ctx
+                .partition_metadata_update
+                .as_ref()
+                .unwrap()
+                .partition_key_indices,
+            vec![0]
+        );
+
+        let update_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(update_status.need_persist());
+        assert_parent_state::<AllocateRegion>(&procedure);
+        assert_eq!(
+            table_partition_key_indices(&procedure.context).await,
+            vec![0]
+        );
+
+        let build_allocate_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(build_allocate_status.need_persist());
+        assert_parent_state::<AllocateRegion>(&procedure);
+        assert_eq!(procedure.context.persistent_ctx.plans.len(), 1);
+        let plan = &procedure.context.persistent_ctx.plans[0];
+        assert_eq!(
+            plan.source_regions,
+            vec![SourceRegionDescriptor::Default {
+                region_id: RegionId::new(table_id, 1)
+            }]
+        );
+        assert_eq!(plan.target_regions.len(), 2);
+        assert_eq!(plan.target_regions[0].region_id, RegionId::new(table_id, 1));
+        assert_eq!(plan.target_regions[0].partition_expr, to_exprs[0]);
+        assert_eq!(
+            plan.allocated_region_ids,
+            vec![plan.target_regions[1].region_id]
+        );
+        assert!(plan.pending_deallocate_region_ids.is_empty());
+        assert_eq!(plan.transition_map, vec![vec![0, 1]]);
+        let target_regions = plan.target_regions.clone();
+
+        let execute_allocate_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(execute_allocate_status.need_persist());
+        assert_parent_state::<Dispatch>(&procedure);
+        let region_routes = current_parent_region_routes(&procedure.context).await;
+        assert_eq!(region_routes.len(), 2);
+        assert_eq!(
+            region_route_by_id(&region_routes, target_regions[0].region_id)
+                .region
+                .partition_expr(),
+            ""
+        );
+        assert_eq!(
+            region_route_by_id(&region_routes, target_regions[1].region_id)
+                .region
+                .partition_expr(),
+            to_exprs[1].as_json_str().unwrap()
+        );
+
+        let dispatch_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        let subprocedure_ids = extract_subprocedure_ids(dispatch_status);
+        assert_eq!(subprocedure_ids.len(), 1);
+        assert_parent_state::<Collect>(&procedure);
+
+        let failed_state = ProcedureState::failed(Arc::new(ProcedureError::external(
+            MockError::new(StatusCode::Internal),
+        )));
+        let collect_ctx = procedure_context_with_receivers(HashMap::from([(
+            subprocedure_ids[0],
+            procedure_state_receiver(failed_state),
+        )]));
+        let err = procedure.execute(&collect_ctx).await.unwrap_err();
+        assert!(!err.is_retry_later());
+        assert_parent_state::<Collect>(&procedure);
+
+        procedure
+            .rollback(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        assert!(
+            table_partition_key_indices(&procedure.context)
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            current_parent_region_routes(&procedure.context).await,
+            vec![test_region_route(RegionId::new(table_id, 1), "")]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repartition_procedure_flow_unpartitioned_rollback_is_idempotent() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![test_region_route(RegionId::new(table_id, 1), "")],
+            test_region_wal_options(&[1]),
+        )
+        .await;
+
+        let context = new_parent_context(&env, node_manager, table_id);
+        let mut procedure = RepartitionProcedure::new(
+            RepartitionFrom::Unpartitioned {
+                partition_columns: vec!["col1".to_string()],
+            },
+            vec![range_expr("col1", 0, 50), range_expr("col1", 50, 100)],
+            context,
+        );
+
+        procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert_eq!(
+            table_partition_key_indices(&procedure.context).await,
+            vec![0]
+        );
+        assert_eq!(
+            current_parent_region_routes(&procedure.context).await.len(),
+            2
+        );
+
+        let dispatch_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        let subprocedure_ids = extract_subprocedure_ids(dispatch_status);
+        assert_eq!(subprocedure_ids.len(), 1);
+        assert_parent_state::<Collect>(&procedure);
+
+        let failed_state = ProcedureState::failed(Arc::new(ProcedureError::external(
+            MockError::new(StatusCode::Internal),
+        )));
+        let collect_ctx = procedure_context_with_receivers(HashMap::from([(
+            subprocedure_ids[0],
+            procedure_state_receiver(failed_state),
+        )]));
+        let err = procedure.execute(&collect_ctx).await.unwrap_err();
+        assert!(!err.is_retry_later());
+
+        procedure
+            .rollback(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        let once_indices = table_partition_key_indices(&procedure.context).await;
+        let once_routes = current_parent_region_routes(&procedure.context).await;
+
+        procedure
+            .rollback(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        let twice_indices = table_partition_key_indices(&procedure.context).await;
+        let twice_routes = current_parent_region_routes(&procedure.context).await;
+
+        assert_eq!(once_indices, twice_indices);
+        assert_eq!(once_routes, twice_routes);
+        assert!(twice_indices.is_empty());
+        assert_eq!(
+            twice_routes,
+            vec![test_region_route(RegionId::new(table_id, 1), "")]
         );
     }
 

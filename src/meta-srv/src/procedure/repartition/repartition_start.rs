@@ -323,7 +323,6 @@ impl RepartitionStart {
                 ),
             }
         );
-
         let source_region = &physical_route.region_routes[0].region;
         ensure!(
             source_region.partition_expr().is_empty(),
