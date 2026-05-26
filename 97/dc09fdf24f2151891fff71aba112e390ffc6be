@@ -1,0 +1,14 @@
+src/sql/src/parsers/alter_parser.rs
+  h_623774b620da8e 178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.1",
+  "base_commit_sha": "97dc09fdf24f2151891fff71aba112e390ffc6be",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
