@@ -352,7 +352,7 @@ pub fn setup_pg(pg_port: u16, pg_version: Option<&str>) {
         }
     }
 
-    // Docker of PostgreSQL starts slowly, so we need to wait for a while.
+    // PostgreSQL in Docker starts slowly, so we need to wait for a while.
     std::thread::sleep(Duration::from_secs(10));
 }
 
