@@ -735,6 +735,7 @@ jobs:
         name: Wait for kafka server
         shell: bash
         run: |
+          # Allow up to 60 seconds for the service container to accept connections.
           for _ in {1..30}; do
             if (echo > /dev/tcp/127.0.0.1/9092) >/dev/null 2>&1; then
               exit 0
