@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use common_catalog::format_full_table_name;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider};
 use datafusion::datasource::TableProvider;
+use session::context::QueryContextRef;
 use snafu::OptionExt;
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -32,12 +33,27 @@ use crate::error::TableNotExistSnafu;
 #[derive(Clone)]
 pub struct DummyCatalogList {
     catalog_manager: CatalogManagerRef,
+    query_ctx: Option<QueryContextRef>,
 }
 
 impl DummyCatalogList {
-    /// Creates a new catalog list with the given catalog manager.
+    /// Creates a new catalog list with the given catalog manager (no query context).
     pub fn new(catalog_manager: CatalogManagerRef) -> Self {
-        Self { catalog_manager }
+        Self {
+            catalog_manager,
+            query_ctx: None,
+        }
+    }
+
+    /// Creates a new catalog list with the given catalog manager and query context.
+    pub fn new_with_query_ctx(
+        catalog_manager: CatalogManagerRef,
+        query_ctx: QueryContextRef,
+    ) -> Self {
+        Self {
+            catalog_manager,
+            query_ctx: Some(query_ctx),
+        }
     }
 }
 
@@ -68,6 +84,7 @@ impl CatalogProviderList for DummyCatalogList {
         Some(Arc::new(DummyCatalogProvider {
             catalog_name: catalog_name.to_string(),
             catalog_manager: self.catalog_manager.clone(),
+            query_ctx: self.query_ctx.clone(),
         }))
     }
 }
@@ -77,6 +94,7 @@ impl CatalogProviderList for DummyCatalogList {
 struct DummyCatalogProvider {
     catalog_name: String,
     catalog_manager: CatalogManagerRef,
+    query_ctx: Option<QueryContextRef>,
 }
 
 impl CatalogProvider for DummyCatalogProvider {
@@ -93,6 +111,7 @@ impl CatalogProvider for DummyCatalogProvider {
             catalog_name: self.catalog_name.clone(),
             schema_name: schema_name.to_string(),
             catalog_manager: self.catalog_manager.clone(),
+            query_ctx: self.query_ctx.clone(),
         }))
     }
 }
@@ -111,6 +130,7 @@ struct DummySchemaProvider {
     catalog_name: String,
     schema_name: String,
     catalog_manager: CatalogManagerRef,
+    query_ctx: Option<QueryContextRef>,
 }
 
 #[async_trait]
@@ -126,7 +146,12 @@ impl SchemaProvider for DummySchemaProvider {
     async fn table(&self, name: &str) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
         let table = self
             .catalog_manager
-            .table(&self.catalog_name, &self.schema_name, name, None)
+            .table(
+                &self.catalog_name,
+                &self.schema_name,
+                name,
+                self.query_ctx.as_deref(),
+            )
             .await?
             .with_context(|| TableNotExistSnafu {
                 table: format_full_table_name(&self.catalog_name, &self.schema_name, name),
