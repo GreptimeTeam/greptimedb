@@ -437,7 +437,7 @@ fn test_apply_query_result_to_state_blocks_full_snapshot_when_scoped_backlog_pen
         decision,
         FlowCheckpointDecision::FallbackToFullSnapshot {
             previous_mode: CheckpointMode::FullSnapshot,
-            reason: FlowQueryFallbackReason::ScopedDirtyBacklogPending,
+            reason: FlowQueryFallbackReason::DirtyBacklogPending,
         }
     );
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
@@ -463,7 +463,7 @@ fn test_apply_query_result_to_state_blocks_incremental_when_scoped_backlog_pendi
         decision,
         FlowCheckpointDecision::FallbackToFullSnapshot {
             previous_mode: CheckpointMode::Incremental,
-            reason: FlowQueryFallbackReason::ScopedDirtyBacklogPending,
+            reason: FlowQueryFallbackReason::DirtyBacklogPending,
         }
     );
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
@@ -491,8 +491,8 @@ fn test_checkpoint_decision_labels_are_stable() {
     assert_eq!(fallback.decision_label(), CHECKPOINT_DECISION_FALLBACK);
     assert_eq!(fallback.reason_label(), "stale_cursor");
     assert_eq!(
-        FlowQueryFallbackReason::ScopedDirtyBacklogPending.as_label(),
-        "scoped_dirty_backlog_pending"
+        FlowQueryFallbackReason::DirtyBacklogPending.as_label(),
+        "dirty_backlog_pending"
     );
 }
 

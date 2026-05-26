@@ -41,7 +41,7 @@ impl BatchingTask {
             state.mark_full_snapshot();
             return FlowCheckpointDecision::FallbackToFullSnapshot {
                 previous_mode: checkpoint_mode,
-                reason: FlowQueryFallbackReason::ScopedDirtyBacklogPending,
+                reason: FlowQueryFallbackReason::DirtyBacklogPending,
             };
         }
 

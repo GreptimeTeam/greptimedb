@@ -26,9 +26,11 @@ pub(super) enum FlowQueryFallbackReason {
     /// Some participating regions could not prove safe advancement against
     /// both the returned watermarks and the checkpoint map.
     IncompleteRegionWatermark,
-    /// The query only covered a scoped subset of dirty time windows while
-    /// additional dirty backlog remains, so global checkpoints cannot advance.
-    ScopedDirtyBacklogPending,
+    /// The query only covered part of the dirty backlog, so global checkpoints
+    /// cannot advance yet. Incremental SQL drains all dirty windows before
+    /// checkpoint advancement; this primarily protects scoped full-snapshot
+    /// runs capped by the per-query dirty-window limit.
+    DirtyBacklogPending,
     /// The datanode detected a stale incremental cursor and the Flow
     /// must recompute from scratch.
     StaleCursor,
@@ -45,7 +47,7 @@ impl FlowQueryFallbackReason {
         match self {
             Self::MissingRegionWatermark => "missing_region_watermark",
             Self::IncompleteRegionWatermark => "incomplete_region_watermark",
-            Self::ScopedDirtyBacklogPending => "scoped_dirty_backlog_pending",
+            Self::DirtyBacklogPending => "dirty_backlog_pending",
             Self::StaleCursor => "stale_cursor",
             Self::IncrementalQueryFailure => "incremental_query_failure",
             Self::IncrementalDisabled => "incremental_disabled",
