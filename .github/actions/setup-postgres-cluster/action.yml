@@ -22,6 +22,7 @@ runs:
     run: |
       if [ "${{ inputs.provider }}" = "docker" ]; then
         REPO_ROOT=$(git rev-parse --show-toplevel)
+        "${REPO_ROOT}/.github/scripts/pull-test-deps-images.sh"
         docker compose -f "${REPO_ROOT}/tests-integration/fixtures/docker-compose.yml" up -d --wait postgres
         exit 0
       fi
