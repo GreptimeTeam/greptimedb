@@ -853,7 +853,7 @@ mod tests {
     use crate::procedure::repartition::deallocate_region::DeallocateRegion;
     use crate::procedure::repartition::dispatch::Dispatch;
     use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
-    use crate::procedure::repartition::plan::RegionDescriptor;
+    use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
     use crate::procedure::repartition::repartition_end::RepartitionEnd;
     use crate::procedure::repartition::test_util::{
         TestingEnv, assert_parent_state, current_parent_region_routes, extract_subprocedure_ids,
@@ -864,16 +864,16 @@ mod tests {
     fn test_plan(table_id: TableId) -> RepartitionPlanEntry {
         RepartitionPlanEntry {
             group_id: uuid::Uuid::new_v4(),
-            source_regions: vec![RegionDescriptor {
-                region_id: RegionId::new(table_id, 1),
-                partition_expr: range_expr("x", 0, 100),
-            }],
+            source_regions: vec![SourceRegionDescriptor::partitioned(
+                RegionId::new(table_id, 1),
+                range_expr("x", 0, 100),
+            )],
             target_regions: vec![
-                RegionDescriptor {
+                TargetRegionDescriptor {
                     region_id: RegionId::new(table_id, 1),
                     partition_expr: range_expr("x", 0, 50),
                 },
-                RegionDescriptor {
+                TargetRegionDescriptor {
                     region_id: RegionId::new(table_id, 3),
                     partition_expr: range_expr("x", 50, 100),
                 },
@@ -1209,16 +1209,16 @@ mod tests {
         );
         let succeeded_plan = RepartitionPlanEntry {
             group_id: Uuid::new_v4(),
-            source_regions: vec![RegionDescriptor {
-                region_id: RegionId::new(table_id, 2),
-                partition_expr: range_expr("x", 100, 200),
-            }],
+            source_regions: vec![SourceRegionDescriptor::partitioned(
+                RegionId::new(table_id, 2),
+                range_expr("x", 100, 200),
+            )],
             target_regions: vec![
-                RegionDescriptor {
+                TargetRegionDescriptor {
                     region_id: RegionId::new(table_id, 2),
                     partition_expr: range_expr("x", 100, 150),
                 },
-                RegionDescriptor {
+                TargetRegionDescriptor {
                     region_id: RegionId::new(table_id, 4),
                     partition_expr: range_expr("x", 150, 200),
                 },
@@ -1292,16 +1292,16 @@ mod tests {
         );
         let succeeded_plan = RepartitionPlanEntry {
             group_id: Uuid::new_v4(),
-            source_regions: vec![RegionDescriptor {
-                region_id: RegionId::new(table_id, 2),
-                partition_expr: range_expr("x", 100, 200),
-            }],
+            source_regions: vec![SourceRegionDescriptor::partitioned(
+                RegionId::new(table_id, 2),
+                range_expr("x", 100, 200),
+            )],
             target_regions: vec![
-                RegionDescriptor {
+                TargetRegionDescriptor {
                     region_id: RegionId::new(table_id, 2),
                     partition_expr: range_expr("x", 100, 150),
                 },
-                RegionDescriptor {
+                TargetRegionDescriptor {
                     region_id: RegionId::new(table_id, 4),
                     partition_expr: range_expr("x", 150, 200),
                 },
@@ -1567,16 +1567,16 @@ mod tests {
         let failed_merge_plan = RepartitionPlanEntry {
             group_id: Uuid::new_v4(),
             source_regions: vec![
-                RegionDescriptor {
-                    region_id: RegionId::new(table_id, 1),
-                    partition_expr: range_expr("x", 0, 100),
-                },
-                RegionDescriptor {
-                    region_id: RegionId::new(table_id, 2),
-                    partition_expr: range_expr("x", 100, 200),
-                },
+                SourceRegionDescriptor::partitioned(
+                    RegionId::new(table_id, 1),
+                    range_expr("x", 0, 100),
+                ),
+                SourceRegionDescriptor::partitioned(
+                    RegionId::new(table_id, 2),
+                    range_expr("x", 100, 200),
+                ),
             ],
-            target_regions: vec![RegionDescriptor {
+            target_regions: vec![TargetRegionDescriptor {
                 region_id: RegionId::new(table_id, 1),
                 partition_expr: range_expr("x", 0, 200),
             }],
@@ -1587,16 +1587,16 @@ mod tests {
         };
         let succeeded_split_plan = RepartitionPlanEntry {
             group_id: Uuid::new_v4(),
-            source_regions: vec![RegionDescriptor {
-                region_id: RegionId::new(table_id, 3),
-                partition_expr: range_expr("x", 200, 300),
-            }],
+            source_regions: vec![SourceRegionDescriptor::partitioned(
+                RegionId::new(table_id, 3),
+                range_expr("x", 200, 300),
+            )],
             target_regions: vec![
-                RegionDescriptor {
+                TargetRegionDescriptor {
                     region_id: RegionId::new(table_id, 3),
                     partition_expr: range_expr("x", 200, 250),
                 },
-                RegionDescriptor {
+                TargetRegionDescriptor {
                     region_id: RegionId::new(table_id, 4),
                     partition_expr: range_expr("x", 250, 300),
                 },

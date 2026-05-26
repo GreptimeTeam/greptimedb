@@ -17,6 +17,7 @@ use std::any::Any;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::debug;
+use partition::collider::Collider;
 use partition::expr::PartitionExpr;
 use partition::subtask::{self, RepartitionSubtask};
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,7 @@ use uuid::Uuid;
 
 use crate::error::{self, Result};
 use crate::procedure::repartition::allocate_region::AllocateRegion;
-use crate::procedure::repartition::plan::{AllocationPlanEntry, RegionDescriptor};
+use crate::procedure::repartition::plan::{AllocationPlanEntry, SourceRegionDescriptor};
 use crate::procedure::repartition::repartition_end::RepartitionEnd;
 use crate::procedure::repartition::{Context, State};
 
@@ -107,8 +108,12 @@ impl RepartitionStart {
         from_exprs: &[PartitionExpr],
         to_exprs: &[PartitionExpr],
     ) -> Result<Vec<AllocationPlanEntry>> {
-        let subtasks = subtask::create_subtasks(from_exprs, to_exprs)
-            .context(error::RepartitionCreateSubtasksSnafu)?;
+        let subtasks = if from_exprs.is_empty() {
+            Self::default_source_subtasks(to_exprs)?
+        } else {
+            subtask::create_subtasks(from_exprs, to_exprs)
+                .context(error::RepartitionCreateSubtasksSnafu)?
+        };
         if subtasks.is_empty() {
             return Ok(vec![]);
         }
@@ -123,7 +128,7 @@ impl RepartitionStart {
 
     fn build_plan_entries(
         subtasks: Vec<RepartitionSubtask>,
-        source_index: &[RegionDescriptor],
+        source_index: &[SourceRegionDescriptor],
         target_exprs: &[PartitionExpr],
     ) -> Vec<AllocationPlanEntry> {
         subtasks
@@ -151,10 +156,32 @@ impl RepartitionStart {
             .collect::<Vec<_>>()
     }
 
+    fn default_source_subtasks(to_exprs: &[PartitionExpr]) -> Result<Vec<RepartitionSubtask>> {
+        ensure!(
+            !to_exprs.is_empty(),
+            error::UnexpectedSnafu {
+                violated: "Default source repartition expects non-empty target partition exprs",
+            }
+        );
+
+        Collider::new(to_exprs).context(error::RepartitionCreateSubtasksSnafu)?;
+
+        let to_expr_indices = (0..to_exprs.len()).collect::<Vec<_>>();
+        Ok(vec![RepartitionSubtask {
+            from_expr_indices: vec![0],
+            to_expr_indices: to_expr_indices.clone(),
+            transition_map: vec![to_expr_indices],
+        }])
+    }
+
     fn source_region_descriptors(
         from_exprs: &[PartitionExpr],
         physical_route: &PhysicalTableRouteValue,
-    ) -> Result<Vec<RegionDescriptor>> {
+    ) -> Result<Vec<SourceRegionDescriptor>> {
+        if from_exprs.is_empty() {
+            return Self::default_source_region_descriptors(physical_route);
+        }
+
         let existing_regions = physical_route
             .region_routes
             .iter()
@@ -178,13 +205,166 @@ impl RepartitionStart {
                         debug!("Failed to find matching region for partition expression: {}, existing regions: {:?}", expr_json, existing_regions);
                     })?;
 
-                Ok(RegionDescriptor {
-                    region_id: matched_region_id,
-                    partition_expr: expr.clone(),
-                })
+                Ok(SourceRegionDescriptor::partitioned(
+                    matched_region_id,
+                    expr.clone(),
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
 
         Ok(descriptors)
+    }
+
+    fn default_source_region_descriptors(
+        physical_route: &PhysicalTableRouteValue,
+    ) -> Result<Vec<SourceRegionDescriptor>> {
+        ensure!(
+            physical_route.region_routes.len() == 1,
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Default source repartition expects exactly one source region, but got {}",
+                    physical_route.region_routes.len()
+                ),
+            }
+        );
+
+        let source_region = &physical_route.region_routes[0].region;
+        ensure!(
+            source_region.partition_expr().is_empty(),
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Default source repartition expects an empty partition expr, but got {}",
+                    source_region.partition_expr()
+                ),
+            }
+        );
+
+        Ok(vec![SourceRegionDescriptor::Default {
+            region_id: source_region.id,
+        }])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_meta::key::table_route::PhysicalTableRouteValue;
+    use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use datatypes::prelude::Value;
+    use partition::expr::{Operand, RestrictedOp};
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::procedure::repartition::test_util::{range_expr, test_region_route};
+
+    fn physical_route(region_routes: Vec<RegionRoute>) -> PhysicalTableRouteValue {
+        PhysicalTableRouteValue::new(region_routes)
+    }
+
+    #[test]
+    fn test_build_plan_with_default_source_region() {
+        let table_id = 1024;
+        let physical_route =
+            physical_route(vec![test_region_route(RegionId::new(table_id, 1), "")]);
+        let to_exprs = vec![range_expr("x", 0, 50), range_expr("x", 50, 100)];
+
+        let plans = RepartitionStart::build_plan(&physical_route, &[], &to_exprs).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        let plan = &plans[0];
+        assert_eq!(
+            plan.source_regions,
+            vec![SourceRegionDescriptor::Default {
+                region_id: RegionId::new(table_id, 1)
+            }]
+        );
+        assert_eq!(plan.target_partition_exprs, to_exprs);
+        assert_eq!(plan.transition_map, vec![vec![0, 1]]);
+    }
+
+    #[test]
+    fn test_build_plan_with_default_source_rejects_non_empty_partition_expr() {
+        let table_id = 1024;
+        let physical_route = physical_route(vec![test_region_route(
+            RegionId::new(table_id, 1),
+            &range_expr("x", 0, 100).as_json_str().unwrap(),
+        )]);
+        let to_exprs = vec![range_expr("x", 0, 50), range_expr("x", 50, 100)];
+
+        let err = RepartitionStart::build_plan(&physical_route, &[], &to_exprs).unwrap_err();
+
+        assert!(err.to_string().contains("empty partition expr"));
+    }
+
+    #[test]
+    fn test_build_plan_with_default_source_rejects_multiple_regions() {
+        let table_id = 1024;
+        let physical_route = physical_route(vec![
+            test_region_route(RegionId::new(table_id, 1), ""),
+            test_region_route(RegionId::new(table_id, 2), ""),
+        ]);
+        let to_exprs = vec![range_expr("x", 0, 50), range_expr("x", 50, 100)];
+
+        let err = RepartitionStart::build_plan(&physical_route, &[], &to_exprs).unwrap_err();
+
+        assert!(err.to_string().contains("exactly one source region"));
+    }
+
+    #[test]
+    fn test_build_plan_with_default_source_rejects_empty_targets() {
+        let table_id = 1024;
+        let physical_route =
+            physical_route(vec![test_region_route(RegionId::new(table_id, 1), "")]);
+
+        let err = RepartitionStart::build_plan(&physical_route, &[], &[]).unwrap_err();
+
+        assert!(err.to_string().contains("non-empty target partition exprs"));
+    }
+
+    #[test]
+    fn test_build_plan_with_default_source_rejects_invalid_targets() {
+        let table_id = 1024;
+        let physical_route =
+            physical_route(vec![test_region_route(RegionId::new(table_id, 1), "")]);
+        let invalid_to_expr = PartitionExpr::new(
+            Operand::Value(Value::Int64(1)),
+            RestrictedOp::Eq,
+            Operand::Value(Value::Int64(2)),
+        );
+
+        let err =
+            RepartitionStart::build_plan(&physical_route, &[], &[invalid_to_expr]).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Failed to create repartition subtasks")
+        );
+    }
+
+    #[test]
+    fn test_build_plan_keeps_partitioned_source_matching() {
+        let table_id = 1024;
+        let from_exprs = vec![range_expr("x", 0, 100)];
+        let to_exprs = vec![range_expr("x", 0, 50), range_expr("x", 50, 100)];
+        let physical_route = physical_route(vec![RegionRoute {
+            region: Region {
+                id: RegionId::new(table_id, 1),
+                partition_expr: from_exprs[0].as_json_str().unwrap(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(1)),
+            ..Default::default()
+        }]);
+
+        let plans = RepartitionStart::build_plan(&physical_route, &from_exprs, &to_exprs).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].source_regions,
+            vec![SourceRegionDescriptor::partitioned(
+                RegionId::new(table_id, 1),
+                from_exprs[0].clone()
+            )]
+        );
     }
 }

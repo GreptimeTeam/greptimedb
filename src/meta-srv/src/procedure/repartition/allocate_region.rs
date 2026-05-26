@@ -35,7 +35,7 @@ use tokio::time::Instant;
 use crate::error::{self, Result};
 use crate::procedure::repartition::dispatch::Dispatch;
 use crate::procedure::repartition::plan::{
-    AllocationPlanEntry, RegionDescriptor, RepartitionPlanEntry,
+    AllocationPlanEntry, RepartitionPlanEntry, TargetRegionDescriptor,
     convert_allocation_plan_to_repartition_plan,
 };
 use crate::procedure::repartition::{Context, State};
@@ -324,7 +324,7 @@ impl AllocateRegion {
     /// Collects all regions that need to be allocated from the repartition plan entries.
     fn collect_allocate_regions(
         repartition_plan_entries: &[RepartitionPlanEntry],
-    ) -> Vec<&RegionDescriptor> {
+    ) -> Vec<&TargetRegionDescriptor> {
         repartition_plan_entries
             .iter()
             .flat_map(|p| p.allocate_regions())
@@ -333,7 +333,7 @@ impl AllocateRegion {
 
     /// Prepares region allocation data: region numbers and their partition expressions.
     fn prepare_region_allocation_data(
-        allocate_regions: &[&RegionDescriptor],
+        allocate_regions: &[&TargetRegionDescriptor],
     ) -> Result<Vec<(RegionNumber, String)>> {
         allocate_regions
             .iter()
@@ -417,6 +417,7 @@ mod tests {
 
     use super::*;
     use crate::procedure::repartition::State;
+    use crate::procedure::repartition::plan::SourceRegionDescriptor;
     use crate::procedure::repartition::test_util::{
         TestingEnv, current_parent_region_routes, new_parent_context, range_expr,
         test_region_wal_options,
@@ -428,8 +429,21 @@ mod tests {
         col: &str,
         start: i64,
         end: i64,
-    ) -> RegionDescriptor {
-        RegionDescriptor {
+    ) -> SourceRegionDescriptor {
+        SourceRegionDescriptor::partitioned(
+            RegionId::new(table_id, region_number),
+            range_expr(col, start, end),
+        )
+    }
+
+    fn create_target_region_descriptor(
+        table_id: TableId,
+        region_number: u32,
+        col: &str,
+        start: i64,
+        end: i64,
+    ) -> TargetRegionDescriptor {
+        TargetRegionDescriptor {
             region_id: RegionId::new(table_id, region_number),
             partition_expr: range_expr(col, start, end),
         }
@@ -700,10 +714,10 @@ mod tests {
     fn test_prepare_region_allocation_data() {
         let table_id = 1024;
         let regions = [
-            create_region_descriptor(table_id, 10, "x", 0, 50),
-            create_region_descriptor(table_id, 11, "x", 50, 100),
+            create_target_region_descriptor(table_id, 10, "x", 0, 50),
+            create_target_region_descriptor(table_id, 11, "x", 50, 100),
         ];
-        let region_refs: Vec<&RegionDescriptor> = regions.iter().collect();
+        let region_refs: Vec<&TargetRegionDescriptor> = regions.iter().collect();
 
         let result = AllocateRegion::prepare_region_allocation_data(&region_refs).unwrap();
 
@@ -732,7 +746,7 @@ mod tests {
         ctx.persistent_ctx.plans = vec![RepartitionPlanEntry {
             group_id: Uuid::new_v4(),
             source_regions: vec![],
-            target_regions: vec![create_region_descriptor(table_id, 3, "x", 0, 100)],
+            target_regions: vec![create_target_region_descriptor(table_id, 3, "x", 0, 100)],
             allocated_region_ids: vec![RegionId::new(table_id, 3)],
             pending_deallocate_region_ids: vec![],
             transition_map: vec![],
