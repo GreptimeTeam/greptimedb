@@ -18,6 +18,7 @@
 //! to various storage backends (S3, OSS, GCS, Azure Blob, local filesystem).
 
 use std::collections::BTreeSet;
+use std::path::Component;
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
@@ -129,6 +130,92 @@ pub fn validate_uri(uri: &str) -> Result<StorageScheme> {
     }
 
     StorageScheme::from_uri(uri)
+}
+
+/// Validates a URI for snapshot-scoped destructive operations.
+///
+/// Unlike read-only parent scans, destructive commands must target a concrete
+/// snapshot directory instead of a bucket/container root or filesystem root.
+/// Remote storage buckets/containers already provide namespace isolation, so a
+/// non-empty object prefix is enough; local filesystem paths require at least
+/// two non-root path segments to avoid deleting broad system directories.
+pub fn validate_snapshot_uri(uri: &str) -> Result<StorageScheme> {
+    let scheme = validate_uri(uri)?;
+    reject_query_or_fragment(uri)?;
+    match scheme {
+        StorageScheme::File => validate_file_snapshot_uri(uri)?,
+        StorageScheme::S3 | StorageScheme::Oss | StorageScheme::Gcs | StorageScheme::Azblob => {
+            extract_remote_location_with_root_policy(uri, false)?;
+        }
+    }
+    Ok(scheme)
+}
+
+fn reject_query_or_fragment(uri: &str) -> Result<()> {
+    let url = Url::parse(uri).context(UrlParseSnafu)?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return InvalidUriSnafu {
+            uri,
+            reason: "snapshot URI must not include query or fragment",
+        }
+        .fail();
+    }
+
+    Ok(())
+}
+
+fn validate_file_snapshot_uri(uri: &str) -> Result<()> {
+    if has_explicit_dot_segment(uri) {
+        return InvalidUriSnafu {
+            uri,
+            reason: "file snapshot URI must not contain '.' or '..' path segments",
+        }
+        .fail();
+    }
+
+    let path = extract_file_path_from_uri(uri)?;
+    let mut normal_component_count = 0;
+
+    // This is only a path-shape guard for destructive operations. It does not
+    // resolve symlinks. Drive prefixes and root separators also do not count
+    // toward depth; delete still relies on the manifest check and explicit
+    // confirmation before removing the rooted storage prefix.
+    for component in std::path::Path::new(&path).components() {
+        match component {
+            Component::Normal(_) => normal_component_count += 1,
+            Component::CurDir | Component::ParentDir => {
+                return InvalidUriSnafu {
+                    uri,
+                    reason: "file snapshot URI must not contain '.' or '..' path segments",
+                }
+                .fail();
+            }
+            Component::Prefix(_) | Component::RootDir => {}
+        }
+    }
+
+    if normal_component_count < 2 {
+        return InvalidUriSnafu {
+            uri,
+            reason: "file snapshot URI must point to a directory at least two levels deep",
+        }
+        .fail();
+    }
+
+    Ok(())
+}
+
+fn has_explicit_dot_segment(uri: &str) -> bool {
+    // Defense in depth: catch dot segments at the raw URI level before
+    // `Url::to_file_path()` can normalize them away. The `Path::components()`
+    // check below still runs because URL decoding can reintroduce them.
+    let without_fragment = uri.split_once('#').map_or(uri, |(path, _)| path);
+    let path = without_fragment
+        .split_once('?')
+        .map_or(without_fragment, |(path, _)| path);
+
+    path.split('/')
+        .any(|segment| segment == "." || segment == "..")
 }
 
 fn schema_index_path() -> String {
@@ -706,6 +793,43 @@ mod tests {
 
         assert!(OpenDalStorage::from_uri("s3://bucket", &storage).is_err());
         assert!(OpenDalStorage::from_parent_uri("s3://bucket", &storage).is_ok());
+    }
+
+    #[test]
+    fn test_validate_snapshot_uri_rejects_dangerous_roots() {
+        assert!(validate_snapshot_uri("s3://bucket").is_err());
+        assert!(validate_snapshot_uri("s3://bucket/").is_err());
+        assert!(validate_snapshot_uri("oss://bucket").is_err());
+        assert!(validate_snapshot_uri("gs://bucket").is_err());
+        assert!(validate_snapshot_uri("azblob://container").is_err());
+        assert!(validate_snapshot_uri("s3://bucket/snapshot?version=1").is_err());
+        assert!(validate_snapshot_uri("file:///tmp/backup#fragment").is_err());
+        assert!(validate_snapshot_uri("file:///").is_err());
+        assert!(validate_snapshot_uri("file:///tmp").is_err());
+        assert!(validate_snapshot_uri("file:///tmp/backup/.").is_err());
+        assert!(validate_snapshot_uri("file:///tmp/backup/..").is_err());
+    }
+
+    #[test]
+    fn test_validate_snapshot_uri_accepts_snapshot_paths() {
+        assert_eq!(
+            validate_snapshot_uri("s3://bucket/snapshots/prod").unwrap(),
+            StorageScheme::S3
+        );
+
+        let dir = tempdir().unwrap();
+        let snapshot = dir.path().join("snapshot");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let uri = Url::from_directory_path(snapshot).unwrap().to_string();
+        assert_eq!(validate_snapshot_uri(&uri).unwrap(), StorageScheme::File);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_validate_snapshot_uri_windows_drive_prefix_depth() {
+        assert!(validate_snapshot_uri("file:///C:/").is_err());
+        assert!(validate_snapshot_uri("file:///C:/Users").is_err());
+        assert!(validate_snapshot_uri("file:///C:/Users/snapshot").is_ok());
     }
 
     #[cfg(not(windows))]
