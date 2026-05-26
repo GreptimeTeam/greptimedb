@@ -535,19 +535,20 @@ impl Runner {
         let parent_id = self.meta.id;
 
         let tracing_context = TracingContext::from_current_span();
-        let handle = common_runtime::spawn_global(async move {
-            let span = tracing_context.attach(tracing::info_span!(
-                "LocalManager::submit_subprocedure",
-                procedure_name = %runner.meta.type_name,
-                procedure_id = %runner.meta.id,
-                parent_id = %parent_id,
-            ));
-            // Run the root procedure.
-            // The task was moved to another runtime for execution.
-            // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
-            runner.run().trace(span).await
+        self.manager_ctx.spawn_runner_task(procedure_id, || {
+            common_runtime::spawn_global(async move {
+                let span = tracing_context.attach(tracing::info_span!(
+                    "LocalManager::submit_subprocedure",
+                    procedure_name = %runner.meta.type_name,
+                    procedure_id = %runner.meta.id,
+                    parent_id = %parent_id,
+                ));
+                // Run the root procedure.
+                // The task was moved to another runtime for execution.
+                // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
+                runner.run().trace(span).await
+            })
         });
-        self.manager_ctx.insert_runner_task(procedure_id, handle);
     }
 
     /// Extend the retry time to wait for the next retry.

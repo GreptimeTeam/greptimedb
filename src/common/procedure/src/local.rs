@@ -341,17 +341,22 @@ impl ManagerContext {
         self.dynamic_key_lock.clear();
     }
 
-    fn insert_runner_task(&self, procedure_id: ProcedureId, handle: JoinHandle<()>) {
+    fn spawn_runner_task<F>(&self, procedure_id: ProcedureId, spawn: F) -> bool
+    where
+        F: FnOnce() -> JoinHandle<()>,
+    {
         let mut tasks = self.runner_tasks.lock().unwrap();
         if !self.running() {
-            handle.abort();
-            return;
+            return false;
         }
+
+        let handle = spawn();
         if handle.is_finished() {
-            return;
+            return false;
         }
 
         let _ = tasks.insert(procedure_id, handle);
+        true
     }
 
     pub(crate) fn remove_runner_task(&self, procedure_id: ProcedureId) {
@@ -731,18 +736,19 @@ impl LocalManager {
 
         let tracing_context = TracingContext::from_current_span();
 
-        let handle = common_runtime::spawn_global(async move {
-            let span = tracing_context.attach(tracing::info_span!(
-            "LocalManager::submit_root_procedure",
-                procedure_name = %runner.meta.type_name,
-                procedure_id = %runner.meta.id,
-            ));
-            // Run the root procedure.
-            // The task was moved to another runtime for execution.
-            // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
-            runner.run().trace(span).await;
+        self.manager_ctx.spawn_runner_task(procedure_id, || {
+            common_runtime::spawn_global(async move {
+                let span = tracing_context.attach(tracing::info_span!(
+                "LocalManager::submit_root_procedure",
+                    procedure_name = %runner.meta.type_name,
+                    procedure_id = %runner.meta.id,
+                ));
+                // Run the root procedure.
+                // The task was moved to another runtime for execution.
+                // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
+                runner.run().trace(span).await;
+            })
         });
-        self.manager_ctx.insert_runner_task(procedure_id, handle);
 
         Ok(watcher)
     }
@@ -879,6 +885,7 @@ impl ProcedureManager for LocalManager {
 
         *task = Some(task_inner);
 
+        self.manager_ctx.reset_runtime_state();
         self.manager_ctx.start();
 
         info!("LocalManager is start.");
@@ -1031,8 +1038,9 @@ mod tests {
             .lock()
             .unwrap()
             .push_back((procedure_id, Instant::now()));
-        let handle = common_runtime::spawn_global(async {});
-        ctx.insert_runner_task(procedure_id, handle);
+        ctx.spawn_runner_task(procedure_id, || {
+            common_runtime::spawn_global(std::future::pending::<()>())
+        });
 
         drop(
             ctx.key_lock
@@ -1060,17 +1068,20 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_finished_runner_task() {
+    fn test_spawn_runner_task_not_started_after_stop() {
         let ctx = new_test_manager_context();
-        ctx.set_running();
         let procedure_id = ProcedureId::random();
 
-        let handle = common_runtime::spawn_global(async {});
-        while !handle.is_finished() {
-            std::thread::yield_now();
-        }
-        ctx.insert_runner_task(procedure_id, handle);
+        let spawned = Arc::new(AtomicBool::new(false));
+        let spawned_in_task = spawned.clone();
+        let started = ctx.spawn_runner_task(procedure_id, || {
+            common_runtime::spawn_global(async move {
+                spawned_in_task.store(true, AtomicOrdering::Relaxed);
+            })
+        });
 
+        assert!(!started);
+        assert!(!spawned.load(AtomicOrdering::Relaxed));
         assert!(ctx.runner_tasks.lock().unwrap().is_empty());
     }
 
