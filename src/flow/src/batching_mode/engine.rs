@@ -59,8 +59,7 @@ use crate::{CreateFlowArgs, Error, FlowId, TableName};
 ///
 /// TODO(discord9): determine how to configure refresh rate
 pub struct BatchingEngine {
-    tasks: RwLock<BTreeMap<FlowId, BatchingTask>>,
-    shutdown_txs: RwLock<BTreeMap<FlowId, oneshot::Sender<()>>>,
+    runtime: RwLock<FlowRuntimeRegistry>,
     /// frontend client for insert request
     pub(crate) frontend_client: Arc<FrontendClient>,
     flow_metadata_manager: FlowMetadataManagerRef,
@@ -70,6 +69,51 @@ pub struct BatchingEngine {
     /// Batching mode options for control how batching mode query works
     ///
     pub(crate) batch_opts: Arc<BatchingModeOptions>,
+}
+
+#[derive(Default)]
+struct FlowRuntimeRegistry {
+    tasks: BTreeMap<FlowId, BatchingTask>,
+    shutdown_txs: BTreeMap<FlowId, oneshot::Sender<()>>,
+}
+
+impl FlowRuntimeRegistry {
+    fn insert(
+        &mut self,
+        flow_id: FlowId,
+        task: BatchingTask,
+        shutdown_tx: oneshot::Sender<()>,
+    ) -> (Option<BatchingTask>, Option<oneshot::Sender<()>>) {
+        (
+            self.tasks.insert(flow_id, task),
+            self.shutdown_txs.insert(flow_id, shutdown_tx),
+        )
+    }
+
+    fn remove(&mut self, flow_id: FlowId) -> Option<(BatchingTask, Option<oneshot::Sender<()>>)> {
+        let task = self.tasks.remove(&flow_id)?;
+        let shutdown_tx = self.shutdown_txs.remove(&flow_id);
+        Some((task, shutdown_tx))
+    }
+
+    fn remove_if_current(
+        &mut self,
+        flow_id: FlowId,
+        task: &BatchingTask,
+    ) -> (Option<BatchingTask>, Option<oneshot::Sender<()>>) {
+        if self
+            .tasks
+            .get(&flow_id)
+            .is_some_and(|current| Arc::ptr_eq(&current.state, &task.state))
+        {
+            let Some((removed_task, removed_shutdown_tx)) = self.remove(flow_id) else {
+                return (None, None);
+            };
+            (Some(removed_task), removed_shutdown_tx)
+        } else {
+            (None, None)
+        }
+    }
 }
 
 impl BatchingEngine {
@@ -82,8 +126,7 @@ impl BatchingEngine {
         batch_opts: BatchingModeOptions,
     ) -> Self {
         Self {
-            tasks: Default::default(),
-            shutdown_txs: Default::default(),
+            runtime: Default::default(),
             frontend_client,
             flow_metadata_manager,
             table_meta,
@@ -95,8 +138,9 @@ impl BatchingEngine {
 
     /// Returns last execution timestamps (millisecond) for all batching flows.
     pub async fn get_last_exec_time_map(&self) -> BTreeMap<FlowId, i64> {
-        let tasks = self.tasks.read().await;
-        tasks
+        let runtime = self.runtime.read().await;
+        runtime
+            .tasks
             .iter()
             .filter_map(|(flow_id, task)| {
                 task.last_execution_time_millis()
@@ -151,10 +195,17 @@ impl BatchingEngine {
 
         let group_by_table_name = Arc::new(group_by_table_name);
 
+        let tasks = self
+            .runtime
+            .read()
+            .await
+            .tasks
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         let mut handles = Vec::new();
-        let tasks = self.tasks.read().await;
 
-        for (_flow_id, task) in tasks.iter() {
+        for task in tasks {
             let src_table_names = &task.config.source_table_names;
 
             if src_table_names
@@ -204,7 +255,6 @@ impl BatchingEngine {
             });
             handles.push(handle);
         }
-        drop(tasks);
         for handle in handles {
             match handle.await {
                 Err(e) => {
@@ -274,9 +324,16 @@ impl BatchingEngine {
 
         let group_by_table_name = Arc::new(group_by_table_name);
 
+        let tasks = self
+            .runtime
+            .read()
+            .await
+            .tasks
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         let mut handles = Vec::new();
-        let tasks = self.tasks.read().await;
-        for (_flow_id, task) in tasks.iter() {
+        for task in tasks {
             let src_table_names = &task.config.source_table_names;
 
             if src_table_names
@@ -327,8 +384,6 @@ impl BatchingEngine {
                 }
             }
         }
-        drop(tasks);
-
         Ok(())
     }
 }
@@ -390,7 +445,7 @@ impl BatchingEngine {
 
         // or replace logic
         {
-            let is_exist = self.tasks.read().await.contains_key(&flow_id);
+            let is_exist = self.runtime.read().await.tasks.contains_key(&flow_id);
             match (create_if_not_exists, or_replace, is_exist) {
                 // if replace, ignore that old flow exists
                 (_, true, true) => {
@@ -533,14 +588,13 @@ impl BatchingEngine {
         let task_for_rollback = task.clone();
 
         // Only replace here, not earlier, because we want the old one intact if
-        // something went wrong before this line. Hold both registry locks while
-        // re-checking existence and updating the two maps so create/remove can't
-        // observe a task without its matching shutdown sender, or vice versa.
+        // something went wrong before this line. Keep the task and shutdown
+        // sender in one registry lock so create/remove can't observe one
+        // without the other.
         let (replaced_old_task_opt, replaced_old_shutdown_tx) = {
-            let mut tasks = self.tasks.write().await;
-            let mut shutdown_txs = self.shutdown_txs.write().await;
+            let mut runtime = self.runtime.write().await;
 
-            let is_exist = tasks.contains_key(&flow_id);
+            let is_exist = runtime.tasks.contains_key(&flow_id);
             match (create_if_not_exists, or_replace, is_exist) {
                 (_, true, true) => {
                     info!(
@@ -563,9 +617,7 @@ impl BatchingEngine {
                 (_, _, false) => (),
             }
 
-            let replaced_old_task_opt = tasks.insert(flow_id, task);
-            let replaced_old_shutdown_tx = shutdown_txs.insert(flow_id, tx);
-            (replaced_old_task_opt, replaced_old_shutdown_tx)
+            runtime.insert(flow_id, task, tx)
         };
 
         notify_flow_shutdown(flow_id, replaced_old_shutdown_tx, "replaced");
@@ -709,14 +761,11 @@ impl BatchingEngine {
 
     pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
         let (task, shutdown_tx) = {
-            let mut tasks = self.tasks.write().await;
-            let mut shutdown_txs = self.shutdown_txs.write().await;
-
-            let Some(task) = tasks.remove(&flow_id) else {
+            let mut runtime = self.runtime.write().await;
+            let Some((task, shutdown_tx)) = runtime.remove(flow_id) else {
                 warn!("Flow {flow_id} not found in tasks");
                 FlowNotFoundSnafu { id: flow_id }.fail()?
             };
-            let shutdown_tx = shutdown_txs.remove(&flow_id);
             (task, shutdown_tx)
         };
 
@@ -741,7 +790,7 @@ impl BatchingEngine {
         // this is only useful for the case when we are flushing the flow right after inserting data into it
         // TODO(discord9): find a better way to ensure the data is ready, maybe inform flownode from frontend?
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let task = self.tasks.read().await.get(&flow_id).cloned();
+        let task = self.runtime.read().await.tasks.get(&flow_id).cloned();
         let task = task.with_context(|| FlowNotFoundSnafu { id: flow_id })?;
 
         let time_window_size = task
@@ -776,22 +825,13 @@ impl BatchingEngine {
 
     /// Determine if the batching mode flow task exists with given flow id
     pub async fn flow_exist_inner(&self, flow_id: FlowId) -> bool {
-        self.tasks.read().await.contains_key(&flow_id)
+        self.runtime.read().await.tasks.contains_key(&flow_id)
     }
 
     async fn rollback_flow_runtime_if_current(&self, flow_id: FlowId, task: &BatchingTask) {
         let (removed_task, removed_shutdown_tx) = {
-            let mut tasks = self.tasks.write().await;
-            let mut shutdown_txs = self.shutdown_txs.write().await;
-
-            if tasks
-                .get(&flow_id)
-                .is_some_and(|current| Arc::ptr_eq(&current.state, &task.state))
-            {
-                (tasks.remove(&flow_id), shutdown_txs.remove(&flow_id))
-            } else {
-                (None, None)
-            }
+            let mut runtime = self.runtime.write().await;
+            runtime.remove_if_current(flow_id, task)
         };
 
         notify_flow_shutdown(flow_id, removed_shutdown_tx, "rolled back");
@@ -841,7 +881,14 @@ impl FlowEngine for BatchingEngine {
         Ok(self.flow_exist_inner(flow_id).await)
     }
     async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
-        Ok(self.tasks.read().await.keys().cloned().collect::<Vec<_>>())
+        Ok(self
+            .runtime
+            .read()
+            .await
+            .tasks
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>())
     }
     async fn handle_flow_inserts(
         &self,
@@ -988,8 +1035,7 @@ mod tests {
         let (task, shutdown_tx) = new_test_task(42).await;
         let drop_rx = install_abort_observed_handle(&task).await;
 
-        engine.tasks.write().await.insert(42, task);
-        engine.shutdown_txs.write().await.insert(42, shutdown_tx);
+        engine.runtime.write().await.insert(42, task, shutdown_tx);
 
         engine.remove_flow_inner(42).await.unwrap();
 
@@ -998,7 +1044,72 @@ mod tests {
             .expect("removed task should be dropped")
             .expect("drop notifier should fire");
         assert!(!engine.flow_exist_inner(42).await);
-        assert!(!engine.shutdown_txs.read().await.contains_key(&42));
+        assert!(!engine.runtime.read().await.shutdown_txs.contains_key(&42));
+    }
+
+    #[tokio::test]
+    async fn test_or_replace_flow_runtime_replaces_old_handles_and_keeps_new_task() {
+        let engine = new_test_engine().await;
+        let (old_task, old_shutdown_tx) = new_test_task(42).await;
+        let old_task_identity = old_task.clone();
+        let old_drop_rx = install_abort_observed_handle(&old_task).await;
+        let (new_task, new_shutdown_tx) = new_test_task(42).await;
+        let new_task_identity = new_task.clone();
+
+        engine
+            .runtime
+            .write()
+            .await
+            .insert(42, old_task, old_shutdown_tx);
+        let (replaced_old_task, replaced_old_shutdown_tx) =
+            engine
+                .runtime
+                .write()
+                .await
+                .insert(42, new_task, new_shutdown_tx);
+
+        let replaced_old_task = replaced_old_task.expect("old task should be returned");
+        assert!(Arc::ptr_eq(
+            &replaced_old_task.state,
+            &old_task_identity.state
+        ));
+        assert!(notify_flow_shutdown(
+            42,
+            replaced_old_shutdown_tx,
+            "replaced"
+        ));
+        old_task_identity
+            .state
+            .write()
+            .unwrap()
+            .shutdown_rx
+            .try_recv()
+            .expect("old shutdown receiver should receive signal");
+        assert!(abort_flow_task(42, Some(replaced_old_task), "replaced"));
+
+        tokio::time::timeout(Duration::from_secs(1), old_drop_rx)
+            .await
+            .expect("replaced task should be dropped")
+            .expect("drop notifier should fire");
+
+        let runtime = engine.runtime.read().await;
+        assert_eq!(1, runtime.tasks.len());
+        assert_eq!(1, runtime.shutdown_txs.len());
+        let registered_task = runtime.tasks.get(&42).expect("new task should remain");
+        assert!(Arc::ptr_eq(
+            &registered_task.state,
+            &new_task_identity.state
+        ));
+        assert!(runtime.shutdown_txs.contains_key(&42));
+        assert!(matches!(
+            new_task_identity
+                .state
+                .write()
+                .unwrap()
+                .shutdown_rx
+                .try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
@@ -1008,26 +1119,25 @@ mod tests {
         let (current_task, current_shutdown_tx) = new_test_task(42).await;
         let current_task_identity = current_task.clone();
 
-        engine.tasks.write().await.insert(42, current_task);
         engine
-            .shutdown_txs
+            .runtime
             .write()
             .await
-            .insert(42, current_shutdown_tx);
+            .insert(42, current_task, current_shutdown_tx);
 
         engine.rollback_flow_runtime_if_current(42, &old_task).await;
 
-        let registered_task = engine.tasks.read().await.get(&42).cloned().unwrap();
+        let registered_task = engine.runtime.read().await.tasks.get(&42).cloned().unwrap();
         assert!(Arc::ptr_eq(
             &registered_task.state,
             &current_task_identity.state
         ));
-        assert!(engine.shutdown_txs.read().await.contains_key(&42));
+        assert!(engine.runtime.read().await.shutdown_txs.contains_key(&42));
 
         engine
             .rollback_flow_runtime_if_current(42, &current_task_identity)
             .await;
         assert!(!engine.flow_exist_inner(42).await);
-        assert!(!engine.shutdown_txs.read().await.contains_key(&42));
+        assert!(!engine.runtime.read().await.shutdown_txs.contains_key(&42));
     }
 }

@@ -187,7 +187,7 @@ fn dirty_range(start: i64, end: i64) -> DirtyTimeWindows {
     dirty
 }
 
-async fn assert_filterless_failure_restore(
+async fn assert_unscoped_failure_restore(
     consumed_dirty_windows: DirtyTimeWindows,
     current_dirty_windows: DirtyTimeWindows,
     expected_len: usize,
@@ -201,13 +201,12 @@ async fn assert_filterless_failure_restore(
             .dirty_time_windows
             .add_dirty_windows(&current_dirty_windows);
     }
-    let filterless_query = PlanInfo {
+    let unscoped_query = PlanInfo {
         plan,
-        filter: None,
-        filterless_dirty_windows_to_restore: Some(consumed_dirty_windows),
+        dirty_restore: DirtyRestore::Unscoped(consumed_dirty_windows),
     };
 
-    task.handle_executed_query_failure(Some(&filterless_query));
+    task.handle_executed_query_failure(Some(&unscoped_query));
 
     let state = task.state.read().unwrap();
     assert_eq!(state.dirty_time_windows.len(), expected_len);
@@ -226,13 +225,12 @@ async fn test_executed_query_failure_restores_scoped_dirty_windows_for_flush_pat
     }
     let scoped_query = PlanInfo {
         plan,
-        filter: Some(FilterExprInfo {
+        dirty_restore: DirtyRestore::Scoped(FilterExprInfo {
             expr: datafusion_expr::lit(true),
             col_name: "ts".to_string(),
             time_ranges: vec![(Timestamp::new_second(10), Timestamp::new_second(20))],
             window_size: chrono::Duration::seconds(10),
         }),
-        filterless_dirty_windows_to_restore: None,
     };
 
     task.handle_executed_query_failure(Some(&scoped_query));
@@ -242,14 +240,14 @@ async fn test_executed_query_failure_restores_scoped_dirty_windows_for_flush_pat
 }
 
 #[tokio::test]
-async fn test_filterless_failure_restores_consumed_dirty_windows() {
-    assert_filterless_failure_restore(dirty_marker(), DirtyTimeWindows::default(), 1, 0).await;
-    assert_filterless_failure_restore(dirty_range(30, 40), dirty_range(10, 20), 2, 20).await;
-    assert_filterless_failure_restore(dirty_range(30, 40), dirty_range(30, 50), 1, 20).await;
+async fn test_unscoped_failure_restores_consumed_dirty_signal() {
+    assert_unscoped_failure_restore(dirty_marker(), DirtyTimeWindows::default(), 1, 0).await;
+    assert_unscoped_failure_restore(dirty_range(30, 40), dirty_range(10, 20), 2, 20).await;
+    assert_unscoped_failure_restore(dirty_range(30, 40), dirty_range(30, 50), 1, 20).await;
 }
 
 #[tokio::test]
-async fn test_filterless_plan_generation_failure_restores_consumed_dirty_marker() {
+async fn test_unscoped_plan_generation_failure_restores_consumed_dirty_signal() {
     let TestTaskParts {
         task, query_engine, ..
     } = new_test_task_engine_and_plan_with_query(

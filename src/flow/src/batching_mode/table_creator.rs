@@ -220,7 +220,11 @@ fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
         .filter(|f| pk_final_names.contains(f.name()))
         .map(|f| f.name().clone())
         .collect();
-    // auto create table use first timestamp column in group by clause as time index
+    // Auto-created tables use the first timestamp column in the group-by keys
+    // as the time index. It is possible that timestamp columns appear only as
+    // aggregate outputs (for example `max(ts)`) and are not group-by keys; in
+    // that case `first_time_stamp` stays `None` and the caller falls back to a
+    // placeholder time index column.
     let first_time_stamp = fields
         .iter()
         .find(|f| {

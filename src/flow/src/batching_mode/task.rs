@@ -122,14 +122,20 @@ pub struct TaskArgs<'a> {
 
 pub struct PlanInfo {
     pub plan: LogicalPlan,
-    pub filter: Option<FilterExprInfo>,
-    /// Dirty windows consumed while building a filterless query.
+    pub dirty_restore: DirtyRestore,
+}
+
+pub enum DirtyRestore {
+    /// The query was scoped to dirty time ranges; restore those ranges if the
+    /// run fails.
+    Scoped(FilterExprInfo),
+    /// The query could not be scoped to dirty time ranges, so the dirty-window
+    /// state is only a dirty signal. Restore the consumed signal if the full
+    /// run fails.
     ///
-    /// Scoped queries restore failed work from `filter.time_ranges`.  A
-    /// filterless query has no such scope, so keep the exact dirty markers
-    /// that were cleaned before planning and merge them back if execution
-    /// fails.
-    pub filterless_dirty_windows_to_restore: Option<DirtyTimeWindows>,
+    /// TODO(discord9): Full-query runs only need a dirty bool flag. Refactor
+    /// the unscoped path to stop reusing `DirtyTimeWindows` for this signal.
+    Unscoped(DirtyTimeWindows),
 }
 
 impl BatchingTask {
@@ -323,8 +329,7 @@ impl BatchingTask {
         ));
         let insert_into_info = PlanInfo {
             plan,
-            filter: new_query.filter,
-            filterless_dirty_windows_to_restore: new_query.filterless_dirty_windows_to_restore,
+            dirty_restore: new_query.dirty_restore,
         };
         let insert_into =
             match insert_into_info
@@ -343,9 +348,7 @@ impl BatchingTask {
 
         Ok(Some(PlanInfo {
             plan: insert_into,
-            filter: insert_into_info.filter,
-            filterless_dirty_windows_to_restore: insert_into_info
-                .filterless_dirty_windows_to_restore,
+            dirty_restore: insert_into_info.dirty_restore,
         }))
     }
 
@@ -474,19 +477,14 @@ impl BatchingTask {
     /// the next execution.
     ///
     fn restore_dirty_windows_after_failure(&self, query: &PlanInfo) {
-        if query.filter.is_none() {
-            if let Some(dirty_windows) = &query.filterless_dirty_windows_to_restore {
-                self.state
-                    .write()
-                    .unwrap()
-                    .dirty_time_windows
-                    .add_dirty_windows(dirty_windows);
-            }
-            return;
-        }
-
-        if let Some(filter) = query.filter.as_ref() {
-            self.restore_scoped_dirty_windows(filter);
+        match &query.dirty_restore {
+            DirtyRestore::Scoped(filter) => self.restore_scoped_dirty_windows(filter),
+            DirtyRestore::Unscoped(dirty_windows) => self
+                .state
+                .write()
+                .unwrap()
+                .dirty_time_windows
+                .add_dirty_windows(dirty_windows),
         }
     }
 
@@ -734,12 +732,12 @@ impl BatchingTask {
 
                     return Ok(Some(PlanInfo {
                         plan,
-                        filter: None,
-                        filterless_dirty_windows_to_restore: Some(dirty_windows_to_restore),
+                        dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
                     }));
                 }
                 _ => {
-                    // clean for tql have no use for time window
+                    // Clean dirty windows for full-query/non-scoped paths,
+                    // such as TQL, that cannot use a time-window filter.
                     let dirty_windows_to_restore = {
                         let mut state = self.state.write().unwrap();
                         let dirty_windows_to_restore = state.dirty_time_windows.clone();
@@ -770,8 +768,7 @@ impl BatchingTask {
 
                     return Ok(Some(PlanInfo {
                         plan,
-                        filter: None,
-                        filterless_dirty_windows_to_restore: Some(dirty_windows_to_restore),
+                        dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
                     }));
                 }
             };
@@ -861,8 +858,7 @@ impl BatchingTask {
 
         let info = PlanInfo {
             plan: new_plan.clone(),
-            filter: Some(expr),
-            filterless_dirty_windows_to_restore: None,
+            dirty_restore: DirtyRestore::Scoped(expr),
         };
 
         Ok(Some(info))
