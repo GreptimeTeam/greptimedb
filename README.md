@@ -77,7 +77,9 @@ Use it as the single OpenTelemetry backend — replacing Prometheus, Loki, and E
 A quick overview of what GreptimeDB ingests, how it connects to other systems, and what its distributed engine lets you do.
 
 <p align="center">
-  <img alt="GreptimeDB Overview" src="docs/overview.png" width="900px">
+  <a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/overview.png" target="_blank" rel="noopener">
+    <img alt="GreptimeDB Overview" src="docs/overview.png" width="900px">
+  </a>
 </p>
 
 ## Features
@@ -128,7 +130,9 @@ GreptimeDB can run in two modes:
 
 For deeper coverage, see the [architecture doc](https://docs.greptime.com/contributor-guide/overview/#architecture) or [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview).
 
-<img alt="GreptimeDB System Overview" src="docs/architecture.png">
+<a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/architecture.png" target="_blank" rel="noopener">
+  <img alt="GreptimeDB System Overview" src="docs/architecture.png">
+</a>
 
 ## Try GreptimeDB
 
