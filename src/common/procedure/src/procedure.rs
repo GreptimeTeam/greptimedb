@@ -605,14 +605,6 @@ pub trait ProcedureManager: Send + Sync + 'static {
 
     /// Returns the details of the procedure.
     async fn list_procedures(&self) -> Result<Vec<ProcedureInfo>>;
-
-    /// Clears in-memory state before a leadership-regain recovery.
-    ///
-    /// Implementations that keep procedure maps across `stop()` should clear
-    /// them here so the next `start()` reloads persisted procedure state.
-    async fn reset_before_recover(&self) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Ref-counted pointer to the [ProcedureManager].

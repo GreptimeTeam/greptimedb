@@ -861,6 +861,9 @@ impl LocalManager {
         info!("LocalManager start to recover");
         let recover_start = Instant::now();
 
+        self.manager_ctx.reset();
+        info!("LocalManager in-memory procedure state cleared before recovery");
+
         let ProcedureMessages {
             messages,
             rollback_messages,
@@ -988,12 +991,6 @@ impl ProcedureManager for LocalManager {
 
     async fn list_procedures(&self) -> Result<Vec<ProcedureInfo>> {
         Ok(self.manager_ctx.list_procedure())
-    }
-
-    async fn reset_before_recover(&self) -> Result<()> {
-        self.manager_ctx.reset();
-        info!("LocalManager in-memory procedure state cleared before recovery");
-        Ok(())
     }
 }
 
@@ -1380,6 +1377,19 @@ mod tests {
         let procedure_store = ProcedureStore::from_object_store(object_store.clone());
         let root: BoxedProcedure = Box::new(ProcedureToLoad::new("test recover manager"));
         let root_id = ProcedureId::random();
+        let stale_meta = Arc::new(ProcedureMeta::new(
+            root_id,
+            ProcedureState::failed(Arc::new(Error::external(MockError::new(
+                StatusCode::Unexpected,
+            )))),
+            None,
+            LockKey::default(),
+            PoisonKeys::default(),
+            "stale",
+            None,
+            None,
+        ));
+        assert!(manager.manager_ctx.try_insert_procedure(stale_meta));
         // Prepare data for the root procedure.
         for step in 0..3 {
             let type_name = root.type_name().to_string();
@@ -1406,7 +1416,8 @@ mod tests {
         manager.recover().await.unwrap();
 
         // The manager should submit the root procedure.
-        let _ = manager.procedure_state(root_id).await.unwrap().unwrap();
+        let state = manager.procedure_state(root_id).await.unwrap().unwrap();
+        assert!(!state.is_failed(), "{state:?}");
         // Since the mocked root procedure actually doesn't submit subprocedures, so there is no
         // related state.
         assert!(manager.procedure_state(child_id).await.unwrap().is_none());
