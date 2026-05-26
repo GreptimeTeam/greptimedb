@@ -40,7 +40,7 @@ fn ensure_source_region_route_expr_match(
     let actual = region_route.region.partition_expr();
     let expected = source.route_expr_for_rollback()?;
     ensure!(
-        source.matches_route_expr(&actual)?,
+        actual == expected,
         error::PartitionExprMismatchSnafu {
             region_id: region_route.region.id,
             expected,

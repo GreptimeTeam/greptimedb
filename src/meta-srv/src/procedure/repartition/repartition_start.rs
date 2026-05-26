@@ -222,8 +222,19 @@ impl RepartitionStart {
             }
         );
 
+        let source_region = &physical_route.region_routes[0].region;
+        ensure!(
+            source_region.partition_expr().is_empty(),
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Default source repartition expects an empty partition expr, but got {}",
+                    source_region.partition_expr()
+                ),
+            }
+        );
+
         Ok(vec![SourceRegionDescriptor::Default {
-            region_id: physical_route.region_routes[0].region.id,
+            region_id: source_region.id,
         }])
     }
 }
@@ -264,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_plan_with_default_source_accepts_non_empty_partition_expr() {
+    fn test_build_plan_with_default_source_rejects_non_empty_partition_expr() {
         let table_id = 1024;
         let physical_route = physical_route(vec![test_region_route(
             RegionId::new(table_id, 1),
@@ -272,15 +283,9 @@ mod tests {
         )]);
         let to_exprs = vec![range_expr("x", 0, 50), range_expr("x", 50, 100)];
 
-        let plans = RepartitionStart::build_plan(&physical_route, &[], &to_exprs).unwrap();
+        let err = RepartitionStart::build_plan(&physical_route, &[], &to_exprs).unwrap_err();
 
-        assert_eq!(plans.len(), 1);
-        assert_eq!(
-            plans[0].source_regions,
-            vec![SourceRegionDescriptor::Default {
-                region_id: RegionId::new(table_id, 1)
-            }]
-        );
+        assert!(err.to_string().contains("empty partition expr"));
     }
 
     #[test]

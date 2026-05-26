@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 
 use common_meta::rpc::router::RegionRoute;
 use partition::expr::PartitionExpr;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
@@ -26,9 +26,8 @@ use crate::procedure::repartition::group::GroupId;
 /// Metadata describing a source region involved in the plan.
 ///
 /// Source regions may represent either an existing partitioned region or the
-/// default region of an unpartitioned table. PR 1 only migrates the type model;
-/// default-source behavior is introduced by a later PR.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// default region of an unpartitioned table.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub enum SourceRegionDescriptor {
     /// A regular partitioned source region.
     Partitioned {
@@ -42,6 +41,55 @@ pub enum SourceRegionDescriptor {
         /// The region id of the default source region.
         region_id: RegionId,
     },
+}
+
+impl<'de> Deserialize<'de> for SourceRegionDescriptor {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PartitionedSourceRegionDescriptor {
+            region_id: RegionId,
+            partition_expr: PartitionExpr,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum SourceRegionDescriptorRepr {
+            Tagged(SourceRegionDescriptorTaggedRepr),
+            Legacy(PartitionedSourceRegionDescriptor),
+        }
+
+        #[derive(Deserialize)]
+        enum SourceRegionDescriptorTaggedRepr {
+            Partitioned {
+                region_id: RegionId,
+                partition_expr: PartitionExpr,
+            },
+            Default {
+                region_id: RegionId,
+            },
+        }
+
+        match SourceRegionDescriptorRepr::deserialize(deserializer)? {
+            SourceRegionDescriptorRepr::Tagged(SourceRegionDescriptorTaggedRepr::Partitioned {
+                region_id,
+                partition_expr,
+            }) => Ok(Self::Partitioned {
+                region_id,
+                partition_expr,
+            }),
+            SourceRegionDescriptorRepr::Tagged(SourceRegionDescriptorTaggedRepr::Default {
+                region_id,
+            }) => Ok(Self::Default { region_id }),
+            SourceRegionDescriptorRepr::Legacy(descriptor) => Ok(Self::Partitioned {
+                region_id: descriptor.region_id,
+                partition_expr: descriptor.partition_expr,
+            }),
+        }
+    }
 }
 
 impl SourceRegionDescriptor {
@@ -293,6 +341,135 @@ mod tests {
             RegionId::new(table_id, region_number),
             range_expr(col, start, end),
         )
+    }
+
+    #[test]
+    fn test_source_region_descriptor_deserializes_legacy_partitioned_shape() {
+        let table_id = 1024;
+        let region_id = RegionId::new(table_id, 1);
+        let partition_expr = range_expr("x", 0, 100);
+        let legacy_json = serde_json::json!({
+            "region_id": region_id,
+            "partition_expr": partition_expr,
+        });
+
+        let descriptor: SourceRegionDescriptor = serde_json::from_value(legacy_json).unwrap();
+
+        assert_eq!(
+            descriptor,
+            SourceRegionDescriptor::partitioned(region_id, partition_expr)
+        );
+    }
+
+    #[test]
+    fn test_source_region_descriptor_rejects_legacy_default_shape() {
+        let region_id = RegionId::new(1024, 1);
+        let default_json = serde_json::json!({
+            "region_id": region_id,
+        });
+
+        let err = serde_json::from_value::<SourceRegionDescriptor>(default_json).unwrap_err();
+
+        assert!(err.to_string().contains("data did not match any variant"));
+    }
+
+    #[test]
+    fn test_source_region_descriptor_roundtrip_tagged_partitioned_shape() {
+        let region_id = RegionId::new(1024, 1);
+        let partition_expr = range_expr("x", 0, 100);
+        let descriptor = SourceRegionDescriptor::partitioned(region_id, partition_expr.clone());
+
+        let value = serde_json::to_value(&descriptor).unwrap();
+        let decoded = serde_json::from_value::<SourceRegionDescriptor>(value.clone()).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "Partitioned": {
+                    "region_id": region_id,
+                    "partition_expr": partition_expr,
+                }
+            })
+        );
+        assert_eq!(decoded, descriptor);
+    }
+
+    #[test]
+    fn test_source_region_descriptor_roundtrip_tagged_default_shape() {
+        let region_id = RegionId::new(1024, 1);
+        let descriptor = SourceRegionDescriptor::Default { region_id };
+
+        let value = serde_json::to_value(&descriptor).unwrap();
+        let decoded = serde_json::from_value::<SourceRegionDescriptor>(value.clone()).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "Default": {
+                    "region_id": region_id,
+                }
+            })
+        );
+        assert_eq!(decoded, descriptor);
+    }
+
+    #[test]
+    fn test_source_region_descriptor_rejects_invalid_partition_expr_shape() {
+        let region_id = RegionId::new(1024, 1);
+        let invalid_json = serde_json::json!({
+            "region_id": region_id,
+            "partition_expr": 42,
+        });
+
+        let err = serde_json::from_value::<SourceRegionDescriptor>(invalid_json).unwrap_err();
+
+        assert!(err.to_string().contains("data did not match any variant"));
+    }
+
+    #[test]
+    fn test_repartition_plan_entry_deserializes_legacy_source_regions() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let source_region_id = RegionId::new(table_id, 1);
+        let target_region_id = RegionId::new(table_id, 2);
+        let source_partition_expr = range_expr("x", 0, 100);
+        let target_partition_expr = range_expr("x", 0, 50);
+        let legacy_json = serde_json::json!({
+            "group_id": group_id,
+            "source_regions": [{
+                "region_id": source_region_id,
+                "partition_expr": source_partition_expr,
+            }],
+            "target_regions": [{
+                "region_id": target_region_id,
+                "partition_expr": target_partition_expr,
+            }],
+            "allocated_region_ids": [target_region_id],
+            "pending_deallocate_region_ids": [],
+            "transition_map": [[0]],
+        });
+
+        let plan: RepartitionPlanEntry = serde_json::from_value(legacy_json).unwrap();
+
+        assert_eq!(plan.group_id, group_id);
+        assert_eq!(
+            plan.source_regions,
+            vec![SourceRegionDescriptor::partitioned(
+                source_region_id,
+                source_partition_expr
+            )]
+        );
+        assert_eq!(
+            plan.target_regions,
+            vec![TargetRegionDescriptor {
+                region_id: target_region_id,
+                partition_expr: target_partition_expr,
+            }]
+        );
+        assert_eq!(plan.allocated_region_ids, vec![target_region_id]);
+        assert!(plan.pending_deallocate_region_ids.is_empty());
+        assert_eq!(plan.transition_map, vec![vec![0]]);
+        assert!(plan.original_target_routes.is_empty());
     }
 
     #[test]
