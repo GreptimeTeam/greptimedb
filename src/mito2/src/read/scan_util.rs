@@ -2001,6 +2001,10 @@ mod tests {
         );
         // A run of equal timestamps yields single-row sub-batches.
         assert_eq!(split_ts(&[5, 5, 5]), vec![vec![5], vec![5], vec![5]]);
+        // Equal-ts run at the leading edge of the batch.
+        assert_eq!(split_ts(&[5, 5, 1, 2]), vec![vec![5], vec![5], vec![1, 2]]);
+        // Equal-ts run at the trailing edge of the batch.
+        assert_eq!(split_ts(&[1, 2, 5, 5]), vec![vec![1, 2, 5], vec![5]]);
     }
 
     #[test]
