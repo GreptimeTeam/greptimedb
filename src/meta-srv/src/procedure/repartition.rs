@@ -63,7 +63,7 @@ use crate::procedure::repartition::group::{
     Context as RepartitionGroupContext, RepartitionGroupProcedure, region_routes,
 };
 use crate::procedure::repartition::plan::RepartitionPlanEntry;
-use crate::procedure::repartition::repartition_start::RepartitionStart;
+use crate::procedure::repartition::repartition_start::{RepartitionFrom, RepartitionStart};
 use crate::procedure::repartition::update_partition_metadata::PartitionMetadataUpdate;
 use crate::procedure::repartition::utils::{
     get_datanode_table_value, rollback_group_metadata_routes,
@@ -502,12 +502,8 @@ struct RepartitionDataOwned {
 impl RepartitionProcedure {
     const TYPE_NAME: &'static str = "metasrv-procedure::Repartition";
 
-    pub fn new(
-        from_exprs: Vec<PartitionExpr>,
-        to_exprs: Vec<PartitionExpr>,
-        context: Context,
-    ) -> Self {
-        let state = Box::new(RepartitionStart::new(from_exprs, to_exprs));
+    pub fn new(from: RepartitionFrom, to_exprs: Vec<PartitionExpr>, context: Context) -> Self {
+        let state = Box::new(RepartitionStart::new(from, to_exprs));
 
         Self { state, context }
     }
@@ -834,7 +830,7 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
             .map_err(BoxedError::new)?;
 
         let procedure = RepartitionProcedure::new(
-            from_exprs,
+            RepartitionFrom::Partitioned { exprs: from_exprs },
             to_exprs,
             Context::new(
                 ddl_ctx,
@@ -1044,7 +1040,10 @@ mod tests {
         let table_id = 1024;
 
         let procedure = test_procedure(
-            Box::new(RepartitionStart::new(vec![], vec![])),
+            Box::new(RepartitionStart::new(
+                RepartitionFrom::Partitioned { exprs: vec![] },
+                vec![],
+            )),
             test_context(&env, table_id),
         );
         assert!(!procedure.should_rollback());
@@ -1892,7 +1891,9 @@ mod tests {
 
         let context = new_parent_context(&env, node_manager, table_id);
         let mut procedure = RepartitionProcedure::new(
-            vec![range_expr("x", 0, 100)],
+            RepartitionFrom::Partitioned {
+                exprs: vec![range_expr("x", 0, 100)],
+            },
             vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
             context,
         );
@@ -2036,7 +2037,9 @@ mod tests {
 
         let context = new_parent_context(&env, node_manager, table_id);
         let mut procedure = RepartitionProcedure::new(
-            vec![range_expr("x", 0, 100)],
+            RepartitionFrom::Partitioned {
+                exprs: vec![range_expr("x", 0, 100)],
+            },
             vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
             context,
         );

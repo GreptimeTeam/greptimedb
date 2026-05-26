@@ -20,7 +20,7 @@ use common_telemetry::debug;
 use partition::collider::Collider;
 use partition::expr::PartitionExpr;
 use partition::subtask::{self, RepartitionSubtask};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -29,21 +29,57 @@ use crate::error::{self, Result};
 use crate::procedure::repartition::allocate_region::AllocateRegion;
 use crate::procedure::repartition::plan::{AllocationPlanEntry, SourceRegionDescriptor};
 use crate::procedure::repartition::repartition_end::RepartitionEnd;
-use crate::procedure::repartition::update_partition_metadata::UpdatePartitionMetadata;
+use crate::procedure::repartition::update_partition_metadata::{
+    PartitionMetadataUpdate, UpdatePartitionMetadata,
+};
 use crate::procedure::repartition::{Context, State};
+
+#[derive(Debug, Clone, Serialize)]
+pub enum RepartitionFrom {
+    Partitioned { exprs: Vec<PartitionExpr> },
+    Unpartitioned { partition_columns: Vec<String> },
+}
+
+impl<'de> Deserialize<'de> for RepartitionFrom {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        enum CurrentRepartitionFrom {
+            Partitioned { exprs: Vec<PartitionExpr> },
+            Unpartitioned { partition_columns: Vec<String> },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RepartitionFromRepr {
+            Current(CurrentRepartitionFrom),
+            Legacy(Vec<PartitionExpr>),
+        }
+
+        match RepartitionFromRepr::deserialize(deserializer)? {
+            RepartitionFromRepr::Current(CurrentRepartitionFrom::Partitioned { exprs }) => {
+                Ok(Self::Partitioned { exprs })
+            }
+            RepartitionFromRepr::Current(CurrentRepartitionFrom::Unpartitioned {
+                partition_columns,
+            }) => Ok(Self::Unpartitioned { partition_columns }),
+            RepartitionFromRepr::Legacy(exprs) => Ok(Self::Partitioned { exprs }),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepartitionStart {
-    from_exprs: Vec<PartitionExpr>,
+    #[serde(alias = "from_exprs")]
+    from: RepartitionFrom,
     to_exprs: Vec<PartitionExpr>,
 }
 
 impl RepartitionStart {
-    pub fn new(from_exprs: Vec<PartitionExpr>, to_exprs: Vec<PartitionExpr>) -> Self {
-        Self {
-            from_exprs,
-            to_exprs,
-        }
+    pub fn new(from: RepartitionFrom, to_exprs: Vec<PartitionExpr>) -> Self {
+        Self { from, to_exprs }
     }
 }
 
@@ -73,7 +109,8 @@ impl State for RepartitionStart {
             }
         );
 
-        let plans = Self::build_plan(&table_route, &self.from_exprs, &self.to_exprs)?;
+        let from_exprs = self.prepare_from(ctx).await?;
+        let plans = Self::build_plan(&table_route, from_exprs, &self.to_exprs)?;
         let plan_count = plans.len();
         let total_source_regions: usize = plans.iter().map(|p| p.source_regions.len()).sum();
         let total_target_regions: usize =
@@ -111,6 +148,57 @@ impl State for RepartitionStart {
 }
 
 impl RepartitionStart {
+    async fn prepare_from<'a>(&'a self, ctx: &mut Context) -> Result<&'a [PartitionExpr]> {
+        match &self.from {
+            RepartitionFrom::Partitioned { exprs } => Ok(exprs),
+            RepartitionFrom::Unpartitioned { partition_columns } => {
+                Self::prepare_unpartitioned(ctx, partition_columns).await?;
+                Ok(&[])
+            }
+        }
+    }
+
+    async fn prepare_unpartitioned(ctx: &mut Context, partition_columns: &[String]) -> Result<()> {
+        if ctx.persistent_ctx.partition_metadata_update.is_some() {
+            return Ok(());
+        }
+
+        let table_info_value = ctx.get_table_info_value().await?;
+        ensure!(
+            table_info_value
+                .table_info
+                .meta
+                .partition_key_indices
+                .is_empty(),
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Unpartitioned repartition expects an unpartitioned table, but table {} has partition key indices: {:?}",
+                    ctx.persistent_ctx.table_id,
+                    table_info_value.table_info.meta.partition_key_indices
+                ),
+            }
+        );
+
+        let schema = &table_info_value.table_info.meta.schema;
+        let partition_key_indices = partition_columns
+            .iter()
+            .map(|column_name| {
+                schema
+                    .column_index_by_name(column_name)
+                    .with_context(|| error::UnexpectedSnafu {
+                        violated: format!(
+                            "Partition column {} not found in table {}",
+                            column_name, ctx.persistent_ctx.table_id
+                        ),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        ctx.persistent_ctx.partition_metadata_update =
+            Some(PartitionMetadataUpdate::new(partition_key_indices));
+
+        Ok(())
+    }
+
     pub(crate) fn build_plan(
         physical_route: &PhysicalTableRouteValue,
         from_exprs: &[PartitionExpr],
@@ -255,18 +343,35 @@ impl RepartitionStart {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
     use common_meta::key::table_route::PhysicalTableRouteValue;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::test_util::MockDatanodeManager;
     use datatypes::prelude::Value;
     use partition::expr::{Operand, RestrictedOp};
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::procedure::repartition::test_util::{range_expr, test_region_route};
+    use crate::procedure::repartition::test_util::{
+        TestingEnv, new_parent_context, range_expr, test_region_route, test_region_wal_options,
+    };
 
     fn physical_route(region_routes: Vec<RegionRoute>) -> PhysicalTableRouteValue {
         PhysicalTableRouteValue::new(region_routes)
+    }
+
+    async fn new_test_context(env: &TestingEnv, table_id: u32) -> Context {
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![test_region_route(RegionId::new(table_id, 1), "")],
+            test_region_wal_options(&[1]),
+        )
+        .await;
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        new_parent_context(env, node_manager, table_id)
     }
 
     #[test]
@@ -374,5 +479,153 @@ mod tests {
                 from_exprs[0].clone()
             )]
         );
+    }
+
+    #[test]
+    fn test_repartition_start_deserializes_legacy_from_exprs() {
+        let from_exprs = vec![range_expr("x", 0, 100)];
+        let to_exprs = vec![range_expr("x", 0, 50), range_expr("x", 50, 100)];
+        let json = serde_json::json!({
+            "from_exprs": from_exprs,
+            "to_exprs": to_exprs,
+        })
+        .to_string();
+
+        let state: RepartitionStart = serde_json::from_str(&json).unwrap();
+
+        let RepartitionFrom::Partitioned { exprs } = state.from else {
+            panic!("expected partition source");
+        };
+        assert_eq!(exprs, vec![range_expr("x", 0, 100)]);
+    }
+
+    #[test]
+    fn test_repartition_start_deserializes_current_from() {
+        let state = RepartitionStart::new(
+            RepartitionFrom::Unpartitioned {
+                partition_columns: vec!["col1".to_string()],
+            },
+            vec![range_expr("col1", 0, 50)],
+        );
+        let json = serde_json::to_string(&state).unwrap();
+
+        let state: RepartitionStart = serde_json::from_str(&json).unwrap();
+
+        let RepartitionFrom::Unpartitioned { partition_columns } = state.from else {
+            panic!("expected unpartitioned source");
+        };
+        assert_eq!(partition_columns, vec!["col1"]);
+    }
+
+    #[tokio::test]
+    async fn test_partitions_source_does_not_initialize_partition_metadata_update() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![test_region_route(
+                RegionId::new(table_id, 1),
+                &range_expr("x", 0, 100).as_json_str().unwrap(),
+            )],
+            test_region_wal_options(&[1]),
+        )
+        .await;
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let mut ctx = new_parent_context(&env, node_manager, table_id);
+        let mut state = RepartitionStart::new(
+            RepartitionFrom::Partitioned {
+                exprs: vec![range_expr("x", 0, 100)],
+            },
+            vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
+        );
+
+        let (next, status) = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        assert!(!status.need_persist());
+        assert!(next.as_any().is::<AllocateRegion>());
+        assert!(ctx.persistent_ctx.partition_metadata_update.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unpartitioned_source_initializes_partition_metadata_update() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut ctx = new_test_context(&env, table_id).await;
+        let mut state = RepartitionStart::new(
+            RepartitionFrom::Unpartitioned {
+                partition_columns: vec!["col2".to_string(), "col1".to_string()],
+            },
+            vec![range_expr("col2", 0, 50), range_expr("col2", 50, 100)],
+        );
+
+        let (next, status) = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        assert!(status.need_persist());
+        assert!(next.as_any().is::<UpdatePartitionMetadata>());
+        assert_eq!(
+            ctx.persistent_ctx
+                .partition_metadata_update
+                .as_ref()
+                .unwrap()
+                .partition_key_indices,
+            vec![2, 0]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unpartitioned_source_rejects_existing_partition_metadata() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut ctx = new_test_context(&env, table_id).await;
+        let current = ctx.get_raw_table_info_value().await.unwrap();
+        let mut table_info = current.table_info.clone();
+        table_info.meta.partition_key_indices = vec![0];
+        ctx.update_table_info(&current, current.update(table_info))
+            .await
+            .unwrap();
+        let mut state = RepartitionStart::new(
+            RepartitionFrom::Unpartitioned {
+                partition_columns: vec!["col1".to_string()],
+            },
+            vec![range_expr("col1", 0, 50)],
+        );
+
+        let err = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("expects an unpartitioned table"));
+        assert!(ctx.persistent_ctx.partition_metadata_update.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unpartitioned_source_rejects_missing_partition_column() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut ctx = new_test_context(&env, table_id).await;
+        let mut state = RepartitionStart::new(
+            RepartitionFrom::Unpartitioned {
+                partition_columns: vec!["missing_col".to_string()],
+            },
+            vec![range_expr("col1", 0, 50)],
+        );
+
+        let err = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Partition column missing_col not found")
+        );
+        assert!(ctx.persistent_ctx.partition_metadata_update.is_none());
     }
 }
