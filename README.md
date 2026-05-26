@@ -136,6 +136,12 @@ For deeper coverage, see the [architecture doc](https://docs.greptime.com/contri
 
 ## Try GreptimeDB
 
+**For AI agents** — paste this prompt into your agent:
+
+```text
+Read https://docs.greptime.com/SKILL.md and follow the instructions to deploy, configure, ingest, and query GreptimeDB.
+```
+
 ```shell
 docker run -p 127.0.0.1:4000-4003:4000-4003 \
   -v "$(pwd)/greptimedb_data:/greptimedb_data" \
