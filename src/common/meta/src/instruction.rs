@@ -179,9 +179,37 @@ impl Display for OpenRegion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OpenRegion(region_ident={}, region_storage_path={})",
-            self.region_ident, self.region_storage_path
+            "OpenRegion(region_ident={}, region_storage_path={}, reason={:?})",
+            self.region_ident, self.region_storage_path, self.reason
         )
+    }
+}
+
+/// The reason why a region is being opened.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenRegionReason {
+    /// Normal region open, e.g., on datanode startup for its own regions.
+    #[default]
+    Normal,
+    /// Region is being migrated to this datanode (manual or auto-rebalance).
+    RegionMigration,
+    /// Region is being opened as part of failover to this datanode.
+    RegionFailover,
+}
+
+impl OpenRegionReason {
+    fn is_normal(&self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
+    /// Returns true if this open reason requires the datanode to be backed by object storage.
+    ///
+    /// When a region is migrated or failed over to this node, the region data must reside in
+    /// a shared object storage that both the source and destination datanodes can access.
+    /// If the datanode only has local file storage, the data would not be accessible.
+    pub fn requires_object_storage(&self) -> bool {
+        matches!(self, Self::RegionMigration | Self::RegionFailover)
     }
 }
 
@@ -196,6 +224,9 @@ pub struct OpenRegion {
     pub region_wal_options: HashMap<RegionNumber, String>,
     #[serde(default)]
     pub skip_wal_replay: bool,
+    /// The reason why this region is being opened.
+    #[serde(default, skip_serializing_if = "OpenRegionReason::is_normal")]
+    pub reason: OpenRegionReason,
 }
 
 impl OpenRegion {
@@ -212,7 +243,14 @@ impl OpenRegion {
             region_options,
             region_wal_options,
             skip_wal_replay,
+            reason: OpenRegionReason::Normal,
         }
+    }
+
+    /// Sets the reason for opening this region.
+    pub fn with_reason(mut self, reason: OpenRegionReason) -> Self {
+        self.reason = reason;
+        self
     }
 }
 
@@ -1368,6 +1406,7 @@ mod tests {
             region_options,
             region_wal_options: HashMap::new(),
             skip_wal_replay: false,
+            reason: OpenRegionReason::Normal,
         };
         assert_eq!(expected, deserialized);
     }

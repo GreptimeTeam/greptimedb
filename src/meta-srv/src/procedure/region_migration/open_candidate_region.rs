@@ -18,7 +18,9 @@ use std::ops::Div;
 use api::v1::meta::MailboxMessage;
 use common_meta::RegionIdent;
 use common_meta::distributed_time_constants::default_distributed_time_constants;
-use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
+use common_meta::instruction::{
+    Instruction, InstructionReply, OpenRegion, OpenRegionReason, SimpleReply,
+};
 use common_meta::key::datanode_table::RegionInfo;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
@@ -31,6 +33,7 @@ use tokio::time::Instant;
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
+use crate::procedure::region_migration::manager::RegionMigrationTriggerReason;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
@@ -67,6 +70,10 @@ impl OpenCandidateRegion {
         let region_ids = ctx.persistent_ctx.region_ids.clone();
         let from_peer_id = ctx.persistent_ctx.from_peer.id;
         let to_peer_id = ctx.persistent_ctx.to_peer.id;
+        let open_reason = match ctx.persistent_ctx.trigger_reason {
+            RegionMigrationTriggerReason::Failover => OpenRegionReason::RegionFailover,
+            _ => OpenRegionReason::RegionMigration,
+        };
         let datanode_table_values = ctx.get_from_peer_datanode_table_values().await?;
         let mut open_regions = Vec::with_capacity(region_ids.len());
 
@@ -86,18 +93,21 @@ impl OpenCandidateRegion {
                 engine,
             } = datanode_table_value.region_info.clone();
 
-            open_regions.push(OpenRegion::new(
-                RegionIdent {
-                    datanode_id: to_peer_id,
-                    table_id,
-                    region_number,
-                    engine,
-                },
-                &region_storage_path,
-                region_options,
-                region_wal_options,
-                true,
-            ));
+            open_regions.push(
+                OpenRegion::new(
+                    RegionIdent {
+                        datanode_id: to_peer_id,
+                        table_id,
+                        region_number,
+                        engine,
+                    },
+                    &region_storage_path,
+                    region_options,
+                    region_wal_options,
+                    true,
+                )
+                .with_reason(open_reason.clone()),
+            );
         }
 
         Ok(Instruction::OpenRegions(open_regions))
@@ -244,6 +254,7 @@ mod tests {
             region_options: Default::default(),
             region_wal_options: Default::default(),
             skip_wal_replay: true,
+            reason: OpenRegionReason::RegionMigration,
         }])
     }
 
