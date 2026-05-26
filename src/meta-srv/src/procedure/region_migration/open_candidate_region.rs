@@ -74,7 +74,10 @@ impl OpenCandidateRegion {
         if matches!(open_reason, OpenRegionReason::RegionFailover) {
             let wal_options = region_wal_options
                 .get(&region_number)
-                .map(|wal_options| serde_json::from_str::<WalOptions>(wal_options))
+                .map(|wal_options| {
+                    serde_json::from_str::<WalOptions>(wal_options)
+                        .context(common_meta::error::SerdeJsonSnafu)
+                })
                 .transpose()
                 .context(error::ParseWalOptionsSnafu)?;
 
