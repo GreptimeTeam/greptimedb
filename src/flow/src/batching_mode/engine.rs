@@ -630,8 +630,11 @@ impl BatchingEngine {
         let engine = self.query_engine.clone();
         let frontend = self.frontend_client.clone();
 
-        // check execute once first to detect any error early
+        // Create sink table if needed, then validate an existing/created sink schema before
+        // spawning the background task. This catches user-created sink schema mismatches at
+        // CREATE FLOW time instead of surfacing them later in the execution loop.
         task.check_or_create_sink_table(&engine, &frontend).await?;
+        task.validate_sink_table_schema(&engine).await?;
 
         let (start_tx, start_rx) = oneshot::channel();
 

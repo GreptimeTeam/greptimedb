@@ -33,9 +33,10 @@ use datafusion_common::{
 };
 use datafusion_expr::logical_plan::{Aggregate, TableScan};
 use datafusion_expr::{
-    Distinct, JoinType, LogicalPlan, LogicalPlanBuilder, Operator, Projection, and, binary_expr,
-    bitwise_and, bitwise_or, bitwise_xor, is_null, or, when,
+    Distinct, ExprSchemable, JoinType, LogicalPlan, LogicalPlanBuilder, Operator, Projection, and,
+    binary_expr, bitwise_and, bitwise_or, bitwise_xor, is_null, or, when,
 };
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use query::QueryEngineRef;
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
@@ -955,7 +956,7 @@ pub(crate) async fn gen_plan_with_matching_schema(
         .clone()
         .rewrite(&mut add_auto_column)
         .with_context(|_| DatafusionSnafu {
-            context: format!("Failed to rewrite plan:\n {}\n", plan),
+            context: "Failed to rewrite plan".to_string(),
         })?
         .data;
     Ok(plan)
@@ -1090,10 +1091,16 @@ impl ColumnMatcherRewriter {
     }
 
     /// modify the exprs in place so that it matches the schema and some auto columns are added
-    fn modify_project_exprs(&mut self, mut exprs: Vec<Expr>) -> DfResult<Vec<Expr>> {
+    fn modify_project_exprs(
+        &mut self,
+        mut exprs: Vec<Expr>,
+        input_schema: &DFSchema,
+    ) -> DfResult<Vec<Expr>> {
         if self.allow_partial {
             return self.modify_project_exprs_with_partial(exprs);
         }
+
+        let original_exprs = exprs.clone();
 
         let all_names = self
             .schema
@@ -1101,22 +1108,6 @@ impl ColumnMatcherRewriter {
             .iter()
             .map(|c| c.name.clone())
             .collect::<BTreeSet<_>>();
-        // first match by position
-        for (idx, expr) in exprs.iter_mut().enumerate() {
-            if !all_names.contains(&expr.qualified_name().1)
-                && let Some(col_name) = self
-                    .schema
-                    .column_schemas()
-                    .get(idx)
-                    .map(|c| c.name.clone())
-            {
-                // if the data type mismatched, later check_execute will error out
-                // hence no need to check it here, beside, optimize pass might be able to cast it
-                // so checking here is not necessary
-                *expr = expr.clone().alias(col_name);
-            }
-        }
-
         // add columns if have different column count
         let query_col_cnt = exprs.len();
         let table_col_cnt = self.schema.column_schemas().len();
@@ -1170,14 +1161,40 @@ impl ColumnMatcherRewriter {
                 )));
             }
         } else {
-            return Err(DataFusionError::Plan(format!(
-                "Expect table have 0,1 or 2 columns more than query columns, found {} query columns {:?}, {} table columns {:?}",
-                query_col_cnt,
-                exprs,
-                table_col_cnt,
-                self.schema.column_schemas()
+            return Err(DataFusionError::Plan(format_flow_sink_schema_mismatch(
+                &original_exprs,
+                self.schema.as_ref(),
             )));
         }
+
+        // Match remaining unknown output names by position, but only when the expression type
+        // matches the target sink column type. This keeps the legacy "omit output aliases and map
+        // by position" behavior while preventing misleading aliases like a string tag column being
+        // renamed to a timestamp column.
+        for (idx, expr) in exprs.iter_mut().enumerate() {
+            if all_names.contains(&expr.qualified_name().1) {
+                continue;
+            }
+
+            let Some(col_schema) = self.schema.column_schemas().get(idx) else {
+                continue;
+            };
+
+            let expr_type = ConcreteDataType::from_arrow_type(&expr.get_type(input_schema)?);
+            if is_obviously_incompatible_positional_match(&expr_type, &col_schema.data_type) {
+                return Err(DataFusionError::Plan(format!(
+                    "Cannot match flow output column '{}' to sink column '{}' by position: incompatible data types, flow output type is {:?}, sink column type is {:?}. {}",
+                    expr.qualified_name().1,
+                    col_schema.name,
+                    expr_type,
+                    col_schema.data_type,
+                    format_flow_sink_schema_mismatch(&original_exprs, self.schema.as_ref())
+                )));
+            }
+
+            *expr = expr.clone().alias(col_schema.name.clone());
+        }
+
         Ok(exprs)
     }
 
@@ -1186,12 +1203,9 @@ impl ColumnMatcherRewriter {
         let query_col_cnt = exprs.len();
 
         if query_col_cnt > table_col_cnt {
-            return Err(DataFusionError::Plan(format!(
-                "Expect query column count <= table column count, found {} query columns {:?}, {} table columns {:?}",
-                query_col_cnt,
-                exprs,
-                table_col_cnt,
-                self.schema.column_schemas()
+            return Err(DataFusionError::Plan(format_flow_sink_schema_mismatch(
+                &exprs,
+                self.schema.as_ref(),
             )));
         }
 
@@ -1209,8 +1223,9 @@ impl ColumnMatcherRewriter {
             .collect();
         if !missing.is_empty() {
             return Err(DataFusionError::Plan(format!(
-                "Column(s) {:?} required by sink table are missing from flow output when merge_mode=last_non_null",
-                missing
+                "Column(s) {:?} required by sink table are missing from flow output when merge_mode=last_non_null. {}",
+                missing,
+                format_flow_sink_schema_mismatch(&exprs, self.schema.as_ref())
             )));
         }
 
@@ -1250,8 +1265,9 @@ impl ColumnMatcherRewriter {
         if !remap.is_empty() {
             let extra: Vec<_> = remap.keys().cloned().collect();
             return Err(DataFusionError::Plan(format!(
-                "Flow output has extra column(s) {:?} not found in sink schema when merge_mode=last_non_null",
-                extra
+                "Flow output has extra column(s) {:?} not found in sink schema when merge_mode=last_non_null. {}",
+                extra,
+                format_flow_sink_schema_mismatch(&exprs, self.schema.as_ref())
             )));
         }
 
@@ -1279,6 +1295,65 @@ impl ColumnMatcherRewriter {
 
         required
     }
+}
+
+fn is_obviously_incompatible_positional_match(
+    expr_type: &ConcreteDataType,
+    sink_type: &ConcreteDataType,
+) -> bool {
+    if expr_type == sink_type {
+        return false;
+    }
+
+    expr_type.is_timestamp() != sink_type.is_timestamp()
+        || expr_type.is_string() != sink_type.is_string()
+        || expr_type.is_boolean() != sink_type.is_boolean()
+        || expr_type.is_json() != sink_type.is_json()
+        || expr_type.is_vector() != sink_type.is_vector()
+}
+
+fn format_flow_sink_schema_mismatch(
+    query_exprs: &[Expr],
+    sink_schema: &datatypes::schema::Schema,
+) -> String {
+    let flow_output_columns = query_exprs
+        .iter()
+        .map(|expr| expr.qualified_name().1)
+        .collect::<Vec<_>>();
+    let sink_table_columns = sink_schema
+        .column_schemas()
+        .iter()
+        .map(|col| col.name.clone())
+        .collect::<Vec<_>>();
+
+    let flow_output_set = flow_output_columns.iter().cloned().collect::<HashSet<_>>();
+    let sink_table_set = sink_table_columns.iter().cloned().collect::<HashSet<_>>();
+
+    let mut extra_flow_columns = flow_output_columns
+        .iter()
+        .filter(|name| !sink_table_set.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    extra_flow_columns.sort();
+    extra_flow_columns.dedup();
+
+    let mut missing_sink_columns = sink_table_columns
+        .iter()
+        .filter(|name| !flow_output_set.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    missing_sink_columns.sort();
+    missing_sink_columns.dedup();
+
+    format!(
+        "Flow output schema does not match sink table schema: found {} flow output columns and {} sink table columns. flow output columns: {:?}, sink table columns: {:?}, extra flow columns not in sink: {:?}, missing sink columns from flow output: {:?}",
+        flow_output_columns.len(),
+        sink_table_columns.len(),
+        flow_output_columns,
+        sink_table_columns,
+        extra_flow_columns,
+        missing_sink_columns
+    )
 }
 
 impl TreeNodeRewriter for ColumnMatcherRewriter {
@@ -1327,7 +1402,7 @@ impl TreeNodeRewriter for ColumnMatcherRewriter {
         // if not, wrap it in a projection
         if let LogicalPlan::Projection(project) = &node {
             let exprs = project.expr.clone();
-            let exprs = self.modify_project_exprs(exprs)?;
+            let exprs = self.modify_project_exprs(exprs, project.input.schema())?;
 
             self.is_rewritten = true;
             let new_plan =
@@ -1341,7 +1416,7 @@ impl TreeNodeRewriter for ColumnMatcherRewriter {
                     field.name(),
                 )));
             }
-            let exprs = self.modify_project_exprs(exprs)?;
+            let exprs = self.modify_project_exprs(exprs, node.schema())?;
             self.is_rewritten = true;
             let new_plan =
                 LogicalPlan::Projection(Projection::try_new(exprs, Arc::new(node.clone()))?);
