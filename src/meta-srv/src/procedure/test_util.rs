@@ -66,7 +66,7 @@ impl MailboxContext {
     ) {
         let pusher_id = channel.pusher_id();
         let pusher = Pusher::new(tx);
-        let _ = self.pushers.insert(pusher_id.string_key(), pusher).await;
+        let _ = self.pushers.insert(pusher_id, pusher).await;
     }
 
     pub fn mailbox(&self) -> &MailboxRef {
