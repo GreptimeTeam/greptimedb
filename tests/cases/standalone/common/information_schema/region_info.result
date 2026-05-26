@@ -6,6 +6,7 @@ DESC TABLE information_schema.region_info;
 | region_id              | UInt64  |     | NO   |         | FIELD         |
 | table_id               | UInt32  |     | NO   |         | FIELD         |
 | region_number          | UInt32  |     | NO   |         | FIELD         |
+| region_group           | UInt8   |     | NO   |         | FIELD         |
 | region_sequence        | UInt32  |     | NO   |         | FIELD         |
 | state                  | String  |     | NO   |         | FIELD         |
 | role                   | String  |     | NO   |         | FIELD         |

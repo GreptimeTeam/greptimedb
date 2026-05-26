@@ -683,6 +683,7 @@ impl MitoRegion {
             region_id,
             table_id: region_id.table_id(),
             region_number: region_id.region_number(),
+            region_group: region_id.region_group(),
             region_sequence: region_id.region_sequence(),
             state: state.as_str().to_string(),
             role: role.to_string(),

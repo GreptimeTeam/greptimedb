@@ -660,7 +660,6 @@ impl MitoEngine {
         self.inner
             .workers
             .all_regions()
-            .into_iter()
             .map(|region| region.region_info_entry(node_id))
             .collect()
     }
