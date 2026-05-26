@@ -1,0 +1,26 @@
+src/meta-srv/src/procedure/repartition/repartition_start.rs
+  s_cb30d61f84a023::t_e1d931aae5ecb0 225-235,237,278,286,288
+src/meta-srv/src/procedure/repartition/plan.rs
+  s_cb30d61f84a023::t_53ea403780f480 29,31,298-371
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.1",
+  "base_commit_sha": "2bf8bf7abace0ec7f1a77d3a0c73dedeae3cec72",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_cb30d61f84a023": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_19cd64a0cffeUo5vb4H0v2DZac",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
