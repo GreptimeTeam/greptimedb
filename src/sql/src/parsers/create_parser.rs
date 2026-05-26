@@ -502,6 +502,12 @@ impl<'a> ParserContext<'a> {
         if !self.parser.parse_keyword(Keyword::PARTITION) {
             return Ok(None);
         }
+
+        self.parse_partition_on_columns().map(Some)
+    }
+
+    /// Parses the "ON COLUMNS (...) (...)" part after "PARTITION".
+    pub(crate) fn parse_partition_on_columns(&mut self) -> Result<Partitions> {
         self.parser
             .expect_keywords(&[Keyword::ON, Keyword::COLUMNS])
             .context(error::UnexpectedSnafu {
@@ -520,7 +526,7 @@ impl<'a> ParserContext<'a> {
 
         let exprs = self.parse_comma_separated(Self::parse_partition_entry)?;
 
-        Ok(Some(Partitions { column_list, exprs }))
+        Ok(Partitions { column_list, exprs })
     }
 
     fn parse_partition_entry(&mut self) -> Result<Expr> {

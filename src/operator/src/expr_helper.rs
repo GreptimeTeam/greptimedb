@@ -814,6 +814,12 @@ pub(crate) fn to_alter_table_expr(
             }
             .fail();
         }
+        AlterTableOperation::Partition { .. } => {
+            return NotSupportedSnafu {
+                feat: "ALTER TABLE ... PARTITION ON COLUMNS",
+            }
+            .fail();
+        }
         AlterTableOperation::SetIndex { options } => {
             let option = match options {
                 sql::statements::alter::SetIndexOperation::Fulltext {
