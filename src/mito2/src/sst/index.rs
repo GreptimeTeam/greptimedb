@@ -2155,12 +2155,25 @@ mod tests {
         region_id: RegionId,
         reason: IndexBuildType,
     ) -> IndexBuildTask {
+        create_mock_task_for_schedule_with_result(env, file_id, region_id, reason)
+            .await
+            .0
+    }
+
+    /// Like [`create_mock_task_for_schedule`] but also returns the result receiver
+    /// so tests can verify pending task cancellation errors.
+    async fn create_mock_task_for_schedule_with_result(
+        env: &SchedulerEnv,
+        file_id: FileId,
+        region_id: RegionId,
+        reason: IndexBuildType,
+    ) -> (IndexBuildTask, mpsc::Receiver<Result<IndexBuildOutcome>>) {
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
         let indexer_builder = mock_indexer_builder(metadata, env).await;
         let (tx, _rx) = mpsc::channel(4);
-        let (result_tx, _result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
+        let (result_tx, result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
 
         let file_meta = FileMeta {
             region_id,
@@ -2171,7 +2184,7 @@ mod tests {
 
         let file = FileHandle::new(file_meta.clone(), file_purger.clone());
 
-        IndexBuildTask {
+        let task = IndexBuildTask {
             file,
             file_meta,
             reason,
@@ -2183,7 +2196,8 @@ mod tests {
             indexer_builder,
             request_sender: tx,
             result_sender: result_tx,
-        }
+        };
+        (task, result_rx)
     }
 
     #[tokio::test]
@@ -2336,5 +2350,219 @@ mod tests {
 
         scheduler.on_region_dropped(region_id).await;
         assert!(!scheduler.region_status.contains_key(&region_id));
+    }
+
+    /// Helper to set up a scheduler with files_limit=1 and 3 scheduled tasks,
+    /// returning the scheduler, the two pending-task result receivers, and the
+    /// version_control (needed for no-op assertion after cleanup).
+    async fn setup_scheduler_with_pending_tasks(
+        env: &SchedulerEnv,
+    ) -> (
+        IndexBuildScheduler,
+        mpsc::Receiver<Result<IndexBuildOutcome>>,
+        mpsc::Receiver<Result<IndexBuildOutcome>>,
+        VersionControlRef,
+        RegionId,
+        FileId, // building file_id for no-op assertion
+    ) {
+        let metadata = Arc::new(sst_region_metadata());
+        let region_id = metadata.region_id;
+        let file_purger = Arc::new(NoopFilePurger {});
+
+        let file_id1 = FileId::random();
+        let file_id2 = FileId::random();
+        let file_id3 = FileId::random();
+
+        let files = HashMap::from([
+            (
+                file_id1,
+                FileMeta {
+                    region_id,
+                    file_id: file_id1,
+                    file_size: 100,
+                    ..Default::default()
+                },
+            ),
+            (
+                file_id2,
+                FileMeta {
+                    region_id,
+                    file_id: file_id2,
+                    file_size: 100,
+                    ..Default::default()
+                },
+            ),
+            (
+                file_id3,
+                FileMeta {
+                    region_id,
+                    file_id: file_id3,
+                    file_size: 100,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let version_control =
+            mock_version_control(metadata.clone(), file_purger.clone(), files).await;
+
+        let mut scheduler = env.mock_index_build_scheduler(1);
+
+        // task1 becomes the "building" task (files_limit=1).
+        // We intentionally drop its result receiver: the building task's late-stop
+        // behavior is covered by the manual on_task_stopped no-op assertion below.
+        let (task1, _rx1) = create_mock_task_for_schedule_with_result(
+            env,
+            file_id1,
+            region_id,
+            IndexBuildType::Flush,
+        )
+        .await;
+        let (task2, rx2) = create_mock_task_for_schedule_with_result(
+            env,
+            file_id2,
+            region_id,
+            IndexBuildType::Flush,
+        )
+        .await;
+        let (task3, rx3) = create_mock_task_for_schedule_with_result(
+            env,
+            file_id3,
+            region_id,
+            IndexBuildType::Flush,
+        )
+        .await;
+
+        scheduler
+            .schedule_build(&version_control, task1)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task2)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task3)
+            .await
+            .unwrap();
+
+        // Verify: 1 building + 2 pending.
+        assert!(scheduler.region_status.contains_key(&region_id));
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 1);
+        assert_eq!(status.pending_tasks.len(), 2);
+
+        (scheduler, rx2, rx3, version_control, region_id, file_id1)
+    }
+
+    /// Pattern‑matches a pending‑task cancellation error: outer **must** be
+    /// [`crate::error::Error::BuildIndexAsync`] and the inner source **must** be
+    /// the lifecycle variant named by `expected_source` (`"dropped"`, `"closed"`,
+    /// or `"truncated"`).  Panics with a descriptive message on mismatch.
+    fn assert_lifecycle_error(
+        err: crate::error::Error,
+        expected_source: &str,
+        lifecycle_name: &str,
+    ) {
+        let crate::error::Error::BuildIndexAsync { source, .. } = err else {
+            panic!("[{lifecycle_name}] Expected BuildIndexAsync outer error, got: {err:?}");
+        };
+        let actual = match &*source {
+            crate::error::Error::RegionDropped { .. } => "dropped",
+            crate::error::Error::RegionClosed { .. } => "closed",
+            crate::error::Error::RegionTruncated { .. } => "truncated",
+            other => panic!(
+                "[{lifecycle_name}] Expected lifecycle source variant (RegionDropped/RegionClosed/RegionTruncated), got: {other:?}"
+            ),
+        };
+        assert_eq!(
+            actual, expected_source,
+            "[{lifecycle_name}] Source variant mismatch"
+        );
+    }
+
+    /// Receives a pending‑task error from `rx` with a 5‑second timeout, then
+    /// delegates to [`assert_lifecycle_error`].
+    async fn recv_lifecycle_error(
+        rx: &mut mpsc::Receiver<Result<IndexBuildOutcome>>,
+        expected_source: &str,
+        lifecycle_name: &str,
+    ) {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "[{lifecycle_name}] Timeout (5s) waiting for lifecycle error from pending task"
+                )
+            });
+        let result = result.unwrap_or_else(|| {
+            panic!("[{lifecycle_name}] Channel closed without receiving lifecycle error")
+        });
+        let err = result.unwrap_err();
+        assert_lifecycle_error(err, expected_source, lifecycle_name);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_lifecycle_cleanup() {
+        let env = SchedulerEnv::new().await;
+
+        // --- on_region_dropped ---
+        {
+            let (mut scheduler, mut rx2, mut rx3, version_control, region_id, building_file_id) =
+                setup_scheduler_with_pending_tasks(&env).await;
+
+            scheduler.on_region_dropped(region_id).await;
+
+            // region_status is removed.
+            assert!(
+                !scheduler.region_status.contains_key(&region_id),
+                "region_status should be removed after on_region_dropped"
+            );
+
+            // Pending-task receivers get lifecycle errors (with timeout).
+            recv_lifecycle_error(&mut rx2, "dropped", "on_region_dropped").await;
+            recv_lifecycle_error(&mut rx3, "dropped", "on_region_dropped").await;
+
+            // on_task_stopped after cleanup is a safe no-op.
+            scheduler.on_task_stopped(region_id, building_file_id, &version_control);
+            assert!(!scheduler.region_status.contains_key(&region_id));
+        }
+
+        // --- on_region_closed ---
+        {
+            let (mut scheduler, mut rx2, mut rx3, version_control, region_id, building_file_id) =
+                setup_scheduler_with_pending_tasks(&env).await;
+
+            scheduler.on_region_closed(region_id).await;
+
+            assert!(
+                !scheduler.region_status.contains_key(&region_id),
+                "region_status should be removed after on_region_closed"
+            );
+
+            recv_lifecycle_error(&mut rx2, "closed", "on_region_closed").await;
+            recv_lifecycle_error(&mut rx3, "closed", "on_region_closed").await;
+
+            scheduler.on_task_stopped(region_id, building_file_id, &version_control);
+            assert!(!scheduler.region_status.contains_key(&region_id));
+        }
+
+        // --- on_region_truncated ---
+        {
+            let (mut scheduler, mut rx2, mut rx3, version_control, region_id, building_file_id) =
+                setup_scheduler_with_pending_tasks(&env).await;
+
+            scheduler.on_region_truncated(region_id).await;
+
+            assert!(
+                !scheduler.region_status.contains_key(&region_id),
+                "region_status should be removed after on_region_truncated"
+            );
+
+            recv_lifecycle_error(&mut rx2, "truncated", "on_region_truncated").await;
+            recv_lifecycle_error(&mut rx3, "truncated", "on_region_truncated").await;
+
+            scheduler.on_task_stopped(region_id, building_file_id, &version_control);
+            assert!(!scheduler.region_status.contains_key(&region_id));
+        }
     }
 }

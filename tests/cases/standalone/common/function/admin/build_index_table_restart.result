@@ -1,0 +1,202 @@
+CREATE TABLE build_index_restart_test (
+    ts TIMESTAMP TIME INDEX,
+    msg TEXT,
+);
+
+Affected Rows: 0
+
+INSERT INTO build_index_restart_test VALUES 
+(1,"The quick brown fox jumps over the lazy dog"), 
+(2,"The quick brown fox jumps over the lazy cat"), 
+(3,"The quick brown fox jumps over the lazy mouse"), 
+(4,"The quick brown fox jumps over the lazy rabbit"), 
+(5,"The quick brown fox jumps over the lazy turtle");
+
+Affected Rows: 5
+
+ADMIN FLUSH_TABLE('build_index_restart_test');
+
++-----------------------------------------------+
+| ADMIN FLUSH_TABLE('build_index_restart_test') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+-- SQLNESS SLEEP 1s
+-- No fulltext index yet
+SHOW INDEX FROM build_index_restart_test;
+
++--------------------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table                    | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++--------------------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| build_index_restart_test | 1          | TIME INDEX | 1            | ts          | A         |             |          |        | NO   |            |         |               | YES     |            |
++--------------------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+
+-- No physical fulltext index metadata yet.
+-- ssts_index_meta.index_type uses physical backend names (fulltext_bloom/fulltext_tantivy),
+-- unlike SHOW INDEX's greptime-fulltext-index-* display value.
+-- One flushed SST with one fulltext column should produce exactly one fulltext metadata entry.
+SELECT COUNT(*) AS fulltext_index_meta_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (
+    SELECT table_id
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'build_index_restart_test'
+)
+AND index_type LIKE 'fulltext%';
+
++---------------------------+
+| fulltext_index_meta_count |
++---------------------------+
+| 0                         |
++---------------------------+
+
+ALTER TABLE build_index_restart_test MODIFY COLUMN msg SET FULLTEXT INDEX;
+
+Affected Rows: 0
+
+ADMIN BUILD_INDEX('build_index_restart_test');
+
++-----------------------------------------------+
+| ADMIN BUILD_INDEX('build_index_restart_test') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+-- SQLNESS SLEEP 1s
+-- Fulltext index built, verify via fulltext query
+SELECT msg FROM build_index_restart_test WHERE MATCHES(msg, 'fox') ORDER BY ts;
+
++------------------------------------------------+
+| msg                                            |
++------------------------------------------------+
+| The quick brown fox jumps over the lazy dog    |
+| The quick brown fox jumps over the lazy cat    |
+| The quick brown fox jumps over the lazy mouse  |
+| The quick brown fox jumps over the lazy rabbit |
+| The quick brown fox jumps over the lazy turtle |
++------------------------------------------------+
+
+-- Verify index metadata
+SHOW INDEX FROM build_index_restart_test;
+
++--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+| Table                    | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
++--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+| build_index_restart_test | 1          | FULLTEXT INDEX | 2            | msg         | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
+| build_index_restart_test | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                               |         |               | YES     |            |
++--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+
+-- Verify physical fulltext index metadata before restart
+SELECT COUNT(*) AS fulltext_index_meta_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (
+    SELECT table_id
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'build_index_restart_test'
+)
+AND index_type LIKE 'fulltext%';
+
++---------------------------+
+| fulltext_index_meta_count |
++---------------------------+
+| 1                         |
++---------------------------+
+
+-- SQLNESS ARG restart=true
+-- After restart, verify fulltext query still works
+SELECT msg FROM build_index_restart_test WHERE MATCHES(msg, 'fox') ORDER BY ts;
+
++------------------------------------------------+
+| msg                                            |
++------------------------------------------------+
+| The quick brown fox jumps over the lazy dog    |
+| The quick brown fox jumps over the lazy cat    |
+| The quick brown fox jumps over the lazy mouse  |
+| The quick brown fox jumps over the lazy rabbit |
+| The quick brown fox jumps over the lazy turtle |
++------------------------------------------------+
+
+-- Verify index metadata persists
+SHOW INDEX FROM build_index_restart_test;
+
++--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+| Table                    | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
++--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+| build_index_restart_test | 1          | FULLTEXT INDEX | 2            | msg         | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
+| build_index_restart_test | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                               |         |               | YES     |            |
++--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+
+-- Verify physical fulltext index metadata persists
+SELECT COUNT(*) AS fulltext_index_meta_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (
+    SELECT table_id
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'build_index_restart_test'
+)
+AND index_type LIKE 'fulltext%';
+
++---------------------------+
+| fulltext_index_meta_count |
++---------------------------+
+| 1                         |
++---------------------------+
+
+-- Run ADMIN BUILD_INDEX again (idempotency)
+ADMIN BUILD_INDEX('build_index_restart_test');
+
++-----------------------------------------------+
+| ADMIN BUILD_INDEX('build_index_restart_test') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+-- SQLNESS SLEEP 1s
+-- Fulltext query still works after idempotent rebuild
+SELECT msg FROM build_index_restart_test WHERE MATCHES(msg, 'fox') ORDER BY ts;
+
++------------------------------------------------+
+| msg                                            |
++------------------------------------------------+
+| The quick brown fox jumps over the lazy dog    |
+| The quick brown fox jumps over the lazy cat    |
+| The quick brown fox jumps over the lazy mouse  |
+| The quick brown fox jumps over the lazy rabbit |
+| The quick brown fox jumps over the lazy turtle |
++------------------------------------------------+
+
+-- Verify index metadata still present
+SHOW INDEX FROM build_index_restart_test;
+
++--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+| Table                    | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
++--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+| build_index_restart_test | 1          | FULLTEXT INDEX | 2            | msg         | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
+| build_index_restart_test | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                               |         |               | YES     |            |
++--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+
+-- Verify idempotent rebuild did not duplicate physical fulltext index metadata
+SELECT COUNT(*) AS fulltext_index_meta_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (
+    SELECT table_id
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'build_index_restart_test'
+)
+AND index_type LIKE 'fulltext%';
+
++---------------------------+
+| fulltext_index_meta_count |
++---------------------------+
+| 1                         |
++---------------------------+
+
+DROP TABLE build_index_restart_test;
+
+Affected Rows: 0
+
