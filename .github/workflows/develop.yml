@@ -698,20 +698,19 @@ jobs:
           persist-credentials: false
 
       - if: matrix.mode.kafka
-        name: Setup Kafka cluster
-        uses: ./.github/actions/setup-kafka-cluster
-        with:
-          provider: docker
+        name: Setup Kafka
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait kafka
 
       - if: matrix.mode.postgres
         name: Setup PostgreSQL
-        uses: ./.github/actions/setup-postgres-cluster
-        with:
-          provider: docker
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait postgres
 
       - if: matrix.mode.mysql
         name: Setup MySQL
-        uses: ./.github/actions/setup-mysql-cluster
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait mysql
         with:
           provider: docker
 
