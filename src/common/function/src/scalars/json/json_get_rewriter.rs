@@ -59,7 +59,10 @@ impl FunctionRewrite for JsonGetRewriter {
 //   json_get(column, path, <data_type>)
 // )
 fn inject_type_from_cast_expr(cast: Cast) -> Result<Transformed<Expr>> {
-    let Cast { expr, data_type } = cast;
+    let Cast {
+        expr,
+        mut data_type,
+    } = cast;
 
     let mut json_get = match *expr {
         Expr::ScalarFunction(f)
@@ -75,6 +78,9 @@ fn inject_type_from_cast_expr(cast: Cast) -> Result<Transformed<Expr>> {
         }
     };
 
+    if data_type.is_string() {
+        data_type = DataType::Utf8View;
+    }
     let with_type = ScalarValue::try_new_null(&data_type).map(|x| Expr::Literal(x, None))?;
     json_get.args.push(with_type);
     Ok(Transformed::yes(Expr::ScalarFunction(json_get)))

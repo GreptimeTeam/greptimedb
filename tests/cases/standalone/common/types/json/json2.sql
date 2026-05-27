@@ -42,7 +42,11 @@ explain select j.a.x::bool from json2_table;
 
 select j.a.b from json2_table order by ts;
 
+select j.a, j.a.x from json2_table order by ts;
+
 select j.c, j.y from json2_table order by ts;
+
+select j.a.b + 1 from json2_table order by ts;
 
 select j.d from json2_table order by ts;
 

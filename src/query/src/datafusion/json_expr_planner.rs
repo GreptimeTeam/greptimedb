@@ -115,11 +115,14 @@ fn extract_untyped_json_get(expr: &mut Expr) -> Option<&mut ScalarFunction> {
     }
 }
 
-fn push_json_get_type_arg(mut expr: Expr, data_type: DataType) -> Result<Either<Expr, Expr>> {
+fn push_json_get_type_arg(mut expr: Expr, mut data_type: DataType) -> Result<Either<Expr, Expr>> {
     let Some(json_get) = extract_untyped_json_get(&mut expr) else {
         return Ok(Either::Left(expr));
     };
 
+    if data_type.is_string() {
+        data_type = DataType::Utf8View;
+    }
     let with_type = ScalarValue::try_new_null(&data_type).map(|x| Expr::Literal(x, None))?;
     json_get.args.push(with_type);
 

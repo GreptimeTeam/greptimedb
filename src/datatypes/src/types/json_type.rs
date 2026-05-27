@@ -128,7 +128,7 @@ impl JsonNativeType {
                 JsonNumberType::I64 => ArrowDataType::Int64,
                 JsonNumberType::F64 => ArrowDataType::Float64,
             },
-            JsonNativeType::String => ArrowDataType::Utf8,
+            JsonNativeType::String => ArrowDataType::Utf8View,
             JsonNativeType::Array(array) => {
                 ArrowDataType::List(Arc::new(Field::new("item", array.as_arrow_type(), true)))
             }
