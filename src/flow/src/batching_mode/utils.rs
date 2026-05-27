@@ -1166,32 +1166,86 @@ impl ColumnMatcherRewriter {
             )));
         }
 
-        // Match remaining unknown output names by position, but only when the expression type
-        // matches the target sink column type. This keeps the legacy "omit output aliases and map
-        // by position" behavior while preventing misleading aliases like a string tag column being
-        // renamed to a timestamp column.
-        for (idx, expr) in exprs.iter_mut().enumerate() {
-            if all_names.contains(&expr.qualified_name().1) {
-                continue;
-            }
+        self.match_extra_output_columns(exprs, input_schema, &original_exprs, &all_names)
+    }
 
-            let Some(col_schema) = self.schema.column_schemas().get(idx) else {
-                continue;
-            };
+    /// Match flow output columns whose names are not in the sink schema by position only.
+    ///
+    /// This keeps the legacy "omit output aliases and map by position" behavior, but only when the
+    /// sink column at the same index is actually missing from the flow output. If the extra output
+    /// would be aliased to a sink column that already exists elsewhere, report a schema mismatch
+    /// instead of guessing another sink column by type.
+    fn match_extra_output_columns(
+        &self,
+        mut exprs: Vec<Expr>,
+        input_schema: &DFSchema,
+        original_exprs: &[Expr],
+        all_names: &BTreeSet<String>,
+    ) -> DfResult<Vec<Expr>> {
+        let mut output_names = exprs
+            .iter()
+            .map(|expr| expr.qualified_name().1)
+            .collect::<Vec<_>>();
+        let output_name_set = output_names.iter().cloned().collect::<BTreeSet<_>>();
+        let extra_expr_indices = output_names
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, name)| (!all_names.contains(name)).then_some(idx))
+            .collect::<Vec<_>>();
+        let missing_sink_indices = self
+            .schema
+            .column_schemas()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, column)| (!output_name_set.contains(&column.name)).then_some(idx))
+            .collect::<Vec<_>>();
 
-            let expr_type = ConcreteDataType::from_arrow_type(&expr.get_type(input_schema)?);
-            if is_obviously_incompatible_positional_match(&expr_type, &col_schema.data_type) {
-                return Err(DataFusionError::Plan(format!(
-                    "Cannot match flow output column '{}' to sink column '{}' by position: incompatible data types, flow output type is {:?}, sink column type is {:?}. {}",
-                    expr.qualified_name().1,
-                    col_schema.name,
-                    expr_type,
-                    col_schema.data_type,
-                    format_flow_sink_schema_mismatch(&original_exprs, self.schema.as_ref())
+        if extra_expr_indices.is_empty() && missing_sink_indices.is_empty() {
+            return Ok(exprs);
+        }
+
+        if extra_expr_indices.len() != missing_sink_indices.len() {
+            return Err(DataFusionError::Plan(format_flow_sink_schema_mismatch(
+                original_exprs,
+                self.schema.as_ref(),
+            )));
+        }
+
+        for expr_idx in extra_expr_indices {
+            if !missing_sink_indices.contains(&expr_idx) {
+                return Err(DataFusionError::Plan(format_flow_sink_schema_mismatch(
+                    original_exprs,
+                    self.schema.as_ref(),
                 )));
             }
 
-            *expr = expr.clone().alias(col_schema.name.clone());
+            let target_col_schema = &self.schema.column_schemas()[expr_idx];
+            let expr_type =
+                ConcreteDataType::from_arrow_type(&exprs[expr_idx].get_type(input_schema)?);
+            if is_obviously_incompatible_positional_match(&expr_type, &target_col_schema.data_type)
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "Cannot match flow output column '{}' to sink column '{}' by position: incompatible data types, flow output type is {:?}, sink column type is {:?}. {}",
+                    output_names[expr_idx],
+                    target_col_schema.name,
+                    expr_type,
+                    target_col_schema.data_type,
+                    format_flow_sink_schema_mismatch(original_exprs, self.schema.as_ref())
+                )));
+            }
+
+            let target_name = target_col_schema.name.clone();
+            exprs[expr_idx] = exprs[expr_idx].clone().alias(target_name.clone());
+            output_names[expr_idx] = target_name;
+        }
+
+        let duplicated_output_names = duplicate_names(&output_names);
+        if !duplicated_output_names.is_empty() {
+            return Err(DataFusionError::Plan(format!(
+                "Flow output schema contains duplicate column(s) after schema matching {:?}. {}",
+                duplicated_output_names,
+                format_flow_sink_schema_mismatch(&exprs, self.schema.as_ref())
+            )));
         }
 
         Ok(exprs)
@@ -1309,6 +1363,17 @@ fn is_obviously_incompatible_positional_match(
         || expr_type.is_boolean() != sink_type.is_boolean()
         || expr_type.is_json() != sink_type.is_json()
         || expr_type.is_vector() != sink_type.is_vector()
+}
+
+fn duplicate_names(names: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut duplicated = BTreeSet::new();
+    for name in names {
+        if !seen.insert(name.clone()) {
+            duplicated.insert(name.clone());
+        }
+    }
+    duplicated.into_iter().collect()
 }
 
 fn format_flow_sink_schema_mismatch(

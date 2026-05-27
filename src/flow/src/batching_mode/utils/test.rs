@@ -589,6 +589,93 @@ async fn test_gen_plan_with_matching_schema_rejects_positional_alias_type_mismat
 }
 
 #[tokio::test]
+async fn test_gen_plan_with_matching_schema_rejects_cross_position_extra_column_match() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "time_window",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        ),
+    ]));
+
+    let err = gen_plan_with_matching_schema(
+        "SELECT number, ts, date_bin('5 minutes', ts) AS time_window2 FROM numbers_with_ts GROUP BY number, ts, time_window2",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(
+        err.contains("Flow output schema does not match sink table schema"),
+        "{err}"
+    );
+    assert!(err.contains("time_window2"), "{err}");
+    assert!(err.contains("time_window"), "{err}");
+    assert!(!err.contains("DuplicateUnqualifiedField"), "{err}");
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_accepts_out_of_order_matching_names() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "time_window",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        ),
+    ]));
+
+    let plan = gen_plan_with_matching_schema(
+        "SELECT number, ts, date_bin('5 minutes', ts) AS time_window FROM numbers_with_ts GROUP BY number, ts, time_window",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    let output_names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        output_names,
+        vec![
+            "number".to_string(),
+            "ts".to_string(),
+            "time_window".to_string()
+        ]
+    );
+    assert!(duplicate_names(&output_names).is_empty());
+}
+
+#[tokio::test]
 async fn test_gen_plan_with_matching_schema_allows_numeric_positional_alias() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
