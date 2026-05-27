@@ -253,17 +253,17 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
     let mut stack = vec![plan];
 
     while let Some(plan) = stack.pop() {
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
-            if !merge_scan.is_flow_sink_scan() {
-                merge_merge_scan_region_watermarks(
-                    &mut merged,
-                    merge_scan
-                        .regions()
-                        .iter()
-                        .map(|region_id| region_id.as_u64()),
-                    merge_scan.sub_stage_metrics(),
-                );
-            }
+        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>()
+            && !merge_scan.is_flow_sink_scan()
+        {
+            merge_merge_scan_region_watermarks(
+                &mut merged,
+                merge_scan
+                    .regions()
+                    .iter()
+                    .map(|region_id| region_id.as_u64()),
+                merge_scan.sub_stage_metrics(),
+            );
         }
         stack.extend(plan.children().into_iter().cloned());
     }
@@ -389,7 +389,7 @@ mod tests {
     use datafusion::physical_plan::empty::EmptyExec;
     use datafusion_expr::LogicalPlanBuilder;
     use session::ReadPreference;
-    use session::context::{QueryContext, QueryContextBuilder};
+    use session::context::QueryContextBuilder;
     use store_api::storage::RegionId;
     use table::table_name::TableName;
 
