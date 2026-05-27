@@ -584,14 +584,14 @@ impl MitoRegion {
         let memtables = &version.memtables;
         let memtable_usage = (memtables.mutable_usage() + memtables.immutables_usage()) as u64;
 
-        let sst_usage = version.ssts.sst_usage();
-        let index_usage = version.ssts.index_usage();
+        let sst_usage = version.ssts.sst_usage(self.region_id);
+        let index_usage = version.ssts.index_usage(self.region_id);
         let flushed_entry_id = version.flushed_entry_id;
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
         let manifest_usage = self.stats.total_manifest_size();
-        let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
-        let num_files = version.ssts.num_files();
+        let num_rows = version.ssts.num_rows(self.region_id) + version.memtables.num_rows();
+        let num_files = version.ssts.num_files(self.region_id);
         let manifest_version = self.stats.manifest_version();
         let file_removed_cnt = self.stats.file_removed_cnt();
 
