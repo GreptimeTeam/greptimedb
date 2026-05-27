@@ -518,13 +518,6 @@ impl BatchingTask {
         METRIC_FLOW_ROWS
             .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
             .inc_by(affected_rows as _);
-        let affected_rows: usize = affected_rows.try_into().map_err(|_| {
-            UnexpectedSnafu {
-                reason: format!("Failed to convert rows to usize: {}", affected_rows),
-            }
-            .build()
-        })?;
-
         {
             let mut state = self.state.write().unwrap();
             let decision = Self::apply_query_result_to_state(
