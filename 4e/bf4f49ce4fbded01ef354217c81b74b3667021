@@ -1,0 +1,14 @@
+src/meta-srv/src/procedure/repartition/update_partition_metadata.rs
+  h_623774b620da8e 100-101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "4ebf4f49ce4fbded01ef354217c81b74b3667021",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
