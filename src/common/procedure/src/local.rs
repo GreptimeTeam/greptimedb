@@ -336,7 +336,15 @@ impl ManagerContext {
         self.procedures.write().unwrap().clear();
         self.running_procedures.lock().unwrap().clear();
         self.finished_procedures.lock().unwrap().clear();
-        self.runner_tasks.lock().unwrap().clear();
+        for handle in self
+            .runner_tasks
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, handle)| handle)
+        {
+            handle.abort();
+        }
         self.key_lock.clear();
         self.dynamic_key_lock.clear();
     }
@@ -351,12 +359,16 @@ impl ManagerContext {
         }
 
         let handle = spawn();
-        if handle.is_finished() {
-            return false;
-        }
-
         let _ = tasks.insert(procedure_id, handle);
         true
+    }
+
+    fn remove_procedure(&self, procedure_id: ProcedureId) {
+        self.procedures.write().unwrap().remove(&procedure_id);
+        self.running_procedures
+            .lock()
+            .unwrap()
+            .remove(&procedure_id);
     }
 
     pub(crate) fn remove_runner_task(&self, procedure_id: ProcedureId) {
@@ -736,19 +748,25 @@ impl LocalManager {
 
         let tracing_context = TracingContext::from_current_span();
 
-        self.manager_ctx.spawn_runner_task(procedure_id, || {
-            common_runtime::spawn_global(async move {
-                let span = tracing_context.attach(tracing::info_span!(
-                "LocalManager::submit_root_procedure",
-                    procedure_name = %runner.meta.type_name,
-                    procedure_id = %runner.meta.id,
-                ));
-                // Run the root procedure.
-                // The task was moved to another runtime for execution.
-                // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
-                runner.run().trace(span).await;
-            })
-        });
+        ensure!(
+            self.manager_ctx.spawn_runner_task(procedure_id, || {
+                common_runtime::spawn_global(async move {
+                    let span = tracing_context.attach(tracing::info_span!(
+                    "LocalManager::submit_root_procedure",
+                        procedure_name = %runner.meta.type_name,
+                        procedure_id = %runner.meta.id,
+                    ));
+                    // Run the root procedure.
+                    // The task was moved to another runtime for execution.
+                    // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
+                    runner.run().trace(span).await;
+                })
+            }),
+            {
+                self.manager_ctx.remove_procedure(procedure_id);
+                ManagerNotStartSnafu
+            }
+        );
 
         Ok(watcher)
     }
