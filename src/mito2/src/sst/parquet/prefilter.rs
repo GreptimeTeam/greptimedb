@@ -1686,7 +1686,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_filters_to_batch_handles_binary_pk_column() {
+    fn test_eval_pk_group_mask_handles_binary_pk_column() {
         let metadata = Arc::new(sst_region_metadata());
         let filters = Arc::new(new_test_filters(&[col("tag_0").eq(lit("a"))]));
         let mut pk_filter = Some(Box::new(CachedPrimaryKeyFilter::new(
@@ -1704,9 +1704,7 @@ mod tests {
             &[10, 11, 12, 13],
         );
 
-        let mask = apply_filters_to_batch(&batch, &mut pk_filter, &[], &[], "test")
-            .unwrap()
-            .unwrap();
+        let mask = eval_pk_group_mask(&batch, pk_filter.as_mut().unwrap().as_mut()).unwrap();
 
         assert_eq!(mask.count_set_bits(), 2);
     }
