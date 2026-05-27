@@ -47,6 +47,82 @@ pub struct ChainedRecordBatchStream {
     metrics: Arc<ArcSwapOption<RecordBatchMetrics>>,
 }
 
+/// A stream that returns at most `limit` rows from the input stream.
+pub struct LimitRecordBatchStream {
+    input: Option<SendableRecordBatchStream>,
+    schema: SchemaRef,
+    output_ordering: Option<Vec<OrderOption>>,
+    remaining: usize,
+}
+
+impl LimitRecordBatchStream {
+    pub fn new(input: SendableRecordBatchStream, limit: usize) -> Self {
+        let schema = input.schema();
+        let output_ordering = input.output_ordering().map(|ordering| ordering.to_vec());
+        Self {
+            input: Some(input),
+            schema,
+            output_ordering,
+            remaining: limit,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.remaining = 0;
+        self.input = None;
+    }
+}
+
+impl RecordBatchStream for LimitRecordBatchStream {
+    fn name(&self) -> &str {
+        "LimitRecordBatchStream"
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.output_ordering.as_deref()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.input.as_ref().and_then(|input| input.metrics())
+    }
+}
+
+impl Stream for LimitRecordBatchStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.remaining == 0 {
+            self.input = None;
+            return Poll::Ready(None);
+        }
+
+        let Some(input) = self.input.as_mut() else {
+            return Poll::Ready(None);
+        };
+
+        match input.poll_next_unpin(ctx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                let remaining = self.remaining;
+                if batch.num_rows() <= remaining {
+                    self.remaining -= batch.num_rows();
+                    if self.remaining == 0 {
+                        self.input = None;
+                    }
+                    Poll::Ready(Some(Ok(batch)))
+                } else {
+                    self.finish();
+                    Poll::Ready(Some(batch.slice(0, remaining)))
+                }
+            }
+            other => other,
+        }
+    }
+}
+
 impl ChainedRecordBatchStream {
     pub fn new(inputs: Vec<SendableRecordBatchStream>) -> Result<Self> {
         // check length
@@ -126,6 +202,7 @@ impl Stream for ChainedRecordBatchStream {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::pin::Pin;
     use std::sync::Arc;
 
@@ -140,7 +217,7 @@ mod tests {
     use crate::{OrderOption, RecordBatchStream};
 
     struct MockRecordBatchStream {
-        batch: Option<RecordBatch>,
+        batches: VecDeque<RecordBatch>,
         schema: SchemaRef,
     }
 
@@ -162,7 +239,7 @@ mod tests {
         type Item = Result<RecordBatch>;
 
         fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            let batch = self.batch.take();
+            let batch = self.batches.pop_front();
 
             if let Some(batch) = batch {
                 Poll::Ready(Some(Ok(batch)))
@@ -184,7 +261,7 @@ mod tests {
 
         let stream = MockRecordBatchStream {
             schema: schema.clone(),
-            batch: None,
+            batches: VecDeque::new(),
         };
 
         let batches = collect(Box::pin(stream)).await.unwrap();
@@ -196,7 +273,7 @@ mod tests {
 
         let stream = MockRecordBatchStream {
             schema: schema.clone(),
-            batch: Some(batch.clone()),
+            batches: VecDeque::from([batch.clone()]),
         };
         let batches = collect(Box::pin(stream)).await.unwrap();
         assert_eq!(1, batches.len());
@@ -204,10 +281,69 @@ mod tests {
 
         let stream = MockRecordBatchStream {
             schema: schema.clone(),
-            batch: Some(batch.clone()),
+            batches: VecDeque::from([batch.clone()]),
         };
         let batches = collect_batches(Box::pin(stream)).await.unwrap();
         let expect_batches = RecordBatches::try_new(schema.clone(), vec![batch]).unwrap();
         assert_eq!(expect_batches, batches);
+    }
+
+    #[tokio::test]
+    async fn test_limit_record_batch_stream() {
+        let schema = Arc::new(
+            Schema::try_new(vec![ColumnSchema::new(
+                "number",
+                ConcreteDataType::uint32_datatype(),
+                false,
+            )])
+            .unwrap(),
+        );
+        let batch1 = RecordBatch::new(
+            schema.clone(),
+            [Arc::new(UInt32Vector::from_vec(vec![0, 1, 2])) as _],
+        )
+        .unwrap();
+        let batch2 = RecordBatch::new(
+            schema.clone(),
+            [Arc::new(UInt32Vector::from_vec(vec![3, 4, 5])) as _],
+        )
+        .unwrap();
+        let input = MockRecordBatchStream {
+            schema: schema.clone(),
+            batches: VecDeque::from([batch1, batch2]),
+        };
+
+        let batches = collect(Box::pin(LimitRecordBatchStream::new(Box::pin(input), 4)))
+            .await
+            .unwrap();
+        assert_eq!(2, batches.len());
+        assert_eq!(3, batches[0].num_rows());
+        assert_eq!(1, batches[1].num_rows());
+    }
+
+    #[tokio::test]
+    async fn test_limit_record_batch_stream_zero_limit() {
+        let schema = Arc::new(
+            Schema::try_new(vec![ColumnSchema::new(
+                "number",
+                ConcreteDataType::uint32_datatype(),
+                false,
+            )])
+            .unwrap(),
+        );
+        let batch = RecordBatch::new(
+            schema.clone(),
+            [Arc::new(UInt32Vector::from_vec(vec![0, 1, 2])) as _],
+        )
+        .unwrap();
+        let input = MockRecordBatchStream {
+            schema,
+            batches: VecDeque::from([batch]),
+        };
+
+        let batches = collect(Box::pin(LimitRecordBatchStream::new(Box::pin(input), 0)))
+            .await
+            .unwrap();
+        assert!(batches.is_empty());
     }
 }

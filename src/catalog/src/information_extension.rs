@@ -23,7 +23,7 @@ use common_meta::rpc::procedure;
 use common_procedure::{ProcedureInfo, ProcedureState};
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
-use common_recordbatch::util::ChainedRecordBatchStream;
+use common_recordbatch::util::{ChainedRecordBatchStream, LimitRecordBatchStream};
 use meta_client::MetaClientRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -120,6 +120,7 @@ impl InformationExtension for DistributedInformationExtension {
             .map_err(BoxedError::new)
             .context(crate::error::ListNodesSnafu)?;
 
+        let global_limit = request.scan.limit;
         let plan = request
             .build_plan()
             .context(crate::error::DatafusionSnafu)?;
@@ -140,6 +141,13 @@ impl InformationExtension for DistributedInformationExtension {
 
         let chained =
             ChainedRecordBatchStream::new(streams).context(crate::error::CreateRecordBatchSnafu)?;
-        Ok(Box::pin(chained))
+        if let Some(limit) = global_limit {
+            Ok(Box::pin(LimitRecordBatchStream::new(
+                Box::pin(chained),
+                limit,
+            )))
+        } else {
+            Ok(Box::pin(chained))
+        }
     }
 }
