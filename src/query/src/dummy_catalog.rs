@@ -45,7 +45,7 @@ use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
-use crate::options::FlowQueryExtensions;
+use crate::options::{FlowIncrementalMode, FlowQueryExtensions};
 
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
 #[derive(Clone, Debug)]
@@ -338,7 +338,7 @@ fn scan_request_from_query_context(
     query_ctx: &QueryContext,
 ) -> Result<ScanRequest> {
     let decision = decide_flow_scan(query_ctx, region_id)?;
-    Ok(build_scan_request(query_ctx, region_id, &decision))
+    Ok(build_scan_request(&decision))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,6 +357,11 @@ struct FlowScanDecision {
     /// When present, this becomes the effective memtable upper bound and suppresses
     /// binding a new snapshot on scan open.
     memtable_max_sequence: Option<u64>,
+    /// Optional minimum SST sequence for source scans.
+    /// Set to `Some(u64::MAX)` for memtable-only incremental mode to exclude
+    /// all SST files. For sink scans this is `None`. For non-flow queries
+    /// it comes from `query_ctx.sst_min_sequence()`.
+    sst_min_sequence: Option<u64>,
 }
 
 impl FlowScanDecision {
@@ -366,6 +371,7 @@ impl FlowScanDecision {
             snapshot_on_scan: false,
             memtable_min_sequence: None,
             memtable_max_sequence: None,
+            sst_min_sequence: None,
         }
     }
 }
@@ -379,6 +385,7 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
             snapshot_on_scan: false,
             memtable_min_sequence: None,
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
+            sst_min_sequence: query_ctx.sst_min_sequence(region_id.as_u64()),
         });
     };
 
@@ -403,27 +410,35 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
 
     let memtable_max_sequence = query_ctx.get_snapshot(region_id.as_u64());
 
+    let sst_min_sequence = if apply_incremental
+        && flow_extensions.incremental_mode == Some(FlowIncrementalMode::MemtableOnly)
+    {
+        // Memtable-only incremental mode: exclude all SST files from the
+        // source scan by setting the minimum SST sequence to u64::MAX.
+        // TODO(discord9): Replace this sentinel with an explicit SST scan mode
+        // (for example `SkipAll`) so memtable-only scans don't encode SST
+        // exclusion through a sequence boundary.
+        Some(u64::MAX)
+    } else {
+        query_ctx.sst_min_sequence(region_id.as_u64())
+    };
+
     Ok(FlowScanDecision {
         is_sink_scan: false,
         snapshot_on_scan: memtable_max_sequence.is_none()
             && flow_extensions.should_collect_region_watermark(),
         memtable_min_sequence,
         memtable_max_sequence,
+        sst_min_sequence,
     })
 }
 
-fn build_scan_request(
-    query_ctx: &QueryContext,
-    region_id: RegionId,
-    decision: &FlowScanDecision,
-) -> ScanRequest {
+fn build_scan_request(decision: &FlowScanDecision) -> ScanRequest {
     // Build the initial scan request from the final decision known at provider creation
     // time. A later scan may still refresh `memtable_max_sequence` if another source scan
     // has bound a snapshot into `query_ctx` after this provider was created.
     ScanRequest {
-        sst_min_sequence: (!decision.is_sink_scan)
-            .then(|| query_ctx.sst_min_sequence(region_id.as_u64()))
-            .flatten(),
+        sst_min_sequence: decision.sst_min_sequence,
         snapshot_on_scan: decision.snapshot_on_scan,
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
@@ -841,6 +856,7 @@ mod tests {
 
         let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
         assert_eq!(request.memtable_min_sequence, Some(55));
+        assert_eq!(request.sst_min_sequence, Some(u64::MAX));
     }
 
     #[test]

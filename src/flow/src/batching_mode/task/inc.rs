@@ -105,19 +105,45 @@ impl BatchingTask {
             return Ok(Some(plan.clone()));
         }
 
-        // Fetch sink table for the merge rewrite
-        let (sink_table, _) = get_table_info_df_schema(
+        // Fetch sink table for the merge rewrite.
+        // Transient errors (catalog, schema, filter, or rewrite) should not
+        // permanently disable incremental mode. Instead, we fall back to a
+        // full-snapshot plan for this round while keeping incremental retryable.
+        let sink_table = match get_table_info_df_schema(
             self.config.catalog_manager.clone(),
             self.config.sink_table_name.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok((table, _)) => table,
+            Err(err) => {
+                warn!(
+                    "Flow {} failed to fetch sink table for incremental rewrite; \
+                     falling back to full snapshot for this round: {:?}",
+                    self.config.flow_id, err
+                );
+                self.state.write().unwrap().mark_full_snapshot();
+                return Ok(None);
+            }
+        };
         let sink_schema = sink_table.table_info().meta.schema.clone();
-        let sink_dirty_filter = build_sink_dirty_time_window_filter_expr(
+        let sink_dirty_filter = match build_sink_dirty_time_window_filter_expr(
             self.config.flow_id,
             &analysis,
             &sink_schema,
             dirty_filter,
-        )?;
+        ) {
+            Ok(filter) => filter,
+            Err(err) => {
+                warn!(
+                    "Flow {} failed to build sink dirty time window filter; \
+                     falling back to full snapshot for this round: {:?}",
+                    self.config.flow_id, err
+                );
+                self.state.write().unwrap().mark_full_snapshot();
+                return Ok(None);
+            }
+        };
 
         let rewritten_inner = match rewrite_incremental_aggregate_with_sink_merge(
             &inner_plan,
@@ -132,10 +158,10 @@ impl BatchingTask {
             Err(err) => {
                 warn!(
                     "Flow {} failed to rewrite incremental aggregate with sink merge; \
-                     permanently disabling incremental for this flow: {:?}",
+                     falling back to full snapshot for this round: {:?}",
                     self.config.flow_id, err
                 );
-                self.state.write().unwrap().disable_incremental();
+                self.state.write().unwrap().mark_full_snapshot();
                 return Ok(None);
             }
         };
@@ -166,38 +192,51 @@ impl BatchingTask {
     ) -> Result<Vec<(&'static str, String)>, Error> {
         let mut extensions = vec![("flow.return_region_seq", "true".to_string())];
 
-        if let Some(table) = self
-            .config
-            .catalog_manager
-            .table(
-                &self.config.sink_table_name[0],
-                &self.config.sink_table_name[1],
-                &self.config.sink_table_name[2],
-                None,
-            )
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?
-        {
+        let incremental_checkpoints_json = {
+            let state = self.state.read().unwrap();
+            if incremental_safe
+                && can_advance_checkpoints
+                && !state.is_incremental_disabled()
+                && state.checkpoint_mode() == CheckpointMode::Incremental
+                && !state.checkpoints().is_empty()
+            {
+                Some(serde_json::to_string(state.checkpoints()).map_err(|err| {
+                    UnexpectedSnafu {
+                        reason: format!("Failed to serialize checkpoint map: {err}"),
+                    }
+                    .build()
+                })?)
+            } else {
+                None
+            }
+        };
+
+        if let Some(checkpoints_json) = incremental_checkpoints_json {
+            let table = self
+                .config
+                .catalog_manager
+                .table(
+                    &self.config.sink_table_name[0],
+                    &self.config.sink_table_name[1],
+                    &self.config.sink_table_name[2],
+                    None,
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .ok_or_else(|| {
+                    UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} cannot build incremental extensions because sink table {:?} was not found",
+                            self.config.flow_id, self.config.sink_table_name
+                        ),
+                    }
+                    .build()
+                })?;
             extensions.push((
                 FLOW_SINK_TABLE_ID,
                 table.table_info().table_id().to_string(),
             ));
-        }
-
-        let state = self.state.read().unwrap();
-        if incremental_safe
-            && can_advance_checkpoints
-            && !state.is_incremental_disabled()
-            && state.checkpoint_mode() == CheckpointMode::Incremental
-            && !state.checkpoints().is_empty()
-        {
-            let checkpoints_json = serde_json::to_string(state.checkpoints()).map_err(|err| {
-                UnexpectedSnafu {
-                    reason: format!("Failed to serialize checkpoint map: {err}"),
-                }
-                .build()
-            })?;
             extensions.push((
                 FLOW_INCREMENTAL_MODE,
                 FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),

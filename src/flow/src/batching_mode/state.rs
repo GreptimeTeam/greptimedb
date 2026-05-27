@@ -182,12 +182,10 @@ impl TaskState {
     /// if current the dirty time range is longer than one query can handle,
     /// execute immediately to faster clean up dirty time windows.
     ///
-    /// When `prefer_short_incremental_cadence` is true and the dirty backlog does not
-    /// require immediate execution, a short cadence based on `min_refresh_duration`
-    /// is used instead of the normal time-window-based long cadence.
-    ///
-    /// Short cadence is best-effort mitigation for memtable-only / flush-driven
-    /// stale cursor exposure, not a correctness guarantee.
+    /// If `prefer_short_incremental_cadence` is true, run incremental queries
+    /// more often when there is no large dirty backlog. This only reduces the
+    /// chance of hitting a stale cursor after flush; it is not required for
+    /// correctness.
     pub fn get_next_start_query_time(
         &self,
         flow_id: FlowId,
@@ -215,12 +213,9 @@ impl TaskState {
         // to faster clean up dirty time windows
         if cur_dirty_window_size < max_query_update_range {
             if prefer_short_incremental_cadence {
-                // Short incremental cadence: avoid the normal time-window-based
-                // lower bound, but still back off to at least the last query
-                // duration so sink-side work can self-throttle. Preserve the
-                // existing max-timeout cap. This is best-effort mitigation for
-                // memtable-only / flush-driven stale cursor exposure, not a
-                // correctness guarantee.
+                // Run incremental queries sooner than the normal time-window
+                // cadence, while still backing off by at least the previous
+                // query duration and respecting the max-timeout cap.
                 let next_duration = self.last_query_duration.max(min_refresh_duration);
                 let next_duration = if let Some(max_timeout) = max_timeout {
                     next_duration.min(max_timeout)

@@ -537,7 +537,12 @@ fn test_checkpoint_decision_labels_are_stable() {
 
 #[tokio::test]
 async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
-    let (task, _) = new_test_task_and_plan_with_missing_sink().await;
+    let (task, _) = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+    )
+    .await
+    .into_task_and_plan();
 
     let extensions = task.build_flow_query_extensions(false, true).await.unwrap();
     assert_eq!(
@@ -788,7 +793,7 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
 }
 
 #[tokio::test]
-async fn test_prepare_plan_for_incremental_disables_on_rewrite_error() {
+async fn test_prepare_plan_for_incremental_falls_back_without_disable_on_rewrite_error() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let plan = sql_to_df_plan(
@@ -861,7 +866,7 @@ async fn test_prepare_plan_for_incremental_disables_on_rewrite_error() {
         .unwrap();
     assert!(incremental_plan.is_none());
     let state = task.state.read().unwrap();
-    assert!(state.is_incremental_disabled());
+    assert!(!state.is_incremental_disabled());
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
 }
 

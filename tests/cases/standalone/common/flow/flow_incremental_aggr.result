@@ -45,6 +45,17 @@ SELECT total, min_n, max_n, time_window FROM incremental_aggr_sink ORDER BY time
 | 30    | 10    | 20    | 2024-01-01T00:00:00 |
 +-------+-------+-------+---------------------+
 
+-- Move already checkpointed source rows into SST. The next incremental run
+-- must still read only the memtable delta and must not merge these old SST
+-- rows again.
+ADMIN FLUSH_TABLE('incremental_aggr_input');
+
++---------------------------------------------+
+| ADMIN FLUSH_TABLE('incremental_aggr_input') |
++---------------------------------------------+
+| 0                                           |
++---------------------------------------------+
+
 -- Insert more rows into the same time window. An incremental-safe flow should
 -- merge the delta aggregate with the existing sink aggregate state.
 INSERT INTO incremental_aggr_input VALUES
