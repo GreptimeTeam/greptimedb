@@ -27,14 +27,12 @@ use crate::procedure::repartition::{Context, State};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PartitionMetadataUpdate {
     pub partition_key_indices: Vec<usize>,
-    pub applied: bool,
 }
 
 impl PartitionMetadataUpdate {
     pub fn new(partition_key_indices: Vec<usize>) -> Self {
         Self {
             partition_key_indices,
-            applied: false,
         }
     }
 }
@@ -65,6 +63,14 @@ impl State for UpdatePartitionMetadata {
             ));
         };
         let partition_key_indices = update.partition_key_indices.clone();
+        ensure!(
+            !partition_key_indices.is_empty(),
+            error::InvalidArgumentsSnafu {
+                err_msg:
+                    "Repartition partition metadata update expects non-empty partition key indices"
+                        .to_string(),
+            }
+        );
 
         let table_id = ctx.persistent_ctx.table_id;
         let table_lock = TableLock::Write(table_id).into();
@@ -72,9 +78,6 @@ impl State for UpdatePartitionMetadata {
         let table_info_value = ctx.get_raw_table_info_value().await?;
         let current_partition_key_indices = &table_info_value.table_info.meta.partition_key_indices;
         if current_partition_key_indices == &partition_key_indices {
-            if let Some(update) = ctx.persistent_ctx.partition_metadata_update.as_mut() {
-                update.applied = true;
-            }
             return Ok((
                 Box::new(AllocateRegion::new(self.plan_entries.clone())),
                 Status::executing(true),
@@ -82,8 +85,8 @@ impl State for UpdatePartitionMetadata {
         }
         ensure!(
             current_partition_key_indices.is_empty(),
-            error::UnexpectedSnafu {
-                violated: format!(
+            error::InvalidArgumentsSnafu {
+                err_msg: format!(
                     "Repartition partition metadata update expects an unpartitioned table, but table {} has partition key indices: {:?}",
                     table_id, current_partition_key_indices
                 ),
@@ -95,9 +98,6 @@ impl State for UpdatePartitionMetadata {
         ctx.update_table_info(&table_info_value, table_info_value.update(new_table_info))
             .await?;
         ctx.invalidate_table_cache().await?;
-        if let Some(update) = ctx.persistent_ctx.partition_metadata_update.as_mut() {
-            update.applied = true;
-        }
 
         Ok((
             Box::new(AllocateRegion::new(self.plan_entries.clone())),
@@ -169,13 +169,6 @@ mod tests {
         assert!(status.need_persist());
         assert!(next.as_any().is::<AllocateRegion>());
         assert_eq!(partition_key_indices(&ctx).await, vec![0]);
-        assert!(
-            ctx.persistent_ctx
-                .partition_metadata_update
-                .as_ref()
-                .unwrap()
-                .applied
-        );
     }
 
     #[tokio::test]
@@ -194,13 +187,23 @@ mod tests {
         assert!(status.need_persist());
         assert!(next.as_any().is::<AllocateRegion>());
         assert_eq!(partition_key_indices(&ctx).await, vec![0]);
-        assert!(
-            ctx.persistent_ctx
-                .partition_metadata_update
-                .as_ref()
-                .unwrap()
-                .applied
-        );
+    }
+
+    #[tokio::test]
+    async fn test_update_partition_metadata_rejects_empty_partition_key_indices() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut ctx = new_test_context(&env, table_id).await;
+        ctx.persistent_ctx.partition_metadata_update = Some(PartitionMetadataUpdate::new(vec![]));
+        let mut state = UpdatePartitionMetadata::new(vec![]);
+
+        let err = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("non-empty partition key indices"));
+        assert!(partition_key_indices(&ctx).await.is_empty());
     }
 
     #[tokio::test]

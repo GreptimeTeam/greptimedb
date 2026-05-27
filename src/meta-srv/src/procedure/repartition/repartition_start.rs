@@ -91,6 +91,13 @@ impl State for RepartitionStart {
         ctx: &mut Context,
         _: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        ensure!(
+            !self.to_exprs.is_empty(),
+            error::InvalidArgumentsSnafu {
+                err_msg: "Repartition expects non-empty target partition expressions".to_string(),
+            }
+        );
+
         let timer = Instant::now();
         let (physical_table_id, table_route) = ctx
             .table_metadata_manager
@@ -163,6 +170,14 @@ impl RepartitionStart {
             return Ok(());
         }
 
+        ensure!(
+            !partition_columns.is_empty(),
+            error::InvalidArgumentsSnafu {
+                err_msg: "Unpartitioned repartition expects non-empty partition columns"
+                    .to_string(),
+            }
+        );
+
         let table_info_value = ctx.get_table_info_value().await?;
         ensure!(
             table_info_value
@@ -170,8 +185,8 @@ impl RepartitionStart {
                 .meta
                 .partition_key_indices
                 .is_empty(),
-            error::UnexpectedSnafu {
-                violated: format!(
+            error::InvalidArgumentsSnafu {
+                err_msg: format!(
                     "Unpartitioned repartition expects an unpartitioned table, but table {} has partition key indices: {:?}",
                     ctx.persistent_ctx.table_id,
                     table_info_value.table_info.meta.partition_key_indices
@@ -183,14 +198,14 @@ impl RepartitionStart {
         let partition_key_indices = partition_columns
             .iter()
             .map(|column_name| {
-                schema
-                    .column_index_by_name(column_name)
-                    .with_context(|| error::UnexpectedSnafu {
-                        violated: format!(
+                schema.column_index_by_name(column_name).with_context(|| {
+                    error::InvalidArgumentsSnafu {
+                        err_msg: format!(
                             "Partition column {} not found in table {}",
                             column_name, ctx.persistent_ctx.table_id
                         ),
-                    })
+                    }
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         ctx.persistent_ctx.partition_metadata_update =
@@ -517,7 +532,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_partitions_source_does_not_initialize_partition_metadata_update() {
+    async fn test_partitioned_source_does_not_initialize_partition_metadata_update() {
         let env = TestingEnv::new();
         let table_id = 1024;
         env.create_physical_table_metadata_for_repartition(
@@ -601,6 +616,70 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("expects an unpartitioned table"));
+        assert!(ctx.persistent_ctx.partition_metadata_update.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_repartition_start_rejects_empty_target_partition_exprs() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut ctx = new_test_context(&env, table_id).await;
+        let mut state =
+            RepartitionStart::new(RepartitionFrom::Partitioned { exprs: vec![] }, vec![]);
+
+        let err = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("non-empty target partition expressions")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unpartitioned_source_rejects_empty_target_partition_exprs() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut ctx = new_test_context(&env, table_id).await;
+        let mut state = RepartitionStart::new(
+            RepartitionFrom::Unpartitioned {
+                partition_columns: vec!["col1".to_string()],
+            },
+            vec![],
+        );
+
+        let err = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("non-empty target partition expressions")
+        );
+        assert!(ctx.persistent_ctx.partition_metadata_update.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unpartitioned_source_rejects_empty_partition_columns() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut ctx = new_test_context(&env, table_id).await;
+        let mut state = RepartitionStart::new(
+            RepartitionFrom::Unpartitioned {
+                partition_columns: vec![],
+            },
+            vec![range_expr("col1", 0, 50)],
+        );
+
+        let err = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("non-empty partition columns"));
         assert!(ctx.persistent_ctx.partition_metadata_update.is_none());
     }
 

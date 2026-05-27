@@ -624,7 +624,7 @@ impl RepartitionProcedure {
         else {
             return Ok(());
         };
-        if !update.applied || update.partition_key_indices.is_empty() {
+        if update.partition_key_indices.is_empty() {
             return Ok(());
         }
 
@@ -644,9 +644,12 @@ impl RepartitionProcedure {
         self.context
             .update_table_info(&table_info_value, table_info_value.update(new_table_info))
             .await?;
-        if let Err(err) = self.context.invalidate_table_cache().await {
-            warn!(err; "Failed to invalidate table cache during repartition partition metadata rollback, table_id: {}", self.context.persistent_ctx.table_id);
-        }
+
+        // Do not invalidate the table cache here. The table routes may still
+        // contain partition expressions until `rollback_inner` rolls them back.
+        // Exposing cleared partition columns with partitioned routes can build
+        // an inconsistent partition rule. The cache is invalidated once after
+        // both partition metadata and routes are rolled back.
 
         Ok(())
     }
@@ -1174,7 +1177,6 @@ mod tests {
             .unwrap();
         context.persistent_ctx.partition_metadata_update = Some(PartitionMetadataUpdate {
             partition_key_indices: vec![0],
-            applied: true,
         });
         let mut procedure = RepartitionProcedure {
             state: Box::new(UpdatePartitionMetadata::new(vec![])),
@@ -1196,53 +1198,6 @@ mod tests {
                 .meta
                 .partition_key_indices,
             vec![1]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_repartition_rollback_preserves_partition_metadata_if_not_applied() {
-        let env = TestingEnv::new();
-        let table_id = 1024;
-        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
-        env.create_physical_table_metadata_for_repartition(
-            table_id,
-            vec![test_region_route(RegionId::new(table_id, 1), "")],
-            test_region_wal_options(&[1]),
-        )
-        .await;
-
-        let mut context = new_parent_context(&env, node_manager, table_id);
-        let current = context.get_raw_table_info_value().await.unwrap();
-        let mut table_info = current.table_info.clone();
-        table_info.meta.partition_key_indices = vec![0, 1];
-        context
-            .update_table_info(&current, current.update(table_info))
-            .await
-            .unwrap();
-        context.persistent_ctx.partition_metadata_update = Some(PartitionMetadataUpdate {
-            partition_key_indices: vec![0],
-            applied: false,
-        });
-        let mut procedure = RepartitionProcedure {
-            state: Box::new(UpdatePartitionMetadata::new(vec![])),
-            context,
-        };
-
-        procedure
-            .rollback(&TestingEnv::procedure_context())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            procedure
-                .context
-                .get_table_info_value()
-                .await
-                .unwrap()
-                .table_info
-                .meta
-                .partition_key_indices,
-            vec![0, 1]
         );
     }
 
