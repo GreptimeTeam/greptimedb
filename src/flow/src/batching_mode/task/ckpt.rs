@@ -29,6 +29,23 @@ use crate::metrics::{
 };
 
 impl BatchingTask {
+    pub(super) fn apply_query_failure_to_state(
+        state: &mut TaskState,
+        elapsed: Duration,
+    ) -> Option<FlowCheckpointDecision> {
+        state.after_query_exec(elapsed, false);
+        let checkpoint_mode = state.checkpoint_mode();
+        if checkpoint_mode == CheckpointMode::Incremental {
+            state.mark_full_snapshot();
+            Some(FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: checkpoint_mode,
+                reason: FlowQueryFallbackReason::IncrementalQueryFailure,
+            })
+        } else {
+            None
+        }
+    }
+
     pub(super) fn apply_query_result_to_state(
         state: &mut TaskState,
         res: &OutputWithMetrics,

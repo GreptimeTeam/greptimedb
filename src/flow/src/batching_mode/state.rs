@@ -424,7 +424,7 @@ impl DirtyTimeWindows {
         );
         self.merge_dirty_time_windows(window_size, expire_lower_bound)?;
 
-        if self.windows.len() > self.max_filter_num_per_query {
+        if self.windows.len() > window_cnt {
             let first_time_window = self.windows.first_key_value();
             let last_time_window = self.windows.last_key_value();
 
@@ -433,7 +433,7 @@ impl DirtyTimeWindows {
                     "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
                     task_ctx.config.flow_id,
                     self.windows.len(),
-                    self.max_filter_num_per_query,
+                    window_cnt,
                     task_ctx.config.time_window_expr,
                     task_ctx.config.expire_after,
                     first_time_window,
@@ -445,7 +445,7 @@ impl DirtyTimeWindows {
                     "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
                     flow_id,
                     self.windows.len(),
-                    self.max_filter_num_per_query,
+                    window_cnt,
                     first_time_window,
                     last_time_window
                 )

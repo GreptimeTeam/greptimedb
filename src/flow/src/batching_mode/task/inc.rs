@@ -68,10 +68,11 @@ impl BatchingTask {
         };
 
         // Analyze the plan for incremental rewritability.
-        // PR3 only enables incremental reads for aggregate / group-by plans via
-        // the PR4 delta-left-join rewrite. Non-aggregate SQL (projection, filter,
-        // or other non-aggregate shapes) stays full-snapshot until separately
-        // supported, and incremental mode is permanently disabled for this flow.
+        // Incremental reads currently require aggregate / group-by plans that
+        // can be rewritten into a delta-left-join-sink merge. Non-aggregate SQL
+        // (projection, filter, or other non-aggregate shapes) stays full-snapshot
+        // until separately supported, and incremental mode is permanently
+        // disabled for this flow.
         let Some(analysis) = analyze_incremental_aggregate_plan(&inner_plan)? else {
             warn!(
                 "Flow {} incremental mode but plan is not an aggregate query; \

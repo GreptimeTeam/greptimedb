@@ -420,7 +420,7 @@ fn test_apply_query_result_to_state_advances_incremental_subset() {
 }
 
 #[test]
-fn test_apply_query_result_to_state_blocks_full_snapshot_when_scoped_backlog_pending() {
+fn test_apply_query_result_to_state_blocks_full_snapshot_when_dirty_backlog_pending() {
     let query_ctx = QueryContext::arc();
     let (_tx, rx) = tokio::sync::oneshot::channel();
     let mut state = TaskState::new(query_ctx, rx);
@@ -445,7 +445,7 @@ fn test_apply_query_result_to_state_blocks_full_snapshot_when_scoped_backlog_pen
 }
 
 #[test]
-fn test_apply_query_result_to_state_blocks_incremental_when_scoped_backlog_pending() {
+fn test_apply_query_result_to_state_blocks_incremental_when_dirty_backlog_pending() {
     let query_ctx = QueryContext::arc();
     let (_tx, rx) = tokio::sync::oneshot::channel();
     let mut state = TaskState::new(query_ctx, rx);
@@ -471,6 +471,45 @@ fn test_apply_query_result_to_state_blocks_incremental_when_scoped_backlog_pendi
         state.checkpoints(),
         &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
     );
+}
+
+#[test]
+fn test_apply_query_failure_to_state_falls_back_from_incremental() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+
+    let decision =
+        BatchingTask::apply_query_failure_to_state(&mut state, std::time::Duration::from_millis(1));
+
+    assert_eq!(
+        decision,
+        Some(FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: CheckpointMode::Incremental,
+            reason: FlowQueryFallbackReason::IncrementalQueryFailure,
+        })
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(
+        state.checkpoints(),
+        &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+    );
+}
+
+#[test]
+fn test_apply_query_failure_to_state_keeps_full_snapshot_without_decision() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+
+    let decision =
+        BatchingTask::apply_query_failure_to_state(&mut state, std::time::Duration::from_millis(1));
+
+    assert_eq!(decision, None);
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert!(state.checkpoints().is_empty());
 }
 
 #[test]

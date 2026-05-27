@@ -488,7 +488,13 @@ impl BatchingTask {
                 "Failed to execute Flow {flow_id}, result: {err:?}, elapsed: {:?} with query: {}",
                 elapsed, &plan
             );
-            self.state.write().unwrap().after_query_exec(elapsed, false);
+            let decision = {
+                let mut state = self.state.write().unwrap();
+                Self::apply_query_failure_to_state(&mut state, elapsed)
+            };
+            if let Some(decision) = decision {
+                Self::record_checkpoint_decision(flow_id, decision);
+            }
         }
 
         // record slow query
