@@ -33,7 +33,7 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl::allocator::region_routes::RegionRoutesAllocatorRef;
 use common_meta::ddl::allocator::wal_options::WalOptionsAllocatorRef;
-use common_meta::ddl_manager::RepartitionProcedureFactory;
+use common_meta::ddl_manager::{RepartitionProcedureFactory, RepartitionSource};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::key::table_info::TableInfoValue;
@@ -808,20 +808,28 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
         ddl_ctx: &DdlContext,
         table_name: TableName,
         table_id: TableId,
-        from_exprs: Vec<String>,
+        source: RepartitionSource,
         to_exprs: Vec<String>,
         timeout: Option<Duration>,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
         let persistent_ctx = PersistentContext::new(table_name, table_id, timeout);
-        let from_exprs = from_exprs
-            .iter()
-            .map(|e| {
-                PartitionExpr::from_json_str(e)
-                    .context(error::DeserializePartitionExprSnafu)?
-                    .context(error::EmptyPartitionExprSnafu)
-            })
-            .collect::<Result<Vec<_>>>()
-            .map_err(BoxedError::new)?;
+        let from = match source {
+            RepartitionSource::Partitioned { exprs } => {
+                let exprs = exprs
+                    .iter()
+                    .map(|e| {
+                        PartitionExpr::from_json_str(e)
+                            .context(error::DeserializePartitionExprSnafu)?
+                            .context(error::EmptyPartitionExprSnafu)
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map_err(BoxedError::new)?;
+                RepartitionFrom::Partitioned { exprs }
+            }
+            RepartitionSource::Unpartitioned { partition_columns } => {
+                RepartitionFrom::Unpartitioned { partition_columns }
+            }
+        };
         let to_exprs = to_exprs
             .iter()
             .map(|e| {
@@ -833,7 +841,7 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
             .map_err(BoxedError::new)?;
 
         let procedure = RepartitionProcedure::new(
-            RepartitionFrom::Partitioned { exprs: from_exprs },
+            from,
             to_exprs,
             Context::new(
                 ddl_ctx,
