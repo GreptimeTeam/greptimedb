@@ -1669,7 +1669,7 @@ mod tests {
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
         let poison_manager = Arc::new(InMemoryPoisonStore::new());
         let manager = LocalManager::new(config, state_store, poison_manager, None, None);
-        manager.manager_ctx.set_running();
+        manager.start().await.unwrap();
 
         manager
             .manager_ctx
@@ -1677,7 +1677,6 @@ mod tests {
             .lock()
             .unwrap()
             .insert(ProcedureId::random());
-        manager.start().await.unwrap();
 
         // Submit a new procedure should fail.
         let mut procedure = ProcedureToLoad::new("submit");
