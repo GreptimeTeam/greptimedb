@@ -777,11 +777,11 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
         CheckpointMode::Incremental
     );
 
-    let (_plan, incremental_safe) = task
+    let incremental_plan = task
         .prepare_plan_for_incremental(&dml_plan, None)
         .await
         .unwrap();
-    assert!(!incremental_safe);
+    assert!(incremental_plan.is_none());
     let state = task.state.read().unwrap();
     assert!(state.is_incremental_disabled());
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
@@ -855,14 +855,86 @@ async fn test_prepare_plan_for_incremental_disables_on_rewrite_error() {
         CheckpointMode::Incremental
     );
 
-    let (_plan, incremental_safe) = task
+    let incremental_plan = task
         .prepare_plan_for_incremental(&dml_plan, None)
         .await
         .unwrap();
-    assert!(!incremental_safe);
+    assert!(incremental_plan.is_none());
     let state = task.state.read().unwrap();
     assert!(state.is_incremental_disabled());
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+}
+
+#[tokio::test]
+async fn test_prepare_plan_for_incremental_group_by_without_merge_columns_uses_original_plan() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let plan = sql_to_df_plan(
+        ctx.clone(),
+        query_engine.clone(),
+        "SELECT ts FROM numbers_with_ts GROUP BY ts",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (sink_table, _) = get_table_info_df_schema(
+        query_engine.engine_state().catalog_manager().clone(),
+        [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    let table_provider = Arc::new(DfTableProviderAdapter::new(sink_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider));
+    let dml_plan = LogicalPlan::Dml(DmlStatement::new(
+        datafusion_common::TableReference::bare("test"),
+        table_source,
+        WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+        Arc::new(plan),
+    ));
+
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query: "SELECT ts FROM numbers_with_ts GROUP BY ts",
+        plan: dml_plan.clone(),
+        time_window_expr: None,
+        expire_after: None,
+        sink_table_name: [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ],
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx: rx,
+        batch_opts: Arc::new(BatchingModeOptions::default()),
+        flow_eval_interval: None,
+    })
+    .unwrap();
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+
+    let incremental_plan = task
+        .prepare_plan_for_incremental(&dml_plan, None)
+        .await
+        .unwrap()
+        .expect("plain GROUP BY is incremental-safe without a rewrite");
+
+    assert_eq!(format!("{incremental_plan}"), format!("{dml_plan}"));
+    assert!(!task.state.read().unwrap().is_incremental_disabled());
 }
 
 #[tokio::test]
@@ -889,10 +961,11 @@ async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
         .write()
         .unwrap()
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
-    let (_plan, incremental_safe) = task
+    let incremental_plan = task
         .prepare_plan_for_incremental(&plan_info.plan, None)
         .await
         .unwrap();
+    let incremental_safe = incremental_plan.is_some();
 
     assert!(incremental_safe);
     assert!(!task.state.read().unwrap().is_incremental_disabled());

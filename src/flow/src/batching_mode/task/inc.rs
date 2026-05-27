@@ -36,27 +36,31 @@ use crate::batching_mode::utils::{
 use crate::error::{ExternalSnafu, UnexpectedSnafu};
 
 impl BatchingTask {
-    /// For incremental-mode SQL queries, attempt to rewrite the delta aggregate
-    /// plan into a safe delta-LEFT-JOIN-sink merge plan. Returns `(plan, true)`
-    /// if the rewrite succeeded and incremental extensions are safe;
-    /// `(plan, false)` if incremental is not applicable (non-SQL, non-aggregate,
-    /// or unsupported aggregates).
+    /// For incremental-mode SQL queries, attempt to prepare an executable plan
+    /// that is safe for incremental scan extensions.
+    ///
+    /// Returns `Some(plan)` when incremental extensions are safe, and `None`
+    /// when the caller should execute the original plan without incremental
+    /// extensions. The returned plan may be either a rewritten
+    /// delta-LEFT-JOIN-sink merge plan or the original plan. In particular,
+    /// plain GROUP BY queries with no aggregate merge columns are incremental
+    /// safe without a rewrite, so they return `Some(original_plan)`.
     pub(super) async fn prepare_plan_for_incremental(
         &self,
         plan: &LogicalPlan,
         dirty_filter: Option<&FilterExprInfo>,
-    ) -> Result<(LogicalPlan, bool), Error> {
+    ) -> Result<Option<LogicalPlan>, Error> {
         let is_incremental_sql = {
             let state = self.state.read().unwrap();
             if state.is_incremental_disabled() {
-                return Ok((plan.clone(), false));
+                return Ok(None);
             }
             state.checkpoint_mode() == CheckpointMode::Incremental
                 && matches!(self.config.query_type, QueryType::Sql)
         };
 
         if !is_incremental_sql {
-            return Ok((plan.clone(), false));
+            return Ok(None);
         }
 
         // Extract inner query plan from the DML wrapper.
@@ -64,7 +68,7 @@ impl BatchingTask {
         // non-aggregate TQL or non-INSERT plans do not need incremental scan extensions.
         let inner_plan = match plan {
             LogicalPlan::Dml(dml) => dml.input.as_ref().clone(),
-            _ => return Ok((plan.clone(), false)),
+            _ => return Ok(None),
         };
 
         // Analyze the plan for incremental rewritability.
@@ -80,7 +84,7 @@ impl BatchingTask {
                 self.config.flow_id
             );
             self.state.write().unwrap().disable_incremental();
-            return Ok((plan.clone(), false));
+            return Ok(None);
         };
 
         if !analysis.unsupported_exprs.is_empty() {
@@ -90,7 +94,7 @@ impl BatchingTask {
                 self.config.flow_id, analysis.unsupported_exprs
             );
             self.state.write().unwrap().disable_incremental();
-            return Ok((plan.clone(), false));
+            return Ok(None);
         }
 
         // Plain GROUP BY without aggregate expressions has no values to
@@ -98,7 +102,7 @@ impl BatchingTask {
         // changed groups, and sink primary-key write semantics make this
         // idempotent; no explicit left-join rewrite is needed.
         if analysis.merge_columns.is_empty() {
-            return Ok((plan.clone(), true));
+            return Ok(Some(plan.clone()));
         }
 
         // Fetch sink table for the merge rewrite
@@ -132,7 +136,7 @@ impl BatchingTask {
                     self.config.flow_id, err
                 );
                 self.state.write().unwrap().disable_incremental();
-                return Ok((plan.clone(), false));
+                return Ok(None);
             }
         };
 
@@ -152,7 +156,7 @@ impl BatchingTask {
             self.config.flow_id
         );
 
-        Ok((rewritten, true))
+        Ok(Some(rewritten))
     }
 
     pub(super) async fn build_flow_query_extensions(

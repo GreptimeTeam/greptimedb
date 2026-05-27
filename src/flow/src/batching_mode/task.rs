@@ -419,12 +419,14 @@ impl BatchingTask {
 
         // For incremental-mode SQL queries, attempt to rewrite the delta aggregate
         // plan into a safe delta-LEFT-JOIN-sink form before deciding on extensions.
-        let (plan, incremental_safe) = if can_advance_checkpoints {
+        let incremental_plan = if can_advance_checkpoints {
             self.prepare_plan_for_incremental(&plan, dirty_filter)
                 .await?
         } else {
-            (plan.clone(), false)
+            None
         };
+        let incremental_safe = incremental_plan.is_some();
+        let plan = incremental_plan.unwrap_or_else(|| plan.clone());
 
         let extensions = self
             .build_flow_query_extensions(incremental_safe, can_advance_checkpoints)
