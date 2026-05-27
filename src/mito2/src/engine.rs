@@ -612,8 +612,10 @@ impl MitoEngine {
                             return Vec::new();
                         }
                     };
+                    // The index file path is derived from the physical file owner. After
+                    // repartition, `entry.region_id` is only the referring region.
                     let region_index_id = RegionIndexId::new(
-                        RegionFileId::new(entry.region_id, file_id),
+                        RegionFileId::new(entry.origin_region_id, file_id),
                         index_version,
                     );
                     let context = IndexEntryContext {
