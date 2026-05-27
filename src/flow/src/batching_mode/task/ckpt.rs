@@ -15,10 +15,11 @@
 use std::time::Duration;
 
 use client::OutputWithMetrics;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 
-use crate::FlowId;
 use crate::batching_mode::checkpoint::{
     FlowCheckpointDecision, FlowQueryFallbackReason, checkpoint_mode_label,
 };
@@ -27,11 +28,21 @@ use crate::batching_mode::task::BatchingTask;
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT,
 };
+use crate::{Error, FlowId};
 
 impl BatchingTask {
+    pub(super) fn query_failure_reason(err: &Error) -> FlowQueryFallbackReason {
+        if err.status_code() == StatusCode::RequestOutdated {
+            FlowQueryFallbackReason::StaleCursor
+        } else {
+            FlowQueryFallbackReason::IncrementalQueryFailure
+        }
+    }
+
     pub(super) fn apply_query_failure_to_state(
         state: &mut TaskState,
         elapsed: Duration,
+        reason: FlowQueryFallbackReason,
     ) -> Option<FlowCheckpointDecision> {
         state.after_query_exec(elapsed, false);
         let checkpoint_mode = state.checkpoint_mode();
@@ -39,7 +50,7 @@ impl BatchingTask {
             state.mark_full_snapshot();
             Some(FlowCheckpointDecision::FallbackToFullSnapshot {
                 previous_mode: checkpoint_mode,
-                reason: FlowQueryFallbackReason::IncrementalQueryFailure,
+                reason,
             })
         } else {
             None

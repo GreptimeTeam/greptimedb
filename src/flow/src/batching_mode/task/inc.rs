@@ -23,6 +23,7 @@ use query::options::{
     FLOW_SINK_TABLE_ID,
 };
 use snafu::ResultExt;
+use table::metadata::TableId;
 
 use crate::Error;
 use crate::batching_mode::incremental_filter::build_sink_dirty_time_window_filter_expr;
@@ -36,6 +37,31 @@ use crate::batching_mode::utils::{
 use crate::error::{ExternalSnafu, UnexpectedSnafu};
 
 impl BatchingTask {
+    async fn sink_table_id(&self) -> Result<TableId, Error> {
+        let table = self
+            .config
+            .catalog_manager
+            .table(
+                &self.config.sink_table_name[0],
+                &self.config.sink_table_name[1],
+                &self.config.sink_table_name[2],
+                None,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+            .ok_or_else(|| {
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Flow {} cannot build incremental extensions because sink table {:?} was not found",
+                        self.config.flow_id, self.config.sink_table_name
+                    ),
+                }
+                .build()
+            })?;
+        Ok(table.table_info().table_id())
+    }
+
     /// For incremental-mode SQL queries, attempt to prepare an executable plan
     /// that is safe for incremental scan extensions.
     ///
@@ -212,31 +238,8 @@ impl BatchingTask {
         };
 
         if let Some(checkpoints_json) = incremental_checkpoints_json {
-            let table = self
-                .config
-                .catalog_manager
-                .table(
-                    &self.config.sink_table_name[0],
-                    &self.config.sink_table_name[1],
-                    &self.config.sink_table_name[2],
-                    None,
-                )
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
-                .ok_or_else(|| {
-                    UnexpectedSnafu {
-                        reason: format!(
-                            "Flow {} cannot build incremental extensions because sink table {:?} was not found",
-                            self.config.flow_id, self.config.sink_table_name
-                        ),
-                    }
-                    .build()
-                })?;
-            extensions.push((
-                FLOW_SINK_TABLE_ID,
-                table.table_info().table_id().to_string(),
-            ));
+            let sink_table_id = self.sink_table_id().await?;
+            extensions.push((FLOW_SINK_TABLE_ID, sink_table_id.to_string()));
             extensions.push((
                 FLOW_INCREMENTAL_MODE,
                 FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),

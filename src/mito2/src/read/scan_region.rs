@@ -446,26 +446,28 @@ impl ScanRegion {
 
         let ssts = &self.version.ssts;
         let mut files = Vec::new();
-        for level in ssts.levels() {
-            for file in level.files.values() {
-                let exceed_min_sequence = match (sst_min_sequence, file.meta_ref().sequence) {
-                    (Some(min_sequence), Some(file_sequence)) => file_sequence > min_sequence,
-                    // If the file's sequence is None (or actually is zero), it could mean the file
-                    // is generated and added to the region "directly". In this case, its data should
-                    // be considered as fresh as the memtable. So its sequence is treated greater than
-                    // the min_sequence, whatever the value of min_sequence is. Hence the default
-                    // "true" in this arm.
-                    (Some(_), None) => true,
-                    (None, _) => true,
-                };
+        if !self.request.skip_sst_files {
+            for level in ssts.levels() {
+                for file in level.files.values() {
+                    let exceed_min_sequence = match (sst_min_sequence, file.meta_ref().sequence) {
+                        (Some(min_sequence), Some(file_sequence)) => file_sequence > min_sequence,
+                        // If the file's sequence is None (or actually is zero), it could mean the file
+                        // is generated and added to the region "directly". In this case, its data should
+                        // be considered as fresh as the memtable. So its sequence is treated greater than
+                        // the min_sequence, whatever the value of min_sequence is. Hence the default
+                        // "true" in this arm.
+                        (Some(_), None) => true,
+                        (None, _) => true,
+                    };
 
-                // Finds SST files in range.
-                if exceed_min_sequence && file_in_range(file, &time_range) {
-                    files.push(file.clone());
+                    // Finds SST files in range.
+                    if exceed_min_sequence && file_in_range(file, &time_range) {
+                        files.push(file.clone());
+                    }
+                    // There is no need to check and prune for file's sequence here as the sequence number is usually very new,
+                    // unless the timing is too good, or the sequence number wouldn't be in file.
+                    // and the batch will be filtered out by tree reader anyway.
                 }
-                // There is no need to check and prune for file's sequence here as the sequence number is usually very new,
-                // unless the timing is too good, or the sequence number wouldn't be in file.
-                // and the batch will be filtered out by tree reader anyway.
             }
         }
 
@@ -569,7 +571,9 @@ impl ScanRegion {
             .with_vector_index_k(vector_index_k);
 
         #[cfg(feature = "enterprise")]
-        let input = if let Some(provider) = self.extension_range_provider {
+        let input = if !self.request.skip_sst_files
+            && let Some(provider) = self.extension_range_provider
+        {
             let ranges = provider
                 .find_extension_ranges(self.version.flushed_sequence, time_range, &self.request)
                 .await?;

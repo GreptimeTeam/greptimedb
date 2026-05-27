@@ -481,8 +481,11 @@ fn test_apply_query_failure_to_state_falls_back_from_incremental() {
     state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
     assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
 
-    let decision =
-        BatchingTask::apply_query_failure_to_state(&mut state, std::time::Duration::from_millis(1));
+    let decision = BatchingTask::apply_query_failure_to_state(
+        &mut state,
+        std::time::Duration::from_millis(1),
+        FlowQueryFallbackReason::IncrementalQueryFailure,
+    );
 
     assert_eq!(
         decision,
@@ -504,8 +507,11 @@ fn test_apply_query_failure_to_state_keeps_full_snapshot_without_decision() {
     let (_tx, rx) = tokio::sync::oneshot::channel();
     let mut state = TaskState::new(query_ctx, rx);
 
-    let decision =
-        BatchingTask::apply_query_failure_to_state(&mut state, std::time::Duration::from_millis(1));
+    let decision = BatchingTask::apply_query_failure_to_state(
+        &mut state,
+        std::time::Duration::from_millis(1),
+        FlowQueryFallbackReason::StaleCursor,
+    );
 
     assert_eq!(decision, None);
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);

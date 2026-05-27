@@ -332,7 +332,7 @@ fn collect_output_projection_info(plan: &LogicalPlan) -> OutputProjectionInfo {
 fn is_passthrough_output_column(alias_name: &str, expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(_, _))
         || match alias_name {
-            AUTO_CREATED_UPDATE_AT_TS_COL => expr.to_string().eq_ignore_ascii_case("now()"),
+            AUTO_CREATED_UPDATE_AT_TS_COL => expr == &datafusion::prelude::now(),
             AUTO_CREATED_PLACEHOLDER_TS_COL => is_literal_or_cast_literal(expr),
             _ => false,
         }

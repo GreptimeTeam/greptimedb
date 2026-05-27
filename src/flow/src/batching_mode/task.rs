@@ -44,7 +44,7 @@ use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::checkpoint::checkpoint_mode_label;
-use crate::batching_mode::frontend_client::FrontendClient;
+use crate::batching_mode::frontend_client::{FrontendClient, PeerDesc};
 use crate::batching_mode::state::{CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState};
 use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
 use crate::batching_mode::time_window::TimeWindowExpr;
@@ -66,6 +66,8 @@ use crate::{Error, FlowId};
 
 mod ckpt;
 mod inc;
+
+const MAX_INCREMENTAL_DIRTY_WINDOW_FILTERS: usize = 4096;
 
 /// The task's config, immutable once created
 #[derive(Clone)]
@@ -450,6 +452,7 @@ impl BatchingTask {
             extensions.len()
         );
 
+        let mut peer_desc = None;
         let res = {
             let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
                 .with_label_values(&[flow_id.to_string().as_str()])
@@ -480,19 +483,24 @@ impl BatchingTask {
             };
 
             frontend_client
-                .query_with_terminal_metrics(catalog, schema, req, &extension_refs)
+                .query_with_terminal_metrics(catalog, schema, req, &extension_refs, &mut peer_desc)
                 .await
         };
 
         let elapsed = instant.elapsed();
+        let peer_label = peer_desc
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| PeerDesc::default().to_string());
         if let Err(err) = &res {
             warn!(
-                "Failed to execute Flow {flow_id}, result: {err:?}, elapsed: {:?} with query: {}",
+                "Failed to execute Flow {flow_id} on frontend {peer_label}, result: {err:?}, elapsed: {:?} with query: {}",
                 elapsed, &plan
             );
             let decision = {
                 let mut state = self.state.write().unwrap();
-                Self::apply_query_failure_to_state(&mut state, elapsed)
+                let reason = Self::query_failure_reason(err);
+                Self::apply_query_failure_to_state(&mut state, elapsed, reason)
             };
             if let Some(decision) = decision {
                 Self::record_checkpoint_decision(flow_id, decision);
@@ -502,11 +510,12 @@ impl BatchingTask {
         // record slow query
         if elapsed >= self.config.batch_opts.slow_query_threshold {
             warn!(
-                "Flow {flow_id} executed for {:?} before complete, query: {}",
+                "Flow {flow_id} on frontend {peer_label} executed for {:?} before complete, query: {}",
                 elapsed, &plan
             );
+            let flow_id = flow_id.to_string();
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
-                .with_label_values(&[flow_id.to_string().as_str(), "watermark-path"])
+                .with_label_values(&[flow_id.as_str(), peer_label.as_str()])
                 .observe(elapsed.as_secs_f64());
         }
 
@@ -884,9 +893,10 @@ impl BatchingTask {
             {
                 // Incremental scans are bounded by region sequence checkpoints,
                 // so the dirty-window filter only narrows sink-side/time-window
-                // work. Consume all pending dirty windows in one incremental
-                // query to keep checkpoint advancement globally safe.
-                i32::MAX as usize
+                // work. Drain more windows than normal, but keep a hard cap to
+                // avoid building a huge OR filter after a long downtime. If
+                // windows remain, checkpoints won't advance this round.
+                MAX_INCREMENTAL_DIRTY_WINDOW_FILTERS
             } else {
                 max_window_cnt
                     .unwrap_or(self.config.batch_opts.experimental_max_filter_num_per_query)

@@ -51,6 +51,8 @@ pub struct TaskState {
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
     checkpoint_mode: CheckpointMode,
+    /// Region id -> last consumed watermark sequence. Incremental scans use
+    /// this as the next lower sequence bound for each source region.
     checkpoints: BTreeMap<u64, u64>,
     /// Once set, the task will never attempt incremental mode again.
     /// Set when the flow's query shape is deterministically incompatible

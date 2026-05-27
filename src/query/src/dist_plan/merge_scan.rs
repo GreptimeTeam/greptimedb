@@ -483,14 +483,20 @@ impl MergeScanExec {
     }
 
     pub fn is_flow_sink_scan(&self) -> bool {
-        let Some(region_id) = self.regions.first() else {
+        let Some(sink_table_id) =
+            FlowQueryExtensions::parse_flow_extensions(&self.query_ctx.extensions())
+                .ok()
+                .flatten()
+                .and_then(|extensions| extensions.sink_table_id)
+        else {
             return false;
         };
 
-        FlowQueryExtensions::parse_flow_extensions(&self.query_ctx.extensions())
-            .ok()
-            .flatten()
-            .is_some_and(|extensions| extensions.sink_table_id == Some(region_id.table_id()))
+        !self.regions.is_empty()
+            && self
+                .regions
+                .iter()
+                .all(|region_id| region_id.table_id() == sink_table_id)
     }
 
     pub fn partition_count(&self) -> usize {
