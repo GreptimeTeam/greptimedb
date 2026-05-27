@@ -1131,10 +1131,9 @@ impl ColumnMatcherRewriter {
                 // is the update at column
                 exprs.push(datafusion::prelude::now().alias(&last_col_schema.name));
             } else {
-                // helpful error message
-                return Err(DataFusionError::Plan(format!(
-                    "Expect the last column in table to be timestamp column, found column {} with type {:?}",
-                    last_col_schema.name, last_col_schema.data_type
+                return Err(DataFusionError::Plan(format_flow_sink_schema_mismatch(
+                    &original_exprs,
+                    self.schema.as_ref(),
                 )));
             }
         } else if query_col_cnt + 2 == table_col_cnt {

@@ -435,9 +435,7 @@ async fn test_add_auto_column_rewriter() {
         // error datatype mismatch
         (
             "SELECT number, ts FROM numbers_with_ts",
-            Err(
-                "Expect the last column in table to be timestamp column, found column atat with type Int8",
-            ),
+            Err("missing sink columns from flow output: [\"atat\"]"),
             vec![
                 ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                 ColumnSchema::new(
