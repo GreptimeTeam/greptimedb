@@ -708,6 +708,40 @@ async fn test_gen_plan_with_matching_schema_allows_numeric_positional_alias() {
 }
 
 #[tokio::test]
+async fn test_gen_plan_with_matching_schema_allows_null_positional_alias() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("label", ConcreteDataType::string_datatype(), true),
+    ]));
+
+    let plan = gen_plan_with_matching_schema(
+        "SELECT number, NULL AS label_placeholder FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    let output_names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    let sql = df_plan_to_sql(&plan).unwrap();
+
+    assert_eq!(
+        output_names,
+        vec!["number".to_string(), "label".to_string()]
+    );
+    assert!(sql.contains("NULL AS label"), "{sql}");
+}
+
+#[tokio::test]
 async fn test_gen_plan_with_matching_schema_accepts_matching_flow_schema() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();

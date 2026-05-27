@@ -1169,12 +1169,16 @@ impl ColumnMatcherRewriter {
         self.match_extra_output_columns(exprs, input_schema, &original_exprs, &all_names)
     }
 
-    /// Match flow output columns whose names are not in the sink schema by position only.
+    /// Match flow output columns whose names are not in the sink schema by the same position only.
     ///
     /// This keeps the legacy "omit output aliases and map by position" behavior, but only when the
     /// sink column at the same index is actually missing from the flow output. If the extra output
     /// would be aliased to a sink column that already exists elsewhere, report a schema mismatch
     /// instead of guessing another sink column by type.
+    ///
+    /// In particular, this intentionally rejects cross-position remaps like
+    /// `record_time_window2 -> record_time_window`: they are easy to confuse with real schema
+    /// mismatches and should be fixed by giving the flow output the sink column name explicitly.
     fn match_extra_output_columns(
         &self,
         mut exprs: Vec<Expr>,
@@ -1354,7 +1358,11 @@ fn is_obviously_incompatible_positional_match(
     expr_type: &ConcreteDataType,
     sink_type: &ConcreteDataType,
 ) -> bool {
-    if expr_type == sink_type {
+    // This is a coarse type-family guard for legacy positional aliasing, not a strict type equality
+    // check. For example, numeric width/sign differences are allowed here and left to downstream
+    // coercion, and untyped NULL can be coerced to any target type. Clearly different families such
+    // as timestamp vs string are rejected early.
+    if expr_type.is_null() || expr_type == sink_type {
         return false;
     }
 
