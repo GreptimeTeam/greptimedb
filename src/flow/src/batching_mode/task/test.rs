@@ -132,6 +132,25 @@ async fn test_incremental_read_is_disabled_by_default() {
     assert!(task.state.read().unwrap().is_incremental_disabled());
 }
 
+#[tokio::test]
+async fn test_dirty_time_windows_uses_batch_opts() {
+    let task = new_test_task_engine_and_plan_with_query_and_opts(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+        Arc::new(BatchingModeOptions {
+            experimental_max_filter_num_per_query: 7,
+            experimental_time_window_merge_threshold: 11,
+            ..Default::default()
+        }),
+    )
+    .await
+    .task;
+
+    let state = task.state.read().unwrap();
+    assert_eq!(7, state.dirty_time_windows.max_filter_num_per_query());
+    assert_eq!(11, state.dirty_time_windows.time_window_merge_threshold());
+}
+
 async fn new_time_window_test_task_with_query(query: &str) -> TestTaskParts {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();

@@ -168,7 +168,14 @@ impl BatchingTask {
             flow_eval_interval,
         }: TaskArgs<'_>,
     ) -> Result<Self, Error> {
-        let mut state = TaskState::new(query_ctx.clone(), shutdown_rx);
+        let mut state = TaskState::with_dirty_time_windows(
+            query_ctx.clone(),
+            shutdown_rx,
+            DirtyTimeWindows::new(
+                batch_opts.experimental_max_filter_num_per_query,
+                batch_opts.experimental_time_window_merge_threshold,
+            ),
+        );
         if !batch_opts.experimental_enable_incremental_read {
             state.disable_incremental();
         }
