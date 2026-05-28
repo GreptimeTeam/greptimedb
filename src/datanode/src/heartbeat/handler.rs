@@ -305,7 +305,8 @@ mod tests {
         HeartbeatMailbox, IncomingMessage, MailboxRef, MessageMeta,
     };
     use common_meta::instruction::{
-        DowngradeRegion, EnterStagingRegion, OpenRegion, StagingPartitionDirective, UpgradeRegion,
+        DowngradeRegion, EnterStagingRegion, OpenRegion, OpenRegionReason,
+        StagingPartitionDirective, UpgradeRegion,
     };
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
@@ -313,7 +314,7 @@ mod tests {
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionRole;
-    use store_api::region_request::{RegionCloseRequest, RegionRequest};
+    use store_api::region_request::{RegionCloseRequest, RegionRequest, RegionRequirements};
     use store_api::storage::RegionId;
     use tokio::sync::mpsc::{self, Receiver};
 
@@ -442,6 +443,8 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             false,
+            OpenRegionReason::NormalOpen,
+            RegionRequirements::empty(),
         )])
     }
 

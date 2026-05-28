@@ -160,6 +160,7 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
                     skip_wal_replay: true,
                     path_type: PathType::Bare,
                     checkpoint: None,
+                    requirements: Default::default(),
                 },
             )
         })

@@ -916,6 +916,20 @@ pub enum Error {
         source: Arc<Error>,
     },
 
+    #[snafu(display(
+        "Region {} does not satisfy open capability '{}': {}",
+        region_id,
+        capability,
+        reason
+    ))]
+    OpenRegionCapability {
+        region_id: RegionId,
+        capability: &'static str,
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to parse job id"))]
     ParseJobId {
         #[snafu(implicit)]
@@ -1376,6 +1390,7 @@ impl ErrorExt for Error {
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
+            OpenRegionCapability { .. } => StatusCode::InvalidArguments,
             DeleteSsts { .. } | DeleteIndex { .. } | DeleteIndexes { .. } => {
                 StatusCode::StorageUnavailable
             }

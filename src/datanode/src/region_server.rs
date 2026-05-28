@@ -2057,6 +2057,7 @@ mod tests {
                     options: Default::default(),
                     skip_wal_replay: false,
                     checkpoint: None,
+                    requirements: Default::default(),
                 }),
             )
             .await
@@ -2235,6 +2236,7 @@ mod tests {
                             options: Default::default(),
                             skip_wal_replay: false,
                             checkpoint: None,
+                            requirements: Default::default(),
                         },
                     ),
                     (
@@ -2246,6 +2248,7 @@ mod tests {
                             options: Default::default(),
                             skip_wal_replay: false,
                             checkpoint: None,
+                            requirements: Default::default(),
                         },
                     ),
                 ],
@@ -2268,6 +2271,7 @@ mod tests {
                             options: Default::default(),
                             skip_wal_replay: false,
                             checkpoint: None,
+                            requirements: Default::default(),
                         },
                     ),
                     (
@@ -2279,6 +2283,7 @@ mod tests {
                             options: Default::default(),
                             skip_wal_replay: false,
                             checkpoint: None,
+                            requirements: Default::default(),
                         },
                     ),
                 ],

@@ -156,6 +156,7 @@ pub(crate) async fn build_region_open_requests(
                 options,
                 skip_wal_replay: false,
                 checkpoint,
+                requirements: Default::default(),
             },
         ));
     }
@@ -174,6 +175,7 @@ pub(crate) async fn build_region_open_requests(
                     options,
                     skip_wal_replay: true,
                     checkpoint: None,
+                    requirements: Default::default(),
                 },
             ));
         }

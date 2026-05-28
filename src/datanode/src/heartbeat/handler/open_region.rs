@@ -14,6 +14,7 @@
 
 use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
 use common_meta::wal_provider::prepare_wal_options;
+use common_telemetry::info;
 use store_api::path_utils::table_dir;
 use store_api::region_request::{PathType, RegionOpenRequest};
 use store_api::storage::RegionId;
@@ -41,8 +42,13 @@ impl InstructionHandler for OpenRegionsHandler {
                     mut region_options,
                     region_wal_options,
                     skip_wal_replay,
+                    reason,
+                    requirements,
                 } = open_region;
                 let region_id = RegionId::new(region_ident.table_id, region_ident.region_number);
+                info!(
+                    "Received open region instruction, region_id: {region_id}, reason: {reason:?}"
+                );
                 prepare_wal_options(&mut region_options, region_id, &region_wal_options);
                 let request = RegionOpenRequest {
                     engine: region_ident.engine,
@@ -51,6 +57,7 @@ impl InstructionHandler for OpenRegionsHandler {
                     options: region_options,
                     skip_wal_replay,
                     checkpoint: None,
+                    requirements,
                 };
                 (region_id, request)
             })
@@ -98,17 +105,21 @@ mod tests {
     ) -> Instruction {
         let region_idents = region_ids
             .into_iter()
-            .map(|region_id| OpenRegion {
-                region_ident: RegionIdent {
-                    datanode_id: 0,
-                    table_id: region_id.table_id(),
-                    region_number: region_id.region_number(),
-                    engine: MITO_ENGINE_NAME.to_string(),
-                },
-                region_storage_path: storage_path.to_string(),
-                region_options: HashMap::new(),
-                region_wal_options: HashMap::new(),
-                skip_wal_replay: false,
+            .map(|region_id| {
+                OpenRegion::new(
+                    RegionIdent {
+                        datanode_id: 0,
+                        table_id: region_id.table_id(),
+                        region_number: region_id.region_number(),
+                        engine: MITO_ENGINE_NAME.to_string(),
+                    },
+                    storage_path,
+                    HashMap::new(),
+                    HashMap::new(),
+                    false,
+                    Default::default(),
+                    Default::default(),
+                )
             })
             .collect();
 

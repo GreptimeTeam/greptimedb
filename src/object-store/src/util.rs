@@ -27,6 +27,11 @@ use snafu::ResultExt;
 use crate::config::HttpClientConfig;
 use crate::{ObjectStore, error};
 
+/// Returns true if the object store is not backed by local filesystem.
+pub fn is_object_storage(object_store: &ObjectStore) -> bool {
+    object_store.info().scheme() != "fs"
+}
+
 /// Join two paths and normalize the output dir.
 ///
 /// The output dir is always ends with `/`. e.g.
@@ -249,7 +254,11 @@ impl RetryInterceptor for PrintDetailedError {
 
 #[cfg(test)]
 mod tests {
+    use opendal::services::Fs;
+
     use super::*;
+    use crate::ObjectStore;
+    use crate::util::is_object_storage;
 
     #[test]
     fn test_normalize_dir() {
@@ -288,5 +297,15 @@ mod tests {
         assert_eq!("abc/def", join_path(" abc", "/def "));
         assert_eq!("/abc", join_path("//", "/abc"));
         assert_eq!("abc/def", join_path("abc/", "//def"));
+    }
+
+    #[test]
+    fn test_fs_is_not_object_storage() {
+        let object_store = ObjectStore::new(Fs::default().root("/tmp"))
+            .unwrap()
+            .finish();
+
+        assert_eq!("fs", object_store.info().scheme());
+        assert!(!is_object_storage(&object_store));
     }
 }

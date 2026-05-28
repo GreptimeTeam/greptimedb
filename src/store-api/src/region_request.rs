@@ -315,6 +315,7 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
             options: open.options,
             skip_wal_replay: false,
             checkpoint: None,
+            requirements: Default::default(),
         }),
     )])
 }
@@ -566,6 +567,28 @@ pub struct RegionDropRequest {
     pub partial_drop: bool,
 }
 
+/// Requirements for a region request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegionRequirements {
+    /// Whether the region data must be backed by object storage.
+    pub object_storage: bool,
+}
+
+impl RegionRequirements {
+    /// Returns empty requirements.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Returns requirements for object storage.
+    pub fn object_storage() -> Self {
+        Self {
+            object_storage: true,
+        }
+    }
+}
+
 /// Open region request.
 #[derive(Debug, Clone)]
 pub struct RegionOpenRequest {
@@ -581,6 +604,8 @@ pub struct RegionOpenRequest {
     pub skip_wal_replay: bool,
     /// Replay checkpoint.
     pub checkpoint: Option<ReplayCheckpoint>,
+    /// Requirements for opening the region.
+    pub requirements: RegionRequirements,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

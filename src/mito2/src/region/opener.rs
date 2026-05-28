@@ -28,7 +28,7 @@ use log_store::kafka::log_store::KafkaLogStore;
 use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::manager::ObjectStoreManagerRef;
-use object_store::util::normalize_dir;
+use object_store::util::{is_object_storage, normalize_dir};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
@@ -36,7 +36,7 @@ use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
 use store_api::region_engine::RegionRole;
-use store_api::region_request::PathType;
+use store_api::region_request::{PathType, RegionRequirements};
 use store_api::storage::{ColumnId, RegionId};
 use tokio::sync::Semaphore;
 
@@ -46,8 +46,8 @@ use crate::cache::file_cache::{FileCache, FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::error;
 use crate::error::{
-    EmptyRegionDirSnafu, InvalidMetadataSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu,
-    Result, StaleLogEntrySnafu,
+    EmptyRegionDirSnafu, InvalidMetadataSnafu, InvalidRegionOptionsSnafu, ObjectStoreNotFoundSnafu,
+    RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
 };
 use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
@@ -204,6 +204,23 @@ impl RegionOpener {
         options.validate()?;
         self.options = Some(options);
         Ok(self)
+    }
+
+    /// Ensures the current region open request satisfies its requirements.
+    pub(crate) fn ensure_open_requirements(&self, requirements: RegionRequirements) -> Result<()> {
+        if !requirements.object_storage {
+            return Ok(());
+        }
+
+        let options = self.options.as_ref().context(InvalidRegionOptionsSnafu {
+            reason: "missing region options before capability check".to_string(),
+        })?;
+        let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
+        ensure_open_requirements_inner(
+            self.region_id,
+            requirements,
+            is_object_storage(&object_store),
+        )
     }
 
     /// Sets the cache manager for the region.
@@ -595,6 +612,27 @@ impl RegionOpener {
 
         Ok(Some(region))
     }
+}
+
+fn ensure_open_requirements_inner(
+    region_id: RegionId,
+    requirements: RegionRequirements,
+    is_object_storage: bool,
+) -> Result<()> {
+    if !requirements.object_storage {
+        return Ok(());
+    }
+
+    ensure!(
+        is_object_storage,
+        error::OpenRegionCapabilitySnafu {
+            region_id,
+            capability: "object storage",
+            reason: "region data must be accessible from another datanode",
+        }
+    );
+
+    Ok(())
 }
 
 /// Creates a version builder from a region manifest.
@@ -1176,12 +1214,16 @@ mod tests {
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
-    use store_api::region_request::PathType;
+    use store_api::region_request::{PathType, RegionRequirements};
     use store_api::storage::{FileId, RegionId};
 
-    use super::{preload_parquet_meta_cache_for_files, sanitize_region_options};
+    use super::{
+        ensure_open_requirements_inner, preload_parquet_meta_cache_for_files,
+        sanitize_region_options,
+    };
     use crate::cache::CacheManager;
     use crate::cache::file_cache::{FileType, IndexKey};
+    use crate::error::Error;
     use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
     use crate::region::options::RegionOptions;
     use crate::sst::FormatType;
@@ -1205,6 +1247,34 @@ mod tests {
             sst_format,
             append_mode: None,
         }
+    }
+
+    #[test]
+    fn test_open_requirement_rejects_non_object_store() {
+        let err = ensure_open_requirements_inner(
+            RegionId::new(1, 1),
+            RegionRequirements::object_storage(),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::OpenRegionCapability { .. }));
+    }
+
+    #[test]
+    fn test_open_requirement_accepts_object_store() {
+        ensure_open_requirements_inner(
+            RegionId::new(1, 1),
+            RegionRequirements::object_storage(),
+            true,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_empty_open_capability_skips_storage_check() {
+        ensure_open_requirements_inner(RegionId::new(1, 1), RegionRequirements::empty(), false)
+            .unwrap();
     }
 
     #[test]

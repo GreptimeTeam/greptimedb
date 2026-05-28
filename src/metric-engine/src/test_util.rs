@@ -144,6 +144,7 @@ impl TestEnv {
                     options: physical_region_option,
                     skip_wal_replay: true,
                     checkpoint: None,
+                    requirements: Default::default(),
                 }),
             )
             .await
