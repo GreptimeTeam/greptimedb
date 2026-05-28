@@ -21,7 +21,8 @@ use crate::ir::Ident;
 use crate::ir::create_expr::PartitionDef;
 
 const PARTITIONS_INFO_SCHEMA_SQL: &str = "SELECT table_catalog, table_schema, table_name, \
-partition_name, partition_expression, partition_description, greptime_partition_id, \
+partition_name, COALESCE(partition_expression, '') AS partition_expression, \
+COALESCE(partition_description, '') AS partition_description, greptime_partition_id, \
 partition_ordinal_position FROM information_schema.partitions WHERE table_name = ? \
 ORDER BY partition_ordinal_position;";
 
@@ -88,6 +89,23 @@ pub fn assert_partitions(expected: &PartitionDef, actual: &[PartitionInfo]) -> R
             }
         );
     }
+
+    Ok(())
+}
+
+/// Asserts that the table has no partition metadata in information schema.
+pub fn assert_unpartitioned(actual: &[PartitionInfo]) -> Result<()> {
+    let has_no_partition_metadata = actual.is_empty()
+        || (actual.len() == 1
+            && actual[0].partition_expression.is_empty()
+            && actual[0].partition_description.is_empty());
+
+    ensure!(
+        has_no_partition_metadata,
+        error::AssertSnafu {
+            reason: format!("Expected unpartitioned table, got partitions: {actual:?}"),
+        }
+    );
 
     Ok(())
 }

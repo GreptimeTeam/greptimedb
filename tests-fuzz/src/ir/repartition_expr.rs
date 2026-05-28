@@ -16,6 +16,7 @@ use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::Ident;
+use crate::ir::create_expr::PartitionDef;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SplitPartitionExpr {
@@ -35,9 +36,18 @@ pub struct MergePartitionExpr {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlterTablePartitionsExpr {
+    pub table_name: Ident,
+    pub partition: PartitionDef,
+    #[serde(default = "default_wait")]
+    pub wait: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RepartitionExpr {
     Split(SplitPartitionExpr),
     Merge(MergePartitionExpr),
+    AlterPartitions(AlterTablePartitionsExpr),
 }
 
 const fn default_wait() -> bool {

@@ -200,6 +200,15 @@ impl TableContext {
                 partitions.remove_bound(removed_idx)?;
                 partition_def.exprs = partitions.generate()?;
             }
+            RepartitionExpr::AlterPartitions(partition) => {
+                ensure!(
+                    self.partition.is_none(),
+                    error::UnexpectedSnafu {
+                        violated: format!("Table {} already has partition", self.name),
+                    }
+                );
+                self.partition = Some(partition.partition);
+            }
         }
 
         Ok(self)
