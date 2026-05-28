@@ -14,8 +14,10 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
+use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tonic::codegen::http;
 
@@ -29,13 +31,27 @@ pub struct LeaderHandler {
     pub election: Option<ElectionRef>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LeaderInfo {
+    pub leader_addr: Option<String>,
+    pub is_leader: bool,
+}
+
 impl LeaderHandler {
-    async fn get_leader(&self) -> Result<Option<String>> {
-        if let Some(election) = &self.election {
-            let leader_addr = election.leader().await.context(error::KvBackendSnafu)?.0;
-            return Ok(Some(leader_addr));
-        }
-        Ok(None)
+    async fn get_leader_info(&self) -> Result<LeaderInfo> {
+        let (leader_addr, is_leader) = if let Some(election) = &self.election {
+            (
+                Some(election.leader().await.context(error::KvBackendSnafu)?.0),
+                election.is_leader(),
+            )
+        } else {
+            (None, false)
+        };
+
+        Ok(LeaderInfo {
+            leader_addr,
+            is_leader,
+        })
     }
 }
 
@@ -43,10 +59,10 @@ impl LeaderHandler {
 #[axum_macros::debug_handler]
 pub(crate) async fn get(State(handler): State<LeaderHandler>) -> Response {
     handler
-        .get_leader()
+        .get_leader_info()
         .await
+        .map(Json)
         .map_err(ErrorHandler::new)
-        .map(|leader| leader.unwrap_or("election info is None".to_string()))
         .into_response()
 }
 
@@ -58,7 +74,7 @@ impl HttpHandler for LeaderHandler {
         _: http::Method,
         _: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        if let Some(leader_addr) = self.get_leader().await? {
+        if let Some(leader_addr) = self.get_leader_info().await?.leader_addr {
             return http::Response::builder()
                 .status(http::StatusCode::OK)
                 .body(leader_addr)
