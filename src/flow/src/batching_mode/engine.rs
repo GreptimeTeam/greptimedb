@@ -458,6 +458,26 @@ impl BatchingEngine {
             .is_some_and(|value| value.eq_ignore_ascii_case("true"))
     }
 
+    fn ensure_incremental_source_append_only(
+        batch_opts: &BatchingModeOptions,
+        table_name: &[String; 3],
+        extra_options: &HashMap<String, String>,
+    ) -> Result<(), Error> {
+        if batch_opts.experimental_enable_incremental_read {
+            ensure!(
+                Self::table_options_enable_append_mode(extra_options),
+                UnsupportedSnafu {
+                    reason: format!(
+                        "Flow incremental read requires append-only source table, but source table `{}` is not append-only. Consider setting append_mode='true' on the source table or disabling experimental_enable_incremental_read",
+                        table_name.join(".")
+                    ),
+                }
+            );
+        }
+
+        Ok(())
+    }
+
     pub async fn create_flow_inner(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         let CreateFlowArgs {
             flow_id,
@@ -541,19 +561,11 @@ impl BatchingEngine {
                     ),
                 }
             );
-            if batch_opts.experimental_enable_incremental_read {
-                ensure!(
-                    Self::table_options_enable_append_mode(
-                        &table_info.table_info.meta.options.extra_options
-                    ),
-                    UnsupportedSnafu {
-                        reason: format!(
-                            "Flow incremental read requires append-only source table, but source table `{}` is not append-only. Consider setting append_mode='true' on the source table or disabling experimental_enable_incremental_read",
-                            table_name.join(".")
-                        ),
-                    }
-                );
-            }
+            Self::ensure_incremental_source_append_only(
+                &batch_opts,
+                &table_name,
+                &table_info.table_info.meta.options.extra_options,
+            )?;
 
             source_table_names.push(table_name);
         }
@@ -1018,6 +1030,47 @@ mod tests {
         assert!(BatchingEngine::table_options_enable_append_mode(
             &HashMap::from([(APPEND_MODE_KEY.to_string(), "TRUE".to_string())])
         ));
+    }
+
+    #[test]
+    fn test_incremental_source_append_only_enforcement() {
+        let table_name = [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers".to_string(),
+        ];
+        let disabled_opts = BatchingModeOptions::default();
+        let enabled_opts = BatchingModeOptions {
+            experimental_enable_incremental_read: true,
+            ..Default::default()
+        };
+        let non_append_options = HashMap::new();
+        let append_options = HashMap::from([(APPEND_MODE_KEY.to_string(), "true".to_string())]);
+
+        BatchingEngine::ensure_incremental_source_append_only(
+            &disabled_opts,
+            &table_name,
+            &non_append_options,
+        )
+        .expect("disabled incremental read should not require append-only source");
+        BatchingEngine::ensure_incremental_source_append_only(
+            &enabled_opts,
+            &table_name,
+            &append_options,
+        )
+        .expect("append-only source should be accepted when incremental read is enabled");
+
+        let err = BatchingEngine::ensure_incremental_source_append_only(
+            &enabled_opts,
+            &table_name,
+            &non_append_options,
+        )
+        .expect_err("non-append source should be rejected when incremental read is enabled");
+        assert!(
+            err.to_string()
+                .contains("Flow incremental read requires append-only source table"),
+            "{err}"
+        );
     }
 
     async fn new_test_task(flow_id: FlowId) -> (BatchingTask, oneshot::Sender<()>) {

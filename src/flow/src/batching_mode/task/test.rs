@@ -25,7 +25,9 @@ use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::ColumnSchema;
 use datatypes::vectors::{TimestampMillisecondVector, UInt32Vector, VectorRef};
 use pretty_assertions::assert_eq;
-use query::options::{FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY};
+use query::options::{
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY, QueryOptions,
+};
 use session::context::QueryContext;
 use table::test_util::MemTable;
 
@@ -149,6 +151,43 @@ async fn test_dirty_time_windows_uses_batch_opts() {
     let state = task.state.read().unwrap();
     assert_eq!(7, state.dirty_time_windows.max_filter_num_per_query());
     assert_eq!(11, state.dirty_time_windows.time_window_merge_threshold());
+}
+
+#[tokio::test]
+async fn test_gen_exec_once_waits_for_execution_lock() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "missing_sink",
+    )
+    .await;
+    let (frontend_client, _handler) =
+        FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend_client = Arc::new(frontend_client);
+
+    let guard = task.execution_lock.clone().lock_owned().await;
+    let task_to_run = task.clone();
+    let query_engine_to_run = query_engine.clone();
+    let frontend_client_to_run = frontend_client.clone();
+    let exec = tokio::spawn(async move {
+        task_to_run
+            .gen_exec_once(&query_engine_to_run, &frontend_client_to_run, None)
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        !exec.is_finished(),
+        "gen_exec_once should wait for execution_lock"
+    );
+
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(1), exec)
+        .await
+        .expect("gen_exec_once should finish once execution_lock is released")
+        .expect("gen_exec_once task should not panic")
+        .expect_err("missing sink should fail after acquiring execution_lock");
 }
 
 async fn new_time_window_test_task_with_query(query: &str) -> TestTaskParts {
