@@ -40,9 +40,12 @@ use crate::rpc::store::RangeRequest;
 
 pub const FLOW_INFO_KEY_PREFIX: &str = "info";
 
+/// The lifecycle status of a flow stored in metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum FlowStatus {
+    /// The flow metadata exists, but at least one source table did not exist at create time.
     PendingSources,
+    /// The flow has resolved source tables and can be scheduled on flownodes.
     #[default]
     Active,
 }

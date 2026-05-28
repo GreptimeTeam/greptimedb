@@ -409,6 +409,7 @@ pub fn get_flow_type_from_options(flow_task: &CreateFlowTask) -> Result<FlowType
     }
 }
 
+/// The flow option key for creating pending flow metadata when source tables do not exist.
 pub const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 
 pub fn defer_on_missing_source(flow_task: &CreateFlowTask) -> Result<bool> {
