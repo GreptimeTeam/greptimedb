@@ -407,39 +407,6 @@ impl ManagerContext {
         self.running.load(Ordering::Relaxed)
     }
 
-    /// Clears in-memory procedure state so recovery reloads from persisted metadata.
-    pub(crate) fn reset(&self) {
-        match self.procedures.write() {
-            Ok(mut procedures) => procedures.clear(),
-            Err(poisoned) => {
-                common_telemetry::warn!(
-                    "Procedure map lock was poisoned while resetting procedure manager"
-                );
-                poisoned.into_inner().clear();
-            }
-        }
-
-        match self.running_procedures.lock() {
-            Ok(mut running_procedures) => running_procedures.clear(),
-            Err(poisoned) => {
-                common_telemetry::warn!(
-                    "Running procedure set lock was poisoned while resetting procedure manager"
-                );
-                poisoned.into_inner().clear();
-            }
-        }
-
-        match self.finished_procedures.lock() {
-            Ok(mut finished_procedures) => finished_procedures.clear(),
-            Err(poisoned) => {
-                common_telemetry::warn!(
-                    "Finished procedure queue lock was poisoned while resetting procedure manager"
-                );
-                poisoned.into_inner().clear();
-            }
-        }
-    }
-
     /// Returns true if the procedure with specific `procedure_id` exists.
     fn contains_procedure(&self, procedure_id: ProcedureId) -> bool {
         let procedures = self.procedures.read().unwrap();
@@ -860,9 +827,6 @@ impl LocalManager {
     async fn recover(&self) -> Result<()> {
         info!("LocalManager start to recover");
         let recover_start = Instant::now();
-
-        self.manager_ctx.reset();
-        info!("LocalManager in-memory procedure state cleared before recovery");
 
         let ProcedureMessages {
             messages,
@@ -1377,19 +1341,6 @@ mod tests {
         let procedure_store = ProcedureStore::from_object_store(object_store.clone());
         let root: BoxedProcedure = Box::new(ProcedureToLoad::new("test recover manager"));
         let root_id = ProcedureId::random();
-        let stale_meta = Arc::new(ProcedureMeta::new(
-            root_id,
-            ProcedureState::failed(Arc::new(Error::external(MockError::new(
-                StatusCode::Unexpected,
-            )))),
-            None,
-            LockKey::default(),
-            PoisonKeys::default(),
-            "stale",
-            None,
-            None,
-        ));
-        assert!(manager.manager_ctx.try_insert_procedure(stale_meta));
         // Prepare data for the root procedure.
         for step in 0..3 {
             let type_name = root.type_name().to_string();
@@ -1416,8 +1367,7 @@ mod tests {
         manager.recover().await.unwrap();
 
         // The manager should submit the root procedure.
-        let state = manager.procedure_state(root_id).await.unwrap().unwrap();
-        assert!(!state.is_failed(), "{state:?}");
+        let _ = manager.procedure_state(root_id).await.unwrap().unwrap();
         // Since the mocked root procedure actually doesn't submit subprocedures, so there is no
         // related state.
         assert!(manager.procedure_state(child_id).await.unwrap().is_none());
