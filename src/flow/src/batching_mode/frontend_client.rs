@@ -340,12 +340,13 @@ impl FrontendClient {
         }
     }
 
-    pub async fn query_with_terminal_metrics(
+    pub(crate) async fn query_with_terminal_metrics(
         &self,
         catalog: &str,
         schema: &str,
         request: QueryRequest,
         extensions: &[(&str, &str)],
+        peer_desc: &mut Option<PeerDesc>,
     ) -> Result<OutputWithMetrics, Error> {
         let flow_extensions = build_flow_extensions(extensions)?;
         match self {
@@ -358,6 +359,9 @@ impl FrontendClient {
                     (READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref()),
                 ];
                 let db = self.get_random_active_frontend(catalog, schema).await?;
+                *peer_desc = Some(PeerDesc::Dist {
+                    peer: db.peer.clone(),
+                });
                 db.database
                     .query_with_terminal_metrics_and_flow_extensions(request, &hints, extensions)
                     .await
@@ -368,6 +372,7 @@ impl FrontendClient {
                 database_client,
                 query,
             } => {
+                *peer_desc = Some(PeerDesc::Standalone);
                 let mut extensions_map = HashMap::from([(
                     QUERY_PARALLELISM_HINT.to_string(),
                     query.parallelism.to_string(),
@@ -556,21 +561,24 @@ fn terminal_recordbatch_metrics_from_snapshots(
 }
 
 /// Describe a peer of frontend
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) enum PeerDesc {
+    /// The query failed before a frontend peer was selected.
+    #[default]
+    Unknown,
     /// Distributed mode's frontend peer address
     Dist {
         /// frontend peer address
         peer: Peer,
     },
     /// Standalone mode
-    #[default]
     Standalone,
 }
 
 impl std::fmt::Display for PeerDesc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PeerDesc::Unknown => write!(f, "unknown"),
             PeerDesc::Dist { peer } => write!(f, "{}", peer.addr),
             PeerDesc::Standalone => write!(f, "standalone"),
         }
@@ -768,6 +776,7 @@ mod tests {
         let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(MetricsHandler);
         let client =
             FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        let mut peer_desc = None;
 
         let result = client
             .query_with_terminal_metrics(
@@ -777,9 +786,11 @@ mod tests {
                     query: Some(Query::Sql("select 1".to_string())),
                 },
                 &[],
+                &mut peer_desc,
             )
             .await
             .unwrap();
+        assert!(matches!(peer_desc, Some(PeerDesc::Standalone)));
 
         let terminal_metrics = result.metrics.clone();
         assert!(!result.metrics.is_ready());
@@ -802,6 +813,7 @@ mod tests {
         let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(ExtensionAwareHandler);
         let client =
             FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        let mut peer_desc = None;
 
         let result = client
             .query_with_terminal_metrics(
@@ -811,9 +823,11 @@ mod tests {
                     query: Some(Query::Sql("insert into t select 1".to_string())),
                 },
                 &[("flow.return_region_seq", "true")],
+                &mut peer_desc,
             )
             .await
             .unwrap();
+        assert!(matches!(peer_desc, Some(PeerDesc::Standalone)));
 
         assert!(result.metrics.is_ready());
         assert!(result.region_watermark_map().is_none());
@@ -824,6 +838,7 @@ mod tests {
         let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(SnapshotBindingHandler);
         let client =
             FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        let mut peer_desc = None;
 
         let result = client
             .query_with_terminal_metrics(
@@ -833,9 +848,11 @@ mod tests {
                     query: Some(Query::Sql("insert into t select * from src".to_string())),
                 },
                 &[("flow.return_region_seq", "true")],
+                &mut peer_desc,
             )
             .await
             .unwrap();
+        assert!(matches!(peer_desc, Some(PeerDesc::Standalone)));
 
         assert!(result.metrics.is_ready());
         assert_eq!(
@@ -849,6 +866,7 @@ mod tests {
         let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(NoopHandler);
         let client =
             FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        let mut peer_desc = None;
 
         let err = client
             .query_with_terminal_metrics(
@@ -858,6 +876,7 @@ mod tests {
                     query: Some(Query::Sql("select 1".to_string())),
                 },
                 &[("flow.return_region_seq", "not-a-bool")],
+                &mut peer_desc,
             )
             .await
             .unwrap_err();

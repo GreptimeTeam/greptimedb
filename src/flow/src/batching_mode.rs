@@ -23,6 +23,7 @@ use session::ReadPreference;
 mod checkpoint;
 pub(crate) mod engine;
 pub(crate) mod frontend_client;
+mod incremental_filter;
 mod state;
 mod table_creator;
 mod task;

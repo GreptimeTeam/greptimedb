@@ -45,7 +45,7 @@ use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
-use crate::options::FlowQueryExtensions;
+use crate::options::{FlowIncrementalMode, FlowQueryExtensions};
 
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
 #[derive(Clone, Debug)]
@@ -357,6 +357,8 @@ struct FlowScanDecision {
     /// When present, this becomes the effective memtable upper bound and suppresses
     /// binding a new snapshot on scan open.
     memtable_max_sequence: Option<u64>,
+    /// Whether to skip SST files for memtable-only incremental source scans.
+    skip_sst_files: bool,
 }
 
 impl FlowScanDecision {
@@ -366,6 +368,7 @@ impl FlowScanDecision {
             snapshot_on_scan: false,
             memtable_min_sequence: None,
             memtable_max_sequence: None,
+            skip_sst_files: false,
         }
     }
 }
@@ -379,6 +382,7 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
             snapshot_on_scan: false,
             memtable_min_sequence: None,
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
+            skip_sst_files: false,
         });
     };
 
@@ -403,12 +407,16 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
 
     let memtable_max_sequence = query_ctx.get_snapshot(region_id.as_u64());
 
+    let skip_sst_files = apply_incremental
+        && flow_extensions.incremental_mode == Some(FlowIncrementalMode::MemtableOnly);
+
     Ok(FlowScanDecision {
         is_sink_scan: false,
         snapshot_on_scan: memtable_max_sequence.is_none()
             && flow_extensions.should_collect_region_watermark(),
         memtable_min_sequence,
         memtable_max_sequence,
+        skip_sst_files,
     })
 }
 
@@ -424,6 +432,7 @@ fn build_scan_request(
         sst_min_sequence: (!decision.is_sink_scan)
             .then(|| query_ctx.sst_min_sequence(region_id.as_u64()))
             .flatten(),
+        skip_sst_files: decision.skip_sst_files,
         snapshot_on_scan: decision.snapshot_on_scan,
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
@@ -841,6 +850,8 @@ mod tests {
 
         let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
         assert_eq!(request.memtable_min_sequence, Some(55));
+        assert_eq!(request.sst_min_sequence, None);
+        assert!(request.skip_sst_files);
     }
 
     #[test]
@@ -875,6 +886,7 @@ mod tests {
         assert_eq!(request.memtable_min_sequence, None);
         assert_eq!(request.memtable_max_sequence, None);
         assert_eq!(request.sst_min_sequence, None);
+        assert!(!request.skip_sst_files);
         assert!(!request.snapshot_on_scan);
     }
 
