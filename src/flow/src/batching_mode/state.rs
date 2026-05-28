@@ -681,7 +681,7 @@ impl DirtyTimeWindows {
     }
 }
 
-fn to_df_literal(value: Timestamp) -> Result<datafusion_common::ScalarValue, Error> {
+pub(crate) fn to_df_literal(value: Timestamp) -> Result<datafusion_common::ScalarValue, Error> {
     let value = Value::from(value);
     let value = value
         .try_to_scalar_value(&value.data_type())

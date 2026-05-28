@@ -21,7 +21,7 @@ use std::time::Duration;
 use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
@@ -38,6 +38,7 @@ use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::parsers::utils::is_tql;
 use store_api::metric_engine_consts::is_metric_engine_internal_column;
+use store_api::mito_engine_options::APPEND_MODE_KEY;
 use store_api::storage::{RegionId, TableId};
 use table::table_reference::TableReference;
 use tokio::sync::{RwLock, oneshot};
@@ -428,6 +429,35 @@ async fn get_table_info(
 }
 
 impl BatchingEngine {
+    fn batch_opts_for_flow_options(
+        &self,
+        flow_options: &HashMap<String, String>,
+    ) -> Result<Arc<BatchingModeOptions>, Error> {
+        let mut batch_opts = (*self.batch_opts).clone();
+        if let Some(enable_incremental_read) =
+            flow_options.get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
+        {
+            batch_opts.experimental_enable_incremental_read = enable_incremental_read
+                .parse::<bool>()
+                .map_err(|_| {
+                    InvalidQuerySnafu {
+                        reason: format!(
+                            "Invalid flow option {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}: {enable_incremental_read}"
+                        ),
+                    }
+                    .build()
+                })?;
+        }
+
+        Ok(Arc::new(batch_opts))
+    }
+
+    fn table_options_enable_append_mode(extra_options: &HashMap<String, String>) -> bool {
+        extra_options
+            .get(APPEND_MODE_KEY)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    }
+
     pub async fn create_flow_inner(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         let CreateFlowArgs {
             flow_id,
@@ -494,6 +524,8 @@ impl BatchingEngine {
             }
         );
 
+        let batch_opts = self.batch_opts_for_flow_options(&flow_options)?;
+
         let mut source_table_names = Vec::with_capacity(2);
         for src_id in source_table_ids {
             // also check table option to see if ttl!=instant
@@ -509,6 +541,19 @@ impl BatchingEngine {
                     ),
                 }
             );
+            if batch_opts.experimental_enable_incremental_read {
+                ensure!(
+                    Self::table_options_enable_append_mode(
+                        &table_info.table_info.meta.options.extra_options
+                    ),
+                    UnsupportedSnafu {
+                        reason: format!(
+                            "Flow incremental read requires append-only source table, but source table `{}` is not append-only. Consider setting append_mode='true' on the source table or disabling experimental_enable_incremental_read",
+                            table_name.join(".")
+                        ),
+                    }
+                );
+            }
 
             source_table_names.push(table_name);
         }
@@ -563,7 +608,7 @@ impl BatchingEngine {
             query_ctx,
             catalog_manager: self.catalog_manager.clone(),
             shutdown_rx: rx,
-            batch_opts: self.batch_opts.clone(),
+            batch_opts,
             flow_eval_interval: eval_interval.map(|secs| Duration::from_secs(secs as u64)),
         };
 
@@ -944,6 +989,35 @@ mod tests {
             catalog_manager,
             BatchingModeOptions::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn test_flow_option_overrides_incremental_read_switch() {
+        let engine = new_test_engine().await;
+
+        let default_opts = engine.batch_opts_for_flow_options(&HashMap::new()).unwrap();
+        assert!(!default_opts.experimental_enable_incremental_read);
+
+        let enabled_opts = engine
+            .batch_opts_for_flow_options(&HashMap::from([(
+                FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+                "true".to_string(),
+            )]))
+            .unwrap();
+        assert!(enabled_opts.experimental_enable_incremental_read);
+    }
+
+    #[test]
+    fn test_table_options_enable_append_mode() {
+        assert!(!BatchingEngine::table_options_enable_append_mode(
+            &HashMap::new()
+        ));
+        assert!(!BatchingEngine::table_options_enable_append_mode(
+            &HashMap::from([(APPEND_MODE_KEY.to_string(), "false".to_string())])
+        ));
+        assert!(BatchingEngine::table_options_enable_append_mode(
+            &HashMap::from([(APPEND_MODE_KEY.to_string(), "TRUE".to_string())])
+        ));
     }
 
     async fn new_test_task(flow_id: FlowId) -> (BatchingTask, oneshot::Sender<()>) {

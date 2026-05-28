@@ -38,6 +38,13 @@ use crate::batching_mode::state::CheckpointMode;
 use crate::batching_mode::time_window::find_time_window_expr;
 use crate::test_utils::create_test_query_engine;
 
+fn incremental_batch_opts() -> Arc<BatchingModeOptions> {
+    Arc::new(BatchingModeOptions {
+        experimental_enable_incremental_read: true,
+        ..Default::default()
+    })
+}
+
 async fn new_test_task_and_plan_with_missing_sink() -> (BatchingTask, LogicalPlan) {
     new_test_task_engine_and_plan_with_query(
         "SELECT number, ts FROM numbers_with_ts",
@@ -60,6 +67,15 @@ impl TestTaskParts {
 }
 
 async fn new_test_task_engine_and_plan_with_query(query: &str, sink_table: &str) -> TestTaskParts {
+    new_test_task_engine_and_plan_with_query_and_opts(query, sink_table, incremental_batch_opts())
+        .await
+}
+
+async fn new_test_task_engine_and_plan_with_query_and_opts(
+    query: &str,
+    sink_table: &str,
+    batch_opts: Arc<BatchingModeOptions>,
+) -> TestTaskParts {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let plan = sql_to_df_plan(
@@ -91,7 +107,7 @@ async fn new_test_task_engine_and_plan_with_query(query: &str, sink_table: &str)
         query_ctx: ctx,
         catalog_manager: query_engine.engine_state().catalog_manager().clone(),
         shutdown_rx: rx,
-        batch_opts: Arc::new(BatchingModeOptions::default()),
+        batch_opts,
         flow_eval_interval: None,
     })
     .unwrap();
@@ -101,6 +117,19 @@ async fn new_test_task_engine_and_plan_with_query(query: &str, sink_table: &str)
         query_engine,
         plan,
     }
+}
+
+#[tokio::test]
+async fn test_incremental_read_is_disabled_by_default() {
+    let task = new_test_task_engine_and_plan_with_query_and_opts(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+        Arc::new(BatchingModeOptions::default()),
+    )
+    .await
+    .task;
+
+    assert!(task.state.read().unwrap().is_incremental_disabled());
 }
 
 async fn new_time_window_test_task_with_query(query: &str) -> TestTaskParts {
@@ -147,7 +176,7 @@ async fn new_time_window_test_task_with_query(query: &str) -> TestTaskParts {
         query_ctx: ctx,
         catalog_manager: query_engine.engine_state().catalog_manager().clone(),
         shutdown_rx: rx,
-        batch_opts: Arc::new(BatchingModeOptions::default()),
+        batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
     })
     .unwrap();
@@ -626,6 +655,7 @@ async fn test_full_snapshot_scoped_plan_marks_checkpoint_advance_safe_only_after
     .await;
     {
         let mut state = task.state.write().unwrap();
+        state.disable_incremental();
         state
             .dirty_time_windows
             .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
@@ -657,7 +687,7 @@ async fn test_full_snapshot_scoped_plan_marks_checkpoint_advance_safe_only_after
 }
 
 #[tokio::test]
-async fn test_incremental_scoped_plan_consumes_all_dirty_windows_for_checkpoint_safety() {
+async fn test_incremental_plan_consumes_dirty_signal_for_checkpoint_safety() {
     let TestTaskParts {
         task,
         query_engine,
@@ -690,6 +720,79 @@ async fn test_incremental_scoped_plan_consumes_all_dirty_windows_for_checkpoint_
 
     assert!(plan.can_advance_checkpoints);
     assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+}
+
+#[tokio::test]
+async fn test_full_snapshot_seeding_for_incremental_does_not_add_dirty_window_filter() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    {
+        let mut state = task.state.write().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(!state.is_incremental_disabled());
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(30), Some(Timestamp::new_second(35)));
+    }
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("time_window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+    ]));
+
+    let plan = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let plan_text = plan.plan.to_string();
+    assert!(plan.can_advance_checkpoints);
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+    assert!(!plan_text.contains("Filter:"), "{plan_text}");
+}
+
+#[tokio::test]
+async fn test_incremental_plan_does_not_add_dirty_window_filter() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("time_window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+    ]));
+
+    let plan = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let plan_text = plan.plan.to_string();
+    assert!(plan.can_advance_checkpoints);
+    assert!(!plan_text.contains("Filter:"), "{plan_text}");
 }
 
 #[tokio::test]
@@ -773,7 +876,7 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
         query_ctx: ctx,
         catalog_manager: query_engine.engine_state().catalog_manager().clone(),
         shutdown_rx: rx,
-        batch_opts: Arc::new(BatchingModeOptions::default()),
+        batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
     })
     .unwrap();
@@ -788,10 +891,7 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
         CheckpointMode::Incremental
     );
 
-    let incremental_plan = task
-        .prepare_plan_for_incremental(&dml_plan, None)
-        .await
-        .unwrap();
+    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
     assert!(incremental_plan.is_none());
     let state = task.state.read().unwrap();
     assert!(state.is_incremental_disabled());
@@ -852,7 +952,7 @@ async fn test_prepare_plan_for_incremental_falls_back_without_disable_on_rewrite
         query_ctx: ctx,
         catalog_manager: query_engine.engine_state().catalog_manager().clone(),
         shutdown_rx: rx,
-        batch_opts: Arc::new(BatchingModeOptions::default()),
+        batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
     })
     .unwrap();
@@ -866,10 +966,7 @@ async fn test_prepare_plan_for_incremental_falls_back_without_disable_on_rewrite
         CheckpointMode::Incremental
     );
 
-    let incremental_plan = task
-        .prepare_plan_for_incremental(&dml_plan, None)
-        .await
-        .unwrap();
+    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
     assert!(incremental_plan.is_none());
     let state = task.state.read().unwrap();
     assert!(!state.is_incremental_disabled());
@@ -928,7 +1025,7 @@ async fn test_prepare_plan_for_incremental_group_by_without_merge_columns_uses_o
         query_ctx: ctx,
         catalog_manager: query_engine.engine_state().catalog_manager().clone(),
         shutdown_rx: rx,
-        batch_opts: Arc::new(BatchingModeOptions::default()),
+        batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
     })
     .unwrap();
@@ -939,7 +1036,7 @@ async fn test_prepare_plan_for_incremental_group_by_without_merge_columns_uses_o
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
 
     let incremental_plan = task
-        .prepare_plan_for_incremental(&dml_plan, None)
+        .prepare_plan_for_incremental(&dml_plan)
         .await
         .unwrap()
         .expect("plain GROUP BY is incremental-safe without a rewrite");
@@ -973,7 +1070,7 @@ async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
         .unwrap()
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
     let incremental_plan = task
-        .prepare_plan_for_incremental(&plan_info.plan, None)
+        .prepare_plan_for_incremental(&plan_info.plan)
         .await
         .unwrap();
     let incremental_safe = incremental_plan.is_some();

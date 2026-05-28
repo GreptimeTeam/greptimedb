@@ -1288,9 +1288,10 @@ async fn test_rewrite_incremental_aggregate_with_left_join() {
 
 #[tokio::test]
 async fn test_rewrite_incremental_aggregate_filters_sink_dirty_time_window() {
-    // This verifies the rewrite placement when callers supply an already
-    // inferred sink dirty-window predicate. The task-level inference rules are
-    // covered by `infer_sink_time_window_filter_col` tests in task.rs.
+    // This verifies the rewrite placement when callers supply a sink predicate.
+    // The production incremental flow path currently leaves sink scans
+    // unfiltered for correctness and relies on future dynamic filters for
+    // pruning.
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let sql = "SELECT max(number) AS number, date_bin(INTERVAL '1 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window";

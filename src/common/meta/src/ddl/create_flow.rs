@@ -487,6 +487,9 @@ pub enum FlowType {
     Streaming,
 }
 
+pub const FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY: &str =
+    "experimental_enable_incremental_read";
+
 impl FlowType {
     pub const BATCHING: &str = "batching";
     pub const STREAMING: &str = "streaming";
