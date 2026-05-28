@@ -63,24 +63,13 @@ impl PromqlJoinSelection {
             return Ok(Transformed::no(plan));
         }
 
-        let projection = hash_join
-            .contains_projection()
-            .then(|| Self::infer_projection(hash_join.join_schema(), &hash_join.schema()))
-            .transpose()?;
-
-        let new_join = HashJoinExec::try_new(
-            Arc::clone(hash_join.left()),
-            Arc::clone(hash_join.right()),
-            hash_join.on().to_vec(),
-            hash_join.filter().cloned(),
-            hash_join.join_type(),
-            projection,
-            PartitionMode::CollectLeft,
-            hash_join.null_equality(),
-            false,
-        )?;
-
-        Ok(Transformed::yes(Arc::new(new_join)))
+        Ok(Transformed::yes(
+            hash_join
+                .builder()
+                .with_partition_mode(PartitionMode::CollectLeft)
+                .reset_state()
+                .build_exec()?,
+        ))
     }
 
     fn should_collect_left(hash_join: &HashJoinExec) -> bool {
@@ -147,37 +136,6 @@ impl PromqlJoinSelection {
 
         has_tsid && has_time
     }
-
-    fn infer_projection(
-        full_schema: &SchemaRef,
-        output_schema: &SchemaRef,
-    ) -> DfResult<Vec<usize>> {
-        let mut used = vec![false; full_schema.fields().len()];
-        let mut projection = Vec::with_capacity(output_schema.fields().len());
-
-        for output_field in output_schema.fields() {
-            let Some((idx, _)) = full_schema
-                .fields()
-                .iter()
-                .enumerate()
-                .find(|(idx, field)| {
-                    !used[*idx]
-                        && field.name() == output_field.name()
-                        && field.data_type() == output_field.data_type()
-                })
-            else {
-                return datafusion_common::plan_err!(
-                    "failed to infer PromQL hash join projection for field {}",
-                    output_field.name()
-                );
-            };
-
-            used[idx] = true;
-            projection.push(idx);
-        }
-
-        Ok(projection)
-    }
 }
 
 #[cfg(test)]
@@ -185,6 +143,7 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use datafusion::common::NullEquality;
     use datafusion::physical_optimizer::PhysicalOptimizerRule;
+    use datafusion::physical_plan::displayable;
     use datafusion::physical_plan::empty::EmptyExec;
     use datafusion::physical_plan::joins::HashJoinExec;
     use datafusion_common::config::ConfigOptions;
@@ -246,6 +205,14 @@ mod tests {
 
         assert_eq!(optimized_join.partition_mode(), &PartitionMode::CollectLeft);
         assert_eq!(optimized.schema(), original_schema);
+        assert!(
+            displayable(optimized.as_ref())
+                .one_line()
+                .to_string()
+                .contains(
+                    "projection=[greptime_value@0, greptime_value@3, host@4, __tsid@5, greptime_timestamp@6]"
+                )
+        );
     }
 
     #[test]
