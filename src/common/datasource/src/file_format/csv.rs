@@ -14,14 +14,21 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::task::Poll;
 
 use arrow::csv::reader::Format;
 use arrow::csv::{self, WriterBuilder};
+use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
-use arrow_schema::Schema;
+use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
+use bytes::{Buf, Bytes};
 use common_runtime;
+use common_telemetry::warn;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use futures::StreamExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -34,9 +41,12 @@ use crate::file_format::{self, FileFormat, stream_to_file};
 use crate::share_buffer::SharedBuffer;
 use crate::util::normalize_infer_schema;
 
+const SKIP_BAD_RECORDS_BATCH_SIZE: usize = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsvFormat {
     pub has_header: bool,
+    pub skip_bad_records: bool,
     pub delimiter: u8,
     pub schema_infer_max_record: Option<usize>,
     pub compression_type: CompressionType,
@@ -75,14 +85,12 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
                     .build()
                 })?);
         };
-        if let Some(has_header) = value.get(file_format::FORMAT_HAS_HEADER) {
-            format.has_header = has_header.parse().map_err(|_| {
-                error::ParseFormatSnafu {
-                    key: file_format::FORMAT_HAS_HEADER,
-                    value: has_header,
-                }
-                .build()
-            })?;
+        if let Some(has_header) = parse_header_option(value)? {
+            format.has_header = has_header;
+        }
+        if let Some(skip_bad_records) = value.get(file_format::FORMAT_SKIP_BAD_RECORDS) {
+            format.skip_bad_records =
+                parse_bool(file_format::FORMAT_SKIP_BAD_RECORDS, skip_bad_records)?;
         };
         if let Some(timestamp_format) = value.get(file_format::TIMESTAMP_FORMAT) {
             format.timestamp_format = Some(timestamp_format.clone());
@@ -97,10 +105,41 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
     }
 }
 
+fn parse_bool(key: &'static str, value: &str) -> Result<bool> {
+    value
+        .parse()
+        .map_err(|_| error::ParseFormatSnafu { key, value }.build())
+}
+
+fn parse_header_option(value: &HashMap<String, String>) -> Result<Option<bool>> {
+    let has_header = value
+        .get(file_format::FORMAT_HAS_HEADER)
+        .map(|value| parse_bool(file_format::FORMAT_HAS_HEADER, value))
+        .transpose()?;
+    let headers = value
+        .get(file_format::FORMAT_HEADERS)
+        .map(|value| parse_bool(file_format::FORMAT_HEADERS, value))
+        .transpose()?;
+
+    match (has_header, headers) {
+        (Some(has_header), Some(headers)) if has_header != headers => error::ParseFormatSnafu {
+            key: file_format::FORMAT_HEADERS,
+            value: value
+                .get(file_format::FORMAT_HEADERS)
+                .expect("headers exists"),
+        }
+        .fail(),
+        (Some(has_header), _) => Ok(Some(has_header)),
+        (_, Some(headers)) => Ok(Some(headers)),
+        (None, None) => Ok(None),
+    }
+}
+
 impl Default for CsvFormat {
     fn default() -> Self {
         Self {
             has_header: true,
+            skip_bad_records: false,
             delimiter: b',',
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
             compression_type: CompressionType::Uncompressed,
@@ -189,10 +228,110 @@ impl DfRecordBatchEncoder for csv::Writer<SharedBuffer> {
     }
 }
 
+pub async fn tolerant_csv_stream(
+    store: &ObjectStore,
+    path: &str,
+    schema: SchemaRef,
+    projection: Vec<usize>,
+    format: &CsvFormat,
+) -> Result<SendableRecordBatchStream> {
+    let meta = store
+        .stat(path)
+        .await
+        .context(error::ReadObjectSnafu { path })?;
+
+    let reader = store
+        .reader(path)
+        .await
+        .context(error::ReadObjectSnafu { path })?
+        .into_bytes_stream(0..meta.content_length())
+        .await
+        .context(error::ReadObjectSnafu { path })?;
+
+    let projected_schema = Arc::new(
+        schema
+            .project(&projection)
+            .context(error::InferSchemaSnafu)?,
+    );
+    let mut decoder = csv::ReaderBuilder::new(schema)
+        .with_header(format.has_header)
+        .with_delimiter(format.delimiter)
+        .with_batch_size(SKIP_BAD_RECORDS_BATCH_SIZE)
+        .with_projection(projection)
+        .build_decoder();
+
+    let path = path.to_string();
+    let mut upstream = format.compression_type.convert_stream(reader).fuse();
+    let mut buffered = Bytes::new();
+    let mut input_finished = false;
+    let stream = futures::stream::poll_fn(move |cx| {
+        loop {
+            while !input_finished {
+                if buffered.is_empty() {
+                    match futures::ready!(upstream.poll_next_unpin(cx)) {
+                        Some(Ok(bytes)) if bytes.is_empty() => continue,
+                        Some(Ok(bytes)) => buffered = bytes,
+                        Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
+                        None => input_finished = true,
+                    }
+                }
+
+                let decoded = decoder.decode(buffered.as_ref())?;
+                if decoded > 0 {
+                    buffered.advance(decoded);
+                    continue;
+                }
+
+                if decoder.capacity() == 0 || input_finished {
+                    break;
+                }
+
+                if buffered.is_empty() {
+                    continue;
+                }
+
+                return Poll::Ready(Some(Err(ArrowError::ParseError(
+                    "CSV decoder made no progress while input bytes remain".to_string(),
+                ))));
+            }
+
+            match decoder.flush() {
+                Ok(Some(batch)) => return Poll::Ready(Some(Ok(batch))),
+                Ok(None) if input_finished => return Poll::Ready(None),
+                Ok(None) => continue,
+                Err(error) if is_skippable_csv_record_error(&error) => {
+                    warn!(
+                        "Skipping bad CSV record while copying from {}: {}",
+                        path, error
+                    );
+                }
+                Err(error) => return Poll::Ready(Some(Err(error))),
+            }
+        }
+    })
+    .map(|result: std::result::Result<RecordBatch, ArrowError>| result.map_err(Into::into));
+
+    Ok(Box::pin(RecordBatchStreamAdapter::new(
+        projected_schema,
+        stream,
+    )))
+}
+
+fn is_skippable_csv_record_error(error: &ArrowError) -> bool {
+    matches!(
+        error,
+        ArrowError::ParseError(_)
+            | ArrowError::CastError(_)
+            | ArrowError::ComputeError(_)
+            | ArrowError::InvalidArgumentError(_)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use arrow_schema::{DataType, Field};
     use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use common_test_util::find_workspace_path;
@@ -204,8 +343,8 @@ mod tests {
 
     use super::*;
     use crate::file_format::{
-        FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER,
-        FORMAT_SCHEMA_INFER_MAX_RECORD, FileFormat, file_to_stream,
+        FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER, FORMAT_HEADERS,
+        FORMAT_SCHEMA_INFER_MAX_RECORD, FORMAT_SKIP_BAD_RECORDS, FileFormat, file_to_stream,
     };
     use crate::test_util::{format_schema, test_store};
 
@@ -331,11 +470,52 @@ mod tests {
                 schema_infer_max_record: Some(2000),
                 delimiter: b'\t',
                 has_header: false,
+                skip_bad_records: false,
                 timestamp_format: None,
                 time_format: None,
                 date_format: None
             }
         );
+
+        let map = HashMap::from([
+            (FORMAT_HEADERS.to_string(), "false".to_string()),
+            (FORMAT_SKIP_BAD_RECORDS.to_string(), "true".to_string()),
+        ]);
+        let format = CsvFormat::try_from(&map).unwrap();
+
+        assert_eq!(
+            format,
+            CsvFormat {
+                has_header: false,
+                skip_bad_records: true,
+                ..CsvFormat::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_try_from_rejects_invalid_bool_options() {
+        let map = HashMap::from([(FORMAT_HEADERS.to_string(), "yes".to_string())]);
+        assert!(CsvFormat::try_from(&map).is_err());
+
+        let map = HashMap::from([(FORMAT_SKIP_BAD_RECORDS.to_string(), "yes".to_string())]);
+        assert!(CsvFormat::try_from(&map).is_err());
+    }
+
+    #[test]
+    fn test_try_from_rejects_conflicted_header_options() {
+        let map = HashMap::from([
+            (FORMAT_HAS_HEADER.to_string(), "true".to_string()),
+            (FORMAT_HEADERS.to_string(), "false".to_string()),
+        ]);
+        assert!(CsvFormat::try_from(&map).is_err());
+
+        let map = HashMap::from([
+            (FORMAT_HAS_HEADER.to_string(), "false".to_string()),
+            (FORMAT_HEADERS.to_string(), "false".to_string()),
+        ]);
+        let format = CsvFormat::try_from(&map).unwrap();
+        assert!(!format.has_header);
     }
 
     #[tokio::test]
@@ -495,5 +675,64 @@ mod tests {
 +----+---------+-------+"#;
             assert_eq!(expected, pretty_print);
         }
+    }
+
+    #[tokio::test]
+    async fn test_tolerant_csv_stream_continues_after_parse_error() {
+        let temp_dir = common_test_util::temp_dir::create_temp_dir("test_tolerant_csv_stream");
+        let csv_file_path = temp_dir.path().join("input.csv");
+        std::fs::write(
+            &csv_file_path,
+            "id,name,value\n1,Alice,10.5\nbad,Bad,20.0\nworse,Bad,21.0\n2,Bob,30.5",
+        )
+        .unwrap();
+
+        let store = test_store("/");
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            Field::new("id", DataType::UInt32, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let path = csv_file_path.to_str().unwrap();
+
+        let stream =
+            tolerant_csv_stream(&store, path, schema, vec![0, 1, 2], &CsvFormat::default())
+                .await
+                .unwrap();
+        let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+        let pretty_print = arrow::util::pretty::pretty_format_batches(&batches)
+            .unwrap()
+            .to_string();
+        let expected = r#"+----+-------+-------+
+| id | name  | value |
++----+-------+-------+
+| 1  | Alice | 10.5  |
+| 2  | Bob   | 30.5  |
++----+-------+-------+"#;
+        assert_eq!(expected, pretty_print);
+    }
+
+    #[tokio::test]
+    async fn test_tolerant_csv_stream_fails_on_structural_csv_error() {
+        let temp_dir =
+            common_test_util::temp_dir::create_temp_dir("test_tolerant_csv_stream_csv_error");
+        let csv_file_path = temp_dir.path().join("input.csv");
+        std::fs::write(&csv_file_path, "id,name,value\n1,Alice,10.5\n2,Bob\n").unwrap();
+
+        let store = test_store("/");
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            Field::new("id", DataType::UInt32, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let path = csv_file_path.to_str().unwrap();
+
+        let stream =
+            tolerant_csv_stream(&store, path, schema, vec![0, 1, 2], &CsvFormat::default())
+                .await
+                .unwrap();
+        let error = stream.try_collect::<Vec<_>>().await.unwrap_err();
+
+        assert!(error.to_string().contains("incorrect number of fields"));
     }
 }
