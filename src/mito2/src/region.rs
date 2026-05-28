@@ -671,8 +671,8 @@ impl MitoRegion {
         let version = self.version();
         let state = self.state();
         let role = self.region_role();
-        let region_options =
-            serde_json::to_string(&version.options).unwrap_or_else(|_| "{}".to_string());
+        let region_options = serde_json::to_string(&version.options)
+            .unwrap_or_else(|err| serde_json::json!({ "error": err.to_string() }).to_string());
         let sst_format = match version.options.sst_format.unwrap_or_default() {
             crate::sst::FormatType::PrimaryKey => "primary_key",
             crate::sst::FormatType::Flat => "flat",
