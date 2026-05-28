@@ -73,14 +73,6 @@ impl BatchingTask {
             };
         }
 
-        if checkpoint_mode == CheckpointMode::Incremental && state.is_incremental_disabled() {
-            state.mark_full_snapshot();
-            return FlowCheckpointDecision::FallbackToFullSnapshot {
-                previous_mode: CheckpointMode::Incremental,
-                reason: FlowQueryFallbackReason::IncrementalDisabled,
-            };
-        }
-
         if let (Some(participating_regions), Some(watermark_map)) =
             (res.participating_regions(), res.region_watermark_map())
         {

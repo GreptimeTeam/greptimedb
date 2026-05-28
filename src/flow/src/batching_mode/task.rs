@@ -67,6 +67,10 @@ use crate::{Error, FlowId};
 mod ckpt;
 mod inc;
 
+/// Maximum number of dirty time-window predicates attached to one incremental
+/// SQL query. This keeps generated OR filters bounded so Substrait encoding and
+/// downstream planning remain predictable; if the backlog is larger, the flow
+/// drains one capped batch and postpones checkpoint advancement to a later run.
 const MAX_INCREMENTAL_DIRTY_WINDOW_FILTERS: usize = 4096;
 
 /// The task's config, immutable once created

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::tracing::warn;
+use common_telemetry::tracing::debug;
 use datafusion_expr::Expr;
 use datatypes::schema::Schema;
 
@@ -70,14 +70,14 @@ fn infer_sink_time_window_filter_col(
     match candidates.as_slice() {
         [name] => Some(name.clone()),
         [] => {
-            warn!(
+            debug!(
                 "Flow {} cannot infer sink dirty-window filter column: no timestamp group key in {:?}",
                 flow_id, analysis.group_key_names
             );
             None
         }
         _ => {
-            warn!(
+            debug!(
                 "Flow {} cannot infer sink dirty-window filter column: ambiguous timestamp group keys {:?}",
                 flow_id, candidates
             );
