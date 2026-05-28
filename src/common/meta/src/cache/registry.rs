@@ -163,6 +163,8 @@ mod tests {
 
     use crate::cache::registry::CacheRegistryBuilder;
     use crate::cache::*;
+    use crate::cache_invalidator::{CacheInvalidator, Context};
+    use crate::error::Result;
     use crate::instruction::CacheIdent;
 
     fn always_true_filter(_: &CacheIdent) -> bool {
@@ -272,5 +274,92 @@ mod tests {
             .get::<Arc<CacheContainer<String, String, CacheIdent>>>()
             .unwrap();
         assert_eq!(cache.name(), "string_cache");
+    }
+
+    #[tokio::test]
+    async fn test_registry_invalidate_all() {
+        let invalidator: Invalidator<_, String, CacheIdent> =
+            Box::new(|_, _| Box::pin(async { Ok(()) }));
+        let i32_cache = Arc::new(test_i32_cache("i32_cache", invalidator));
+        let invalidator: Invalidator<_, String, CacheIdent> =
+            Box::new(|_, _| Box::pin(async { Ok(()) }));
+        let string_cache = Arc::new(test_cache("string_cache", invalidator));
+
+        i32_cache.get(1).await.unwrap();
+        string_cache.get_by_ref("foo").await.unwrap();
+        assert!(i32_cache.contains_key(&1));
+        assert!(string_cache.contains_key("foo"));
+
+        let registry = CacheRegistryBuilder::default()
+            .add_cache(i32_cache.clone())
+            .add_cache(string_cache.clone())
+            .build();
+
+        registry.invalidate_all().unwrap();
+
+        assert!(!i32_cache.contains_key(&1));
+        assert!(!string_cache.contains_key("foo"));
+    }
+
+    struct LayerOrderInvalidator {
+        expected_order: i32,
+        order: Arc<AtomicI32>,
+    }
+
+    #[async_trait::async_trait]
+    impl CacheInvalidator for LayerOrderInvalidator {
+        async fn invalidate(&self, _ctx: &Context, _caches: &[CacheIdent]) -> Result<()> {
+            Ok(())
+        }
+
+        fn invalidate_all(&self) -> Result<()> {
+            let previous = self.order.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(self.expected_order, previous);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_layered_registry_invalidate_all() {
+        let order = Arc::new(AtomicI32::new(0));
+        let invalidator: Invalidator<_, String, CacheIdent> =
+            Box::new(|_, _| Box::pin(async { Ok(()) }));
+        let first_layer_cache = Arc::new(test_cache("first_layer_cache", invalidator));
+        let first_layer_order = Arc::new(LayerOrderInvalidator {
+            expected_order: 0,
+            order: order.clone(),
+        });
+        let first_layer = CacheRegistryBuilder::default()
+            .add_cache(first_layer_order)
+            .add_cache(first_layer_cache.clone())
+            .build();
+
+        let invalidator: Invalidator<_, String, CacheIdent> =
+            Box::new(|_, _| Box::pin(async { Ok(()) }));
+        let second_layer_cache = Arc::new(test_i32_cache("second_layer_cache", invalidator));
+        let second_layer_order = Arc::new(LayerOrderInvalidator {
+            expected_order: 1,
+            order: order.clone(),
+        });
+        let second_layer = CacheRegistryBuilder::default()
+            .add_cache(second_layer_order)
+            .add_cache(second_layer_cache.clone())
+            .build();
+
+        first_layer_cache.get_by_ref("foo").await.unwrap();
+        second_layer_cache.get(1).await.unwrap();
+        assert!(first_layer_cache.contains_key("foo"));
+        assert!(second_layer_cache.contains_key(&1));
+
+        let registry = LayeredCacheRegistryBuilder::default()
+            .add_cache_registry(first_layer)
+            .add_cache_registry(second_layer)
+            .build();
+
+        registry.invalidate_all().unwrap();
+
+        assert_eq!(2, order.load(Ordering::Relaxed));
+        assert!(!first_layer_cache.contains_key("foo"));
+        assert!(!second_layer_cache.contains_key(&1));
     }
 }
