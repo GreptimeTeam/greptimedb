@@ -60,7 +60,7 @@ All keys are flat strings under the `greptime.semantic.` prefix; values are stri
 | `greptime.semantic.source_version` | `1.30.0` (optional) |
 | `greptime.semantic.pipeline` | `greptime_trace_v1` (subsumes the existing `table_data_model` value) |
 
-**Trace**: `trace.conventions` (e.g. `otel-semconv-1.27`, lifted from `schema_url`), `trace.has_events`, `trace.has_links`.
+**Trace**: `greptime.semantic.trace.conventions` (e.g. `otel-semconv-1.27`, lifted from `schema_url`), `greptime.semantic.trace.has_events`, `greptime.semantic.trace.has_links`.
 
 **Metric** — v1 assumes one metric type per table, which is how both Prom RW and the post-v0.16 OTel ingestion path land data today; mixed-type tables are a follow-up.
 
@@ -75,9 +75,9 @@ All keys are flat strings under the `greptime.semantic.` prefix; values are stri
 
 `metadata_quality = inferred` is the load-bearing field for confidence-aware tooling: an inferred counter should be re-checked before betting on `rate()`-style semantics.
 
-**Log**: `log.severity_scheme` (`otlp` / `syslog` / `custom`), `log.body_format` (`string` / `json` / `mixed`).
+**Log**: `greptime.semantic.log.severity_scheme` (`otlp` / `syslog` / `custom`), `greptime.semantic.log.body_format` (`string` / `json` / `mixed`).
 
-**Resource / scope preservation**: `resource.attributes_preserved` (JSON array string of attrs promoted to columns), `resource.attributes_dropped` (boolean), `scope.preserved` (boolean). These answer the most common downstream question: "is this data missing because it was dropped, or because it lives on a different column than I think?" List-shaped values use JSON array strings rather than comma-separated text to avoid escaping and ordering ambiguity.
+**Resource / scope preservation**: `greptime.semantic.resource.attributes_preserved` (JSON array string of attrs promoted to columns), `greptime.semantic.resource.attributes_dropped` (boolean), `greptime.semantic.scope.preserved` (boolean). These answer the most common downstream question: "is this data missing because it was dropped, or because it lives on a different column than I think?" List-shaped values use JSON array strings rather than comma-separated text to avoid escaping and ordering ambiguity.
 
 ## Conflict and update semantics
 
@@ -91,11 +91,11 @@ Two design decisions worth pinning down up front, because they constrain everyth
 A consumer's first SQL on connect:
 
 ```sql
-SELECT table_schema, table_name, signal_type, source, pipeline
+SELECT table_catalog, table_schema, table_name, signal_type, source, pipeline
 FROM information_schema.semantic_tables;
 ```
 
-returns one row per semantic-tagged table. The view exposes a stable set of core columns (`signal_type`, `source`, `source_protocol`, `source_version`, `pipeline`) plus a `semantic_options` JSON column carrying the rest of the `greptime.semantic.*` keys verbatim. Future keys appear inside `semantic_options` without forcing a view-schema change; only widely-used keys are ever promoted to first-class columns.
+returns one row per semantic-tagged table. The view exposes a stable set of core columns (`table_catalog`, `table_schema`, `table_name`, `signal_type`, `source`, `source_protocol`, `source_version`, `pipeline`) plus a `semantic_options` JSON column carrying the rest of the `greptime.semantic.*` keys verbatim. Future keys appear inside `semantic_options` without forcing a view-schema change; only widely-used keys are ever promoted to first-class columns.
 
 # Implementation Plan
 
