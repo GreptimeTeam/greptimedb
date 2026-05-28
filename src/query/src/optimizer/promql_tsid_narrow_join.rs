@@ -28,14 +28,14 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 /// Chooses a broadcast-style hash join for the PromQL vector-vector shape where
 /// the build side only carries value, `__tsid`, and timestamp columns.
 ///
-/// PromQL arithmetic joins often keep one side narrow and the other side wide
+/// PromQL arithmetic joins often keep one side narrow (without raw labels) and the other side wide
 /// with all output labels. Partitioning both sides shuffles the wide stream.
 /// `CollectLeft` only gathers the narrow build side and lets the wide probe side
 /// keep its existing partitioning.
 #[derive(Debug)]
-pub struct PromqlJoinSelection;
+pub struct PromqlTsidNarrowJoin;
 
-impl PhysicalOptimizerRule for PromqlJoinSelection {
+impl PhysicalOptimizerRule for PromqlTsidNarrowJoin {
     fn optimize(
         &self,
         plan: Arc<dyn ExecutionPlan>,
@@ -45,7 +45,7 @@ impl PhysicalOptimizerRule for PromqlJoinSelection {
     }
 
     fn name(&self) -> &str {
-        "PromqlJoinSelection"
+        "PromqlTsidNarrowJoin"
     }
 
     fn schema_check(&self) -> bool {
@@ -53,7 +53,7 @@ impl PhysicalOptimizerRule for PromqlJoinSelection {
     }
 }
 
-impl PromqlJoinSelection {
+impl PromqlTsidNarrowJoin {
     fn rewrite_join(plan: Arc<dyn ExecutionPlan>) -> DfResult<Transformed<Arc<dyn ExecutionPlan>>> {
         let Some(hash_join) = plan.as_any().downcast_ref::<HashJoinExec>() else {
             return Ok(Transformed::no(plan));
@@ -76,7 +76,6 @@ impl PromqlJoinSelection {
         hash_join.partition_mode() == &PartitionMode::Partitioned
             && hash_join.join_type() == &JoinType::Inner
             && hash_join.filter().is_none()
-            && hash_join.left().schema().fields().len() <= 3
             && hash_join.right().schema().fields().len() > hash_join.left().schema().fields().len()
             && Self::is_promql_value_tsid_time_schema(&hash_join.left().schema())
             && Self::joins_on_tsid_and_time(hash_join)
@@ -198,7 +197,7 @@ mod tests {
         ) as Arc<dyn ExecutionPlan>;
         let original_schema = join.schema();
 
-        let optimized = PromqlJoinSelection
+        let optimized = PromqlTsidNarrowJoin
             .optimize(join, &ConfigOptions::default())
             .unwrap();
         let optimized_join = optimized.as_any().downcast_ref::<HashJoinExec>().unwrap();
@@ -262,7 +261,7 @@ mod tests {
             .unwrap(),
         ) as Arc<dyn ExecutionPlan>;
 
-        let optimized = PromqlJoinSelection
+        let optimized = PromqlTsidNarrowJoin
             .optimize(join, &ConfigOptions::default())
             .unwrap();
         let optimized_join = optimized.as_any().downcast_ref::<HashJoinExec>().unwrap();

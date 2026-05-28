@@ -66,7 +66,7 @@ use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
-use crate::optimizer::promql_join::PromqlJoinSelection;
+use crate::optimizer::promql_join::PromqlTsidNarrowJoin;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
@@ -193,7 +193,7 @@ impl QueryEngineState {
         // Prefer collecting narrow PromQL build sides over repartitioning wide label streams.
         physical_optimizer
             .rules
-            .insert(7, Arc::new(PromqlJoinSelection));
+            .insert(7, Arc::new(PromqlTsidNarrowJoin));
         // Enforce sorting AFTER custom rules that modify the plan structure
         physical_optimizer.rules.insert(
             8,
