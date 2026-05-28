@@ -111,7 +111,7 @@ impl SstVersion {
     /// Rows from SST files referenced from other regions, for example after
     /// repartition, are not counted.
     /// For historical reasons, the result is not precise for old SST files.
-    pub(crate) fn num_rows(&self, region_id: RegionId) -> u64 {
+    pub(crate) fn owned_num_rows(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()
             .map(|level_meta| {
@@ -129,7 +129,7 @@ impl SstVersion {
     }
 
     /// Returns the number of SST files owned by `region_id`.
-    pub(crate) fn num_files(&self, region_id: RegionId) -> u64 {
+    pub(crate) fn owned_num_files(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()
             .map(|level_meta| {
@@ -143,7 +143,7 @@ impl SstVersion {
     }
 
     /// Returns the space occupied by SST data files owned by `region_id`.
-    pub(crate) fn sst_usage(&self, region_id: RegionId) -> u64 {
+    pub(crate) fn owned_sst_usage(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()
             .map(|level_meta| {
@@ -161,7 +161,7 @@ impl SstVersion {
     }
 
     /// Returns the space occupied by SST index files owned by `region_id`.
-    pub(crate) fn index_usage(&self, region_id: RegionId) -> u64 {
+    pub(crate) fn owned_index_usage(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()
             .map(|level_meta| {
@@ -306,13 +306,13 @@ mod tests {
         let mut version = SstVersion::new();
         version.add_files(purger, files.iter().cloned());
 
-        assert_eq!(3, version.num_rows(region_id));
-        assert_eq!(2, version.num_files(region_id));
-        assert_eq!(300, version.sst_usage(region_id));
-        assert_eq!(30, version.index_usage(region_id));
-        assert_eq!(3, version.num_rows(other_region_id));
-        assert_eq!(1, version.num_files(other_region_id));
-        assert_eq!(300, version.sst_usage(other_region_id));
-        assert_eq!(30, version.index_usage(other_region_id));
+        assert_eq!(3, version.owned_num_rows(region_id));
+        assert_eq!(2, version.owned_num_files(region_id));
+        assert_eq!(300, version.owned_sst_usage(region_id));
+        assert_eq!(30, version.owned_index_usage(region_id));
+        assert_eq!(3, version.owned_num_rows(other_region_id));
+        assert_eq!(1, version.owned_num_files(other_region_id));
+        assert_eq!(300, version.owned_sst_usage(other_region_id));
+        assert_eq!(30, version.owned_index_usage(other_region_id));
     }
 }
