@@ -106,7 +106,10 @@ impl SstVersion {
         }
     }
 
-    /// Returns the number of rows in SST files.
+    /// Returns the number of rows in SST files owned by `region_id`.
+    ///
+    /// Rows from SST files referenced from other regions, for example after
+    /// repartition, are not counted.
     /// For historical reasons, the result is not precise for old SST files.
     pub(crate) fn num_rows(&self, region_id: RegionId) -> u64 {
         self.levels
@@ -125,7 +128,7 @@ impl SstVersion {
             .sum()
     }
 
-    /// Returns the number of SST files.
+    /// Returns the number of SST files owned by `region_id`.
     pub(crate) fn num_files(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()
@@ -139,7 +142,7 @@ impl SstVersion {
             .sum()
     }
 
-    /// Returns SST data files'space occupied in current version.
+    /// Returns the space occupied by SST data files owned by `region_id`.
     pub(crate) fn sst_usage(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()
@@ -157,7 +160,7 @@ impl SstVersion {
             .sum()
     }
 
-    /// Returns SST index files'space occupied in current version.
+    /// Returns the space occupied by SST index files owned by `region_id`.
     pub(crate) fn index_usage(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()

@@ -485,7 +485,8 @@ pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 pub struct RegionStatistic {
     /// The number of rows stored in SST files owned by this region plus rows in memtables.
     ///
-    /// SST files referenced from other regions, for example after repartition, are not counted.
+    /// Rows from SST files referenced from other regions, for example after repartition,
+    /// are not counted to avoid table-level double counting when summing region statistics.
     #[serde(default)]
     pub num_rows: u64,
     /// The size of memtable in bytes.
