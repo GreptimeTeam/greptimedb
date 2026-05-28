@@ -979,6 +979,58 @@ async fn test_list_ssts_with_format(
 }
 
 #[tokio::test]
+async fn test_all_region_infos() {
+    let mut env = TestEnv::with_prefix("all-region-infos").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1024, 7);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows_for_key("region-info", 0, 3, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let entries = engine.all_region_infos().await;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.region_id == region_id)
+        .expect("region info entry should exist");
+
+    assert_eq!(region_id.as_u64(), entry.region_id.as_u64());
+    assert_eq!(region_id.table_id(), entry.table_id);
+    assert_eq!(region_id.region_number(), entry.region_number);
+    assert_eq!(region_id.region_group(), entry.region_group);
+    assert_eq!(region_id.region_sequence(), entry.region_sequence);
+    assert!(!entry.state.is_empty());
+    assert_eq!("Leader", entry.role);
+    assert!(entry.writable);
+    assert_eq!(3, entry.committed_sequence);
+    assert_eq!(Some(3), entry.flushed_sequence);
+    assert!(entry.manifest_version > 0);
+    assert!(serde_json::from_str::<serde_json::Value>(&entry.region_options).is_ok());
+    assert_eq!("flat", entry.sst_format);
+}
+
+#[tokio::test]
 async fn test_all_index_metas_list_all_types() {
     test_all_index_metas_list_all_types_with_format(false, r#"
 PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "bloom_filter", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 751, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":640,\"row_count\":20,\"rows_per_segment\":2,\"segment_count\":10}}"), node_id: None }

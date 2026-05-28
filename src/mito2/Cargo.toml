@@ -53,6 +53,7 @@ dashmap.workspace = true
 dotenv.workspace = true
 either.workspace = true
 futures.workspace = true
+humantime.workspace = true
 humantime-serde.workspace = true
 index.workspace = true
 itertools.workspace = true
