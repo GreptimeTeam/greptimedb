@@ -8320,6 +8320,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
+ "derive_more",
  "dotenv",
  "either",
  "futures",
