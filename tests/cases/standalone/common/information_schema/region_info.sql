@@ -14,7 +14,7 @@ ADMIN FLUSH_TABLE('region_info_case');
 -- SQLNESS REPLACE (\{".*"\}) <JSON>
 -- SQLNESS REPLACE (-{40,}) ----------------
 -- SQLNESS REPLACE (region_options\s+\|) region_options |
-SELECT region_id, state, role, writable, sequence, manifest_version, compaction_time_window, region_options, sst_format
+SELECT region_id, state, role, writable, committed_sequence, flushed_sequence, manifest_version, compaction_time_window, region_options, sst_format
 FROM information_schema.region_info
 WHERE region_id IN (
   SELECT region_id FROM information_schema.region_peers WHERE table_name = 'region_info_case'

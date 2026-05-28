@@ -1023,7 +1023,8 @@ async fn test_all_region_infos() {
     assert!(!entry.state.is_empty());
     assert_eq!("Leader", entry.role);
     assert!(entry.writable);
-    assert_eq!(3, entry.sequence);
+    assert_eq!(3, entry.committed_sequence);
+    assert_eq!(Some(3), entry.flushed_sequence);
     assert!(entry.manifest_version > 0);
     assert!(serde_json::from_str::<serde_json::Value>(&entry.region_options).is_ok());
     assert_eq!("flat", entry.sst_format);

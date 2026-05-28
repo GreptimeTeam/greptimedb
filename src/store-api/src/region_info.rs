@@ -17,9 +17,10 @@ use std::sync::Arc;
 use common_recordbatch::DfRecordBatch;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, LogicalTableSource};
-use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt8Array, UInt32Array, UInt64Array};
+use datatypes::arrow::array::{
+    ArrayRef, BooleanArray, StringArray, UInt8Array, UInt32Array, UInt64Array,
+};
 use datatypes::arrow::error::ArrowError;
-use datatypes::arrow_array::StringArray;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +46,9 @@ pub struct RegionInfoEntry {
     /// Whether the region accepts writes.
     pub writable: bool,
     /// The committed sequence of the region.
-    pub sequence: u64,
+    pub committed_sequence: u64,
+    /// The latest sequence that has been persisted into SSTs.
+    pub flushed_sequence: Option<u64>,
     /// The manifest version of the region.
     pub manifest_version: u64,
     /// Human-readable compaction time window.
@@ -71,7 +74,8 @@ impl RegionInfoEntry {
             ColumnSchema::new("state", Ty::string_datatype(), false),
             ColumnSchema::new("role", Ty::string_datatype(), false),
             ColumnSchema::new("writable", Ty::boolean_datatype(), false),
-            ColumnSchema::new("sequence", Ty::uint64_datatype(), false),
+            ColumnSchema::new("committed_sequence", Ty::uint64_datatype(), false),
+            ColumnSchema::new("flushed_sequence", Ty::uint64_datatype(), true),
             ColumnSchema::new("manifest_version", Ty::uint64_datatype(), false),
             ColumnSchema::new("compaction_time_window", Ty::string_datatype(), true),
             ColumnSchema::new("region_options", Ty::string_datatype(), false),
@@ -90,8 +94,9 @@ impl RegionInfoEntry {
         let region_sequences = entries.iter().map(|e| e.region_sequence);
         let states = entries.iter().map(|e| e.state.as_str());
         let roles = entries.iter().map(|e| e.role.as_str());
-        let writable = entries.iter().map(|e| Some(e.writable));
-        let sequences = entries.iter().map(|e| e.sequence);
+        let writable = entries.iter().map(|e| e.writable);
+        let committed_sequences = entries.iter().map(|e| e.committed_sequence);
+        let flushed_sequences = entries.iter().map(|e| e.flushed_sequence);
         let manifest_versions = entries.iter().map(|e| e.manifest_version);
         let compaction_time_windows = entries.iter().map(|e| e.compaction_time_window.as_ref());
         let region_options = entries.iter().map(|e| e.region_options.as_str());
@@ -107,7 +112,8 @@ impl RegionInfoEntry {
             Arc::new(StringArray::from_iter_values(states)),
             Arc::new(StringArray::from_iter_values(roles)),
             Arc::new(BooleanArray::from_iter(writable)),
-            Arc::new(UInt64Array::from_iter_values(sequences)),
+            Arc::new(UInt64Array::from_iter_values(committed_sequences)),
+            Arc::new(UInt64Array::from_iter(flushed_sequences)),
             Arc::new(UInt64Array::from_iter_values(manifest_versions)),
             Arc::new(StringArray::from_iter(compaction_time_windows)),
             Arc::new(StringArray::from_iter_values(region_options)),
@@ -150,8 +156,9 @@ impl RegionInfoEntry {
 mod tests {
     use datafusion_common::TableReference;
     use datafusion_expr::{LogicalPlan, Operator, binary_expr, col, lit};
-    use datatypes::arrow::array::{Array, BooleanArray, UInt8Array, UInt32Array, UInt64Array};
-    use datatypes::arrow_array::StringArray;
+    use datatypes::arrow::array::{
+        Array, BooleanArray, StringArray, UInt8Array, UInt32Array, UInt64Array,
+    };
 
     use super::*;
     use crate::storage::{RegionId, ScanRequest};
@@ -173,7 +180,8 @@ mod tests {
                 "state",
                 "role",
                 "writable",
-                "sequence",
+                "committed_sequence",
+                "flushed_sequence",
                 "manifest_version",
                 "compaction_time_window",
                 "region_options",
@@ -182,9 +190,10 @@ mod tests {
             ]
         );
         assert!(!columns[0].is_nullable());
-        assert!(!columns[9].is_nullable());
-        assert!(columns[10].is_nullable());
-        assert!(columns[13].is_nullable());
+        assert!(!columns[8].is_nullable());
+        assert!(columns[9].is_nullable());
+        assert!(columns[11].is_nullable());
+        assert!(columns[14].is_nullable());
     }
 
     #[test]
@@ -201,7 +210,8 @@ mod tests {
                 state: "Leader(Writable)".to_string(),
                 role: "Leader".to_string(),
                 writable: true,
-                sequence: 42,
+                committed_sequence: 42,
+                flushed_sequence: Some(41),
                 manifest_version: 7,
                 compaction_time_window: Some("1h".to_string()),
                 region_options: "{\"sst_format\":\"flat\"}".to_string(),
@@ -217,7 +227,8 @@ mod tests {
                 state: "Follower".to_string(),
                 role: "Follower".to_string(),
                 writable: false,
-                sequence: 9,
+                committed_sequence: 9,
+                flushed_sequence: None,
                 manifest_version: 2,
                 compaction_time_window: None,
                 region_options: "{}".to_string(),
@@ -269,8 +280,24 @@ mod tests {
         assert!(writable.value(0));
         assert!(!writable.value(1));
 
+        let committed_sequences = batch
+            .column(8)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(42, committed_sequences.value(0));
+        assert_eq!(9, committed_sequences.value(1));
+
+        let flushed_sequences = batch
+            .column(9)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(41, flushed_sequences.value(0));
+        assert!(flushed_sequences.is_null(1));
+
         let compaction_time_windows = batch
-            .column(10)
+            .column(11)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -278,7 +305,7 @@ mod tests {
         assert!(compaction_time_windows.is_null(1));
 
         let node_ids = batch
-            .column(13)
+            .column(14)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -288,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_region_info_build_plan() {
-        let projection_input = Some(vec![0, 5, 7, 10].into());
+        let projection_input = Some(vec![0, 5, 7, 11].into());
         let request = ScanRequest {
             projection_input,
             filters: vec![binary_expr(col("writable"), Operator::Eq, lit(true))],
@@ -304,7 +331,7 @@ mod tests {
             scan.table_name,
             TableReference::bare(RegionInfoEntry::reserved_table_name_for_inspection())
         );
-        assert_eq!(scan.projection, Some(vec![0, 5, 7, 10]));
+        assert_eq!(scan.projection, Some(vec![0, 5, 7, 11]));
 
         let fields = scan.projected_schema.fields();
         assert_eq!(fields.len(), 4);

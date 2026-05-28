@@ -11,7 +11,8 @@ DESC TABLE information_schema.region_info;
 | state                  | String  |     | NO   |         | FIELD         |
 | role                   | String  |     | NO   |         | FIELD         |
 | writable               | Boolean |     | NO   |         | FIELD         |
-| sequence               | UInt64  |     | NO   |         | FIELD         |
+| committed_sequence     | UInt64  |     | NO   |         | FIELD         |
+| flushed_sequence       | UInt64  |     | YES  |         | FIELD         |
 | manifest_version       | UInt64  |     | NO   |         | FIELD         |
 | compaction_time_window | String  |     | YES  |         | FIELD         |
 | region_options         | String  |     | NO   |         | FIELD         |
@@ -43,18 +44,18 @@ ADMIN FLUSH_TABLE('region_info_case');
 -- SQLNESS REPLACE (\{".*"\}) <JSON>
 -- SQLNESS REPLACE (-{40,}) ----------------
 -- SQLNESS REPLACE (region_options\s+\|) region_options |
-SELECT region_id, state, role, writable, sequence, manifest_version, compaction_time_window, region_options, sst_format
+SELECT region_id, state, role, writable, committed_sequence, flushed_sequence, manifest_version, compaction_time_window, region_options, sst_format
 FROM information_schema.region_info
 WHERE region_id IN (
   SELECT region_id FROM information_schema.region_peers WHERE table_name = 'region_info_case'
 )
 ORDER BY region_id;
 
-+---------------+------------------+--------+----------+----------+------------------+------------------------+----------------+------------+
-| region_id     | state            | role   | writable | sequence | manifest_version | compaction_time_window | region_options | sst_format |
-+---------------+------------------+--------+----------+----------+------------------+------------------------+----------------+------------+
-|<NUM>| Leader(Writable) | Leader | true     |<NUM>|<NUM>|                        | <JSON> | flat       |
-+---------------+------------------+--------+----------+----------+------------------+------------------------+----------------+------------+
++---------------+------------------+--------+----------+--------------------+------------------+------------------+------------------------+----------------+------------+
+| region_id     | state            | role   | writable | committed_sequence | flushed_sequence | manifest_version | compaction_time_window | region_options | sst_format |
++---------------+------------------+--------+----------+--------------------+------------------+------------------+------------------------+----------------+------------+
+|<NUM>| Leader(Writable) | Leader | true     |<NUM>|<NUM>|<NUM>|                        | <JSON> | flat       |
++---------------+------------------+--------+----------+--------------------+------------------+------------------+------------------------+----------------+------------+
 
 DROP TABLE region_info_case;
 

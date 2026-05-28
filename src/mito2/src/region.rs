@@ -688,7 +688,8 @@ impl MitoRegion {
             state: state.as_str().to_string(),
             role: role.to_string(),
             writable: self.is_writable(),
-            sequence: self.find_committed_sequence(),
+            committed_sequence: self.find_committed_sequence(),
+            flushed_sequence: Some(self.flushed_sequence()).filter(|sequence| *sequence > 0),
             manifest_version: self.stats.manifest_version(),
             compaction_time_window: version
                 .compaction_time_window
