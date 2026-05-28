@@ -483,7 +483,10 @@ pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 /// Represents the statistics of a region.
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct RegionStatistic {
-    /// The number of rows
+    /// The number of rows stored in SST files owned by this region plus rows in memtables.
+    ///
+    /// Rows from SST files referenced from other regions, for example after repartition,
+    /// are not counted to avoid table-level double counting when summing region statistics.
     #[serde(default)]
     pub num_rows: u64,
     /// The size of memtable in bytes.
@@ -492,11 +495,17 @@ pub struct RegionStatistic {
     pub wal_size: u64,
     /// The size of manifest in bytes.
     pub manifest_size: u64,
-    /// The size of SST data files in bytes.
+    /// The size of SST data files owned by this region in bytes.
+    ///
+    /// SST files referenced from other regions, for example after repartition, are not counted.
     pub sst_size: u64,
-    /// The num of SST files.
+    /// The number of SST files owned by this region.
+    ///
+    /// SST files referenced from other regions, for example after repartition, are not counted.
     pub sst_num: u64,
-    /// The size of SST index files in bytes.
+    /// The size of SST index files owned by this region in bytes.
+    ///
+    /// SST index files referenced from other regions, for example after repartition, are not counted.
     #[serde(default)]
     pub index_size: u64,
     /// The details of the region.
