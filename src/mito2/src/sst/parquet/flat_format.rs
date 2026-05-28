@@ -143,7 +143,7 @@ pub(crate) fn wrap_pk_binary_to_dict(
         })?;
     let n = binary_array.len();
     let keys = UInt32Array::from_iter_values(0..n as u32);
-    let dict_array: ArrayRef = Arc::new(DictionaryArray::new(keys, Arc::new(binary_array.clone())));
+    let dict_array: ArrayRef = Arc::new(DictionaryArray::new(keys, pk_column.clone()));
 
     let mut columns = record_batch.columns().to_vec();
     columns[pk_idx] = dict_array;
@@ -851,11 +851,9 @@ mod tests {
 
     use api::v1::SemanticType;
     use datatypes::arrow::array::{
-        BinaryArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
+        ArrayRef, BinaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
     };
-    use datatypes::arrow::datatypes::{
-        DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema, TimeUnit,
-    };
+    use datatypes::arrow::datatypes::DataType as ArrowDataType;
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -863,10 +861,11 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
-    use super::{FlatReadFormat, field_column_start, wrap_pk_binary_to_dict};
+    use super::*;
     use crate::read::read_columns::ReadColumns;
     use crate::sst::{
-        FlatSchemaOptions, flat_sst_arrow_schema_column_num, to_flat_sst_arrow_schema,
+        FlatSchemaOptions, flat_sst_arrow_schema_column_num, override_pk_field_to_binary,
+        to_flat_sst_arrow_schema,
     };
 
     /// Builds a `RegionMetadata` with the given number of tags and fields.
@@ -943,47 +942,63 @@ mod tests {
     }
 
     #[test]
-    fn test_wrap_pk_binary_to_dict() {
-        use datatypes::arrow::array::{Array, DictionaryArray};
+    fn test_convert_batch_wraps_binary_pk_to_dict() {
+        use datatypes::arrow::array::{Array, DictionaryArray, StringArray};
         use datatypes::arrow::datatypes::UInt32Type;
 
-        // Repeat the second value to verify identity keys (no dedup).
-        let pk_values: Vec<&[u8]> = vec![b"alpha", b"beta", b"beta"];
-        let pk_array = Arc::new(BinaryArray::from_iter_values(pk_values.iter().copied()));
-        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3]));
-        let seq_array = Arc::new(UInt64Array::from(vec![10u64, 11, 12]));
-        let op_array = Arc::new(UInt8Array::from(vec![1u8, 1, 1]));
+        // build_metadata(1, 1, Dense) projects to:
+        // [tag_0: Dict<UInt32, Utf8>, field_0: UInt64, ts: Timestamp(ms),
+        //  __primary_key: Dict<UInt32, Binary>, __sequence: UInt64, __op_type: UInt8]
+        let metadata = Arc::new(build_metadata(1, 1, PrimaryKeyEncoding::Dense));
+        let column_ids: Vec<u32> = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let mut read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids(column_ids),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        read_format.set_pk_as_binary().unwrap();
 
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new(
-                "ts",
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            ArrowField::new("__primary_key", ArrowDataType::Binary, false),
-            ArrowField::new("__sequence", ArrowDataType::UInt64, false),
-            ArrowField::new("__op_type", ArrowDataType::UInt8, false),
-        ]));
-        let dict_schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new(
-                "ts",
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            ArrowField::new_dictionary(
-                "__primary_key",
-                ArrowDataType::UInt32,
-                ArrowDataType::Binary,
-                false,
-            ),
-            ArrowField::new("__sequence", ArrowDataType::UInt64, false),
-            ArrowField::new("__op_type", ArrowDataType::UInt8, false),
-        ]));
-        let batch =
-            RecordBatch::try_new(schema, vec![ts_array, pk_array, seq_array, op_array]).unwrap();
+        let output_schema = read_format.output_arrow_schema().unwrap();
+        let binary_schema = override_pk_field_to_binary(&output_schema);
 
-        let wrapped = wrap_pk_binary_to_dict(batch, &dict_schema).unwrap();
-        let pk_col = wrapped.column(1);
+        // Repeat the second pk to verify identity keys (no dedup).
+        let tag_keys = UInt32Array::from(vec![0u32, 1, 1]);
+        let tag_values = Arc::new(StringArray::from(vec!["t0", "t1"]));
+        let tag_array: ArrayRef =
+            Arc::new(DictionaryArray::<UInt32Type>::new(tag_keys, tag_values));
+        let field_array: ArrayRef = Arc::new(UInt64Array::from(vec![10u64, 11, 12]));
+        let ts_array: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1i64, 2, 3]));
+        let pk_array: ArrayRef = Arc::new(BinaryArray::from_iter_values(
+            [b"alpha".as_ref(), b"beta", b"beta"].iter().copied(),
+        ));
+        let seq_array: ArrayRef = Arc::new(UInt64Array::from(vec![100u64, 101, 102]));
+        let op_array: ArrayRef = Arc::new(UInt8Array::from(vec![1u8, 1, 1]));
+
+        let batch = RecordBatch::try_new(
+            binary_schema,
+            vec![
+                tag_array,
+                field_array,
+                ts_array,
+                pk_array,
+                seq_array,
+                op_array,
+            ],
+        )
+        .unwrap();
+
+        let wrapped = read_format.convert_batch(batch, None).unwrap();
+        assert_eq!(wrapped.schema(), output_schema);
+
+        let pk_idx = primary_key_column_index(wrapped.num_columns());
+        let pk_col = wrapped.column(pk_idx);
         assert_eq!(
             pk_col.data_type(),
             &ArrowDataType::Dictionary(
@@ -1004,7 +1019,6 @@ mod tests {
         assert_eq!(values.value(0), b"alpha");
         assert_eq!(values.value(1), b"beta");
         assert_eq!(values.value(2), b"beta");
-        assert_eq!(wrapped.schema().field(1).data_type(), pk_col.data_type());
     }
 
     #[test]
