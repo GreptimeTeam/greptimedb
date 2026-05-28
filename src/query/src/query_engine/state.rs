@@ -66,7 +66,7 @@ use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
-use crate::optimizer::promql_join::PromqlTsidNarrowJoin;
+use crate::optimizer::promql_tsid_narrow_join::PromqlTsidNarrowJoin;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
