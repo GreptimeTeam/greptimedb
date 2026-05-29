@@ -338,16 +338,19 @@ mod tests {
     #[async_trait]
     impl Sorter for NaiveSorter {
         async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()> {
-            let segment_index = self.total_row_count / self.segment_row_count;
-            let bitmap = self.values.entry(value.map(Into::into)).or_default();
-            set_bit(bitmap, segment_index);
-
-            Ok(())
+            self.push_n(value, 1).await
         }
 
         async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()> {
-            if n > 0 {
-                self.push(value).await?;
+            if n == 0 {
+                return Ok(());
+            }
+
+            let segment_index_start = self.total_row_count / self.segment_row_count;
+            let segment_index_end = (self.total_row_count + n - 1) / self.segment_row_count;
+            let bitmap = self.values.entry(value.map(Into::into)).or_default();
+            for segment_index in segment_index_start..=segment_index_end {
+                set_bit(bitmap, segment_index);
             }
             Ok(())
         }
