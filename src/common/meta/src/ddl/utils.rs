@@ -24,11 +24,12 @@ use std::fmt::Debug;
 use api::region::RegionResponse;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    MetricManifestInfo, MitoManifestInfo, RegionRequest, RegionRequestHeader, SyncRequest,
-    region_request,
+    CloseRequest as PbCloseRegionRequest, MetricManifestInfo, MitoManifestInfo, RegionRequest,
+    RegionRequestHeader, SyncRequest, region_request,
 };
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_procedure::error::Error as ProcedureError;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
@@ -51,6 +52,7 @@ use crate::key::datanode_table::DatanodeTableValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::key::{TableMetadataManager, TableMetadataManagerRef};
+use crate::node_manager::NodeManagerRef;
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{RegionRoute, find_follower_regions, find_followers};
@@ -66,6 +68,39 @@ pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error
         }
         err
     }
+}
+
+/// Makes close region request.
+pub(crate) fn make_close_region_request(region_id: RegionId) -> RegionRequest {
+    RegionRequest {
+        header: Some(RegionRequestHeader {
+            tracing_context: TracingContext::from_current_span().to_w3c(),
+            ..Default::default()
+        }),
+        body: Some(region_request::Body::Close(PbCloseRegionRequest {
+            region_id: region_id.as_u64(),
+        })),
+    }
+}
+
+/// Closes a region on the datanode.
+/// 
+/// Ignores the [StatusCode::RegionNotFound] because the region might have been closed or removed already.
+pub async fn close_region_on_datanode(
+    node_manager: &NodeManagerRef,
+    datanode: Peer,
+    region_id: RegionId,
+) -> Result<()> {
+    let requester = node_manager.datanode(&datanode).await;
+    let request = make_close_region_request(region_id);
+
+    if let Err(err) = requester.handle(request).await
+        && err.status_code() != StatusCode::RegionNotFound
+    {
+        return Err(add_peer_context_if_needed(datanode)(err));
+    }
+
+    Ok(())
 }
 
 /// Maps the error to the corresponding procedure error.

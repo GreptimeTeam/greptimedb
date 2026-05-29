@@ -15,8 +15,7 @@
 use std::collections::HashMap;
 
 use api::v1::region::{
-    CloseRequest as PbCloseRegionRequest, DropRequest as PbDropRegionRequest, RegionRequest,
-    RegionRequestHeader, region_request,
+    DropRequest as PbDropRegionRequest, RegionRequest, RegionRequestHeader, region_request,
 };
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -31,7 +30,10 @@ use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
-use crate::ddl::utils::{add_peer_context_if_needed, convert_region_routes_to_detecting_regions};
+use crate::ddl::utils::{
+    add_peer_context_if_needed, close_region_on_datanode,
+    convert_region_routes_to_detecting_regions,
+};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
@@ -270,7 +272,6 @@ impl DropTableExecutor {
         let followers = find_followers(region_routes);
         let mut close_region_tasks = Vec::with_capacity(followers.len());
         for datanode in followers {
-            let requester = node_manager.datanode(&datanode).await;
             let regions = find_follower_regions(region_routes, &datanode);
             let region_ids = regions
                 .iter()
@@ -279,26 +280,11 @@ impl DropTableExecutor {
 
             for region_id in region_ids {
                 debug!("Closing region {region_id} on Datanode {datanode:?}");
-                let request = RegionRequest {
-                    header: Some(RegionRequestHeader {
-                        tracing_context: TracingContext::from_current_span().to_w3c(),
-                        ..Default::default()
-                    }),
-                    body: Some(region_request::Body::Close(PbCloseRegionRequest {
-                        region_id: region_id.as_u64(),
-                    })),
-                };
-
-                let datanode = datanode.clone();
-                let requester = requester.clone();
-                close_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await
-                        && err.status_code() != StatusCode::RegionNotFound
-                    {
-                        return Err(add_peer_context_if_needed(datanode)(err));
-                    }
-                    Ok(())
-                });
+                close_region_tasks.push(close_region_on_datanode(
+                    node_manager,
+                    datanode.clone(),
+                    region_id,
+                ));
             }
         }
 
