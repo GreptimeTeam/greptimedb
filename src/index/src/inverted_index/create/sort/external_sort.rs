@@ -85,8 +85,9 @@ impl Sorter for ExternalSorter {
             return Ok(());
         }
 
-        let segment_index = self.segment_index(self.total_row_count);
-        let segment_index_range = segment_index..=segment_index;
+        let segment_index_start = self.segment_index(self.total_row_count);
+        let segment_index_end = self.segment_index(self.total_row_count + n - 1);
+        let segment_index_range = segment_index_start..=segment_index_end;
 
         if let Some(value) = value {
             let memory_diff = self.push_not_null(value, segment_index_range);
