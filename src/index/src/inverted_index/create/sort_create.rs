@@ -56,29 +56,27 @@ impl InvertedIndexCreator for SortIndexCreator {
         value: Option<BytesRef<'_>>,
         n: usize,
     ) -> Result<()> {
-        match self.sorters.get_mut(index_name) {
-            Some(sorter) => sorter.push_n(value, n).await,
-            None => {
-                let index_name = index_name.to_string();
-                let mut sorter = (self.sorter_factory)(index_name.clone(), self.segment_row_count);
-                sorter.push_n(value, n).await?;
-                self.sorters.insert(index_name, sorter);
-                Ok(())
-            }
+        if let Some(sorter) = self.sorters.get_mut(index_name) {
+            return sorter.push_n(value, n).await;
         }
+
+        let index_name = index_name.to_string();
+        let mut sorter = (self.sorter_factory)(index_name.clone(), self.segment_row_count);
+        sorter.push_n(value, n).await?;
+        self.sorters.insert(index_name, sorter);
+        Ok(())
     }
 
     async fn advance_with_name_n(&mut self, index_name: &str, n: usize) -> Result<()> {
-        match self.sorters.get_mut(index_name) {
-            Some(sorter) => sorter.advance_n(n).await,
-            None => {
-                let index_name = index_name.to_string();
-                let mut sorter = (self.sorter_factory)(index_name.clone(), self.segment_row_count);
-                sorter.advance_n(n).await?;
-                self.sorters.insert(index_name, sorter);
-                Ok(())
-            }
+        if let Some(sorter) = self.sorters.get_mut(index_name) {
+            return sorter.advance_n(n).await;
         }
+
+        let index_name = index_name.to_string();
+        let mut sorter = (self.sorter_factory)(index_name.clone(), self.segment_row_count);
+        sorter.advance_n(n).await?;
+        self.sorters.insert(index_name, sorter);
+        Ok(())
     }
 
     /// Finalizes the sorting for all indexes and writes them using the inverted index writer

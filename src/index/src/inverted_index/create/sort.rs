@@ -43,15 +43,17 @@ pub struct SortOutput {
 #[async_trait]
 pub trait Sorter: Send {
     /// Inputs a non-null or null value into the sorter.
-    /// Does not advance row/segment.
-    /// Should be equivalent to calling `push_n` with n = 1.
+    ///
+    /// Note: this method does not advance row/segment. Should be equivalent to
+    /// calling `push_n` with n = 1.
     async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()> {
         self.push_n(value, 1).await
     }
 
     /// Pushing n identical non-null or null values into the sorter.
-    /// Does not advance row/segment.
-    /// Should be equivalent to calling `push` n times.
+    ///
+    /// Note: this method does not advance row/segment. Should be equivalent to
+    /// calling `push` n times.
     async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()>;
 
     /// Advances to next row.

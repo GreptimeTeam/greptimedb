@@ -30,8 +30,8 @@ pub trait InvertedIndexCreator: Send {
     /// - `index_name`: Identifier for the index being built
     /// - `value`: The data to be indexed, or `None` for a null entry
     ///
-    /// Does not advance row/segment.
-    /// It should be equivalent to calling `push_with_name_n` with `n = 1`.
+    /// Note: this method does not advance row/segment. It should be equivalent
+    /// to calling `push_with_name_n` with `n = 1`.
     async fn push_with_name(
         &mut self,
         index_name: &str,
@@ -45,8 +45,8 @@ pub trait InvertedIndexCreator: Send {
     /// - `index_name`: Identifier for the index being built
     /// - `value`: The data to be indexed, or `None` for a null entry
     ///
-    /// Does not advance row/segment.
-    /// It should be equivalent to calling `push_with_name` `n` times.
+    /// Note: this method does not advance row/segment. It should be equivalent
+    /// to calling `push_with_name` `n` times.
     async fn push_with_name_n(
         &mut self,
         index_name: &str,
