@@ -97,8 +97,7 @@ impl State for UpdatePartitionMetadata {
         new_table_info.meta.partition_key_indices = partition_key_indices;
         ctx.update_table_info(&table_info_value, table_info_value.update(new_table_info))
             .await?;
-        // We don't invalidate cache here because the subsequent AllocateRegion step
-        // will update the table route and invalidate the cache accordingly.
+        ctx.invalidate_table_cache().await?;
 
         Ok((
             Box::new(AllocateRegion::new(self.plan_entries.clone())),

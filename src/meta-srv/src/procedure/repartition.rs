@@ -440,7 +440,17 @@ impl Context {
         };
         let _ = self
             .cache_invalidator
-            .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
+            .invalidate(
+                &ctx,
+                &[
+                    CacheIdent::TableId(table_id),
+                    CacheIdent::TableName(TableName {
+                        catalog_name: self.persistent_ctx.catalog_name.clone(),
+                        schema_name: self.persistent_ctx.schema_name.clone(),
+                        table_name: self.persistent_ctx.table_name.clone(),
+                    }),
+                ],
+            )
             .await;
         Ok(())
     }
