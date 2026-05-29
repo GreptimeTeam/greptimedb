@@ -1601,6 +1601,7 @@ experimental_grpc_max_retries = 3
 experimental_frontend_scan_timeout = "30s"
 experimental_max_filter_num_per_query = 20
 experimental_time_window_merge_threshold = 3
+experimental_enable_incremental_read = false
 read_preference = "Leader"
 
 [logging]
