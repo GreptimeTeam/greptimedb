@@ -154,7 +154,7 @@ async fn test_dirty_time_windows_uses_batch_opts() {
 }
 
 #[tokio::test]
-async fn test_gen_exec_once_waits_for_execution_lock() {
+async fn test_execute_once_serialized_waits_for_execution_lock() {
     let TestTaskParts {
         task, query_engine, ..
     } = new_test_task_engine_and_plan_with_query(
@@ -172,21 +172,21 @@ async fn test_gen_exec_once_waits_for_execution_lock() {
     let frontend_client_to_run = frontend_client.clone();
     let exec = tokio::spawn(async move {
         task_to_run
-            .gen_exec_once(&query_engine_to_run, &frontend_client_to_run, None)
+            .execute_once_serialized(&query_engine_to_run, &frontend_client_to_run, None)
             .await
     });
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(
         !exec.is_finished(),
-        "gen_exec_once should wait for execution_lock"
+        "execute_once_serialized should wait for execution_lock"
     );
 
     drop(guard);
     tokio::time::timeout(Duration::from_secs(1), exec)
         .await
-        .expect("gen_exec_once should finish once execution_lock is released")
-        .expect("gen_exec_once task should not panic")
+        .expect("execute_once_serialized should finish once execution_lock is released")
+        .expect("execute_once_serialized task should not panic")
         .expect_err("missing sink should fail after acquiring execution_lock");
 }
 
@@ -1238,7 +1238,7 @@ async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
     task.state.write().unwrap().dirty_time_windows.set_dirty();
 
     let plan_info = task
-        .gen_insert_plan(&query_engine, None)
+        .gen_insert_plan_unlocked(&query_engine, None)
         .await
         .unwrap()
         .unwrap();
@@ -1354,11 +1354,11 @@ async fn test_insert_plan_matching_failure_restores_consumed_dirty_marker() {
     register_number_only_sink(&query_engine, sink_table);
     task.state.write().unwrap().dirty_time_windows.set_dirty();
 
-    let result = task.gen_insert_plan(&query_engine, None).await;
+    let result = task.gen_insert_plan_unlocked(&query_engine, None).await;
 
     assert!(result.is_err());
     let _err = match result {
-        Ok(_) => panic!("gen_insert_plan should fail with a sink column mismatch"),
+        Ok(_) => panic!("gen_insert_plan_unlocked should fail with a sink column mismatch"),
         Err(err) => err,
     };
     let state = task.state.read().unwrap();

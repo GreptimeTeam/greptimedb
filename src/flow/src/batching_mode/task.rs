@@ -150,6 +150,16 @@ pub enum DirtyRestore {
     Unscoped(DirtyTimeWindows),
 }
 
+struct ExecuteOnceOutcome {
+    new_query: Option<PlanInfo>,
+    /// Execution result of the generated insert plan.
+    ///
+    /// `Ok(Some((affected_rows, elapsed)))` means a query was executed.
+    /// `Ok(None)` means no query was generated because there was no dirty signal.
+    /// `Err(_)` means plan generation or execution failed.
+    result: Result<Option<(usize, Duration)>, Error>,
+}
+
 impl BatchingTask {
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
@@ -264,36 +274,75 @@ impl BatchingTask {
             .context(ExternalSnafu)
     }
 
-    pub async fn gen_exec_once(
+    pub(crate) async fn execute_once_serialized(
         &self,
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
         max_window_cnt: Option<usize>,
     ) -> Result<Option<(usize, Duration)>, Error> {
+        let outcome = self
+            .execute_once_serialized_with_outcome(engine, frontend_client, max_window_cnt)
+            .await;
+        outcome.result
+    }
+
+    /// Executes one flow evaluation under `execution_lock` and keeps the
+    /// generated query context for the background loop's error logging/backoff.
+    async fn execute_once_serialized_with_outcome(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
         let _execution_guard = self.execution_lock.lock().await;
-        if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
+        self.execute_once_unlocked(engine, frontend_client, max_window_cnt)
+            .await
+    }
+
+    /// Executes one flow evaluation. Caller must hold `execution_lock`.
+    async fn execute_once_unlocked(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        let new_query = match self.gen_insert_plan_unlocked(engine, max_window_cnt).await {
+            Ok(new_query) => new_query,
+            Err(err) => {
+                return ExecuteOnceOutcome {
+                    new_query: None,
+                    result: Err(err),
+                };
+            }
+        };
+
+        if let Some(new_query) = new_query {
             debug!("Generate new query: {}", new_query.plan);
-            match self
-                .execute_logical_plan(
+            let res = self
+                .execute_logical_plan_unlocked(
                     frontend_client,
                     &new_query.plan,
                     new_query.can_advance_checkpoints,
                 )
-                .await
-            {
-                Ok(result) => Ok(result),
-                Err(err) => {
-                    self.handle_executed_query_failure(Some(&new_query));
-                    Err(err)
-                }
+                .await;
+            if res.is_err() {
+                self.handle_executed_query_failure(Some(&new_query));
+            }
+            ExecuteOnceOutcome {
+                new_query: Some(new_query),
+                result: res,
             }
         } else {
             debug!("Generate no query");
-            Ok(None)
+            ExecuteOnceOutcome {
+                new_query: None,
+                result: Ok(None),
+            }
         }
     }
 
-    pub async fn gen_insert_plan(
+    /// Generates the insert plan. Caller must reach this through the serialized path.
+    async fn gen_insert_plan_unlocked(
         &self,
         engine: &QueryEngineRef,
         max_window_cnt: Option<usize>,
@@ -397,7 +446,8 @@ impl BatchingTask {
         Ok(())
     }
 
-    pub async fn execute_logical_plan(
+    /// Executes the insert plan. Caller must reach this through the serialized path.
+    async fn execute_logical_plan_unlocked(
         &self,
         frontend_client: &Arc<FrontendClient>,
         plan: &LogicalPlan,
@@ -739,32 +789,11 @@ impl BatchingTask {
 
             let min_refresh = self.config.batch_opts.experimental_min_refresh_duration;
 
-            let (new_query, res) = {
-                let _execution_guard = self.execution_lock.lock().await;
-                match self.gen_insert_plan(&engine, max_window_cnt).await {
-                    Ok(new_query) => {
-                        let res = if let Some(new_query) = &new_query {
-                            self.execute_logical_plan(
-                                &frontend_client,
-                                &new_query.plan,
-                                new_query.can_advance_checkpoints,
-                            )
-                            .await
-                        } else {
-                            Ok(None)
-                        };
+            let outcome = self
+                .execute_once_serialized_with_outcome(&engine, &frontend_client, max_window_cnt)
+                .await;
 
-                        if res.is_err() {
-                            self.handle_executed_query_failure(new_query.as_ref());
-                        }
-
-                        (new_query, res)
-                    }
-                    Err(err) => (None, Err(err)),
-                }
-            };
-
-            match res {
+            match outcome.result {
                 // normal execute, sleep for some time before doing next query
                 Ok(Some(_)) => {
                     // can increase max_window_cnt to query more windows next time
@@ -818,7 +847,7 @@ impl BatchingTask {
                     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT
                         .with_label_values(&[&flow_id_str])
                         .inc();
-                    match new_query {
+                    match outcome.new_query {
                         Some(query) => {
                             common_telemetry::error!(err; "Failed to execute query for flow={} with query: {}", self.config.flow_id, query.plan);
                             // TODO(discord9): add some backoff here? half the query time window or what

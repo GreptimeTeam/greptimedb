@@ -865,7 +865,7 @@ impl BatchingEngine {
         });
 
         let res = task
-            .gen_exec_once(
+            .execute_once_serialized(
                 &self.query_engine,
                 &self.frontend_client,
                 cur_dirty_window_cnt,
