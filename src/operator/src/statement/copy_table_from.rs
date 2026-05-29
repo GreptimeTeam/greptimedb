@@ -21,7 +21,9 @@ use std::task::{Context, Poll};
 
 use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
-use common_datasource::file_format::csv::{CsvFormat, tolerant_csv_stream};
+use common_datasource::file_format::csv::{
+    CsvFormat, is_skippable_arrow_error, tolerant_csv_stream,
+};
 use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format, file_to_stream};
@@ -554,16 +556,6 @@ fn is_skippable_record_error(error: &DataFusionError) -> bool {
         DataFusionError::Context(_, error) => is_skippable_record_error(error),
         _ => false,
     }
-}
-
-fn is_skippable_arrow_error(error: &ArrowError) -> bool {
-    matches!(
-        error,
-        ArrowError::ParseError(_)
-            | ArrowError::CastError(_)
-            | ArrowError::ComputeError(_)
-            | ArrowError::InvalidArgumentError(_)
-    )
 }
 
 /// Executes all pending inserts all at once, drain pending requests and reset pending bytes.

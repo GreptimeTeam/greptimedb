@@ -299,7 +299,7 @@ pub async fn tolerant_csv_stream(
                 Ok(Some(batch)) => return Poll::Ready(Some(Ok(batch))),
                 Ok(None) if input_finished => return Poll::Ready(None),
                 Ok(None) => continue,
-                Err(error) if is_skippable_csv_record_error(&error) => {
+                Err(error) if is_skippable_arrow_error(&error) => {
                     warn!(
                         "Skipping bad CSV record while copying from {}: {}",
                         path, error
@@ -317,7 +317,7 @@ pub async fn tolerant_csv_stream(
     )))
 }
 
-fn is_skippable_csv_record_error(error: &ArrowError) -> bool {
+pub fn is_skippable_arrow_error(error: &ArrowError) -> bool {
     matches!(
         error,
         ArrowError::ParseError(_)
