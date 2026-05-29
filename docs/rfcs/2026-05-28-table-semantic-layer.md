@@ -55,12 +55,12 @@ All keys are flat strings under the `greptime.semantic.` prefix; values are stri
 | Key | Example |
 | --- | --- |
 | `greptime.semantic.signal_type` | `trace` / `log` / `metric` / `event` |
-| `greptime.semantic.source` | `opentelemetry` / `prometheus` / `jaeger` / `loki` / `custom` |
+| `greptime.semantic.source` | `opentelemetry` / `prometheus` / `elasticsearch` / `loki` / `custom` |
 | `greptime.semantic.source_protocol` | `otlp/http` / `prom_remote_write_v2` / `scrape` |
 | `greptime.semantic.source_version` | `1.30.0` (optional) |
 | `greptime.semantic.pipeline` | `greptime_trace_v1` (subsumes the existing `table_data_model` value) |
 
-**Trace**: `greptime.semantic.trace.conventions` (e.g. `otel-semconv-1.27`, lifted from `schema_url`), `greptime.semantic.trace.has_events`, `greptime.semantic.trace.has_links`.
+**Trace**: `greptime.semantic.trace.conventions` (e.g. `otel-semconv-1.27`, lifted from `schema_url`, which is the version of the OpenTelemetry semantic conventions used in this table), `greptime.semantic.trace.has_events`, `greptime.semantic.trace.has_links`.
 
 **Metric** — v1 assumes one metric type per table, which is how both Prom RW and the post-v0.16 OTel ingestion path land data today; mixed-type tables are a follow-up.
 
@@ -108,7 +108,7 @@ Four phases, each independently shippable.
 
 # Relationship to OpenTelemetry standardisation
 
-OTel today standardises what producers emit and how agents are managed; the read side — what a backend exposes back to clients — is deliberately vendor turf. OTLP is one-way; OpAMP is agent management; OTEP-0243 (App Telemetry Schema) is producer-side; `schema_url` is producer-stated with no reverse. Adjacent precedents — Prometheus `/api/v1/metadata`, Loki labels API, Tempo tags, Jaeger services, ad-hoc MCP servers — are all vendor-specific.
+OTel today standardises what producers emit and how data collectors are managed; the read side — what a backend exposes back to clients — is deliberately vendor turf. OTLP is one-way; OpAMP is agent management; OTEP-0243 (App Telemetry Schema) is producer-side; `schema_url` is producer-stated with no reverse. Adjacent precedents — Prometheus `/api/v1/metadata`, Loki labels API, Tempo tags, Jaeger services, ad-hoc MCP servers — are all vendor-specific.
 
 This is a real gap. The shape we propose locally (signal-agnostic, `schema_url`-aware, structured around a small vocabulary) is deliberately close to what a future upstream OTEP for a backend-catalog read API could look like, with Weaver's *Resolved Telemetry Schema* as the natural data model. We do not commit to driving such an OTEP here; we do commit to keeping the local shape close enough that a future upstream proposal does not force a breaking migration.
 
