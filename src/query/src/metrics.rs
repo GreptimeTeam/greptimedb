@@ -383,6 +383,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
+    use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
     use async_trait::async_trait;
     use datafusion::arrow::datatypes::Schema as ArrowSchema;
     use datafusion::execution::SessionStateBuilder;
@@ -394,6 +395,7 @@ mod tests {
     use table::table_name::TableName;
 
     use super::*;
+    use crate::dist_plan::ProducerScopeId;
     use crate::options::{FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID};
     use crate::region_query::RegionQueryHandler;
 
@@ -407,6 +409,24 @@ mod tests {
             _request: common_query::request::QueryRequest,
         ) -> Result<SendableRecordBatchStream> {
             unreachable!("metrics tests should not execute remote queries")
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _region_id: RegionId,
+            _query_id: String,
+            _update: RemoteDynFilterUpdate,
+        ) -> Result<()> {
+            unreachable!("metrics tests should not send remote dyn filter updates")
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _region_id: RegionId,
+            _query_id: String,
+            _unregister: RemoteDynFilterUnregister,
+        ) -> Result<()> {
+            unreachable!("metrics tests should not send remote dyn filter unregisters")
         }
     }
 
@@ -439,6 +459,7 @@ mod tests {
                 query_ctx,
                 1,
                 BTreeMap::<String, BTreeSet<datafusion_common::Column>>::new(),
+                ProducerScopeId::new(0),
             )
             .unwrap(),
         )
