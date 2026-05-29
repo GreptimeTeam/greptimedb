@@ -172,6 +172,7 @@ impl InvertedIndexer {
         let mut decoded_pks: Option<Vec<(CompositeValues, usize)>> = None;
 
         for target in &self.indexed_targets {
+            let target_key = target.to_string();
             let Some(column_meta) = self.metadata.column_by_id(target.column_id()) else {
                 debug!(
                     "Column {} not found in the metadata during building inverted index",
@@ -196,11 +197,11 @@ impl InvertedIndexer {
 
                     if value_ref.is_null() {
                         self.index_creator
-                            .push_with_name(&target.to_string(), None)
+                            .push_with_name(&target_key, None)
                             .await
                             .context(PushIndexValueSnafu)?;
                         self.index_creator
-                            .advance_with_name(target_key)
+                            .advance_with_name(&target_key)
                             .await
                             .context(PushIndexValueSnafu)?;
                     } else {
@@ -211,11 +212,11 @@ impl InvertedIndexer {
                         )
                         .context(EncodeSnafu)?;
                         self.index_creator
-                            .push_with_name(&target.to_string(), Some(&self.value_buf))
+                            .push_with_name(&target_key, Some(&self.value_buf))
                             .await
                             .context(PushIndexValueSnafu)?;
                         self.index_creator
-                            .advance_with_name(target_key)
+                            .advance_with_name(&target_key)
                             .await
                             .context(PushIndexValueSnafu)?;
                     }
@@ -260,11 +261,11 @@ impl InvertedIndexer {
                         .transpose()?;
 
                     self.index_creator
-                        .push_with_name_n(&target.to_string(), elem, *count)
+                        .push_with_name_n(&target_key, elem, *count)
                         .await
                         .context(PushIndexValueSnafu)?;
                     self.index_creator
-                        .advance_with_name_n(target_key, *count)
+                        .advance_with_name_n(&target_key, *count)
                         .await
                         .context(PushIndexValueSnafu)?;
                 }
@@ -322,6 +323,7 @@ impl InvertedIndexer {
         guard.inc_row_count(n);
 
         for target in &self.indexed_targets {
+            let target_key = target.to_string();
             if target.path().is_some() {
                 continue;
             }
@@ -346,11 +348,11 @@ impl InvertedIndexer {
                         .transpose()?;
 
                     self.index_creator
-                        .push_with_name_n(&target.to_string(), value, n)
+                        .push_with_name_n(&target_key, value, n)
                         .await
                         .context(PushIndexValueSnafu)?;
                     self.index_creator
-                        .advance_with_name_n(target_key, n)
+                        .advance_with_name_n(&target_key, n)
                         .await
                         .context(PushIndexValueSnafu)?;
                 }
@@ -369,11 +371,11 @@ impl InvertedIndexer {
                         let value = values.data.get_ref(i);
                         if value.is_null() {
                             self.index_creator
-                                .push_with_name(&target.to_string(), None)
+                                .push_with_name(&target_key, None)
                                 .await
                                 .context(PushIndexValueSnafu)?;
                             self.index_creator
-                                .advance_with_name(target_key)
+                                .advance_with_name(&target_key)
                                 .await
                                 .context(PushIndexValueSnafu)?;
                         } else {
@@ -384,11 +386,11 @@ impl InvertedIndexer {
                             )
                             .context(EncodeSnafu)?;
                             self.index_creator
-                                .push_with_name(&target.to_string(), Some(&self.value_buf))
+                                .push_with_name(&target_key, Some(&self.value_buf))
                                 .await
                                 .context(PushIndexValueSnafu)?;
                             self.index_creator
-                                .advance_with_name(target_key)
+                                .advance_with_name(&target_key)
                                 .await
                                 .context(PushIndexValueSnafu)?;
                         }
