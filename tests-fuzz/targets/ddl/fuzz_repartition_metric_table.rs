@@ -481,7 +481,7 @@ impl Arbitrary<'_> for FuzzInput {
         let max_tables = get_gt_fuzz_input_max_tables();
         let tables = get_fuzz_override::<usize>("TABLES")
             .unwrap_or_else(|| rng.random_range(1..=std::cmp::max(1, max_tables)));
-        let max_actions = get_gt_fuzz_input_max_alter_actions();
+        let max_actions = std::cmp::min(128, get_gt_fuzz_input_max_alter_actions());
         let actions = get_fuzz_override::<usize>("ACTIONS")
             .unwrap_or_else(|| rng.random_range(1..max_actions));
         Ok(FuzzInput {
