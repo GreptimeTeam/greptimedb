@@ -54,13 +54,19 @@ mod test {
     use api::v1::{
         AddColumn, AddColumns, AlterTableExpr, Column, ColumnDataType, ColumnDataTypeExtension,
         ColumnDef, CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
-        DropTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
+        DropTableExpr, InsertIntoPlan, InsertRequest, InsertRequests, QueryRequest, SemanticType,
         VectorTypeExtension, alter_table_expr,
     };
+    use auth::{
+        DefaultPermissionChecker, Identity, Password, PermissionCheckerRef, UserProvider,
+        static_user_provider_from_option,
+    };
     use client::OutputData;
+    use common_base::Plugins;
     use common_catalog::consts::MITO_ENGINE;
     use common_meta::rpc::router::region_distribution;
     use common_query::Output;
+    use common_query::logical_plan::breakup_insert_plan;
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
@@ -127,6 +133,82 @@ mod test {
         GrpcQueryHandler::do_query(instance, request, QueryContext::arc())
             .await
             .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_grpc_insert_into_plan_rejects_readonly_user() {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(DefaultPermissionChecker::arc());
+
+        let standalone =
+            GreptimeDbStandaloneBuilder::new("test_grpc_insert_into_plan_rejects_readonly_user")
+                .with_plugin(plugins)
+                .build()
+                .await;
+        let instance = standalone.fe_instance();
+        let table_name = "grpc_insert_into_plan_auth";
+
+        create_table(
+            instance,
+            format!("CREATE TABLE {table_name} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX)"),
+        )
+        .await;
+
+        let stmt = QueryLanguageParser::parse_sql(
+            &format!("INSERT INTO {table_name} VALUES ('readonly-bypass', 42.0, 1000)"),
+            &QueryContext::arc(),
+        )
+        .unwrap();
+        let plan = instance
+            .statement_executor()
+            .plan(&stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        let (table_name, insert_plan) = breakup_insert_plan(&plan, "greptime", "public").unwrap();
+        let logical_plan = DFLogicalSubstraitConvertor
+            .encode(&insert_plan, DefaultSerializer)
+            .unwrap()
+            .to_vec();
+
+        let request = Request::Query(QueryRequest {
+            query: Some(Query::InsertIntoPlan(InsertIntoPlan {
+                table_name: Some(table_name),
+                logical_plan,
+            })),
+        });
+        let ctx = QueryContext::arc();
+        let provider =
+            static_user_provider_from_option("static_user_provider:cmd:readonly:ro=readonly_pwd")
+                .unwrap();
+        let readonly_user = provider
+            .authenticate(
+                Identity::UserId("readonly", None),
+                Password::PlainText("readonly_pwd".to_string().into()),
+            )
+            .await
+            .unwrap();
+        ctx.set_current_user(readonly_user);
+
+        let err = GrpcQueryHandler::do_query(instance.as_ref(), request, ctx)
+            .await
+            .unwrap_err();
+        let err_msg = format!("{err:?}");
+        assert!(
+            err_msg.contains("not authorized"),
+            "unexpected error: {err_msg}"
+        );
+
+        query_and_expect(
+            instance,
+            "SELECT count(*) FROM grpc_insert_into_plan_auth",
+            "\
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+",
+        )
+        .await;
     }
 
     async fn test_handle_multi_ddl_request(instance: &Instance) {
