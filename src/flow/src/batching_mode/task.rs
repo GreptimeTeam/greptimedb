@@ -587,6 +587,112 @@ impl BatchingTask {
         })
     }
 
+    fn restore_unscoped_dirty_windows(&self, dirty_windows: &DirtyTimeWindows) {
+        self.state
+            .write()
+            .unwrap()
+            .dirty_time_windows
+            .add_dirty_windows(dirty_windows);
+    }
+
+    fn restore_unscoped_dirty_windows_on_err<T>(
+        &self,
+        dirty_windows: &DirtyTimeWindows,
+        result: Result<T, Error>,
+    ) -> Result<T, Error> {
+        result.inspect_err(|_| {
+            self.restore_unscoped_dirty_windows(dirty_windows);
+        })
+    }
+
+    fn drain_dirty_windows_signal(&self) -> (bool, DirtyTimeWindows) {
+        let mut state = self.state.write().unwrap();
+        let dirty_windows_to_restore = state.dirty_time_windows.clone();
+        let is_dirty = !dirty_windows_to_restore.is_empty();
+        state.dirty_time_windows.clean();
+        (is_dirty, dirty_windows_to_restore)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn gen_unfiltered_plan_info(
+        &self,
+        engine: QueryEngineRef,
+        query_ctx: QueryContextRef,
+        sink_table_schema: Arc<Schema>,
+        primary_key_indices: &[usize],
+        allow_partial: bool,
+        dirty_windows_to_restore: DirtyTimeWindows,
+        retention_filter: Option<(&str, Timestamp, &'static str)>,
+    ) -> Result<PlanInfo, Error> {
+        let mut plan = self.restore_unscoped_dirty_windows_on_err(
+            &dirty_windows_to_restore,
+            gen_plan_with_matching_schema(
+                &self.config.query,
+                query_ctx,
+                engine,
+                sink_table_schema,
+                primary_key_indices,
+                allow_partial,
+            )
+            .await,
+        )?;
+
+        if let Some((col_name, lower_bound, context)) = retention_filter {
+            let lower = self.restore_unscoped_dirty_windows_on_err(
+                &dirty_windows_to_restore,
+                to_df_literal(lower_bound),
+            )?;
+            let retention_filter = col(col_name).gt_eq(lit(lower));
+            let mut add_filter = AddFilterRewriter::new(retention_filter);
+            plan = self.restore_unscoped_dirty_windows_on_err(
+                &dirty_windows_to_restore,
+                plan.clone()
+                    .rewrite(&mut add_filter)
+                    .with_context(|_| DatafusionSnafu {
+                        context: format!(
+                            "Failed to apply {context} expire_after filter to plan:\n {}\n",
+                            plan
+                        ),
+                    })
+                    .map(|rewrite| rewrite.data),
+            )?;
+        }
+
+        Ok(PlanInfo {
+            plan,
+            dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
+            can_advance_checkpoints: true,
+        })
+    }
+
+    async fn gen_unfiltered_plan_info_if_dirty(
+        &self,
+        engine: QueryEngineRef,
+        query_ctx: QueryContextRef,
+        sink_table_schema: Arc<Schema>,
+        primary_key_indices: &[usize],
+        allow_partial: bool,
+        retention_filter: Option<(&str, Timestamp, &'static str)>,
+    ) -> Result<Option<PlanInfo>, Error> {
+        let (is_dirty, dirty_windows_to_restore) = self.drain_dirty_windows_signal();
+        if !is_dirty {
+            debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
+            return Ok(None);
+        }
+
+        self.gen_unfiltered_plan_info(
+            engine,
+            query_ctx,
+            sink_table_schema,
+            primary_key_indices,
+            allow_partial,
+            dirty_windows_to_restore,
+            retention_filter,
+        )
+        .await
+        .map(Some)
+    }
+
     fn handle_executed_query_failure(&self, query: Option<&PlanInfo>) {
         if let Some(query) = query {
             self.restore_dirty_windows_after_failure(query);
@@ -802,83 +908,35 @@ impl BatchingTask {
                         self.config.flow_id
                     );
                     // clean dirty time window too, this could be from create flow's check_execute
-                    let (is_dirty, dirty_windows_to_restore) = {
-                        let mut state = self.state.write().unwrap();
-                        let dirty_windows_to_restore = state.dirty_time_windows.clone();
-                        let is_dirty = !dirty_windows_to_restore.is_empty();
-                        state.dirty_time_windows.clean();
-                        (is_dirty, dirty_windows_to_restore)
-                    };
-
-                    if !is_dirty {
-                        // no dirty data, hence no need to update
-                        debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
-                        return Ok(None);
-                    }
-
-                    let plan = match gen_plan_with_matching_schema(
-                        &self.config.query,
-                        query_ctx,
-                        engine,
-                        sink_table_schema.clone(),
-                        primary_key_indices,
-                        allow_partial,
-                    )
-                    .await
-                    {
-                        Ok(plan) => plan,
-                        Err(err) => {
-                            self.state
-                                .write()
-                                .unwrap()
-                                .dirty_time_windows
-                                .add_dirty_windows(&dirty_windows_to_restore);
-                            return Err(err);
-                        }
-                    };
-
-                    return Ok(Some(PlanInfo {
-                        plan,
-                        dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
-                        can_advance_checkpoints: true,
-                    }));
+                    return self
+                        .gen_unfiltered_plan_info_if_dirty(
+                            engine,
+                            query_ctx,
+                            sink_table_schema.clone(),
+                            primary_key_indices,
+                            allow_partial,
+                            None,
+                        )
+                        .await;
                 }
                 _ => {
                     // Clean dirty windows for full-query/non-scoped paths,
                     // such as TQL, that cannot use a time-window filter.
-                    let dirty_windows_to_restore = {
-                        let mut state = self.state.write().unwrap();
-                        let dirty_windows_to_restore = state.dirty_time_windows.clone();
-                        state.dirty_time_windows.clean();
-                        dirty_windows_to_restore
-                    };
+                    let (_, dirty_windows_to_restore) = self.drain_dirty_windows_signal();
 
-                    let plan = match gen_plan_with_matching_schema(
-                        &self.config.query,
-                        query_ctx,
-                        engine,
-                        sink_table_schema.clone(),
-                        primary_key_indices,
-                        allow_partial,
-                    )
-                    .await
-                    {
-                        Ok(plan) => plan,
-                        Err(err) => {
-                            self.state
-                                .write()
-                                .unwrap()
-                                .dirty_time_windows
-                                .add_dirty_windows(&dirty_windows_to_restore);
-                            return Err(err);
-                        }
-                    };
+                    let plan_info = self
+                        .gen_unfiltered_plan_info(
+                            engine,
+                            query_ctx,
+                            sink_table_schema.clone(),
+                            primary_key_indices,
+                            allow_partial,
+                            dirty_windows_to_restore,
+                            None,
+                        )
+                        .await?;
 
-                    return Ok(Some(PlanInfo {
-                        plan,
-                        dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
-                        can_advance_checkpoints: true,
-                    }));
+                    return Ok(Some(plan_info));
                 }
             };
 
@@ -917,82 +975,20 @@ impl BatchingTask {
             // incremental read to skip them forever. Execute an unfiltered full
             // snapshot instead, and keep dirty windows only as the scheduling and
             // failure-restoration signal.
-            let (is_dirty, dirty_windows_to_restore) = {
-                let mut state = self.state.write().unwrap();
-                let dirty_windows_to_restore = state.dirty_time_windows.clone();
-                let is_dirty = !dirty_windows_to_restore.is_empty();
-                state.dirty_time_windows.clean();
-                (is_dirty, dirty_windows_to_restore)
-            };
-
-            if !is_dirty {
-                debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
-                return Ok(None);
-            }
-
-            let mut plan = match gen_plan_with_matching_schema(
-                &self.config.query,
-                query_ctx,
-                engine,
-                sink_table_schema.clone(),
-                primary_key_indices,
-                allow_partial,
-            )
-            .await
-            {
-                Ok(plan) => plan,
-                Err(err) => {
-                    self.state
-                        .write()
-                        .unwrap()
-                        .dirty_time_windows
-                        .add_dirty_windows(&dirty_windows_to_restore);
-                    return Err(err);
-                }
-            };
-
-            if self.config.expire_after.is_some() {
-                let lower = match to_df_literal(expire_lower_bound) {
-                    Ok(lower) => lower,
-                    Err(err) => {
-                        self.state
-                            .write()
-                            .unwrap()
-                            .dirty_time_windows
-                            .add_dirty_windows(&dirty_windows_to_restore);
-                        return Err(err);
-                    }
-                };
-                let retention_filter = col(col_name.as_str()).gt_eq(lit(lower));
-                let mut add_filter = AddFilterRewriter::new(retention_filter);
-                plan = match plan
-                    .clone()
-                    .rewrite(&mut add_filter)
-                    .with_context(|_| DatafusionSnafu {
-                        context: format!(
-                            "Failed to apply full-snapshot expire_after filter to plan:\n {}\n",
-                            plan
-                        ),
-                    })
-                    .map(|rewrite| rewrite.data)
-                {
-                    Ok(plan) => plan,
-                    Err(err) => {
-                        self.state
-                            .write()
-                            .unwrap()
-                            .dirty_time_windows
-                            .add_dirty_windows(&dirty_windows_to_restore);
-                        return Err(err);
-                    }
-                };
-            }
-
-            return Ok(Some(PlanInfo {
-                plan,
-                dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
-                can_advance_checkpoints: true,
-            }));
+            let retention_filter = self
+                .config
+                .expire_after
+                .map(|_| (col_name.as_str(), expire_lower_bound, "full-snapshot"));
+            return self
+                .gen_unfiltered_plan_info_if_dirty(
+                    engine,
+                    query_ctx,
+                    sink_table_schema.clone(),
+                    primary_key_indices,
+                    allow_partial,
+                    retention_filter,
+                )
+                .await;
         }
 
         if self.should_use_unfiltered_incremental_delta() {
@@ -1005,82 +1001,20 @@ impl BatchingTask {
             // unfiltered by dirty windows; the incremental rewrite joins the
             // delta groups with the full sink state for correctness. Future
             // dynamic filters can prune sink reads as a pure optimization.
-            let (is_dirty, dirty_windows_to_restore) = {
-                let mut state = self.state.write().unwrap();
-                let dirty_windows_to_restore = state.dirty_time_windows.clone();
-                let is_dirty = !dirty_windows_to_restore.is_empty();
-                state.dirty_time_windows.clean();
-                (is_dirty, dirty_windows_to_restore)
-            };
-
-            if !is_dirty {
-                debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
-                return Ok(None);
-            }
-
-            let mut plan = match gen_plan_with_matching_schema(
-                &self.config.query,
-                query_ctx,
-                engine,
-                sink_table_schema.clone(),
-                primary_key_indices,
-                allow_partial,
-            )
-            .await
-            {
-                Ok(plan) => plan,
-                Err(err) => {
-                    self.state
-                        .write()
-                        .unwrap()
-                        .dirty_time_windows
-                        .add_dirty_windows(&dirty_windows_to_restore);
-                    return Err(err);
-                }
-            };
-
-            if self.config.expire_after.is_some() {
-                let lower = match to_df_literal(expire_lower_bound) {
-                    Ok(lower) => lower,
-                    Err(err) => {
-                        self.state
-                            .write()
-                            .unwrap()
-                            .dirty_time_windows
-                            .add_dirty_windows(&dirty_windows_to_restore);
-                        return Err(err);
-                    }
-                };
-                let retention_filter = col(col_name.as_str()).gt_eq(lit(lower));
-                let mut add_filter = AddFilterRewriter::new(retention_filter);
-                plan = match plan
-                    .clone()
-                    .rewrite(&mut add_filter)
-                    .with_context(|_| DatafusionSnafu {
-                        context: format!(
-                            "Failed to apply incremental expire_after filter to plan:\n {}\n",
-                            plan
-                        ),
-                    })
-                    .map(|rewrite| rewrite.data)
-                {
-                    Ok(plan) => plan,
-                    Err(err) => {
-                        self.state
-                            .write()
-                            .unwrap()
-                            .dirty_time_windows
-                            .add_dirty_windows(&dirty_windows_to_restore);
-                        return Err(err);
-                    }
-                };
-            }
-
-            return Ok(Some(PlanInfo {
-                plan,
-                dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
-                can_advance_checkpoints: true,
-            }));
+            let retention_filter = self
+                .config
+                .expire_after
+                .map(|_| (col_name.as_str(), expire_lower_bound, "incremental"));
+            return self
+                .gen_unfiltered_plan_info_if_dirty(
+                    engine,
+                    query_ctx,
+                    sink_table_schema.clone(),
+                    primary_key_indices,
+                    allow_partial,
+                    retention_filter,
+                )
+                .await;
         }
 
         let (expr, can_advance_checkpoints) = {

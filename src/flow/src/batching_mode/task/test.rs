@@ -313,6 +313,14 @@ fn dirty_range(start: i64, end: i64) -> DirtyTimeWindows {
     dirty
 }
 
+fn expire_after_for_retention_filter_test() -> i64 {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+    (now_secs - 10) as i64
+}
+
 async fn assert_unscoped_failure_restore(
     consumed_dirty_windows: DirtyTimeWindows,
     current_dirty_windows: DirtyTimeWindows,
@@ -820,6 +828,48 @@ async fn test_full_snapshot_seeding_for_incremental_does_not_add_dirty_window_fi
 }
 
 #[tokio::test]
+async fn test_full_snapshot_seeding_applies_expire_after_retention_filter() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    {
+        let mut state = task.state.write().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(!state.is_incremental_disabled());
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("time_window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+    ]));
+
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .expire_after = Some(expire_after_for_retention_filter_test());
+    let plan = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(plan.can_advance_checkpoints);
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+    let plan_text = plan.plan.to_string();
+    assert!(
+        plan_text.contains("Filter: ts >= TimestampMillisecond("),
+        "{plan_text}"
+    );
+}
+
+#[tokio::test]
 async fn test_incremental_plan_does_not_add_dirty_window_filter() {
     let TestTaskParts {
         task,
@@ -851,6 +901,77 @@ async fn test_incremental_plan_does_not_add_dirty_window_filter() {
     let plan_text = plan.plan.to_string();
     assert!(plan.can_advance_checkpoints);
     assert!(!plan_text.contains("Filter:"), "{plan_text}");
+}
+
+#[tokio::test]
+async fn test_incremental_delta_applies_expire_after_retention_filter() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("time_window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+    ]));
+
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .expire_after = Some(expire_after_for_retention_filter_test());
+    let plan = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(plan.can_advance_checkpoints);
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+    let plan_text = plan.plan.to_string();
+    assert!(
+        plan_text.contains("Filter: ts >= TimestampMillisecond("),
+        "{plan_text}"
+    );
+}
+
+#[tokio::test]
+async fn test_non_scoped_path_generates_plan_with_empty_dirty_signal() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "missing_sink",
+    )
+    .await;
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .query_type = QueryType::Tql;
+    task.state.write().unwrap().dirty_time_windows.clean();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), false).with_time_index(true),
+    ]));
+
+    let plan = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, None)
+        .await
+        .unwrap()
+        .expect("non-scoped path should generate a plan even with an empty dirty signal");
+
+    assert!(plan.can_advance_checkpoints);
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
 }
 
 #[tokio::test]
