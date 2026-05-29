@@ -35,7 +35,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_reado
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{DEFER_ON_MISSING_SOURCE_KEY, FlowType};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::procedure_executor::ExecutorContext;
@@ -114,7 +114,6 @@ struct DdlSubmitOptions {
     timeout: Duration,
 }
 
-const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 const ALLOWED_FLOW_OPTIONS: [&str; 1] = [DEFER_ON_MISSING_SOURCE_KEY];
 
 fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
@@ -203,6 +202,39 @@ fn validate_and_normalize_flow_options(
             Ok((key, normalized_value))
         })
         .collect()
+}
+
+fn determine_flow_type_for_source_state(
+    flow_name: &str,
+    flow_options: &HashMap<String, String>,
+    has_missing_source_table: bool,
+    has_instant_ttl_source_table: bool,
+) -> Result<Option<FlowType>> {
+    if has_missing_source_table {
+        let defer_on_missing_source = flow_options
+            .get(DEFER_ON_MISSING_SOURCE_KEY)
+            .is_some_and(|value| value == "true");
+        ensure!(
+            defer_on_missing_source,
+            InvalidSqlSnafu {
+                err_msg: format!(
+                    "missing source tables for flow '{}'; use WITH ({DEFER_ON_MISSING_SOURCE_KEY} = true) to create a pending flow",
+                    flow_name
+                )
+            }
+        );
+        info!(
+            "Flow `{}` is created as a pending batching flow because source tables are missing and defer_on_missing_source=true",
+            flow_name
+        );
+        return Ok(Some(FlowType::Batching));
+    }
+
+    if has_instant_ttl_source_table {
+        return Ok(Some(FlowType::Streaming));
+    }
+
+    Ok(None)
 }
 
 impl StatementExecutor {
@@ -715,7 +747,9 @@ impl StatementExecutor {
         expr: &CreateFlowExpr,
         query_ctx: QueryContextRef,
     ) -> Result<FlowType> {
-        // first check if source table's ttl is instant, if it is, force streaming mode
+        let mut has_missing_source_table = false;
+        let mut has_instant_ttl_source_table = false;
+
         for src_table_name in &expr.source_table_names {
             let table = self
                 .catalog_manager()
@@ -727,16 +761,13 @@ impl StatementExecutor {
                 )
                 .await
                 .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: format_full_table_name(
-                        &src_table_name.catalog_name,
-                        &src_table_name.schema_name,
-                        &src_table_name.table_name,
-                    ),
-                })?;
+                .context(ExternalSnafu)?;
 
-            // instant source table can only be handled by streaming mode
+            let Some(table) = table else {
+                has_missing_source_table = true;
+                continue;
+            };
+
             if table.table_info().meta.options.ttl == Some(common_time::TimeToLive::Instant) {
                 warn!(
                     "Source table `{}` for flow `{}`'s ttl=instant, fallback to streaming mode",
@@ -747,8 +778,17 @@ impl StatementExecutor {
                     ),
                     expr.flow_name
                 );
-                return Ok(FlowType::Streaming);
+                has_instant_ttl_source_table = true;
             }
+        }
+
+        if let Some(flow_type) = determine_flow_type_for_source_state(
+            &expr.flow_name,
+            &expr.flow_options,
+            has_missing_source_table,
+            has_instant_ttl_source_table,
+        )? {
+            return Ok(flow_type);
         }
 
         let engine = &self.query_engine;
@@ -2513,6 +2553,35 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert!(err.to_string().contains(
             "unknown flow option 'access_key_id', supported options: defer_on_missing_source"
         ));
+    }
+
+    #[test]
+    fn test_determine_flow_type_for_source_state_missing_sources_require_opt_in() {
+        let err = determine_flow_type_for_source_state("my_flow", &HashMap::new(), true, false)
+            .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "missing source tables for flow 'my_flow'; use WITH (defer_on_missing_source = true) to create a pending flow"
+        ));
+    }
+
+    #[test]
+    fn test_determine_flow_type_for_source_state_missing_sources_prefer_batching() {
+        let flow_options =
+            HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string())]);
+
+        assert_eq!(
+            determine_flow_type_for_source_state("my_flow", &flow_options, true, true).unwrap(),
+            Some(FlowType::Batching)
+        );
+    }
+
+    #[test]
+    fn test_determine_flow_type_for_source_state_instant_ttl_without_missing_sources() {
+        assert_eq!(
+            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true).unwrap(),
+            Some(FlowType::Streaming)
+        );
     }
 
     #[test]

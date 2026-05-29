@@ -43,7 +43,7 @@ impl DropFlowProcedure {
             .map(|(_, value)| value)
             .collect::<Vec<_>>();
         ensure!(
-            !flow_route_values.is_empty(),
+            flow_info_value.is_pending() || !flow_route_values.is_empty(),
             error::FlowRouteNotFoundSnafu {
                 flow_name: format_full_flow_name(catalog_name, flow_name),
             }
