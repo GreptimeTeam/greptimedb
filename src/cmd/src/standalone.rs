@@ -20,6 +20,7 @@ use std::{fs, path};
 
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::CatalogManagerRef;
 use catalog::information_schema::InformationExtensionRef;
 use catalog::kvbackend::{CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder};
 use catalog::process_manager::ProcessManager;
@@ -28,7 +29,8 @@ use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{Configurable, metadata_store_dir};
 use common_error::ext::BoxedError;
-use common_meta::cache::LayeredCacheRegistryBuilder;
+use common_meta::DatanodeId;
+use common_meta::cache::{LayeredCacheRegistryBuilder, LayeredCacheRegistryRef};
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
@@ -53,8 +55,8 @@ use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use flow::{
-    FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient, FrontendInvoker,
-    GrpcQueryHandlerWithBoxedError,
+    FlowDualEngineRef, FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient,
+    FrontendInvoker, GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
 use frontend::instance::StandaloneDatanodeManager;
@@ -124,8 +126,8 @@ pub struct Instance {
     frontend: Frontend,
     flownode: FlownodeInstance,
     procedure_manager: ProcedureManagerRef,
-    wal_provider: WalProviderRef,
     leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
+    leader_services_context: LeaderServicesContext,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
 }
@@ -159,11 +161,7 @@ impl App for Instance {
         self.datanode.start_telemetry();
 
         self.leader_services_controller
-            .start(
-                self.procedure_manager.clone(),
-                self.wal_provider.clone(),
-                self.datanode.region_server(),
-            )
+            .start(self.leader_services_context.clone())
             .await?;
 
         plugins::start_frontend_plugins(self.frontend.instance.plugins().clone())
@@ -379,6 +377,8 @@ impl StartCommand {
         opts.grpc.detect_server_addr();
         let fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();
+        let node_id = dn_opts.node_id;
+        let init_regions_parallelism = dn_opts.init_regions_parallelism;
 
         plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &fe_opts)
             .await
@@ -491,21 +491,18 @@ impl StartCommand {
             .await
             .map_err(BoxedError::new)
             .context(error::OtherSnafu)?;
+        let flow_engine = flownode.flow_engine();
 
         // set the ref to query for the local flow state
         {
             information_extension
-                .set_flow_engine(flownode.flow_engine())
+                .set_flow_engine(flow_engine.clone())
                 .await;
         }
 
         let node_manager = creator
             .node_manager_creator
-            .create(
-                &kv_backend,
-                datanode.region_server(),
-                flownode.flow_engine(),
-            )
+            .create(&kv_backend, datanode.region_server(), flow_engine.clone())
             .await?;
 
         let table_id_allocator = creator.table_id_allocator_creator.create(&kv_backend);
@@ -596,7 +593,7 @@ impl StartCommand {
             .await;
 
         // set the frontend invoker for flownode
-        let flow_streaming_engine = flownode.flow_engine().streaming_engine();
+        let flow_streaming_engine = flow_engine.streaming_engine();
         // flow server need to be able to use frontend to write insert requests back
         let invoker = FrontendInvoker::build_from(
             flow_streaming_engine.clone(),
@@ -620,14 +617,27 @@ impl StartCommand {
             servers,
             heartbeat_task: None,
         };
+        let leader_services_context = LeaderServicesContext {
+            procedure_manager: procedure_manager.clone(),
+            wal_provider: wal_provider.clone(),
+            region_server: datanode.region_server(),
+            kv_backend: kv_backend.clone(),
+            cache_registry: layered_cache_registry,
+            catalog_manager,
+            flow_engine,
+            frontend_client,
+            node_id,
+            init_regions_parallelism,
+            plugin_options: plugin_opts,
+        };
 
         let instance = Instance {
             datanode,
             frontend,
             flownode,
             procedure_manager,
-            wal_provider,
             leader_services_controller: creator.leader_services_controller,
+            leader_services_context,
             _guard: vec![],
         };
         let result = InstanceCreatorResult {
@@ -743,16 +753,11 @@ impl ProcedureExecutorCreator for DefaultProcedureExecutorCreator {
 
 #[async_trait]
 pub trait StandaloneLeaderServicesController: Send + Sync {
-    /// Starts services that manage standalone metadata or WAL state.
+    /// Starts leader services that manage standalone metadata or WAL state.
     ///
     /// The default implementation starts the procedure manager and WAL provider
     /// during instance startup.
-    async fn start(
-        &self,
-        procedure_manager: ProcedureManagerRef,
-        wal_provider: WalProviderRef,
-        region_server: RegionServer,
-    ) -> Result<()>;
+    async fn start(&self, context: LeaderServicesContext) -> Result<()>;
 
     /// Stops services started by [`StandaloneLeaderServicesController::start`].
     async fn stop(
@@ -762,21 +767,42 @@ pub trait StandaloneLeaderServicesController: Send + Sync {
     ) -> Result<()>;
 }
 
+#[derive(Clone)]
+/// Additional runtime handles for custom leader-service controllers.
+///
+/// The default standalone startup only needs to start/stop the procedure
+/// manager and WAL provider. Some embedders need to do more work around
+/// leader-service startup, for example reconciling metadata-backed runtime
+/// state before publishing writable leadership. Grouping those handles here
+/// keeps `Instance` small and avoids expanding
+/// [`StandaloneLeaderServicesController::start`] every time a custom lifecycle
+/// needs one more standalone component.
+pub struct LeaderServicesContext {
+    pub procedure_manager: ProcedureManagerRef,
+    pub wal_provider: WalProviderRef,
+    pub region_server: RegionServer,
+    pub kv_backend: KvBackendRef,
+    pub cache_registry: LayeredCacheRegistryRef,
+    pub catalog_manager: CatalogManagerRef,
+    pub flow_engine: FlowDualEngineRef,
+    pub frontend_client: Arc<FrontendClient>,
+    pub node_id: Option<DatanodeId>,
+    pub init_regions_parallelism: usize,
+    pub plugin_options: Vec<PluginOptions>,
+}
+
 pub struct DefaultStandaloneLeaderServicesController;
 
 #[async_trait]
 impl StandaloneLeaderServicesController for DefaultStandaloneLeaderServicesController {
-    async fn start(
-        &self,
-        procedure_manager: ProcedureManagerRef,
-        wal_provider: WalProviderRef,
-        _region_server: RegionServer,
-    ) -> Result<()> {
-        procedure_manager
+    async fn start(&self, context: LeaderServicesContext) -> Result<()> {
+        context
+            .procedure_manager
             .start()
             .await
             .context(error::StartProcedureManagerSnafu)?;
-        wal_provider
+        context
+            .wal_provider
             .start()
             .await
             .context(error::StartWalProviderSnafu)

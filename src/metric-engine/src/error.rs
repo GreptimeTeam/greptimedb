@@ -254,6 +254,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Write request to physical region is forbidden"))]
+    ForbiddenPhysicalWrite {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid region metadata"))]
     InvalidMetadata {
         source: store_api::metadata::MetadataError,
@@ -411,6 +417,7 @@ impl ErrorExt for Error {
             | CreateDefault { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. }
+            | ForbiddenPhysicalWrite { .. }
             | UnsupportedRegionRequest { .. }
             | MissingFiles { .. } => StatusCode::Unsupported,
 

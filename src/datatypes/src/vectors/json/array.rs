@@ -17,16 +17,24 @@ use std::sync::Arc;
 
 use arrow::compute;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
+use arrow_array::builder::{
+    ArrayBuilder, BooleanBuilder, Float64Builder, Int64Builder, NullBuilder, StringViewBuilder,
+    make_builder,
+};
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
 use arrow_schema::{DataType, FieldRef};
+use common_telemetry::debug;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
-use crate::arrow_array::{StringArray, binary_array_value, string_array_value};
+use crate::arrow_array::{
+    MutableBinaryArray, StringViewArray, binary_array_value, string_array_value,
+};
 use crate::error::{
-    AlignJsonArraySnafu, ArrowComputeSnafu, DeserializeSnafu, InvalidJsonSnafu, Result,
+    AlignJsonArraySnafu, ArrowComputeSnafu, CastTypeSnafu, DeserializeSnafu, InvalidJsonSnafu,
+    Result, SerializeSnafu,
 };
 
 pub struct JsonArray<'a> {
@@ -100,6 +108,12 @@ impl JsonArray<'_> {
         if self.inner.data_type() == expect {
             return Ok(self.inner.clone());
         }
+
+        debug!(
+            "Try aligning JSON array {} to data type {}",
+            self.inner.data_type(),
+            expect
+        );
 
         let struct_array = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
             reason: "expect struct array",
@@ -178,11 +192,23 @@ impl JsonArray<'_> {
     }
 
     fn try_cast(&self, to_type: &DataType) -> Result<ArrayRef> {
-        if compute::can_cast_types(self.inner.data_type(), to_type) {
+        let from_type = self.inner.data_type();
+        if from_type == to_type {
+            return Ok(self.inner.clone());
+        }
+
+        if from_type.is_binary() && !to_type.is_binary() {
+            return self.decode_variant(to_type);
+        }
+
+        if !from_type.is_binary() && to_type.is_binary() {
+            return self.encode_variant();
+        }
+
+        if compute::can_cast_types(from_type, to_type) {
             return compute::cast(&self.inner, to_type).context(ArrowComputeSnafu);
         }
 
-        // TODO(LFC): Cast according to `to_type` instead of formatting to String here.
         let formatter = ArrayFormatter::try_new(&self.inner, &FormatOptions::default())
             .context(ArrowComputeSnafu)?;
         let values = (0..self.inner.len())
@@ -192,7 +218,91 @@ impl JsonArray<'_> {
                     .then(|| formatter.value(i).to_string())
             })
             .collect::<Vec<_>>();
-        Ok(Arc::new(StringArray::from(values)))
+        Ok(Arc::new(StringViewArray::from(values)))
+    }
+
+    fn encode_variant(&self) -> Result<ArrayRef> {
+        let len = self.inner.len();
+        let mut encoded = Vec::with_capacity(len);
+        let mut total_bytes = 0;
+
+        for i in 0..len {
+            let value = self.try_get_value(i)?;
+            if value.is_null() {
+                encoded.push(None);
+            } else {
+                let bytes = serde_json::to_vec(&value).context(SerializeSnafu)?;
+                total_bytes += bytes.len();
+                encoded.push(Some(bytes));
+            }
+        }
+
+        let mut builder = MutableBinaryArray::with_capacity(len, total_bytes);
+        for value in encoded {
+            builder.append_option(value);
+        }
+        Ok(Arc::new(builder.finish()))
+    }
+
+    fn decode_variant(&self, to_type: &DataType) -> Result<ArrayRef> {
+        fn downcast_builder<'a, T: ArrayBuilder>(
+            builder: &'a mut dyn ArrayBuilder,
+            to_type: &DataType,
+        ) -> Result<&'a mut T> {
+            builder
+                .as_any_mut()
+                .downcast_mut::<T>()
+                .with_context(|| CastTypeSnafu {
+                    msg: format!("Expect ArrayBuilder is of type {to_type}"),
+                })
+        }
+
+        let mut builder = make_builder(to_type, self.inner.len());
+        if to_type.is_null() {
+            downcast_builder::<NullBuilder>(builder.as_mut(), to_type)?
+                .append_nulls(self.inner.len());
+        } else {
+            match to_type {
+                DataType::Boolean => {
+                    let b = downcast_builder::<BooleanBuilder>(builder.as_mut(), to_type)?;
+                    for i in 0..self.inner.len() {
+                        b.append_option(self.try_get_value(i)?.as_bool());
+                    }
+                }
+                DataType::Int64 => {
+                    let b = downcast_builder::<Int64Builder>(builder.as_mut(), to_type)?;
+                    for i in 0..self.inner.len() {
+                        b.append_option(self.try_get_value(i)?.as_i64());
+                    }
+                }
+                DataType::Float64 => {
+                    let b = downcast_builder::<Float64Builder>(builder.as_mut(), to_type)?;
+                    for i in 0..self.inner.len() {
+                        b.append_option(self.try_get_value(i)?.as_f64());
+                    }
+                }
+                DataType::Utf8View => {
+                    let b = downcast_builder::<StringViewBuilder>(builder.as_mut(), to_type)?;
+                    for i in 0..self.inner.len() {
+                        let v = self.try_get_value(i)?;
+                        if v.is_null() {
+                            b.append_null();
+                        } else if let Some(s) = v.as_str() {
+                            b.append_value(s);
+                        } else {
+                            b.append_value(v.to_string());
+                        }
+                    }
+                }
+                _ => {
+                    return CastTypeSnafu {
+                        msg: format!("Cannot cast JSON value to {to_type}"),
+                    }
+                    .fail();
+                }
+            }
+        }
+        Ok(builder.finish())
     }
 }
 
@@ -231,7 +341,9 @@ impl<'a> From<&'a ArrayRef> for JsonArray<'a> {
 #[cfg(test)]
 mod test {
     use arrow_array::types::Int64Type;
-    use arrow_array::{BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray};
+    use arrow_array::{
+        BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray,
+    };
     use arrow_schema::{Field, Fields};
     use serde_json::json;
 

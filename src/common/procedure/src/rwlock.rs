@@ -106,6 +106,13 @@ where
             locks.remove(key);
         }
     }
+
+    /// Clears all key locks.
+    ///
+    /// Callers must ensure no tasks are holding or waiting for these locks.
+    pub fn clear(&self) {
+        self.inner.lock().unwrap().clear();
+    }
 }
 
 #[cfg(test)]

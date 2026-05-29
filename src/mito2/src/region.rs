@@ -37,6 +37,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
+use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{PathType, StagingPartitionDirective};
 use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
@@ -109,6 +110,22 @@ impl RegionRoleState {
         match self {
             RegionRoleState::Leader(leader_state) => Some(leader_state),
             RegionRoleState::Follower => None,
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            RegionRoleState::Follower => "Follower",
+            RegionRoleState::Leader(RegionLeaderState::Writable) => "Leader(Writable)",
+            RegionRoleState::Leader(RegionLeaderState::Staging) => "Leader(Staging)",
+            RegionRoleState::Leader(RegionLeaderState::EnteringStaging) => {
+                "Leader(EnteringStaging)"
+            }
+            RegionRoleState::Leader(RegionLeaderState::Altering) => "Leader(Altering)",
+            RegionRoleState::Leader(RegionLeaderState::Dropping) => "Leader(Dropping)",
+            RegionRoleState::Leader(RegionLeaderState::Truncating) => "Leader(Truncating)",
+            RegionRoleState::Leader(RegionLeaderState::Editing) => "Leader(Editing)",
+            RegionRoleState::Leader(RegionLeaderState::Downgrading) => "Leader(Downgrading)",
         }
     }
 }
@@ -584,14 +601,14 @@ impl MitoRegion {
         let memtables = &version.memtables;
         let memtable_usage = (memtables.mutable_usage() + memtables.immutables_usage()) as u64;
 
-        let sst_usage = version.ssts.sst_usage();
-        let index_usage = version.ssts.index_usage();
+        let sst_usage = version.ssts.owned_sst_usage(self.region_id);
+        let index_usage = version.ssts.owned_index_usage(self.region_id);
         let flushed_entry_id = version.flushed_entry_id;
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
         let manifest_usage = self.stats.total_manifest_size();
-        let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
-        let num_files = version.ssts.num_files();
+        let num_rows = version.ssts.owned_num_rows(self.region_id) + version.memtables.num_rows();
+        let num_files = version.ssts.owned_num_files(self.region_id);
         let manifest_version = self.stats.manifest_version();
         let file_removed_cnt = self.stats.file_removed_cnt();
 
@@ -646,6 +663,41 @@ impl MitoRegion {
 
     pub fn access_layer(&self) -> AccessLayerRef {
         self.access_layer.clone()
+    }
+
+    /// Returns the region info entry of the region.
+    pub(crate) fn region_info_entry(&self, node_id: Option<u64>) -> RegionInfoEntry {
+        let region_id = self.region_id;
+        let version = self.version();
+        let state = self.state();
+        let role = self.region_role();
+        let region_options = serde_json::to_string(&version.options)
+            .unwrap_or_else(|err| serde_json::json!({ "error": err.to_string() }).to_string());
+        let sst_format = match version.options.sst_format.unwrap_or_default() {
+            crate::sst::FormatType::PrimaryKey => "primary_key",
+            crate::sst::FormatType::Flat => "flat",
+        }
+        .to_string();
+
+        RegionInfoEntry {
+            region_id,
+            table_id: region_id.table_id(),
+            region_number: region_id.region_number(),
+            region_group: region_id.region_group(),
+            region_sequence: region_id.region_sequence(),
+            state: state.as_str().to_string(),
+            role: role.to_string(),
+            writable: self.is_writable(),
+            committed_sequence: self.find_committed_sequence(),
+            flushed_sequence: Some(self.flushed_sequence()).filter(|sequence| *sequence > 0),
+            manifest_version: self.stats.manifest_version(),
+            compaction_time_window: version
+                .compaction_time_window
+                .map(|duration| humantime::format_duration(duration).to_string()),
+            region_options,
+            sst_format,
+            node_id,
+        }
     }
 
     /// Returns the SST entries of the region.
@@ -1621,6 +1673,23 @@ mod tests {
     #[test]
     fn test_region_state_lock_free() {
         assert!(AtomicCell::<RegionRoleState>::is_lock_free());
+    }
+
+    #[test]
+    fn test_region_role_state_as_str() {
+        assert_eq!("Follower", RegionRoleState::Follower.as_str());
+        assert_eq!(
+            "Leader(Writable)",
+            RegionRoleState::Leader(RegionLeaderState::Writable).as_str()
+        );
+        assert_eq!(
+            "Leader(Staging)",
+            RegionRoleState::Leader(RegionLeaderState::Staging).as_str()
+        );
+        assert_eq!(
+            "Leader(Downgrading)",
+            RegionRoleState::Leader(RegionLeaderState::Downgrading).as_str()
+        );
     }
 
     async fn build_test_region(env: &SchedulerEnv) -> MitoRegion {

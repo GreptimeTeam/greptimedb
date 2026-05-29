@@ -23,7 +23,7 @@ use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::error::{self, Result};
 use crate::procedure::repartition::group::GroupId;
-use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::repartition::plan::SourceRegionDescriptor;
 
 /// Returns the `datanode_table_value`
 ///
@@ -138,21 +138,23 @@ pub fn merge_and_validate_region_wal_options(
 /// restored here.
 pub fn rollback_group_metadata_routes(
     group_id: GroupId,
-    source_regions: &[RegionDescriptor],
+    source_regions: &[SourceRegionDescriptor],
     original_target_routes: &[RegionRoute],
     allocated_region_ids: &[RegionId],
     pending_deallocate_region_ids: &[RegionId],
     region_routes_map: &mut HashMap<RegionId, &mut RegionRoute>,
 ) -> Result<()> {
     for source in source_regions {
-        let region_route = region_routes_map.get_mut(&source.region_id).context(
+        let region_id = source.region_id();
+        let region_route = region_routes_map.get_mut(&region_id).context(
             error::RepartitionSourceRegionMissingSnafu {
                 group_id,
-                region_id: source.region_id,
+                region_id,
             },
         )?;
         region_route.clear_leader_staging();
-        if pending_deallocate_region_ids.contains(&source.region_id) {
+        region_route.region.partition_expr = source.route_expr_for_rollback()?;
+        if pending_deallocate_region_ids.contains(&region_id) {
             region_route.clear_ignore_all_writes();
         }
     }
@@ -191,7 +193,7 @@ mod tests {
 
     use super::*;
     use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
-    use crate::procedure::repartition::plan::RegionDescriptor;
+    use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
     use crate::procedure::repartition::test_util::range_expr;
 
     /// Helper function to create a Kafka WAL option string from a topic name.
@@ -242,7 +244,7 @@ mod tests {
 
     fn original_target_routes(
         region_routes: &[RegionRoute],
-        targets: &[RegionDescriptor],
+        targets: &[TargetRegionDescriptor],
     ) -> Vec<RegionRoute> {
         let target_ids = targets
             .iter()
@@ -380,16 +382,16 @@ mod tests {
             ),
             new_staged_region_route(RegionId::new(table_id, 3), "", None, false),
         ];
-        let sources = vec![RegionDescriptor {
-            region_id: RegionId::new(table_id, 1),
-            partition_expr: range_expr("x", 0, 100),
-        }];
+        let sources = vec![SourceRegionDescriptor::partitioned(
+            RegionId::new(table_id, 1),
+            range_expr("x", 0, 100),
+        )];
         let targets = vec![
-            RegionDescriptor {
+            TargetRegionDescriptor {
                 region_id: RegionId::new(table_id, 1),
                 partition_expr: range_expr("x", 0, 50),
             },
-            RegionDescriptor {
+            TargetRegionDescriptor {
                 region_id: RegionId::new(table_id, 3),
                 partition_expr: range_expr("x", 50, 100),
             },
@@ -421,6 +423,60 @@ mod tests {
     }
 
     #[test]
+    fn test_rollback_group_metadata_routes_default_source_restores_empty_expr() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let default_region_id = RegionId::new(table_id, 1);
+        let allocated_region_id = RegionId::new(table_id, 2);
+        let source_regions = vec![SourceRegionDescriptor::Default {
+            region_id: default_region_id,
+        }];
+        let target_regions = vec![
+            TargetRegionDescriptor {
+                region_id: default_region_id,
+                partition_expr: range_expr("x", 0, 50),
+            },
+            TargetRegionDescriptor {
+                region_id: allocated_region_id,
+                partition_expr: range_expr("x", 50, 100),
+            },
+        ];
+        let current_region_routes = vec![
+            new_staged_region_route(default_region_id, "", None, false),
+            new_staged_region_route(allocated_region_id, "", None, false),
+        ];
+        let original_target_routes = vec![current_region_routes[0].clone()];
+        let mut applied_region_routes = UpdateMetadata::apply_staging_region_routes(
+            group_id,
+            &source_regions,
+            &target_regions,
+            &[],
+            &current_region_routes,
+        )
+        .unwrap();
+        assert_eq!(
+            applied_region_routes[0].region.partition_expr,
+            range_expr("x", 0, 50).as_json_str().unwrap()
+        );
+
+        rollback_group_metadata_routes(
+            group_id,
+            &source_regions,
+            &original_target_routes,
+            &[allocated_region_id],
+            &[],
+            &mut applied_region_routes
+                .iter_mut()
+                .map(|route| (route.region.id, route))
+                .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(applied_region_routes[0].region.partition_expr, "");
+        assert!(!applied_region_routes[0].is_leader_staging());
+    }
+
+    #[test]
     fn test_rollback_group_metadata_routes_merge_case_is_idempotent() {
         let group_id = Uuid::new_v4();
         let table_id = 1024;
@@ -445,16 +501,16 @@ mod tests {
             ),
         ];
         let sources = vec![
-            RegionDescriptor {
-                region_id: RegionId::new(table_id, 1),
-                partition_expr: range_expr("x", 0, 100),
-            },
-            RegionDescriptor {
-                region_id: RegionId::new(table_id, 2),
-                partition_expr: range_expr("x", 100, 200),
-            },
+            SourceRegionDescriptor::partitioned(
+                RegionId::new(table_id, 1),
+                range_expr("x", 0, 100),
+            ),
+            SourceRegionDescriptor::partitioned(
+                RegionId::new(table_id, 2),
+                range_expr("x", 100, 200),
+            ),
         ];
-        let targets = vec![RegionDescriptor {
+        let targets = vec![TargetRegionDescriptor {
             region_id: RegionId::new(table_id, 1),
             partition_expr: range_expr("x", 0, 200),
         }];

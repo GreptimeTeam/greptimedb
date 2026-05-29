@@ -51,6 +51,7 @@ use tracing::{Instrument, Span};
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::analyzer::utils::patch_batch_timezone;
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
+use crate::options::FlowQueryExtensions;
 use crate::region_query::RegionQueryHandlerRef;
 
 #[derive(Debug, Hash, PartialOrd, PartialEq, Eq, Clone)]
@@ -479,6 +480,23 @@ impl MergeScanExec {
 
     pub fn regions(&self) -> &[RegionId] {
         &self.regions
+    }
+
+    pub fn is_flow_sink_scan(&self) -> bool {
+        let Some(sink_table_id) =
+            FlowQueryExtensions::parse_flow_extensions(&self.query_ctx.extensions())
+                .ok()
+                .flatten()
+                .and_then(|extensions| extensions.sink_table_id)
+        else {
+            return false;
+        };
+
+        !self.regions.is_empty()
+            && self
+                .regions
+                .iter()
+                .all(|region_id| region_id.table_id() == sink_table_id)
     }
 
     pub fn partition_count(&self) -> usize {

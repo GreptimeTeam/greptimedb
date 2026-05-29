@@ -42,7 +42,20 @@ explain select j.a.x::bool from json2_table;
 
 select j.a.b from json2_table order by ts;
 
+select j.a, j.a.x from json2_table order by ts;
+
 select j.c, j.y from json2_table order by ts;
+
+select j from json2_table order by ts;
+
+select * from json2_table order by ts;
+
+select j.a.b + 1 from json2_table order by ts;
+
+select abs(j.a.b) from json2_table order by ts;
+
+-- "j.c" is of type "String", "abs" is expected to be all "null"s.
+select abs(j.c) from json2_table order by ts;
 
 select j.d from json2_table order by ts;
 

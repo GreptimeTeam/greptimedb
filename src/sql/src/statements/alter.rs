@@ -26,6 +26,7 @@ use sqlparser::ast::{ColumnDef, DataType, Expr, Ident, ObjectName, TableConstrai
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::statements::OptionMap;
+use crate::statements::create::Partitions;
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AlterTable {
@@ -118,6 +119,10 @@ pub enum AlterTableOperation {
     /// `REPARTITION (...) INTO (...)`
     Repartition {
         operation: RepartitionOperation,
+    },
+    /// `PARTITION ON COLUMNS (...) (...)`
+    Partition {
+        partitions: Partitions,
     },
 }
 
@@ -247,6 +252,9 @@ impl Display for AlterTableOperation {
             }
             AlterTableOperation::Repartition { operation } => {
                 write!(f, "REPARTITION {operation}")
+            }
+            AlterTableOperation::Partition { partitions } => {
+                write!(f, "{partitions}")
             }
             AlterTableOperation::SetIndex { options } => match options {
                 SetIndexOperation::Fulltext {

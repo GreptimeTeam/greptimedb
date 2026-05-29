@@ -323,7 +323,7 @@ mod tests {
 
             fn pre_execute(
                 &self,
-                _statement: &Statement,
+                _statement: Option<&Statement>,
                 _plan: Option<&LogicalPlan>,
                 _query_ctx: QueryContextRef,
             ) -> Result<()> {
@@ -396,7 +396,7 @@ mod tests {
 
             fn pre_execute(
                 &self,
-                _statement: &Statement,
+                _statement: Option<&Statement>,
                 _plan: Option<&LogicalPlan>,
                 _query_ctx: QueryContextRef,
             ) -> Result<()> {

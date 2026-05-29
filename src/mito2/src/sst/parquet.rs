@@ -138,6 +138,7 @@ mod tests {
 
     use super::*;
     use crate::access_layer::{FilePathProvider, Metrics, RegionFilePathFactory, WriteType};
+    use crate::cache::index::result_cache::PredicateKey;
     use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::config::IndexConfig;
@@ -985,11 +986,14 @@ mod tests {
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 2);
         assert_eq!(metrics.filter_metrics.rg_bloom_filtered, 2);
         assert_eq!(metrics.filter_metrics.rows_bloom_filtered, 100);
+        let bloom_predicates = bloom_filter_applier
+            .as_ref()
+            .unwrap()
+            .compatible_predicate_for_sst(&metadata)
+            .unwrap();
+        let bloom_predicate_key = PredicateKey::new_bloom(bloom_predicates);
         let cached = index_result_cache
-            .get(
-                bloom_filter_applier.unwrap().predicate_key(),
-                handle.file_id().file_id(),
-            )
+            .get(&bloom_predicate_key, handle.file_id().file_id())
             .unwrap();
         assert!(cached.contains_row_group(2));
         assert!(cached.contains_row_group(3));
@@ -1055,11 +1059,14 @@ mod tests {
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 0);
         assert_eq!(metrics.filter_metrics.rg_bloom_filtered, 2);
         assert_eq!(metrics.filter_metrics.rows_bloom_filtered, 140);
+        let bloom_predicates = bloom_filter_applier
+            .as_ref()
+            .unwrap()
+            .compatible_predicate_for_sst(&metadata)
+            .unwrap();
+        let bloom_predicate_key = PredicateKey::new_bloom(bloom_predicates);
         let cached = index_result_cache
-            .get(
-                bloom_filter_applier.unwrap().predicate_key(),
-                handle.file_id().file_id(),
-            )
+            .get(&bloom_predicate_key, handle.file_id().file_id())
             .unwrap();
         assert!(cached.contains_row_group(0));
         assert!(cached.contains_row_group(1));

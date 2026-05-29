@@ -82,6 +82,7 @@ log-query.workspace = true
 loki-proto.workspace = true
 metric-engine.workspace = true
 mime_guess = "2.0"
+mysql_common = "0.34"
 notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true

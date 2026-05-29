@@ -273,6 +273,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 3s
 SELECT wildcard FROM out_basic;
 
 +----------+

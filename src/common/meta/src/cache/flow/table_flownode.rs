@@ -210,7 +210,7 @@ mod tests {
     use crate::cache::flow::table_flownode::{FlowIdent, new_table_flownode_set_cache};
     use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
     use crate::key::flow::FlowMetadataManager;
-    use crate::key::flow::flow_info::FlowInfoValue;
+    use crate::key::flow::flow_info::{FlowInfoValue, FlowStatus};
     use crate::key::flow::flow_route::FlowRouteValue;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
@@ -242,11 +242,14 @@ mod tests {
                     catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                     query_context: None,
                     flow_name: "my_flow".to_string(),
+                    all_source_table_names: vec![],
+                    unresolved_source_table_names: vec![],
                     raw_sql: "sql".to_string(),
                     expire_after: Some(300),
                     eval_interval_secs: None,
                     comment: "comment".to_string(),
                     options: Default::default(),
+                    status: FlowStatus::Active,
                     created_time: chrono::Utc::now(),
                     updated_time: chrono::Utc::now(),
                 },

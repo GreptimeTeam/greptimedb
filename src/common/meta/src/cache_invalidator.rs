@@ -55,6 +55,13 @@ pub struct Context {
 pub trait CacheInvalidator: Send + Sync {
     async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()>;
 
+    /// Invalidates every cache entry owned by this invalidator.
+    ///
+    /// This method is required so each implementer explicitly decides how
+    /// full-cache invalidation should behave. Implementations that intentionally
+    /// do nothing must document why a no-op is safe.
+    fn invalidate_all(&self) -> Result<()>;
+
     fn name(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
@@ -67,6 +74,11 @@ pub struct DummyCacheInvalidator;
 #[async_trait::async_trait]
 impl CacheInvalidator for DummyCacheInvalidator {
     async fn invalidate(&self, _ctx: &Context, _caches: &[CacheIdent]) -> Result<()> {
+        Ok(())
+    }
+
+    fn invalidate_all(&self) -> Result<()> {
+        // Dummy invalidator owns no cache state, so there is nothing to clear.
         Ok(())
     }
 }
@@ -155,6 +167,13 @@ where
                 }
             }
         }
+        Ok(())
+    }
+
+    fn invalidate_all(&self) -> Result<()> {
+        // KvCacheInvalidator only knows how to invalidate explicit metadata
+        // keys. There is no safe generic way to enumerate or clear the backend
+        // keyspace, so full invalidation is intentionally a no-op here.
         Ok(())
     }
 }

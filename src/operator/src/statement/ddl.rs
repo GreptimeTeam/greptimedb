@@ -19,9 +19,10 @@ use std::time::Duration;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_table_expr::Kind;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
+use api::v1::repartition::Source;
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    Repartition, column_def,
+    PartitionExprs, Repartition, UnpartitionedSource, column_def,
 };
 #[cfg(feature = "enterprise")]
 use api::v1::{
@@ -34,7 +35,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_reado
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{DEFER_ON_MISSING_SOURCE_KEY, FlowType};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::procedure_executor::ExecutorContext;
@@ -102,7 +103,7 @@ use crate::error::{
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
     ViewAlreadyExistsSnafu,
 };
-use crate::expr_helper::{self, RepartitionRequest};
+use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 use crate::utils::{to_meta_query_context, to_meta_query_context_with_origin_frontend};
@@ -113,7 +114,6 @@ struct DdlSubmitOptions {
     timeout: Duration,
 }
 
-const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 const ALLOWED_FLOW_OPTIONS: [&str; 1] = [DEFER_ON_MISSING_SOURCE_KEY];
 
 fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
@@ -202,6 +202,39 @@ fn validate_and_normalize_flow_options(
             Ok((key, normalized_value))
         })
         .collect()
+}
+
+fn determine_flow_type_for_source_state(
+    flow_name: &str,
+    flow_options: &HashMap<String, String>,
+    has_missing_source_table: bool,
+    has_instant_ttl_source_table: bool,
+) -> Result<Option<FlowType>> {
+    if has_missing_source_table {
+        let defer_on_missing_source = flow_options
+            .get(DEFER_ON_MISSING_SOURCE_KEY)
+            .is_some_and(|value| value == "true");
+        ensure!(
+            defer_on_missing_source,
+            InvalidSqlSnafu {
+                err_msg: format!(
+                    "missing source tables for flow '{}'; use WITH ({DEFER_ON_MISSING_SOURCE_KEY} = true) to create a pending flow",
+                    flow_name
+                )
+            }
+        );
+        info!(
+            "Flow `{}` is created as a pending batching flow because source tables are missing and defer_on_missing_source=true",
+            flow_name
+        );
+        return Ok(Some(FlowType::Batching));
+    }
+
+    if has_instant_ttl_source_table {
+        return Ok(Some(FlowType::Streaming));
+    }
+
+    Ok(None)
 }
 
 impl StatementExecutor {
@@ -714,7 +747,9 @@ impl StatementExecutor {
         expr: &CreateFlowExpr,
         query_ctx: QueryContextRef,
     ) -> Result<FlowType> {
-        // first check if source table's ttl is instant, if it is, force streaming mode
+        let mut has_missing_source_table = false;
+        let mut has_instant_ttl_source_table = false;
+
         for src_table_name in &expr.source_table_names {
             let table = self
                 .catalog_manager()
@@ -726,16 +761,13 @@ impl StatementExecutor {
                 )
                 .await
                 .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: format_full_table_name(
-                        &src_table_name.catalog_name,
-                        &src_table_name.schema_name,
-                        &src_table_name.table_name,
-                    ),
-                })?;
+                .context(ExternalSnafu)?;
 
-            // instant source table can only be handled by streaming mode
+            let Some(table) = table else {
+                has_missing_source_table = true;
+                continue;
+            };
+
             if table.table_info().meta.options.ttl == Some(common_time::TimeToLive::Instant) {
                 warn!(
                     "Source table `{}` for flow `{}`'s ttl=instant, fallback to streaming mode",
@@ -746,8 +778,17 @@ impl StatementExecutor {
                     ),
                     expr.flow_name
                 );
-                return Ok(FlowType::Streaming);
+                has_instant_ttl_source_table = true;
             }
+        }
+
+        if let Some(flow_type) = determine_flow_type_for_source_state(
+            &expr.flow_name,
+            &expr.flow_options,
+            has_missing_source_table,
+            has_instant_ttl_source_table,
+        )? {
+            return Ok(flow_type);
         }
 
         let engine = &self.query_engine;
@@ -1408,7 +1449,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         if matches!(
             alter_table.alter_operation(),
-            AlterTableOperation::Repartition { .. }
+            AlterTableOperation::Repartition { .. } | AlterTableOperation::Partition { .. }
         ) {
             let request = expr_helper::to_repartition_request(alter_table, &query_context)?;
             return self.repartition_table(request, &query_context).await;
@@ -1468,32 +1509,59 @@ impl StatementExecutor {
         );
 
         let table_info = table.table_info();
-        // Get partition column names from the table metadata.
         let existing_partition_columns = table_info.meta.partition_columns().collect::<Vec<_>>();
-        // Repartition requires the table to have partition columns.
-        ensure!(
-            !existing_partition_columns.is_empty(),
-            InvalidPartitionRuleSnafu {
-                reason: format!(
-                    "table {} does not have partition columns, cannot repartition",
-                    table_ref
-                )
+        let partition_columns = match &request.source {
+            RepartitionSource::Partitions { .. } => {
+                ensure!(
+                    !existing_partition_columns.is_empty(),
+                    InvalidPartitionRuleSnafu {
+                        reason: format!(
+                            "table {} does not have partition columns, cannot repartition",
+                            table_ref
+                        )
+                    }
+                );
+                existing_partition_columns
             }
-        );
+            RepartitionSource::Unpartitioned { partition_columns } => {
+                ensure!(
+                    !partition_columns.is_empty(),
+                    InvalidPartitionRuleSnafu {
+                        reason: "PARTITION ON COLUMNS requires at least one partition column"
+                    }
+                );
+                ensure!(
+                    existing_partition_columns.is_empty(),
+                    InvalidPartitionRuleSnafu {
+                        reason: format!("table {} already has partition columns", table_ref)
+                    }
+                );
+                let column_schemas = table_info.meta.schema.column_schemas();
+                partition_columns
+                    .iter()
+                    .map(|column_name| {
+                        column_schemas
+                            .iter()
+                            .find(|column| &column.name == column_name)
+                            .with_context(|| ColumnNotFoundSnafu { msg: column_name })
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            }
+        };
 
-        // Repartition operations involving columns outside the existing partition columns are not supported.
-        // This restriction ensures repartition only applies to current partition columns.
-        let column_name_and_type = existing_partition_columns
+        let column_name_and_type = partition_columns
             .iter()
             .map(|column| (&column.name, column.data_type.clone()))
             .collect();
         let timezone = query_context.timezone();
         // Convert SQL Exprs to PartitionExprs.
-        let from_partition_exprs = request
-            .from_exprs
-            .iter()
-            .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
-            .collect::<Result<Vec<_>>>()?;
+        let from_partition_exprs = match &request.source {
+            RepartitionSource::Partitions { from_exprs } => from_exprs
+                .iter()
+                .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
+                .collect::<Result<Vec<_>>>()?,
+            RepartitionSource::Unpartitioned { .. } => vec![],
+        };
 
         let mut into_partition_exprs = request
             .into_exprs
@@ -1503,7 +1571,8 @@ impl StatementExecutor {
 
         // `MERGE PARTITION` (and some `REPARTITION`) generates a single `OR` expression from
         // multiple source partitions; try to simplify it for better readability and stability.
-        if from_partition_exprs.len() > 1
+        if matches!(&request.source, RepartitionSource::Partitions { .. })
+            && from_partition_exprs.len() > 1
             && into_partition_exprs.len() == 1
             && let Some(expr) = into_partition_exprs.pop()
         {
@@ -1530,34 +1599,36 @@ impl StatementExecutor {
 
         // Validate that from_partition_exprs are a subset of existing partition exprs.
         // We compare PartitionExpr directly since it implements Eq.
-        for from_expr in &from_partition_exprs {
-            ensure!(
-                existing_partition_exprs.contains(from_expr),
-                InvalidPartitionRuleSnafu {
-                    reason: format!(
-                        "partition expression '{}' does not exist in table {}",
-                        from_expr, table_ref
-                    )
-                }
-            );
+        if matches!(&request.source, RepartitionSource::Partitions { .. }) {
+            for from_expr in &from_partition_exprs {
+                ensure!(
+                    existing_partition_exprs.contains(from_expr),
+                    InvalidPartitionRuleSnafu {
+                        reason: format!(
+                            "partition expression '{}' does not exist in table {}",
+                            from_expr, table_ref
+                        )
+                    }
+                );
+            }
         }
 
         // Build the new partition expressions:
         // new_exprs = existing_exprs - from_exprs + into_exprs
-        let new_partition_exprs: Vec<PartitionExpr> = existing_partition_exprs
-            .into_iter()
-            .filter(|expr| !from_partition_exprs.contains(expr))
-            .chain(into_partition_exprs.clone().into_iter())
-            .collect();
+        let new_partition_exprs: Vec<PartitionExpr> = match &request.source {
+            RepartitionSource::Partitions { .. } => existing_partition_exprs
+                .into_iter()
+                .filter(|expr| !from_partition_exprs.contains(expr))
+                .chain(into_partition_exprs.clone().into_iter())
+                .collect(),
+            RepartitionSource::Unpartitioned { .. } => into_partition_exprs.clone(),
+        };
         let new_partition_exprs_len = new_partition_exprs.len();
         let from_partition_exprs_len = from_partition_exprs.len();
 
         // Validate the new partition expressions using MultiDimPartitionRule and PartitionChecker.
         let _ = MultiDimPartitionRule::try_new(
-            existing_partition_columns
-                .iter()
-                .map(|c| c.name.clone())
-                .collect(),
+            partition_columns.iter().map(|c| c.name.clone()).collect(),
             vec![],
             new_partition_exprs,
             true,
@@ -1574,16 +1645,28 @@ impl StatementExecutor {
         };
         let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
         let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
+        let source = match &request.source {
+            RepartitionSource::Partitions { .. } => Source::PartitionExprs(PartitionExprs {
+                exprs: from_partition_exprs_json,
+            }),
+            RepartitionSource::Unpartitioned { partition_columns } => {
+                Source::Unpartitioned(UnpartitionedSource {
+                    partition_columns: partition_columns.clone(),
+                })
+            }
+        };
+        let repartition = Repartition {
+            into_partition_exprs: into_partition_exprs_json,
+            source: Some(source),
+            ..Default::default()
+        };
         let mut req = SubmitDdlTaskRequest::new(
             to_meta_query_context(query_context.clone()),
             DdlTask::new_alter_table(AlterTableExpr {
                 catalog_name: request.catalog_name.clone(),
                 schema_name: request.schema_name.clone(),
                 table_name: request.table_name.clone(),
-                kind: Some(Kind::Repartition(Repartition {
-                    from_partition_exprs: from_partition_exprs_json,
-                    into_partition_exprs: into_partition_exprs_json,
-                })),
+                kind: Some(Kind::Repartition(repartition)),
             }),
         );
         req.wait = ddl_options.wait;
@@ -2470,6 +2553,35 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert!(err.to_string().contains(
             "unknown flow option 'access_key_id', supported options: defer_on_missing_source"
         ));
+    }
+
+    #[test]
+    fn test_determine_flow_type_for_source_state_missing_sources_require_opt_in() {
+        let err = determine_flow_type_for_source_state("my_flow", &HashMap::new(), true, false)
+            .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "missing source tables for flow 'my_flow'; use WITH (defer_on_missing_source = true) to create a pending flow"
+        ));
+    }
+
+    #[test]
+    fn test_determine_flow_type_for_source_state_missing_sources_prefer_batching() {
+        let flow_options =
+            HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string())]);
+
+        assert_eq!(
+            determine_flow_type_for_source_state("my_flow", &flow_options, true, true).unwrap(),
+            Some(FlowType::Batching)
+        );
+    }
+
+    #[test]
+    fn test_determine_flow_type_for_source_state_instant_ttl_without_missing_sources() {
+        assert_eq!(
+            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true).unwrap(),
+            Some(FlowType::Streaming)
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@ use datafusion_expr::{LogicalPlan, TableSource};
 use futures::TryStreamExt;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use store_api::region_info::RegionInfoEntry;
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::RegionId;
 
@@ -41,6 +42,7 @@ enum InternalTableKind {
     InspectSstManifest,
     InspectSstStorage,
     InspectSstIndexMeta,
+    InspectRegionInfo,
 }
 
 impl InternalTableKind {
@@ -55,6 +57,9 @@ impl InternalTableKind {
         if name.eq_ignore_ascii_case(PuffinIndexMetaEntry::reserved_table_name_for_inspection()) {
             return Some(Self::InspectSstIndexMeta);
         }
+        if name.eq_ignore_ascii_case(RegionInfoEntry::reserved_table_name_for_inspection()) {
+            return Some(Self::InspectRegionInfo);
+        }
         None
     }
 
@@ -64,6 +69,7 @@ impl InternalTableKind {
             Self::InspectSstManifest => server.inspect_sst_manifest_provider().await,
             Self::InspectSstStorage => server.inspect_sst_storage_provider().await,
             Self::InspectSstIndexMeta => server.inspect_sst_index_meta_provider().await,
+            Self::InspectRegionInfo => server.inspect_region_info_provider().await,
         }
     }
 }
@@ -122,6 +128,25 @@ impl RegionServer {
         let entries = mito.all_index_metas().await;
         let schema = PuffinIndexMetaEntry::schema().arrow_schema().clone();
         let batch = PuffinIndexMetaEntry::to_record_batch(&entries)
+            .map_err(DataFusionError::from)
+            .context(DataFusionSnafu)?;
+
+        let table = MemTable::try_new(schema, vec![vec![batch]]).context(DataFusionSnafu)?;
+        Ok(Arc::new(table))
+    }
+
+    /// Expose region info across the engine as an in-memory table.
+    pub async fn inspect_region_info_provider(&self) -> Result<Arc<dyn TableProvider>> {
+        let mito = {
+            let guard = self.inner.mito_engine.read().unwrap();
+            guard.as_ref().cloned().context(UnexpectedSnafu {
+                violated: "mito engine not available",
+            })?
+        };
+
+        let entries = mito.all_region_infos().await;
+        let schema = RegionInfoEntry::schema().arrow_schema().clone();
+        let batch = RegionInfoEntry::to_record_batch(&entries)
             .map_err(DataFusionError::from)
             .context(DataFusionSnafu)?;
 
@@ -347,6 +372,7 @@ mod tests {
     use datatypes::arrow::array::Int32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
+    use store_api::region_info::RegionInfoEntry;
 
     use super::*; // bring rewrite() into scope
 
@@ -409,6 +435,18 @@ mod tests {
             b3.reserved_table_needed,
             vec![InternalTableKind::InspectSstManifest]
         );
+
+        let region_info = RegionInfoEntry::reserved_table_name_for_inspection();
+        let plan4 = table_scan(Some(region_info), &schema, None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let b4 = NameAwareDataSourceInjectorBuilder::from_plan(&plan4).unwrap();
+        assert!(!b4.need_region_provider);
+        assert_eq!(
+            b4.reserved_table_needed,
+            vec![InternalTableKind::InspectRegionInfo]
+        );
     }
 
     #[test]
@@ -437,6 +475,39 @@ mod tests {
 
         if let LogicalPlan::TableScan(scan) = new_plan {
             // Compare the underlying Arc ptrs to ensure replacement happened
+            let src_ptr = Arc::as_ptr(&scan.source);
+            let want_ptr = Arc::as_ptr(&source);
+            assert!(std::ptr::eq(src_ptr, want_ptr));
+        } else {
+            panic!("expected TableScan after rewrite");
+        }
+    }
+
+    #[test]
+    fn test_rewriter_replaces_with_region_info_reserved_source() {
+        let schema = test_schema();
+        let table_name = RegionInfoEntry::reserved_table_name_for_inspection();
+        let plan = table_scan(Some(table_name), &schema, None)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let provider = empty_mem_table();
+        let source = provider_as_source(provider);
+
+        let mut injector = NameAwareDataSourceInjector {
+            reserved_sources: {
+                let mut m = HashMap::new();
+                m.insert(InternalTableKind::InspectRegionInfo, source.clone());
+                m
+            },
+            region_source: None,
+        };
+
+        let transformed = plan.rewrite(&mut injector).unwrap();
+        let new_plan = transformed.data;
+
+        if let LogicalPlan::TableScan(scan) = new_plan {
             let src_ptr = Arc::as_ptr(&scan.source);
             let want_ptr = Arc::as_ptr(&source);
             assert!(std::ptr::eq(src_ptr, want_ptr));

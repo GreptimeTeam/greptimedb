@@ -56,6 +56,24 @@ macro_rules! repartition_tests {
                     }
 
                     #[tokio::test(flavor = "multi_thread")]
+                    async fn [< test_partition_unpartitioned_mito >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            common_telemetry::init_default_ut_logging();
+                            $crate::repartition::test_partition_unpartitioned_mito(store_type).await;
+                        }
+                    }
+
+                    #[tokio::test(flavor = "multi_thread")]
+                    async fn [< test_partition_unpartitioned_metric >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            common_telemetry::init_default_ut_logging();
+                            $crate::repartition::test_partition_unpartitioned_metric(store_type).await;
+                        }
+                    }
+
+                    #[tokio::test(flavor = "multi_thread")]
                     async fn [< test_repartition_metric >]() {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
@@ -76,6 +94,274 @@ macro_rules! repartition_tests {
             }
         )*
     };
+}
+
+pub async fn test_partition_unpartitioned_mito(store_type: StorageType) {
+    info!(
+        "test_partition_unpartitioned_mito: store_type: {:?}",
+        store_type
+    );
+    let cluster_name = "test_partition_unpartitioned_mito";
+    let (store_config, _guard) = get_test_store_config(&store_type);
+    let datanodes = 3u64;
+    let mut builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    if matches!(store_type, StorageType::File) {
+        let home_dir = create_temp_dir("test_partition_unpartitioned_mito_data_home");
+        builder = builder.with_shared_home_dir(Arc::new(home_dir));
+    }
+
+    let cluster = builder
+        .with_datanodes(datanodes as u32)
+        .with_store_config(store_config)
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .build(true)
+        .await;
+
+    let query_ctx = QueryContext::arc();
+    let instance = cluster.fe_instance();
+
+    let sql = r#"
+        CREATE TABLE `partition_unpartitioned_mito_table`(
+          `id` INT,
+          `city` STRING,
+          `ts` TIMESTAMP TIME INDEX,
+          PRIMARY KEY(`id`, `city`)
+        ) ENGINE = mito;
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let sql = r#"
+        INSERT INTO `partition_unpartitioned_mito_table` VALUES
+          (1, 'New York', '2022-01-01 00:00:00'),
+          (10, 'Paris', '2022-01-01 00:00:00'),
+          (20, 'Beijing', '2022-01-01 00:00:00');
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let sql = r#"
+        ALTER TABLE `partition_unpartitioned_mito_table` PARTITION ON COLUMNS (`id`) (
+          `id` < 10,
+          `id` >= 10 AND `id` < 20,
+          `id` >= 20
+        );
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+    // Wait for cache invalidation.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `partition_unpartitioned_mito_table` ORDER BY `id`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++----+----------+---------------------+
+| id | city     | ts                  |
++----+----------+---------------------+
+| 1  | New York | 2022-01-01T00:00:00 |
+| 10 | Paris    | 2022-01-01T00:00:00 |
+| 20 | Beijing  | 2022-01-01T00:00:00 |
++----+----------+---------------------+";
+    check_output_stream(result.data, expected).await;
+
+    let result = run_sql(
+        instance,
+        "\
+SELECT partition_expression, partition_description \
+FROM information_schema.partitions \
+WHERE table_name = 'partition_unpartitioned_mito_table' \
+ORDER BY partition_ordinal_position;",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected_partitions = r#"+----------------------+-----------------------+
+| partition_expression | partition_description |
++----------------------+-----------------------+
+| id                   | id < 10               |
+| id                   | id >= 10 AND id < 20  |
+| id                   | id >= 20              |
++----------------------+-----------------------+"#;
+    check_output_stream(result.data, expected_partitions).await;
+
+    let sql = r#"
+        INSERT INTO `partition_unpartitioned_mito_table` VALUES
+          (5, 'London', '2022-01-02 00:00:00'),
+          (15, 'Tokyo', '2022-01-02 00:00:00'),
+          (25, 'Shanghai', '2022-01-02 00:00:00');
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `partition_unpartitioned_mito_table` ORDER BY `id`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++----+----------+---------------------+
+| id | city     | ts                  |
++----+----------+---------------------+
+| 1  | New York | 2022-01-01T00:00:00 |
+| 5  | London   | 2022-01-02T00:00:00 |
+| 10 | Paris    | 2022-01-01T00:00:00 |
+| 15 | Tokyo    | 2022-01-02T00:00:00 |
+| 20 | Beijing  | 2022-01-01T00:00:00 |
+| 25 | Shanghai | 2022-01-02T00:00:00 |
++----+----------+---------------------+";
+    check_output_stream(result.data, expected).await;
+
+    run_sql(
+        instance,
+        "DROP TABLE `partition_unpartitioned_mito_table`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+}
+
+pub async fn test_partition_unpartitioned_metric(store_type: StorageType) {
+    info!(
+        "test_partition_unpartitioned_metric: store_type: {:?}",
+        store_type
+    );
+    let cluster_name = "test_partition_unpartitioned_metric";
+    let (store_config, _guard) = get_test_store_config(&store_type);
+    let datanodes = 3u64;
+    let mut builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    if matches!(store_type, StorageType::File) {
+        let home_dir = create_temp_dir("test_partition_unpartitioned_metric_data_home");
+        builder = builder.with_shared_home_dir(Arc::new(home_dir));
+    }
+
+    let cluster = builder
+        .with_datanodes(datanodes as u32)
+        .with_store_config(store_config)
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .build(true)
+        .await;
+
+    let query_ctx = QueryContext::arc();
+    let instance = cluster.fe_instance();
+
+    let sql = r#"
+        CREATE TABLE `partition_unpartitioned_metric_phy`(
+          `ts` TIMESTAMP TIME INDEX,
+          `val` DOUBLE,
+          `host` STRING PRIMARY KEY
+        ) ENGINE = metric
+        WITH (
+          "physical_metric_table" = "true"
+        );
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let sql = r#"
+        CREATE TABLE `partition_unpartitioned_metric_log`(
+          `ts` TIMESTAMP TIME INDEX,
+          `val` DOUBLE,
+          `host` STRING PRIMARY KEY
+        ) ENGINE = metric
+        WITH (
+          "on_physical_table" = "partition_unpartitioned_metric_phy"
+        );
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let sql = r#"
+        INSERT INTO `partition_unpartitioned_metric_log` (`host`, `ts`, `val`) VALUES
+          ('a_host', '2022-01-01 00:00:00', 1),
+          ('z_host', '2022-01-01 00:00:00', 2);
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let sql = r#"
+        ALTER TABLE `partition_unpartitioned_metric_phy` PARTITION ON COLUMNS (`host`) (
+          `host` < 'm',
+          `host` >= 'm'
+        );
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+    // Wait for cache invalidation.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `partition_unpartitioned_metric_log` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++--------+---------------------+-----+
+| host   | ts                  | val |
++--------+---------------------+-----+
+| a_host | 2022-01-01T00:00:00 | 1.0 |
+| z_host | 2022-01-01T00:00:00 | 2.0 |
++--------+---------------------+-----+";
+    check_output_stream(result.data, expected).await;
+
+    let result = run_sql(
+        instance,
+        "\
+SELECT partition_expression, partition_description \
+FROM information_schema.partitions \
+WHERE table_name = 'partition_unpartitioned_metric_phy' \
+ORDER BY partition_ordinal_position;",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected_partitions = r#"+----------------------+-----------------------+
+| partition_expression | partition_description |
++----------------------+-----------------------+
+| host                 | host < m              |
+| host                 | host >= m             |
++----------------------+-----------------------+"#;
+    check_output_stream(result.data, expected_partitions).await;
+
+    let sql = r#"
+        INSERT INTO `partition_unpartitioned_metric_log` (`host`, `ts`, `val`) VALUES
+          ('b_host', '2022-01-02 00:00:00', 3),
+          ('x_host', '2022-01-02 00:00:00', 4);
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `partition_unpartitioned_metric_log` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++--------+---------------------+-----+
+| host   | ts                  | val |
++--------+---------------------+-----+
+| a_host | 2022-01-01T00:00:00 | 1.0 |
+| b_host | 2022-01-02T00:00:00 | 3.0 |
+| x_host | 2022-01-02T00:00:00 | 4.0 |
+| z_host | 2022-01-01T00:00:00 | 2.0 |
++--------+---------------------+-----+";
+    check_output_stream(result.data, expected).await;
+
+    run_sql(
+        instance,
+        "DROP TABLE `partition_unpartitioned_metric_log`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "DROP TABLE `partition_unpartitioned_metric_phy`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
 }
 
 async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {

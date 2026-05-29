@@ -45,6 +45,7 @@ pub const CLUSTER_INFO: &str = "cluster_info";
 pub const VIEWS: &str = "views";
 pub const FLOWS: &str = "flows";
 pub const PROCEDURE_INFO: &str = "procedure_info";
+pub const REGION_INFO: &str = "region_info";
 pub const REGION_STATISTICS: &str = "region_statistics";
 pub const PROCESS_LIST: &str = "process_list";
 pub const SSTS_MANIFEST: &str = "ssts_manifest";

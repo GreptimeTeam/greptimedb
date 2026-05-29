@@ -111,11 +111,28 @@ select j.a.b from json2_table order by ts;
 | -4                                  |
 |                                     |
 |                                     |
-| "s7"                                |
+| s7                                  |
 | 8                                   |
 |                                     |
 | 10                                  |
 +-------------------------------------+
+
+select j.a, j.a.x from json2_table order by ts;
+
++-----------------------------------+-------------------------------------+
+| json_get(json2_table.j,Utf8("a")) | json_get(json2_table.j,Utf8("a.x")) |
++-----------------------------------+-------------------------------------+
+| {"b":1}                           |                                     |
+| {"b":-2}                          |                                     |
+| {"b":3}                           |                                     |
+| {"b":-4}                          |                                     |
+|                                   |                                     |
+|                                   |                                     |
+| {"b":"s7"}                        |                                     |
+| {"b":8}                           |                                     |
+| {"b":null,"x":true}               | true                                |
+| {"b":10,"x":null}                 | null                                |
++-----------------------------------+-------------------------------------+
 
 select j.c, j.y from json2_table order by ts;
 
@@ -129,10 +146,48 @@ select j.c, j.y from json2_table order by ts;
 | s5                                |                                   |
 | s6                                |                                   |
 | [1]                               |                                   |
-| "s8"                              |                                   |
+| s8                                |                                   |
 | s9                                |                                   |
 |                                   | false                             |
 +-----------------------------------+-----------------------------------+
+
+select j from json2_table order by ts;
+
+Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
+
+select * from json2_table order by ts;
+
+Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
+
+select j.a.b + 1 from json2_table order by ts;
+
++------------------------------------------------------------+
+| json_get(json2_table.j,Utf8("a.b"),Int64(NULL)) + Int64(1) |
++------------------------------------------------------------+
+| 2                                                          |
+| -1                                                         |
+| 4                                                          |
+| -3                                                         |
+|                                                            |
+|                                                            |
+|                                                            |
+| 9                                                          |
+|                                                            |
+| 11                                                         |
++------------------------------------------------------------+
+
+select abs(j.a.b) from json2_table order by ts;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Function 'abs' expects NativeType::Numeric but received NativeType::String No function matches the given name and argument types 'abs(Utf8View)'. You might need to add explicit type casts.
+	Candidate functions:
+	abs(Numeric(1))
+
+-- "j.c" is of type "String", "abs" is expected to be all "null"s.
+select abs(j.c) from json2_table order by ts;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Function 'abs' expects NativeType::Numeric but received NativeType::String No function matches the given name and argument types 'abs(Utf8View)'. You might need to add explicit type casts.
+	Candidate functions:
+	abs(Numeric(1))
 
 select j.d from json2_table order by ts;
 

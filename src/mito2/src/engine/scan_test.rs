@@ -100,7 +100,7 @@ async fn test_incremental_query_stale_error() {
             region_id,
             ScanRequest {
                 memtable_min_sequence: Some(min_readable_seq),
-                sst_min_sequence: Some(u64::MAX),
+                skip_sst_files: true,
                 ..Default::default()
             },
         )
