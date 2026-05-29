@@ -394,18 +394,7 @@ impl StatementExecutor {
 
             let file_schema = file_metadata.schema();
             let (file_schema_projection, table_schema_projection, compat_schema) =
-                match &file_metadata {
-                    FileMetadata::Csv { format, .. } if !format.has_header => {
-                        generated_positional_schema_projection_and_compatible_file_schema(
-                            file_schema,
-                            &table_schema,
-                        )
-                    }
-                    _ => generated_schema_projection_and_compatible_file_schema(
-                        file_schema,
-                        &table_schema,
-                    ),
-                };
+                generated_schema_projection_and_compatible_file_schema(file_schema, &table_schema);
             let projected_file_schema = Arc::new(
                 file_schema
                     .project(&file_schema_projection)
@@ -596,8 +585,7 @@ fn csv_reader_schema_for_skip_bad_records(file: &SchemaRef, compat: &SchemaRef) 
             let compat_field = compat
                 .fields()
                 .find(file_field.name())
-                .map(|(_, field)| field)
-                .or_else(|| compat.fields().get(idx));
+                .map(|(_, field)| field);
 
             match compat_field {
                 Some(compat_field) if can_csv_reader_parse_type(compat_field.data_type()) => {
@@ -681,27 +669,6 @@ fn generated_schema_projection_and_compatible_file_schema(
             // Safety: the compatible_fields has same length as file schema
             compatible_fields[file_idx] = table_field.clone();
         }
-    }
-
-    (
-        file_projection,
-        table_projection,
-        Schema::new(compatible_fields),
-    )
-}
-
-/// Generates a maybe compatible schema by mapping CSV fields to table fields by position.
-fn generated_positional_schema_projection_and_compatible_file_schema(
-    file: &SchemaRef,
-    table: &SchemaRef,
-) -> (Vec<usize>, Vec<usize>, Schema) {
-    let len = file.fields.len().min(table.fields.len());
-    let file_projection = (0..len).collect::<Vec<_>>();
-    let table_projection = (0..len).collect::<Vec<_>>();
-    let mut compatible_fields = file.fields.iter().cloned().collect::<Vec<_>>();
-
-    for (file_idx, table_field) in table.fields.iter().take(len).enumerate() {
-        compatible_fields[file_idx] = table_field.clone();
     }
 
     (
@@ -946,36 +913,6 @@ mod tests {
     }
 
     #[test]
-    fn test_positional_schema_projection() {
-        let file_schema = make_test_schema(&[
-            Field::new("column_1", DataType::UInt8, true),
-            Field::new("column_2", DataType::Utf8, true),
-            Field::new("column_3", DataType::Utf8, true),
-        ]);
-        let table_schema = make_test_schema(&[
-            Field::new(
-                "ts",
-                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
-                true,
-            ),
-            Field::new("host", DataType::Utf8, true),
-        ]);
-
-        let (fp, tp, compat_schema) =
-            generated_positional_schema_projection_and_compatible_file_schema(
-                &file_schema,
-                &table_schema,
-            );
-
-        assert_eq!(fp, vec![0, 1]);
-        assert_eq!(tp, vec![0, 1]);
-        assert_eq!(
-            compat_schema.project(&fp).unwrap(),
-            table_schema.project(&tp).unwrap()
-        );
-    }
-
-    #[test]
     fn test_csv_reader_schema_for_skip_bad_records() {
         let file_schema = make_test_schema(&[
             Field::new("id", DataType::Utf8, true),
@@ -1000,22 +937,5 @@ mod tests {
             reader_schema.field(2).data_type(),
             compat_schema.field(2).data_type()
         );
-
-        let headerless_file_schema = make_test_schema(&[
-            Field::new("column_1", DataType::Utf8, true),
-            Field::new("column_2", DataType::Utf8, true),
-        ]);
-        let positional_compat_schema = make_test_schema(&[
-            Field::new("id", DataType::UInt32, true),
-            Field::new("jsons", DataType::Binary, true),
-        ]);
-
-        let reader_schema = csv_reader_schema_for_skip_bad_records(
-            &headerless_file_schema,
-            &positional_compat_schema,
-        );
-
-        assert_eq!(reader_schema.field(0).data_type(), &DataType::UInt32);
-        assert_eq!(reader_schema.field(1).data_type(), &DataType::Utf8);
     }
 }

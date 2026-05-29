@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::io;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::Poll;
@@ -29,6 +30,7 @@ use common_telemetry::warn;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -85,9 +87,9 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
                     .build()
                 })?);
         };
-        if let Some(has_header) = parse_header_option(value)? {
-            format.has_header = has_header;
-        }
+        if let Some(has_header) = value.get(file_format::FORMAT_HAS_HEADER) {
+            format.has_header = parse_bool(file_format::FORMAT_HAS_HEADER, has_header)?;
+        };
         if let Some(skip_bad_records) = value.get(file_format::FORMAT_SKIP_BAD_RECORDS) {
             format.skip_bad_records =
                 parse_bool(file_format::FORMAT_SKIP_BAD_RECORDS, skip_bad_records)?;
@@ -109,30 +111,6 @@ fn parse_bool(key: &'static str, value: &str) -> Result<bool> {
     value
         .parse()
         .map_err(|_| error::ParseFormatSnafu { key, value }.build())
-}
-
-fn parse_header_option(value: &HashMap<String, String>) -> Result<Option<bool>> {
-    let has_header = value
-        .get(file_format::FORMAT_HAS_HEADER)
-        .map(|value| parse_bool(file_format::FORMAT_HAS_HEADER, value))
-        .transpose()?;
-    let headers = value
-        .get(file_format::FORMAT_HEADERS)
-        .map(|value| parse_bool(file_format::FORMAT_HEADERS, value))
-        .transpose()?;
-
-    match (has_header, headers) {
-        (Some(has_header), Some(headers)) if has_header != headers => error::ParseFormatSnafu {
-            key: file_format::FORMAT_HEADERS,
-            value: value
-                .get(file_format::FORMAT_HEADERS)
-                .expect("headers exists"),
-        }
-        .fail(),
-        (Some(has_header), _) => Ok(Some(has_header)),
-        (_, Some(headers)) => Ok(Some(headers)),
-        (None, None) => Ok(None),
-    }
 }
 
 impl Default for CsvFormat {
@@ -228,6 +206,11 @@ impl DfRecordBatchEncoder for csv::Writer<SharedBuffer> {
     }
 }
 
+/// Builds a CSV stream that can skip selected record-level parse/cast errors.
+///
+/// The decoder intentionally uses one-record batches. Arrow's CSV decoder clears
+/// buffered rows before type parsing, so a failed multi-row flush cannot be
+/// safely retried row by row without replaying input bytes.
 pub async fn tolerant_csv_stream(
     store: &ObjectStore,
     path: &str,
@@ -248,20 +231,39 @@ pub async fn tolerant_csv_stream(
         .await
         .context(error::ReadObjectSnafu { path })?;
 
+    let reader = format.compression_type.convert_stream(reader).boxed();
+    tolerant_csv_stream_from_reader(
+        reader,
+        path,
+        schema,
+        projection,
+        format.has_header,
+        format.delimiter,
+    )
+}
+
+fn tolerant_csv_stream_from_reader(
+    reader: BoxStream<'static, io::Result<Bytes>>,
+    path: &str,
+    schema: SchemaRef,
+    projection: Vec<usize>,
+    has_header: bool,
+    delimiter: u8,
+) -> Result<SendableRecordBatchStream> {
     let projected_schema = Arc::new(
         schema
             .project(&projection)
             .context(error::InferSchemaSnafu)?,
     );
     let mut decoder = csv::ReaderBuilder::new(schema)
-        .with_header(format.has_header)
-        .with_delimiter(format.delimiter)
+        .with_header(has_header)
+        .with_delimiter(delimiter)
         .with_batch_size(SKIP_BAD_RECORDS_BATCH_SIZE)
         .with_projection(projection)
         .build_decoder();
 
     let path = path.to_string();
-    let mut upstream = format.compression_type.convert_stream(reader).fuse();
+    let mut upstream = reader.fuse();
     let mut buffered = Bytes::new();
     let mut input_finished = false;
     let stream = futures::stream::poll_fn(move |cx| {
@@ -343,7 +345,7 @@ mod tests {
 
     use super::*;
     use crate::file_format::{
-        FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER, FORMAT_HEADERS,
+        FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER,
         FORMAT_SCHEMA_INFER_MAX_RECORD, FORMAT_SKIP_BAD_RECORDS, FileFormat, file_to_stream,
     };
     use crate::test_util::{format_schema, test_store};
@@ -477,16 +479,12 @@ mod tests {
             }
         );
 
-        let map = HashMap::from([
-            (FORMAT_HEADERS.to_string(), "false".to_string()),
-            (FORMAT_SKIP_BAD_RECORDS.to_string(), "true".to_string()),
-        ]);
+        let map = HashMap::from([(FORMAT_SKIP_BAD_RECORDS.to_string(), "true".to_string())]);
         let format = CsvFormat::try_from(&map).unwrap();
 
         assert_eq!(
             format,
             CsvFormat {
-                has_header: false,
                 skip_bad_records: true,
                 ..CsvFormat::default()
             }
@@ -495,27 +493,8 @@ mod tests {
 
     #[test]
     fn test_try_from_rejects_invalid_bool_options() {
-        let map = HashMap::from([(FORMAT_HEADERS.to_string(), "yes".to_string())]);
-        assert!(CsvFormat::try_from(&map).is_err());
-
         let map = HashMap::from([(FORMAT_SKIP_BAD_RECORDS.to_string(), "yes".to_string())]);
         assert!(CsvFormat::try_from(&map).is_err());
-    }
-
-    #[test]
-    fn test_try_from_rejects_conflicted_header_options() {
-        let map = HashMap::from([
-            (FORMAT_HAS_HEADER.to_string(), "true".to_string()),
-            (FORMAT_HEADERS.to_string(), "false".to_string()),
-        ]);
-        assert!(CsvFormat::try_from(&map).is_err());
-
-        let map = HashMap::from([
-            (FORMAT_HAS_HEADER.to_string(), "false".to_string()),
-            (FORMAT_HEADERS.to_string(), "false".to_string()),
-        ]);
-        let format = CsvFormat::try_from(&map).unwrap();
-        assert!(!format.has_header);
     }
 
     #[tokio::test]

@@ -403,7 +403,8 @@ mod tests {
 
     #[test]
     fn test_parse_copy_table_from_csv_options() {
-        let sql = "COPY my_table FROM '/tmp/test.csv' WITH (FORMAT = 'CSV', HEADERS = 'true', SKIP_BAD_RECORDS = 'false')";
+        let sql =
+            "COPY my_table FROM '/tmp/test.csv' WITH (FORMAT = 'CSV', SKIP_BAD_RECORDS = 'false')";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -416,7 +417,6 @@ mod tests {
                 copy_table,
             ))) => {
                 assert_eq!(copy_table.with.get("format"), Some("CSV"));
-                assert_eq!(copy_table.with.get("headers"), Some("true"));
                 assert_eq!(copy_table.with.get("skip_bad_records"), Some("false"));
             }
             _ => unreachable!(),
