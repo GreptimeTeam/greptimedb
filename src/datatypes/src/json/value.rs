@@ -65,6 +65,14 @@ impl JsonNumber {
             JsonNumber::Float(n) => n.0,
         }
     }
+
+    fn native_type(&self) -> JsonNativeType {
+        match self {
+            JsonNumber::PosInt(_) => JsonNativeType::u64(),
+            JsonNumber::NegInt(_) => JsonNativeType::i64(),
+            JsonNumber::Float(_) => JsonNativeType::f64(),
+        }
+    }
 }
 
 impl From<u64> for JsonNumber {
@@ -147,26 +155,14 @@ impl JsonVariant {
         match self {
             JsonVariant::Null => JsonNativeType::Null,
             JsonVariant::Bool(_) => JsonNativeType::Bool,
-            JsonVariant::Number(n) => match n {
-                JsonNumber::PosInt(_) => JsonNativeType::u64(),
-                JsonNumber::NegInt(_) => JsonNativeType::i64(),
-                JsonNumber::Float(_) => JsonNativeType::f64(),
-            },
+            JsonVariant::Number(n) => n.native_type(),
             JsonVariant::String(_) => JsonNativeType::String,
             JsonVariant::Array(array) => {
-                let item_type = if let Some(first) = array.first() {
-                    first.native_type()
-                } else {
-                    JsonNativeType::Null
-                };
-                JsonNativeType::Array(Box::new(item_type))
+                json_array_native_type(array.iter().map(JsonVariant::native_type))
             }
-            JsonVariant::Object(object) => JsonNativeType::Object(
-                object
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.native_type()))
-                    .collect(),
-            ),
+            JsonVariant::Object(object) => {
+                json_object_native_type(object.iter().map(|(k, v)| (k, v.native_type())))
+            }
             JsonVariant::Variant(_) => JsonNativeType::Variant,
         }
     }
@@ -469,6 +465,7 @@ impl JsonValue {
                         .collect::<Result<_>>()?,
                 ),
 
+                (JsonVariant::Object(kvs), _) if kvs.is_empty() => JsonVariant::Null,
                 (JsonVariant::Object(mut kvs), JsonNativeType::Object(expected)) => {
                     ensure!(
                         expected.keys().len() >= kvs.keys().len()
@@ -517,7 +514,7 @@ impl JsonValue {
 
         let x = std::mem::take(&mut self.json_variant);
         self.json_variant = helper(x, expected.native_type())?;
-        self.json_type = OnceLock::from(expected.clone());
+        self.json_type = OnceLock::new();
         Ok(())
     }
 }
@@ -623,35 +620,55 @@ pub enum JsonVariantRef<'a> {
 }
 
 impl JsonVariantRef<'_> {
-    fn json_type(&self) -> JsonType {
-        fn native_type(v: &JsonVariantRef<'_>) -> JsonNativeType {
-            match v {
-                JsonVariantRef::Null => JsonNativeType::Null,
-                JsonVariantRef::Bool(_) => JsonNativeType::Bool,
-                JsonVariantRef::Number(n) => match n {
-                    JsonNumber::PosInt(_) => JsonNativeType::u64(),
-                    JsonNumber::NegInt(_) => JsonNativeType::i64(),
-                    JsonNumber::Float(_) => JsonNativeType::f64(),
-                },
-                JsonVariantRef::String(_) => JsonNativeType::String,
-                JsonVariantRef::Array(array) => {
-                    let item_type = if let Some(first) = array.first() {
-                        native_type(first)
-                    } else {
-                        JsonNativeType::Null
-                    };
-                    JsonNativeType::Array(Box::new(item_type))
-                }
-                JsonVariantRef::Object(object) => JsonNativeType::Object(
-                    object
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), native_type(v)))
-                        .collect(),
-                ),
-                JsonVariantRef::Variant(_) => JsonNativeType::Variant,
+    fn native_type(&self) -> JsonNativeType {
+        match self {
+            JsonVariantRef::Null => JsonNativeType::Null,
+            JsonVariantRef::Bool(_) => JsonNativeType::Bool,
+            JsonVariantRef::Number(n) => n.native_type(),
+            JsonVariantRef::String(_) => JsonNativeType::String,
+            JsonVariantRef::Array(array) => {
+                json_array_native_type(array.iter().map(JsonVariantRef::native_type))
             }
+            JsonVariantRef::Object(object) => {
+                json_object_native_type(object.iter().map(|(k, v)| (*k, v.native_type())))
+            }
+            JsonVariantRef::Variant(_) => JsonNativeType::Variant,
         }
-        JsonType::new_json2(native_type(self))
+    }
+
+    fn json_type(&self) -> JsonType {
+        JsonType::new_json2(self.native_type())
+    }
+}
+
+fn json_array_native_type<I>(items: I) -> JsonNativeType
+where
+    I: IntoIterator<Item = JsonNativeType>,
+{
+    let mut iter = items.into_iter();
+    let mut item_type = match iter.next() {
+        Some(t) => t,
+        None => return JsonNativeType::Array(Box::new(JsonNativeType::Null)),
+    };
+    for x in iter {
+        if matches!(item_type, JsonNativeType::Variant) {
+            break;
+        }
+        item_type.merge(&x);
+    }
+    JsonNativeType::Array(Box::new(item_type))
+}
+
+fn json_object_native_type<I, K>(fields: I) -> JsonNativeType
+where
+    I: IntoIterator<Item = (K, JsonNativeType)>,
+    K: Into<String>,
+{
+    let mut fields = fields.into_iter().peekable();
+    if fields.peek().is_none() {
+        JsonNativeType::Null
+    } else {
+        JsonNativeType::Object(fields.map(|(k, v)| (k.into(), v)).collect())
     }
 }
 
@@ -941,7 +958,6 @@ mod tests {
                 ("name".to_string(), JsonVariant::Null),
             ])))
         );
-        assert_eq!(value.json_type(), &expected);
 
         // Object alignment should fail if the expected type misses any field from the value.
         let expected = JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(

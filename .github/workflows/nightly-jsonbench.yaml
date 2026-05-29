@@ -1,0 +1,162 @@
+name: Nightly JSONBench
+
+on:
+  schedule:
+    # Trigger at 00:00(Asia/Shanghai) on every weekday.
+    - cron: "0 16 * * 0-4"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  allocate-runner:
+    name: Allocate runner
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ubuntu-latest
+    outputs:
+      linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
+
+      # The following EC2 resource id will be used for resource releasing.
+      linux-arm64-ec2-runner-label: ${{ steps.start-linux-arm64-runner.outputs.label }}
+      linux-arm64-ec2-runner-instance-id: ${{ steps.start-linux-arm64-runner.outputs.ec2-instance-id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Allocate Linux ARM64 runner
+        uses: ./.github/actions/start-runner
+        id: start-linux-arm64-runner
+        with:
+          runner: ${{ vars.DEFAULT_ARM64_RUNNER }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          image-id: ${{ vars.EC2_RUNNER_LINUX_ARM64_IMAGE_ID }}
+          security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
+          subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
+
+  jsonbench:
+    name: Run JSONBench
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    needs: [ allocate-runner ]
+    runs-on: ${{ needs.allocate-runner.outputs.linux-arm64-runner }}
+    timeout-minutes: 120
+    env:
+      JSONBENCH_DATA_DIR: /home/runner/data/bluesky
+      JSONBENCH_OUTPUT_PREFIX: _ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "nightly-jsonbench"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build GreptimeDB
+        run: cargo build --profile nightly --bin greptime
+
+      - name: Reclaim disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "${RUNNER_TEMP}/greptimedb-bin"
+          cp ./target/nightly/greptime "${RUNNER_TEMP}/greptimedb-bin/greptime"
+          chmod +x "${RUNNER_TEMP}/greptimedb-bin/greptime"
+
+          rm -rf ./target
+
+      - name: Run JSONBench
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${RUNNER_TEMP}"
+          cp "${RUNNER_TEMP}/greptimedb-bin/greptime" ./greptime
+          chmod +x ./greptime
+
+          export GREPTIMEDB_STANDALONE__WAL__DIR=greptimedb_data/wal
+          export GREPTIMEDB_STANDALONE__STORAGE__DATA_HOME=greptimedb_data
+          export GREPTIMEDB_STANDALONE__LOGGING__DIR=greptimedb_data/logs
+          export GREPTIMEDB_STANDALONE__LOGGING__APPEND_STDOUT=false
+          export GREPTIMEDB_STANDALONE__HTTP__BODY_LIMIT=1GB
+          export GREPTIMEDB_STANDALONE__HTTP__TIMEOUT=500s
+
+          ./greptime standalone start > greptimedb.log 2>&1 &
+          greptime_pid=$!
+          trap 'kill "${greptime_pid}" 2>/dev/null || true' EXIT
+
+          until curl -s --fail -o /dev/null http://localhost:4000/health; do
+            if ! kill -0 "${greptime_pid}" 2>/dev/null; then
+              cat greptimedb.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          git clone --branch greptimedb-new-json --depth 1 https://github.com/GreptimeTeam/JSONBench.git JSONBench
+          cp ./greptime JSONBench/greptimedb/greptime
+
+          cd JSONBench/greptimedb
+          ./main.sh 3 "${JSONBENCH_DATA_DIR}" success.log error.log "${JSONBENCH_OUTPUT_PREFIX}" false
+
+      - name: Upload JSONBench results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jsonbench-results
+          path: |
+            ${{ runner.temp }}/greptimedb.log
+            ${{ runner.temp }}/JSONBench/greptimedb/*.log
+            ${{ runner.temp }}/JSONBench/greptimedb/*.total_size
+            ${{ runner.temp }}/JSONBench/greptimedb/*.data_size
+            ${{ runner.temp }}/JSONBench/greptimedb/*.index_size
+            ${{ runner.temp }}/JSONBench/greptimedb/*.count
+            ${{ runner.temp }}/JSONBench/greptimedb/*.results_runtime
+            ${{ runner.temp }}/JSONBench/greptimedb/*.query_results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  stop-linux-arm64-runner:
+    name: Stop Linux ARM64 runner
+    # It's always run as the last job in the workflow to make sure that the runner is released.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    needs: [
+      allocate-runner,
+      jsonbench,
+    ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Stop Linux ARM64 runner
+        uses: ./.github/actions/stop-runner
+        with:
+          label: ${{ needs.allocate-runner.outputs.linux-arm64-ec2-runner-label }}
+          ec2-instance-id: ${{ needs.allocate-runner.outputs.linux-arm64-ec2-runner-instance-id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}

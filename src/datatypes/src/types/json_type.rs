@@ -115,6 +115,14 @@ impl JsonNativeType {
             (JsonNativeType::Null, that) => that.clone(),
             (this, JsonNativeType::Null) => this,
             (this, that) if this == *that => this,
+
+            (JsonNativeType::Number(x), JsonNativeType::Number(y)) => {
+                JsonNativeType::Number(match (x, y) {
+                    (x, y) if x == *y => x,
+                    (JsonNumberType::F64, _) | (_, JsonNumberType::F64) => JsonNumberType::F64,
+                    _ => JsonNumberType::I64,
+                })
+            }
             _ => JsonNativeType::Variant,
         };
     }
@@ -822,7 +830,7 @@ mod tests {
         test(
             "1.5",
             &mut JsonType::new_json2(JsonNativeType::i64()),
-            Ok(r#""<Variant>""#),
+            Ok(r#""<Number>""#),
         )?;
 
         // Object merge should preserve existing fields and append missing fields.
