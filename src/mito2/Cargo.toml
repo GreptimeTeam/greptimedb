@@ -8,6 +8,7 @@ license.workspace = true
 default = []
 test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 testing = ["test"]
+test-shared-fs-region-migration = []
 enterprise = []
 vector_index = ["dep:roaring", "index/vector_index"]
 
