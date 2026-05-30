@@ -373,7 +373,10 @@ impl BloomFilterIndexApplier {
 
     // TODO(ruihang): use the same util with the code in creator
     fn column_blob_name(column_id: ColumnId) -> String {
-        format!("{INDEX_BLOB_TYPE}-{}", IndexTarget::ColumnId(column_id))
+        format!(
+            "{INDEX_BLOB_TYPE}-{}",
+            IndexTarget::ColumnId(column_id).encode()
+        )
     }
 
     /// Creates a blob reader from the remote index file

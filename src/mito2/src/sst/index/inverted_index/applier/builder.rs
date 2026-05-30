@@ -142,7 +142,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             .iter()
             .map(|(column_id, predicates)| {
                 (
-                    format!("{}", IndexTarget::ColumnId(*column_id)),
+                    IndexTarget::ColumnId(*column_id).encode(),
                     predicates.clone(),
                 )
             })

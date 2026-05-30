@@ -172,7 +172,7 @@ impl InvertedIndexer {
         let mut decoded_pks: Option<Vec<(CompositeValues, usize)>> = None;
 
         for target in &self.indexed_targets {
-            let target_key = target.to_string();
+            let target_key = target.encode();
             let Some(column_meta) = self.metadata.column_by_id(target.column_id()) else {
                 debug!(
                     "Column {} not found in the metadata during building inverted index",
@@ -323,7 +323,7 @@ impl InvertedIndexer {
         guard.inc_row_count(n);
 
         for target in &self.indexed_targets {
-            let target_key = target.to_string();
+            let target_key = target.encode();
             if target.path().is_some() {
                 // TODO(fys): support nested-path targets in non-flat `update` path as well,
                 // so behavior matches `update_flat`.
@@ -626,7 +626,7 @@ mod tests {
         let targets = build_indexed_targets(&metadata, HashSet::from([1]));
         let target_keys = targets
             .into_iter()
-            .map(|target| target.to_string())
+            .map(|target| target.encode())
             .collect::<HashSet<_>>();
         assert_eq!(
             target_keys,

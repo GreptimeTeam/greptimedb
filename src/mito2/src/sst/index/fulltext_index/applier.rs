@@ -286,7 +286,7 @@ impl FulltextIndexApplier {
     ) -> Result<Option<BTreeSet<RowId>>> {
         let blob_key = format!(
             "{INDEX_BLOB_TYPE_TANTIVY}-{}",
-            IndexTarget::ColumnId(column_id)
+            IndexTarget::ColumnId(column_id).encode()
         );
         let dir = self
             .index_source
@@ -423,7 +423,7 @@ impl FulltextIndexApplier {
     ) -> Result<bool> {
         let blob_key = format!(
             "{INDEX_BLOB_TYPE_BLOOM}-{}",
-            IndexTarget::ColumnId(column_id)
+            IndexTarget::ColumnId(column_id).encode()
         );
         let Some(reader) = self
             .index_source

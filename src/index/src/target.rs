@@ -36,18 +36,22 @@ pub enum IndexTarget {
 
 impl Display for IndexTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            IndexTarget::ColumnId(id) => write!(f, "{}", id),
-            IndexTarget::ColumnNestedPath { column_id, path } => {
-                let path_json = serde_json::to_vec(path).map_err(|_| fmt::Error)?;
-                let encoded = URL_SAFE_NO_PAD.encode(path_json);
-                write!(f, "{}:{}", column_id, encoded)
-            }
-        }
+        write!(f, "{:?}", self)
     }
 }
 
 impl IndexTarget {
+    pub fn encode(&self) -> String {
+        match self {
+            IndexTarget::ColumnId(id) => id.to_string(),
+            IndexTarget::ColumnNestedPath { column_id, path } => {
+                let path_json = serde_json::to_vec(path).expect("serializing should not fail");
+                let encoded = URL_SAFE_NO_PAD.encode(path_json);
+                format!("{}:{}", column_id, encoded)
+            }
+        }
+    }
+
     /// Parse a target key string back into an index target description.
     pub fn decode(key: &str) -> Result<Self, TargetKeyError> {
         ensure!(!key.is_empty(), EmptySnafu);
@@ -145,7 +149,7 @@ mod tests {
     #[test]
     fn encode_decode_column() {
         let target = IndexTarget::ColumnId(42);
-        let key = format!("{}", target);
+        let key = target.encode();
         assert_eq!(key, "42");
         let decoded = IndexTarget::decode(&key).unwrap();
         assert_eq!(decoded, target);
@@ -169,7 +173,7 @@ mod tests {
             column_id: 42,
             path: vec!["a".to_string(), "b".to_string()],
         };
-        let key = format!("{}", target);
+        let key = target.encode();
         assert_eq!(key, "42:WyJhIiwiYiJd");
         let decoded = IndexTarget::decode(&key).unwrap();
         assert_eq!(decoded, target);

@@ -419,7 +419,7 @@ impl BloomFilterIndexer {
         let (tx, rx) = tokio::io::duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
 
         let target_key = IndexTarget::ColumnId(*col_id);
-        let blob_name = format!("{INDEX_BLOB_TYPE}-{target_key}");
+        let blob_name = format!("{INDEX_BLOB_TYPE}-{}", target_key.encode());
         let (index_finish, puffin_add_blob) = futures::join!(
             creator.finish(tx.compat_write()),
             puffin_writer.put_blob(
