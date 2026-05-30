@@ -54,6 +54,8 @@ const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
 
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
+/// Metadata key for inverted index nested paths.
+const INVERTED_INDEX_NESTED_PATHS_KEY: &str = "greptime:inverted_index_nested_paths";
 
 /// `InvertedIndexer` creates inverted index for SST files.
 pub struct InvertedIndexer {
@@ -75,8 +77,8 @@ pub struct InvertedIndexer {
     /// The memory usage of the index creator.
     memory_usage: Arc<AtomicUsize>,
 
-    /// Ids of indexed columns and their encoded target keys.
-    indexed_column_ids: Vec<(ColumnId, String)>,
+    /// Root/nested targets and their encoded target keys.
+    indexed_targets: Vec<IndexTarget>,
 
     /// Region metadata for column lookups.
     metadata: RegionMetadataRef,
@@ -112,13 +114,7 @@ impl InvertedIndexer {
             metadata.primary_key_encoding,
             metadata.primary_key_columns(),
         );
-        let indexed_column_ids = indexed_column_ids
-            .into_iter()
-            .map(|col_id| {
-                let target_key = format!("{}", IndexTarget::ColumnId(col_id));
-                (col_id, target_key)
-            })
-            .collect();
+        let indexed_targets = build_indexed_targets(metadata, indexed_column_ids);
         Self {
             codec,
             index_creator,
@@ -127,7 +123,7 @@ impl InvertedIndexer {
             stats: Statistics::new(TYPE_INVERTED_INDEX),
             aborted: false,
             memory_usage,
-            indexed_column_ids,
+            indexed_targets,
             metadata: metadata.clone(),
         }
     }
@@ -175,16 +171,21 @@ impl InvertedIndexer {
         let is_sparse = self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
         let mut decoded_pks: Option<Vec<(CompositeValues, usize)>> = None;
 
-        for (col_id, target_key) in &self.indexed_column_ids {
-            let Some(column_meta) = self.metadata.column_by_id(*col_id) else {
+        for target in &self.indexed_targets {
+            let target_key = target.to_string();
+            let Some(column_meta) = self.metadata.column_by_id(target.column_id()) else {
                 debug!(
                     "Column {} not found in the metadata during building inverted index",
-                    col_id
+                    target.column_id()
                 );
                 continue;
             };
-            let column_name = &column_meta.column_schema.name;
-            if let Some(column_array) = batch.column_by_name(column_name) {
+            let column_name = if let Some(path) = target.path() {
+                format!("{}.{}", column_meta.column_schema.name, path.join("."))
+            } else {
+                column_meta.column_schema.name.clone()
+            };
+            if let Some(column_array) = batch.column_by_name(&column_name) {
                 // Convert Arrow array to VectorRef using Helper
                 let vector = Helper::try_into_vector(column_array.clone())
                     .context(crate::error::ConvertVectorSnafu)?;
@@ -196,7 +197,11 @@ impl InvertedIndexer {
 
                     if value_ref.is_null() {
                         self.index_creator
-                            .push_with_name(target_key, None)
+                            .push_with_name(&target_key, None)
+                            .await
+                            .context(PushIndexValueSnafu)?;
+                        self.index_creator
+                            .advance_with_name(&target_key)
                             .await
                             .context(PushIndexValueSnafu)?;
                     } else {
@@ -207,19 +212,26 @@ impl InvertedIndexer {
                         )
                         .context(EncodeSnafu)?;
                         self.index_creator
-                            .push_with_name(target_key, Some(&self.value_buf))
+                            .push_with_name(&target_key, Some(&self.value_buf))
+                            .await
+                            .context(PushIndexValueSnafu)?;
+                        self.index_creator
+                            .advance_with_name(&target_key)
                             .await
                             .context(PushIndexValueSnafu)?;
                     }
                 }
-            } else if is_sparse && column_meta.semantic_type == SemanticType::Tag {
+            } else if target.path().is_none()
+                && is_sparse
+                && column_meta.semantic_type == SemanticType::Tag
+            {
                 // Column not found in batch, tries to decode from primary keys for sparse encoding.
                 if decoded_pks.is_none() {
                     decoded_pks = Some(decode_primary_keys_with_counts(batch, &self.codec)?);
                 }
 
                 let pk_values_with_counts = decoded_pks.as_ref().unwrap();
-                let Some(col_info) = self.codec.pk_col_info(*col_id) else {
+                let Some(col_info) = self.codec.pk_col_info(target.column_id()) else {
                     debug!(
                         "Column {} not found in primary key during building bloom filter index",
                         column_name
@@ -231,7 +243,7 @@ impl InvertedIndexer {
                 for (decoded, count) in pk_values_with_counts {
                     let value = match decoded {
                         CompositeValues::Dense(dense) => dense.get(pk_index).map(|v| &v.1),
-                        CompositeValues::Sparse(sparse) => sparse.get(col_id),
+                        CompositeValues::Sparse(sparse) => sparse.get(&target.column_id()),
                     };
 
                     let elem = value
@@ -249,14 +261,18 @@ impl InvertedIndexer {
                         .transpose()?;
 
                     self.index_creator
-                        .push_with_name_n(target_key, elem, *count)
+                        .push_with_name_n(&target_key, elem, *count)
+                        .await
+                        .context(PushIndexValueSnafu)?;
+                    self.index_creator
+                        .advance_with_name_n(&target_key, *count)
                         .await
                         .context(PushIndexValueSnafu)?;
                 }
             } else {
                 debug!(
                     "Column {} not found in the batch during building inverted index",
-                    col_id
+                    column_name
                 );
             }
         }
@@ -306,14 +322,20 @@ impl InvertedIndexer {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        for (col_id, target_key) in &self.indexed_column_ids {
-            match self.codec.pk_col_info(*col_id) {
+        for target in &self.indexed_targets {
+            let target_key = target.to_string();
+            if target.path().is_some() {
+                // TODO(fys): support nested-path targets in non-flat `update` path as well,
+                // so behavior matches `update_flat`.
+                continue;
+            }
+            match self.codec.pk_col_info(target.column_id()) {
                 // pk
                 Some(col_info) => {
                     let pk_idx = col_info.idx;
                     let field = &col_info.field;
                     let value = batch
-                        .pk_col_value(self.codec.decoder(), pk_idx, *col_id)?
+                        .pk_col_value(self.codec.decoder(), pk_idx, target.column_id())?
                         .filter(|v| !v.is_null())
                         .map(|v| {
                             self.value_buf.clear();
@@ -328,16 +350,20 @@ impl InvertedIndexer {
                         .transpose()?;
 
                     self.index_creator
-                        .push_with_name_n(target_key, value, n)
+                        .push_with_name_n(&target_key, value, n)
+                        .await
+                        .context(PushIndexValueSnafu)?;
+                    self.index_creator
+                        .advance_with_name_n(&target_key, n)
                         .await
                         .context(PushIndexValueSnafu)?;
                 }
                 // fields
                 None => {
-                    let Some(values) = batch.field_col_value(*col_id) else {
+                    let Some(values) = batch.field_col_value(target.column_id()) else {
                         debug!(
                             "Column {} not found in the batch during building inverted index",
-                            col_id
+                            target.column_id()
                         );
                         continue;
                     };
@@ -347,7 +373,11 @@ impl InvertedIndexer {
                         let value = values.data.get_ref(i);
                         if value.is_null() {
                             self.index_creator
-                                .push_with_name(target_key, None)
+                                .push_with_name(&target_key, None)
+                                .await
+                                .context(PushIndexValueSnafu)?;
+                            self.index_creator
+                                .advance_with_name(&target_key)
                                 .await
                                 .context(PushIndexValueSnafu)?;
                         } else {
@@ -358,7 +388,11 @@ impl InvertedIndexer {
                             )
                             .context(EncodeSnafu)?;
                             self.index_creator
-                                .push_with_name(target_key, Some(&self.value_buf))
+                                .push_with_name(&target_key, Some(&self.value_buf))
+                                .await
+                                .context(PushIndexValueSnafu)?;
+                            self.index_creator
+                                .advance_with_name(&target_key)
                                 .await
                                 .context(PushIndexValueSnafu)?;
                         }
@@ -433,12 +467,53 @@ impl InvertedIndexer {
     }
 
     pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.indexed_column_ids.iter().map(|(col_id, _)| *col_id)
+        self.indexed_targets
+            .iter()
+            .map(IndexTarget::column_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
     }
 
     pub fn memory_usage(&self) -> usize {
         self.memory_usage.load(std::sync::atomic::Ordering::Relaxed)
     }
+}
+
+fn build_indexed_targets(
+    metadata: &RegionMetadataRef,
+    indexed_column_ids: HashSet<ColumnId>,
+) -> Vec<IndexTarget> {
+    // TODO(fys): de-duplicate nested targets built from metadata
+    // (for example, repeated paths in `greptime:inverted_index_nested_paths`).
+    // Prefer canonicalization + HashSet based dedup once the target key encoding
+    // for special characters is finalized.
+    let mut targets = Vec::new();
+    for col_id in indexed_column_ids {
+        targets.push(IndexTarget::ColumnId(col_id));
+
+        let Some(column_meta) = metadata.column_by_id(col_id) else {
+            continue;
+        };
+        let Some(raw_paths) = column_meta
+            .column_schema
+            .metadata()
+            .get(INVERTED_INDEX_NESTED_PATHS_KEY)
+        else {
+            continue;
+        };
+
+        for path in raw_paths.split(',') {
+            let path = path.trim();
+            if path.is_empty() {
+                continue;
+            }
+            targets.push(IndexTarget::ColumnNestedPath {
+                column_id: col_id,
+                path: path.split('.').map(ToString::to_string).collect(),
+            });
+        }
+    }
+    targets
 }
 
 #[cfg(test)]
@@ -520,6 +595,48 @@ mod tests {
             .primary_key(vec![1, 2]);
 
         Arc::new(builder.build().unwrap())
+    }
+
+    #[test]
+    fn test_build_indexed_targets_with_nested_paths() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        let mut col = ColumnSchema::new("j", ConcreteDataType::json_datatype(), true)
+            .with_inverted_index(true);
+        col.mut_metadata().insert(
+            INVERTED_INDEX_NESTED_PATHS_KEY.to_string(),
+            "a.b, a.c ,,d".to_string(),
+        );
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: col,
+            semantic_type: SemanticType::Field,
+            column_id: 1,
+        });
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 2,
+        });
+        let metadata = Arc::new(builder.build().unwrap());
+
+        let targets = build_indexed_targets(&metadata, HashSet::from([1]));
+        let target_keys = targets
+            .into_iter()
+            .map(|target| target.to_string())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            target_keys,
+            HashSet::from([
+                "1".to_string(),
+                "1:a.b".to_string(),
+                "1:a.c".to_string(),
+                "1:d".to_string(),
+            ])
+        );
     }
 
     fn new_batch(

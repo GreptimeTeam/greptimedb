@@ -34,7 +34,7 @@ pub struct InvertedIndexBlobWriter<W> {
     /// Tracks the total number of bytes written to the storage so far
     written_size: u64,
 
-    /// Metadata about each index that has been written  
+    /// Metadata about each index that has been written
     metas: InvertedIndexMetas,
 }
 

@@ -56,16 +56,27 @@ impl InvertedIndexCreator for SortIndexCreator {
         value: Option<BytesRef<'_>>,
         n: usize,
     ) -> Result<()> {
-        match self.sorters.get_mut(index_name) {
-            Some(sorter) => sorter.push_n(value, n).await,
-            None => {
-                let index_name = index_name.to_string();
-                let mut sorter = (self.sorter_factory)(index_name.clone(), self.segment_row_count);
-                sorter.push_n(value, n).await?;
-                self.sorters.insert(index_name, sorter);
-                Ok(())
-            }
+        if let Some(sorter) = self.sorters.get_mut(index_name) {
+            return sorter.push_n(value, n).await;
         }
+
+        let index_name = index_name.to_string();
+        let mut sorter = (self.sorter_factory)(index_name.clone(), self.segment_row_count);
+        sorter.push_n(value, n).await?;
+        self.sorters.insert(index_name, sorter);
+        Ok(())
+    }
+
+    async fn advance_with_name_n(&mut self, index_name: &str, n: usize) -> Result<()> {
+        if let Some(sorter) = self.sorters.get_mut(index_name) {
+            return sorter.advance_n(n).await;
+        }
+
+        let index_name = index_name.to_string();
+        let mut sorter = (self.sorter_factory)(index_name.clone(), self.segment_row_count);
+        sorter.advance_n(n).await?;
+        self.sorters.insert(index_name, sorter);
+        Ok(())
     }
 
     /// Finalizes the sorting for all indexes and writes them using the inverted index writer
@@ -144,6 +155,7 @@ mod tests {
                     .push_with_name(index_name, Some(value))
                     .await
                     .unwrap();
+                creator.advance_with_name(index_name).await.unwrap();
             }
         }
 
@@ -193,6 +205,7 @@ mod tests {
                     .push_with_name(index_name, Some(value))
                     .await
                     .unwrap();
+                creator.advance_with_name(index_name).await.unwrap();
             }
         }
 
@@ -250,6 +263,53 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn test_sort_index_creator_advance_with_multi_terms() {
+        let mut creator =
+            SortIndexCreator::new(NaiveSorter::factory(), NonZeroUsize::new(2).unwrap());
+
+        creator
+            .push_with_name("x", Some(b"a".as_slice()))
+            .await
+            .unwrap();
+        creator
+            .push_with_name("x", Some(b"b".as_slice()))
+            .await
+            .unwrap();
+        creator.advance_with_name("x").await.unwrap();
+        creator.push_with_name("x", None).await.unwrap();
+        creator.advance_with_name("x").await.unwrap();
+        creator
+            .push_with_name("x", Some(b"b".as_slice()))
+            .await
+            .unwrap();
+        creator.advance_with_name("x").await.unwrap();
+
+        let mut mock_writer = MockInvertedIndexWriter::new();
+        mock_writer.expect_add_index().times(1).returning(
+            |name, null_bitmap, stream, bitmap_type| {
+                assert_eq!(name, "x");
+                assert_eq!(bitmap_type, BitmapType::Roaring);
+                assert_eq!(null_bitmap.iter_ones().collect::<Vec<_>>(), vec![0]);
+                assert_eq!(stream_to_values(stream), vec![b"a", b"b"]);
+                Ok(())
+            },
+        );
+        mock_writer
+            .expect_finish()
+            .times(1)
+            .returning(|total_row_count, segment_row_count| {
+                assert_eq!(total_row_count, 3);
+                assert_eq!(segment_row_count.get(), 2);
+                Ok(())
+            });
+
+        creator
+            .finish(&mut mock_writer, BitmapType::Roaring)
+            .await
+            .unwrap();
+    }
+
     fn set_bit(bit_vec: &mut BitVec, index: usize) {
         if index >= bit_vec.len() {
             bit_vec.resize(index + 1, false);
@@ -278,19 +338,25 @@ mod tests {
     #[async_trait]
     impl Sorter for NaiveSorter {
         async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()> {
-            let segment_index = self.total_row_count / self.segment_row_count;
-            self.total_row_count += 1;
-
-            let bitmap = self.values.entry(value.map(Into::into)).or_default();
-            set_bit(bitmap, segment_index);
-
-            Ok(())
+            self.push_n(value, 1).await
         }
 
         async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()> {
-            for _ in 0..n {
-                self.push(value).await?;
+            if n == 0 {
+                return Ok(());
             }
+
+            let segment_index_start = self.total_row_count / self.segment_row_count;
+            let segment_index_end = (self.total_row_count + n - 1) / self.segment_row_count;
+            let bitmap = self.values.entry(value.map(Into::into)).or_default();
+            for segment_index in segment_index_start..=segment_index_end {
+                set_bit(bitmap, segment_index);
+            }
+            Ok(())
+        }
+
+        async fn advance_n(&mut self, n: usize) -> Result<()> {
+            self.total_row_count += n;
             Ok(())
         }
 
