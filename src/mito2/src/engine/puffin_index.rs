@@ -49,6 +49,7 @@ const INDEX_TYPE_INVERTED: &str = "inverted";
 const TARGET_TYPE_UNKNOWN: &str = "unknown";
 
 const TARGET_TYPE_COLUMN: &str = "column";
+const TARGET_TYPE_COLUMN_NESTED_PATH: &str = "column_nested_path";
 
 pub(crate) struct IndexEntryContext<'a> {
     pub(crate) table_dir: &'a str,
@@ -370,6 +371,14 @@ fn decode_target_info(target_key: &str) -> (String, String) {
             TARGET_TYPE_COLUMN.to_string(),
             json!({ "column": id }).to_string(),
         ),
+        Ok(IndexTarget::ColumnNestedPath { column_id, path }) => (
+            TARGET_TYPE_COLUMN_NESTED_PATH.to_string(),
+            json!({
+                "column": column_id,
+                "path": path,
+            })
+            .to_string(),
+        ),
         _ => (
             TARGET_TYPE_UNKNOWN.to_string(),
             json!({ "error": "failed_to_decode" }).to_string(),
@@ -380,6 +389,7 @@ fn decode_target_info(target_key: &str) -> (String, String) {
 fn decode_column_id(target_key: &str) -> Option<ColumnId> {
     match IndexTarget::decode(target_key) {
         Ok(IndexTarget::ColumnId(id)) => Some(id),
+        Ok(IndexTarget::ColumnNestedPath { column_id, .. }) => Some(column_id),
         _ => None,
     }
 }

@@ -15,6 +15,8 @@
 use std::any::Any;
 use std::fmt::{self, Display};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -37,7 +39,9 @@ impl Display for IndexTarget {
         match self {
             IndexTarget::ColumnId(id) => write!(f, "{}", id),
             IndexTarget::ColumnNestedPath { column_id, path } => {
-                write!(f, "{}:{}", column_id, path.join("."))
+                let path_json = serde_json::to_vec(path).map_err(|_| fmt::Error)?;
+                let encoded = URL_SAFE_NO_PAD.encode(path_json);
+                write!(f, "{}:{}", column_id, encoded)
             }
         }
     }
@@ -48,8 +52,8 @@ impl IndexTarget {
     pub fn decode(key: &str) -> Result<Self, TargetKeyError> {
         ensure!(!key.is_empty(), EmptySnafu);
 
-        let (col_id, nested_path) = match key.split_once(':') {
-            Some((col_id, path)) => (col_id, Some(path)),
+        let (col_id, encoded_nested_path) = match key.split_once(':') {
+            Some((col_id, encoded_path)) => (col_id, Some(encoded_path)),
             None => (key, None),
         };
 
@@ -59,24 +63,24 @@ impl IndexTarget {
             .parse::<ColumnId>()
             .map_err(|_| InvalidColumnIdSnafu { value: col_id }.build())?;
 
-        let Some(nested_path) = nested_path else {
+        let Some(encoded_nested_path) = encoded_nested_path else {
             return Ok(IndexTarget::ColumnId(col_id));
         };
 
-        let nested_path_str = nested_path.trim();
-        ensure!(!nested_path_str.is_empty(), InvalidPathSnafu { key });
-        // FIXME(fys): do we need to handle special characters in here and encode method?
-        let nested_path = nested_path_str
-            .split('.')
-            .map(str::trim)
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
+        ensure!(!encoded_nested_path.is_empty(), InvalidPathSnafu { key });
+
+        let path_json = URL_SAFE_NO_PAD
+            .decode(encoded_nested_path)
+            .map_err(|_| InvalidPathSnafu { key }.build())?;
+
+        let nested_path: Vec<String> =
+            serde_json::from_slice(&path_json).map_err(|_| InvalidPathSnafu { key }.build())?;
+
         ensure!(
-            nested_path
-                .iter()
-                .all(|seg| !seg.is_empty() && !seg.contains(':')),
+            !nested_path.is_empty() && nested_path.iter().all(|seg| !seg.is_empty()),
             InvalidPathSnafu { key }
         );
+
         Ok(IndexTarget::ColumnNestedPath {
             column_id: col_id,
             path: nested_path,
@@ -166,7 +170,7 @@ mod tests {
             path: vec!["a".to_string(), "b".to_string()],
         };
         let key = format!("{}", target);
-        assert_eq!(key, "42:a.b");
+        assert_eq!(key, "42:WyJhIiwiYiJd");
         let decoded = IndexTarget::decode(&key).unwrap();
         assert_eq!(decoded, target);
     }

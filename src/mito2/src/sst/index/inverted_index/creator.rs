@@ -325,6 +325,8 @@ impl InvertedIndexer {
         for target in &self.indexed_targets {
             let target_key = target.to_string();
             if target.path().is_some() {
+                // TODO(fys): support nested-path targets in non-flat `update` path as well,
+                // so behavior matches `update_flat`.
                 continue;
             }
             match self.codec.pk_col_info(target.column_id()) {
@@ -481,6 +483,10 @@ fn build_indexed_targets(
     metadata: &RegionMetadataRef,
     indexed_column_ids: HashSet<ColumnId>,
 ) -> Vec<IndexTarget> {
+    // TODO(fys): de-duplicate nested targets built from metadata
+    // (for example, repeated paths in `greptime:inverted_index_nested_paths`).
+    // Prefer canonicalization + HashSet based dedup once the target key encoding
+    // for special characters is finalized.
     let mut targets = Vec::new();
     for col_id in indexed_column_ids {
         targets.push(IndexTarget::ColumnId(col_id));
