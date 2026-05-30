@@ -98,7 +98,7 @@ impl IndexTarget {
         }
     }
 
-    pub fn path(&self) -> Option<&[String]> {
+    pub fn column_nested_path(&self) -> Option<&[String]> {
         match self {
             IndexTarget::ColumnId(_) => None,
             IndexTarget::ColumnNestedPath { path, .. } => Some(path),

@@ -171,21 +171,26 @@ impl InvertedIndexer {
         let is_sparse = self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
         let mut decoded_pks: Option<Vec<(CompositeValues, usize)>> = None;
 
-        for target in &self.indexed_targets {
-            let target_key = target.encode();
-            let Some(column_meta) = self.metadata.column_by_id(target.column_id()) else {
+        for index_target in &self.indexed_targets {
+            let target_key = index_target.encode();
+            let col_id = index_target.column_id();
+
+            let Some(col_meta) = self.metadata.column_by_id(col_id) else {
                 debug!(
                     "Column {} not found in the metadata during building inverted index",
-                    target.column_id()
+                    col_id
                 );
                 continue;
             };
-            let column_name = if let Some(path) = target.path() {
-                format!("{}.{}", column_meta.column_schema.name, path.join("."))
+
+            let col_name = if let Some(path) = index_target.column_nested_path() {
+                // FIXME(fys): can not get column array by this.
+                format!("{}.{}", col_meta.column_schema.name, path.join("."))
             } else {
-                column_meta.column_schema.name.clone()
+                col_meta.column_schema.name.clone()
             };
-            if let Some(column_array) = batch.column_by_name(&column_name) {
+
+            if let Some(column_array) = batch.column_by_name(&col_name) {
                 // Convert Arrow array to VectorRef using Helper
                 let vector = Helper::try_into_vector(column_array.clone())
                     .context(crate::error::ConvertVectorSnafu)?;
@@ -221,9 +226,9 @@ impl InvertedIndexer {
                             .context(PushIndexValueSnafu)?;
                     }
                 }
-            } else if target.path().is_none()
+            } else if index_target.column_nested_path().is_none()
                 && is_sparse
-                && column_meta.semantic_type == SemanticType::Tag
+                && col_meta.semantic_type == SemanticType::Tag
             {
                 // Column not found in batch, tries to decode from primary keys for sparse encoding.
                 if decoded_pks.is_none() {
@@ -231,10 +236,10 @@ impl InvertedIndexer {
                 }
 
                 let pk_values_with_counts = decoded_pks.as_ref().unwrap();
-                let Some(col_info) = self.codec.pk_col_info(target.column_id()) else {
+                let Some(col_info) = self.codec.pk_col_info(index_target.column_id()) else {
                     debug!(
                         "Column {} not found in primary key during building bloom filter index",
-                        column_name
+                        col_name
                     );
                     continue;
                 };
@@ -243,7 +248,7 @@ impl InvertedIndexer {
                 for (decoded, count) in pk_values_with_counts {
                     let value = match decoded {
                         CompositeValues::Dense(dense) => dense.get(pk_index).map(|v| &v.1),
-                        CompositeValues::Sparse(sparse) => sparse.get(&target.column_id()),
+                        CompositeValues::Sparse(sparse) => sparse.get(&index_target.column_id()),
                     };
 
                     let elem = value
@@ -272,7 +277,7 @@ impl InvertedIndexer {
             } else {
                 debug!(
                     "Column {} not found in the batch during building inverted index",
-                    column_name
+                    col_name
                 );
             }
         }
@@ -324,7 +329,7 @@ impl InvertedIndexer {
 
         for target in &self.indexed_targets {
             let target_key = target.encode();
-            if target.path().is_some() {
+            if target.column_nested_path().is_some() {
                 // TODO(fys): support nested-path targets in non-flat `update` path as well,
                 // so behavior matches `update_flat`.
                 continue;
