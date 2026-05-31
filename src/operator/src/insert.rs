@@ -83,6 +83,10 @@ pub struct Inserter {
     pub(crate) partition_manager: PartitionRuleManagerRef,
     pub(crate) node_manager: NodeManagerRef,
     pub(crate) table_flownode_set_cache: TableFlownodeSetCacheRef,
+    /// Server-side upper bound for auto table creation on write.
+    /// When `false`, missing tables are never auto-created regardless of the
+    /// per-request `auto_create_table` hint. When `true`, the hint still applies.
+    auto_create_table: bool,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -135,12 +139,14 @@ impl Inserter {
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
+        auto_create_table: bool,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
             node_manager,
             table_flownode_set_cache,
+            auto_create_table,
         }
     }
 
@@ -469,6 +475,30 @@ impl Inserter {
         Ok(inserts)
     }
 
+    /// Returns `None` if auto table creation is allowed, or `Some(reason)` if
+    /// disabled by either the global config or the request hint. The reason tells
+    /// which one, for a clearer error.
+    fn auto_create_disabled_reason(&self, ctx: &QueryContextRef) -> Result<Option<&'static str>> {
+        let auto_create_table_hint = ctx
+            .extension(AUTO_CREATE_TABLE_KEY)
+            .map(|v| v.parse::<bool>())
+            .transpose()
+            .map_err(|_| {
+                InvalidInsertRequestSnafu {
+                    reason: "`auto_create_table` hint must be a boolean",
+                }
+                .build()
+            })?
+            .unwrap_or(true);
+        Ok(if !self.auto_create_table {
+            Some("auto-create table is disabled by frontend config")
+        } else if !auto_create_table_hint {
+            Some("`auto_create_table` hint is disabled")
+        } else {
+            None
+        })
+    }
+
     /// Creates or alter tables on demand:
     /// - if table does not exist, create table by inferred CreateExpr
     /// - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
@@ -498,19 +528,7 @@ impl Inserter {
         let schema = ctx.current_schema();
 
         let mut table_infos = HashMap::new();
-        // If `auto_create_table` hint is disabled, skip creating/altering tables.
-        let auto_create_table_hint = ctx
-            .extension(AUTO_CREATE_TABLE_KEY)
-            .map(|v| v.parse::<bool>())
-            .transpose()
-            .map_err(|_| {
-                InvalidInsertRequestSnafu {
-                    reason: "`auto_create_table` hint must be a boolean",
-                }
-                .build()
-            })?
-            .unwrap_or(true);
-        if !auto_create_table_hint {
+        if let Some(disabled_reason) = self.auto_create_disabled_reason(ctx)? {
             let mut instant_table_ids = HashSet::new();
             for req in &requests.inserts {
                 let table = self
@@ -518,8 +536,8 @@ impl Inserter {
                     .await?
                     .context(InvalidInsertRequestSnafu {
                         reason: format!(
-                            "Table `{}` does not exist, and `auto_create_table` hint is disabled",
-                            req.table_name
+                            "Table `{}` does not exist, and {}",
+                            req.table_name, disabled_reason
                         ),
                     })?;
                 let table_info = table.table_info();
@@ -765,6 +783,16 @@ impl Inserter {
             .is_some()
         {
             return Ok(());
+        }
+
+        // Gate here too, otherwise a disabled switch would still leak the physical table.
+        if let Some(disabled_reason) = self.auto_create_disabled_reason(ctx)? {
+            return InvalidInsertRequestSnafu {
+                reason: format!(
+                    "Physical table `{physical_table}` does not exist, and {disabled_reason}"
+                ),
+            }
+            .fail();
         }
 
         let table_reference = TableReference::full(catalog_name, &schema_name, &physical_table);
@@ -1333,6 +1361,7 @@ mod tests {
                 Cache::new(100),
                 kv_backend.clone(),
             )),
+            true,
         );
         let alter_expr = inserter
             .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true, true)

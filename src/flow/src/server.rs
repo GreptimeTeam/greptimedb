@@ -566,11 +566,15 @@ impl FrontendInvoker {
                 name: TABLE_FLOWNODE_SET_CACHE_NAME,
             })?;
 
+        // TODO(auto_create_table): flow sink tables are created through a controlled
+        // `CREATE FLOW` path, not client writes, so they are intentionally exempt from
+        // the frontend's global auto-create switch. Revisit if flow should honor it.
         let inserter = Arc::new(Inserter::new(
             catalog_manager.clone(),
             partition_manager.clone(),
             node_manager.clone(),
             table_flownode_cache,
+            true,
         ));
 
         let deleter = Arc::new(Deleter::new(

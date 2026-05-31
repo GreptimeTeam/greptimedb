@@ -649,6 +649,20 @@ pub async fn setup_grpc_server_with_user_provider(
     setup_grpc_server_with(store_type, name, user_provider, None, None).await
 }
 
+/// Sets up a gRPC server backed by a standalone instance whose frontend has auto
+/// table creation disabled, for testing the server-side global switch.
+pub async fn setup_grpc_server_with_auto_create_table_disabled(
+    store_type: StorageType,
+    name: &str,
+) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
+    let instance = GreptimeDbStandaloneBuilder::new(name)
+        .with_default_store_type(store_type)
+        .with_auto_create_table(false)
+        .build()
+        .await;
+    setup_grpc_server_for_instance(instance, None, None, None).await
+}
+
 pub async fn setup_grpc_server_with(
     store_type: StorageType,
     name: &str,
@@ -657,7 +671,17 @@ pub async fn setup_grpc_server_with(
     memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
     let instance = setup_standalone_instance(name, store_type).await;
+    setup_grpc_server_for_instance(instance, user_provider, grpc_config, memory_limiter).await
+}
 
+/// Builds and starts a gRPC server on top of an already-constructed standalone
+/// instance. This is the shared core behind the `setup_grpc_server_*` helpers.
+async fn setup_grpc_server_for_instance(
+    instance: GreptimeDbStandalone,
+    user_provider: Option<UserProviderRef>,
+    grpc_config: Option<GrpcServerConfig>,
+    memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
+) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
     let runtime: Runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("grpc-handlers")

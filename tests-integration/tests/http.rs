@@ -1491,6 +1491,7 @@ mem_threshold_on_create = "auto"
     let expected_toml_str = format!(
         r#"
 enable_telemetry = true
+auto_create_table = true
 max_in_flight_write_bytes = "0KiB"
 write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false
