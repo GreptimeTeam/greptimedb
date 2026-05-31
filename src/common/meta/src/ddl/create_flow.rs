@@ -437,11 +437,13 @@ pub fn defer_on_missing_source(flow_task: &CreateFlowTask) -> Result<bool> {
 pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
     for key in flow_task.flow_options.keys() {
         match key.as_str() {
-            DEFER_ON_MISSING_SOURCE_KEY | FlowType::FLOW_TYPE_KEY => {}
+            DEFER_ON_MISSING_SOURCE_KEY
+            | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY
+            | FlowType::FLOW_TYPE_KEY => {}
             unknown => {
                 return UnexpectedSnafu {
                     err_msg: format!(
-                        "Unknown flow option '{unknown}', supported user options: {DEFER_ON_MISSING_SOURCE_KEY}"
+                        "Unknown flow option '{unknown}', supported user options: {DEFER_ON_MISSING_SOURCE_KEY}, {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}"
                     ),
                 }
                 .fail();
