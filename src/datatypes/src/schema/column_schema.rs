@@ -73,6 +73,41 @@ pub const DEFAULT_GRANULARITY: u32 = 10240;
 
 pub const DEFAULT_FALSE_POSITIVE_RATE: f64 = 0.01;
 
+/// Schema of a typed nested sub-column under a complex root column
+/// (for example, a JSON type hint column).
+///
+/// `path` stores the relative field path from the root column.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubColumnSchema {
+    pub path: Vec<String>,
+    pub data_type: ConcreteDataType,
+    is_nullable: bool,
+    metadata: Metadata,
+}
+
+impl SubColumnSchema {
+    #[allow(dead_code)]
+    pub fn is_inverted_indexed(&self) -> bool {
+        self.metadata
+            .get(INVERTED_INDEX_KEY)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    #[allow(dead_code)]
+    pub fn is_skipping_indexed(&self) -> bool {
+        self.metadata
+            .get(SKIPPING_INDEX_KEY)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    #[allow(dead_code)]
+    pub fn is_nullable(&self) -> bool {
+        self.is_nullable
+    }
+}
+
 /// Schema of a column, used as an immutable struct.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnSchema {
@@ -82,6 +117,16 @@ pub struct ColumnSchema {
     is_time_index: bool,
     default_constraint: Option<ColumnDefaultConstraint>,
     metadata: Metadata,
+    /// Optional type-hint sub-column schemas for this root column.
+    ///
+    /// Semantic:
+    /// - `None`: this column does not own sub-columns.
+    /// - `Some(vec![])`: this column owns sub-columns, but currently has no
+    ///   type-hint sub-columns.
+    /// - `Some(non_empty)`: this column owns sub-columns and has declared
+    ///   type-hint sub-columns.
+    #[serde(default)]
+    sub_col_schemas: Option<Vec<SubColumnSchema>>,
 }
 
 impl fmt::Debug for ColumnSchema {
@@ -125,6 +170,7 @@ impl ColumnSchema {
             is_time_index: false,
             default_constraint: None,
             metadata: Metadata::new(),
+            sub_col_schemas: None,
         }
     }
 
@@ -603,6 +649,7 @@ impl TryFrom<&Field> for ColumnSchema {
             is_time_index,
             default_constraint,
             metadata,
+            sub_col_schemas: None,
         })
     }
 }
