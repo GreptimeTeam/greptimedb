@@ -54,8 +54,6 @@ const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
 
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
-/// Metadata key for inverted index nested paths.
-const INVERTED_INDEX_NESTED_PATHS_KEY: &str = "greptime:inverted_index_nested_paths";
 
 /// `InvertedIndexer` creates inverted index for SST files.
 pub struct InvertedIndexer {
@@ -93,7 +91,7 @@ impl InvertedIndexer {
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
         segment_row_count: NonZeroUsize,
-        indexed_column_ids: HashSet<ColumnId>,
+        indexed_targets: Vec<IndexTarget>,
     ) -> Self {
         let temp_file_provider = Arc::new(TempFileProvider::new(
             IntermediateLocation::new(&metadata.region_id, &sst_file_id),
@@ -114,7 +112,6 @@ impl InvertedIndexer {
             metadata.primary_key_encoding,
             metadata.primary_key_columns(),
         );
-        let indexed_targets = build_indexed_targets(metadata, indexed_column_ids);
         Self {
             codec,
             index_creator,
@@ -484,43 +481,6 @@ impl InvertedIndexer {
     }
 }
 
-fn build_indexed_targets(
-    metadata: &RegionMetadataRef,
-    indexed_column_ids: HashSet<ColumnId>,
-) -> Vec<IndexTarget> {
-    // TODO(fys): de-duplicate nested targets built from metadata
-    // (for example, repeated paths in `greptime:inverted_index_nested_paths`).
-    // Prefer canonicalization + HashSet based dedup once the target key encoding
-    // for special characters is finalized.
-    let mut targets = Vec::new();
-    for col_id in indexed_column_ids {
-        targets.push(IndexTarget::ColumnId(col_id));
-
-        let Some(column_meta) = metadata.column_by_id(col_id) else {
-            continue;
-        };
-        let Some(raw_paths) = column_meta
-            .column_schema
-            .metadata()
-            .get(INVERTED_INDEX_NESTED_PATHS_KEY)
-        else {
-            continue;
-        };
-
-        for path in raw_paths.split(',') {
-            let path = path.trim();
-            if path.is_empty() {
-                continue;
-            }
-            targets.push(IndexTarget::ColumnNestedPath {
-                column_id: col_id,
-                path: path.split('.').map(ToString::to_string).collect(),
-            });
-        }
-    }
-    targets
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -602,48 +562,6 @@ mod tests {
         Arc::new(builder.build().unwrap())
     }
 
-    #[test]
-    fn test_build_indexed_targets_with_nested_paths() {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
-        let mut col = ColumnSchema::new("j", ConcreteDataType::json_datatype(), true)
-            .with_inverted_index(true);
-        col.mut_metadata().insert(
-            INVERTED_INDEX_NESTED_PATHS_KEY.to_string(),
-            "a.b, a.c ,,d".to_string(),
-        );
-        builder.push_column_metadata(ColumnMetadata {
-            column_schema: col,
-            semantic_type: SemanticType::Field,
-            column_id: 1,
-        });
-        builder.push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true),
-            semantic_type: SemanticType::Timestamp,
-            column_id: 2,
-        });
-        let metadata = Arc::new(builder.build().unwrap());
-
-        let targets = build_indexed_targets(&metadata, HashSet::from([1]));
-        let target_keys = targets
-            .into_iter()
-            .map(|target| target.encode())
-            .collect::<HashSet<_>>();
-        assert_eq!(
-            target_keys,
-            HashSet::from([
-                "1".to_string(),
-                "1:a.b".to_string(),
-                "1:a.c".to_string(),
-                "1:d".to_string(),
-            ])
-        );
-    }
-
     fn new_batch(
         str_tag: impl AsRef<str>,
         i32_tag: impl Into<i32>,
@@ -692,6 +610,10 @@ mod tests {
         let memory_threshold = None;
         let segment_row_count = 2;
         let indexed_column_ids = HashSet::from_iter([1, 2, 4]);
+        let indexed_targets = indexed_column_ids
+            .iter()
+            .map(|&col_id| IndexTarget::ColumnId(col_id))
+            .collect();
 
         let mut creator = InvertedIndexer::new(
             sst_file_id,
@@ -699,7 +621,7 @@ mod tests {
             intm_mgr,
             memory_threshold,
             NonZeroUsize::new(segment_row_count).unwrap(),
-            indexed_column_ids.clone(),
+            indexed_targets,
         );
 
         for (str_tag, i32_tag, u64_field) in &rows {

@@ -32,6 +32,7 @@ use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
+use index::target::IndexTarget;
 use mito_codec::index::IndexValuesCodec;
 use mito_codec::row_converter::CompositeValues;
 use object_store::ObjectStore;
@@ -390,6 +391,11 @@ impl IndexerBuilderImpl {
             );
             return None;
         }
+        // FIXME(fys): include nested fields in the future.
+        let indexed_targets = indexed_column_ids
+            .iter()
+            .map(|col_id| IndexTarget::ColumnId(*col_id))
+            .collect::<Vec<_>>();
 
         let Some(mut segment_row_count) =
             NonZeroUsize::new(self.index_options.inverted_index.segment_row_count)
@@ -420,7 +426,7 @@ impl IndexerBuilderImpl {
             self.intermediate_manager.clone(),
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
-            indexed_column_ids,
+            indexed_targets,
         );
 
         Some(indexer)
