@@ -6,6 +6,10 @@ default_timezone = "UTC"
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
+## Server-side global switch for auto table creation on write.
+## When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`.
+auto_create_table = true
+
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
 ## @toml2docs:none-default

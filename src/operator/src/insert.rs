@@ -83,6 +83,10 @@ pub struct Inserter {
     pub(crate) partition_manager: PartitionRuleManagerRef,
     pub(crate) node_manager: NodeManagerRef,
     pub(crate) table_flownode_set_cache: TableFlownodeSetCacheRef,
+    /// Server-side upper bound for auto table creation on write.
+    /// When `false`, missing tables are never auto-created regardless of the
+    /// per-request `auto_create_table` hint. When `true`, the hint still applies.
+    auto_create_table: bool,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -135,12 +139,14 @@ impl Inserter {
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
+        auto_create_table: bool,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
             node_manager,
             table_flownode_set_cache,
+            auto_create_table,
         }
     }
 
@@ -498,7 +504,9 @@ impl Inserter {
         let schema = ctx.current_schema();
 
         let mut table_infos = HashMap::new();
-        // If `auto_create_table` hint is disabled, skip creating/altering tables.
+        // Effective auto-create is the AND of the server-side global switch and the
+        // per-request hint: the global switch is an upper bound, so a `false` global
+        // config can never be overridden by a `true` hint.
         let auto_create_table_hint = ctx
             .extension(AUTO_CREATE_TABLE_KEY)
             .map(|v| v.parse::<bool>())
@@ -510,7 +518,14 @@ impl Inserter {
                 .build()
             })?
             .unwrap_or(true);
-        if !auto_create_table_hint {
+        if !self.auto_create_table || !auto_create_table_hint {
+            // Distinguish the disabling source so the error is diagnosable: a
+            // server-side config lock reads very differently from a client opt-out.
+            let disabled_reason = if !self.auto_create_table {
+                "auto-create table is disabled by frontend config"
+            } else {
+                "`auto_create_table` hint is disabled"
+            };
             let mut instant_table_ids = HashSet::new();
             for req in &requests.inserts {
                 let table = self
@@ -518,8 +533,8 @@ impl Inserter {
                     .await?
                     .context(InvalidInsertRequestSnafu {
                         reason: format!(
-                            "Table `{}` does not exist, and `auto_create_table` hint is disabled",
-                            req.table_name
+                            "Table `{}` does not exist, and {}",
+                            req.table_name, disabled_reason
                         ),
                     })?;
                 let table_info = table.table_info();
@@ -1333,6 +1348,7 @@ mod tests {
                 Cache::new(100),
                 kv_backend.clone(),
             )),
+            true,
         );
         let alter_expr = inserter
             .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true, true)

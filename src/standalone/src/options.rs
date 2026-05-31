@@ -38,6 +38,10 @@ pub struct StandaloneOptions {
     pub enable_telemetry: bool,
     pub default_timezone: Option<String>,
     pub default_column_prefix: Option<String>,
+    /// Server-side global switch for auto table creation on write.
+    /// Upper bound: when `false`, missing tables are never auto-created even if a
+    /// request sets the `auto_create_table` hint to `true`. Default: `true`.
+    pub auto_create_table: bool,
     /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
@@ -77,6 +81,7 @@ impl Default for StandaloneOptions {
             enable_telemetry: true,
             default_timezone: None,
             default_column_prefix: None,
+            auto_create_table: true,
             max_in_flight_write_bytes: ReadableSize(0),
             write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
@@ -130,6 +135,7 @@ impl StandaloneOptions {
         let cloned_opts = self.clone();
         FrontendOptions {
             default_timezone: cloned_opts.default_timezone,
+            auto_create_table: cloned_opts.auto_create_table,
             max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             write_bytes_exhausted_policy: cloned_opts.write_bytes_exhausted_policy,
             http: cloned_opts.http,

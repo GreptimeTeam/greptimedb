@@ -44,7 +44,8 @@ use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::{TlsMode, TlsOption};
 use tests_integration::test_util::{
-    StorageType, setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider,
+    StorageType, setup_grpc_server, setup_grpc_server_with,
+    setup_grpc_server_with_auto_create_table_disabled, setup_grpc_server_with_user_provider,
 };
 use tonic::Request;
 use tonic::metadata::MetadataValue;
@@ -82,6 +83,7 @@ macro_rules! grpc_tests {
                 test_invalid_dbname,
                 test_auto_create_table,
                 test_auto_create_table_with_hints,
+                test_auto_create_table_disabled_by_config,
                 test_otel_arrow_auth,
                 test_insert_and_select,
                 test_dbname,
@@ -402,6 +404,42 @@ pub async fn test_auto_create_table_with_hints(store_type: StorageType) {
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
     insert_with_hints_and_assert(&db).await;
+    let _ = fe_grpc_server.shutdown().await;
+}
+
+/// When the frontend global switch disables auto table creation, a write to a
+/// missing table must fail even if the request sets `auto_create_table=true`,
+/// proving the global config is an upper bound that hints cannot bypass.
+pub async fn test_auto_create_table_disabled_by_config(store_type: StorageType) {
+    let (_db, fe_grpc_server) = setup_grpc_server_with_auto_create_table_disabled(
+        store_type,
+        "test_auto_create_table_disabled_by_config",
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+
+    let (host, cpu, mem, ts) = expect_data();
+    let request = InsertRequest {
+        table_name: "demo".to_string(),
+        columns: vec![host, cpu, mem, ts],
+        row_count: 4,
+    };
+    let result = db
+        .insert_with_hints(
+            InsertRequests {
+                inserts: vec![request],
+            },
+            &[("auto_create_table", "true")],
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("does not exist") && err.contains("disabled by frontend config"),
+        "unexpected error: {err}"
+    );
     let _ = fe_grpc_server.shutdown().await;
 }
 
