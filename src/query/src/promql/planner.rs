@@ -190,6 +190,57 @@ enum IslandExpr {
     },
 }
 
+impl IslandExpr {
+    fn try_new(expr: &PromExpr, env: &mut IslandCollectEnv) -> Option<Self> {
+        if let Some(expr) = PromPlanner::try_build_literal_expr(expr) {
+            return Some(Self::Scalar(expr));
+        }
+
+        match expr {
+            PromExpr::Paren(ParenExpr { expr }) => Self::try_new(expr, env),
+            PromExpr::VectorSelector(selector) => {
+                let leaf = env.intern_leaf(selector)?;
+                Some(Self::VectorLeaf(leaf))
+            }
+            PromExpr::Unary(UnaryExpr { expr }) => {
+                let input = Self::try_new(expr, env)?;
+                Some(Self::Unary {
+                    input: Box::new(input),
+                })
+            }
+            PromExpr::Binary(PromBinaryExpr {
+                lhs,
+                rhs,
+                op,
+                modifier,
+            }) if matches!(
+                op.id(),
+                token::T_ADD
+                    | token::T_SUB
+                    | token::T_MUL
+                    | token::T_DIV
+                    | token::T_MOD
+                    | token::T_POW
+                    | token::T_ATAN2
+            ) && modifier.as_ref().is_none_or(|modifier| {
+                !modifier.return_bool
+                    && modifier.matching.is_none()
+                    && matches!(modifier.card, VectorMatchCardinality::OneToOne)
+            }) =>
+            {
+                let lhs = Self::try_new(lhs, env)?;
+                let rhs = Self::try_new(rhs, env)?;
+                Some(Self::Binary {
+                    op: *op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct IslandCollectEnv {
     leaf_by_key: HashMap<VectorLeafKey, usize>,
@@ -216,6 +267,13 @@ impl VectorLeafKey {
     fn from_selector(selector: &VectorSelector) -> Option<Self> {
         let mut metric_name = selector.name.clone();
         let mut matchers = Vec::with_capacity(selector.matchers.matchers.len());
+        let matcher_key = |matcher: &Matcher| {
+            (
+                matcher.name.clone(),
+                matcher.op.to_string(),
+                matcher.value.clone(),
+            )
+        };
 
         for matcher in &selector.matchers.matchers {
             if matcher.name == METRIC_NAME {
@@ -224,7 +282,7 @@ impl VectorLeafKey {
                 }
                 metric_name = Some(matcher.value.clone());
             } else {
-                matchers.push(Self::matcher_key(matcher));
+                matchers.push(matcher_key(matcher));
             }
         }
         matchers.sort();
@@ -234,7 +292,7 @@ impl VectorLeafKey {
             .or_matchers
             .iter()
             .map(|group| {
-                let mut group = group.iter().map(Self::matcher_key).collect::<Vec<_>>();
+                let mut group = group.iter().map(matcher_key).collect::<Vec<_>>();
                 group.sort();
                 group
             })
@@ -245,25 +303,13 @@ impl VectorLeafKey {
             metric_name: metric_name?,
             matchers,
             or_matchers,
-            offset_ms: Self::offset_ms(&selector.offset),
+            offset_ms: match &selector.offset {
+                Some(Offset::Pos(duration)) => duration.as_millis() as i128,
+                Some(Offset::Neg(duration)) => -(duration.as_millis() as i128),
+                None => 0,
+            },
             at: format!("{:?}", selector.at),
         })
-    }
-
-    fn matcher_key(matcher: &Matcher) -> (String, String, String) {
-        (
-            matcher.name.clone(),
-            matcher.op.to_string(),
-            matcher.value.clone(),
-        )
-    }
-
-    fn offset_ms(offset: &Option<Offset>) -> i128 {
-        match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as i128,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as i128),
-            None => 0,
-        }
     }
 }
 
@@ -737,10 +783,9 @@ impl PromPlanner {
     ) -> Result<Option<LogicalPlan>> {
         let original_ctx = self.ctx.clone();
         let mut collect_env = IslandCollectEnv::default();
-        let Some(island_expr) = Self::collect_binary_island_expr(
-            &PromExpr::Binary(binary_expr.clone()),
-            &mut collect_env,
-        ) else {
+        let Some(island_expr) =
+            IslandExpr::try_new(&PromExpr::Binary(binary_expr.clone()), &mut collect_env)
+        else {
             return Ok(None);
         };
 
@@ -800,67 +845,6 @@ impl PromPlanner {
         Ok(Some(plan))
     }
 
-    fn collect_binary_island_expr(
-        expr: &PromExpr,
-        env: &mut IslandCollectEnv,
-    ) -> Option<IslandExpr> {
-        if let Some(expr) = Self::try_build_literal_expr(expr) {
-            return Some(IslandExpr::Scalar(expr));
-        }
-
-        match expr {
-            PromExpr::Paren(ParenExpr { expr }) => Self::collect_binary_island_expr(expr, env),
-            PromExpr::VectorSelector(selector) => {
-                let leaf = env.intern_leaf(selector)?;
-                Some(IslandExpr::VectorLeaf(leaf))
-            }
-            PromExpr::Unary(UnaryExpr { expr }) => {
-                let input = Self::collect_binary_island_expr(expr, env)?;
-                Some(IslandExpr::Unary {
-                    input: Box::new(input),
-                })
-            }
-            PromExpr::Binary(PromBinaryExpr {
-                lhs,
-                rhs,
-                op,
-                modifier,
-            }) if Self::is_safe_binary_island_op(*op)
-                && Self::is_safe_binary_island_modifier(modifier) =>
-            {
-                let lhs = Self::collect_binary_island_expr(lhs, env)?;
-                let rhs = Self::collect_binary_island_expr(rhs, env)?;
-                Some(IslandExpr::Binary {
-                    op: *op,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
-            }
-            _ => None,
-        }
-    }
-
-    fn is_safe_binary_island_op(token: TokenType) -> bool {
-        matches!(
-            token.id(),
-            token::T_ADD
-                | token::T_SUB
-                | token::T_MUL
-                | token::T_DIV
-                | token::T_MOD
-                | token::T_POW
-                | token::T_ATAN2
-        )
-    }
-
-    fn is_safe_binary_island_modifier(modifier: &Option<BinModifier>) -> bool {
-        modifier.as_ref().is_none_or(|modifier| {
-            !modifier.return_bool
-                && modifier.matching.is_none()
-                && matches!(modifier.card, VectorMatchCardinality::OneToOne)
-        })
-    }
-
     fn binary_island_join_contexts_supported(leaves: &[PlannedIslandLeaf]) -> bool {
         if leaves
             .iter()
@@ -889,7 +873,7 @@ impl PromPlanner {
     ) -> Result<LogicalPlan> {
         let only_join_time_index =
             first_leaf.ctx.tag_columns.is_empty() || right_leaf.ctx.tag_columns.is_empty();
-        let (mut left_keys, mut right_keys) = Self::binary_join_key_columns_with_context(
+        let (mut left_keys, mut right_keys) = Self::binary_join_key_columns(
             &left,
             &right_leaf.plan,
             &first_leaf.ctx,
@@ -3986,23 +3970,6 @@ impl PromPlanner {
     }
 
     fn binary_join_key_columns(
-        &self,
-        left: &LogicalPlan,
-        right: &LogicalPlan,
-        only_join_time_index: bool,
-        modifier: &Option<BinModifier>,
-    ) -> (BTreeSet<String>, BTreeSet<String>) {
-        Self::binary_join_key_columns_with_context(
-            left,
-            right,
-            &self.ctx,
-            &self.ctx,
-            only_join_time_index,
-            modifier,
-        )
-    }
-
-    fn binary_join_key_columns_with_context(
         left: &LogicalPlan,
         right: &LogicalPlan,
         left_ctx: &PromPlannerContext,
@@ -4081,8 +4048,14 @@ impl PromPlanner {
         only_join_time_index: bool,
         modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
-        let (mut left_tag_columns, mut right_tag_columns) =
-            self.binary_join_key_columns(&left, &right, only_join_time_index, modifier);
+        let (mut left_tag_columns, mut right_tag_columns) = Self::binary_join_key_columns(
+            &left,
+            &right,
+            &self.ctx,
+            &self.ctx,
+            only_join_time_index,
+            modifier,
+        );
 
         // push time index column if it exists
         if let (Some(left_time_index_column), Some(right_time_index_column)) =
