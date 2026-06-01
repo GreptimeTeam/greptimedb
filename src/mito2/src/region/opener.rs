@@ -1211,14 +1211,17 @@ mod tests {
     use datatypes::arrow::array::{ArrayRef, BinaryArray, Int64Array};
     use datatypes::arrow::record_batch::RecordBatch;
     use object_store::ObjectStore;
-    use object_store::services::{Fs, Memory};
+    use object_store::services::{Fs, Memory, S3};
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
     use store_api::region_request::PathType;
     use store_api::storage::{FileId, RegionId};
 
-    use super::{preload_parquet_meta_cache_for_files, sanitize_region_options};
+    use super::{
+        preload_parquet_meta_cache_for_files, sanitize_region_options,
+        supports_open_region_object_storage_requirement,
+    };
     use crate::cache::CacheManager;
     use crate::cache::file_cache::{FileType, IndexKey};
     use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
@@ -1244,6 +1247,48 @@ mod tests {
             sst_format,
             append_mode: None,
         }
+    }
+
+    fn build_fs_object_store() -> ObjectStore {
+        ObjectStore::new(Fs::default().root("/tmp"))
+            .unwrap()
+            .finish()
+    }
+
+    #[test]
+    #[cfg(not(feature = "test-shared-fs-region-migration"))]
+    fn test_open_requirement_rejects_fs_object_store() {
+        let object_store = build_fs_object_store();
+
+        assert!(!supports_open_region_object_storage_requirement(
+            &object_store
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "test-shared-fs-region-migration")]
+    fn test_open_requirement_accepts_shared_fs_object_store_for_tests() {
+        let object_store = build_fs_object_store();
+
+        assert!(supports_open_region_object_storage_requirement(
+            &object_store
+        ));
+    }
+
+    #[test]
+    fn test_open_requirement_accepts_s3_object_store() {
+        let object_store = ObjectStore::new(
+            S3::default()
+                .bucket("test-bucket")
+                .region("us-east-1")
+                .disable_ec2_metadata(),
+        )
+        .unwrap()
+        .finish();
+
+        assert!(supports_open_region_object_storage_requirement(
+            &object_store
+        ));
     }
 
     #[test]
