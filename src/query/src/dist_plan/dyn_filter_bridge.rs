@@ -84,7 +84,7 @@ pub(crate) fn register_dyn_filters_for_region(
     region_id: RegionId,
     captured_dyn_filters: &[CapturedDynFilter],
 ) {
-    for resolved_filter in resolved_dyn_filters(region_id, captured_dyn_filters) {
+    for resolved_filter in resolved_dyn_filters(captured_dyn_filters) {
         let _ = registry.register_remote_dyn_filter(
             resolved_filter.filter_id.clone(),
             resolved_filter.alive_dyn_filter,
@@ -115,10 +115,7 @@ pub(crate) fn bridge_dyn_filters_for_region(
     register_dyn_filters_for_region(&registry, region_id, captured_dyn_filters);
 }
 
-fn resolve_dyn_filter(
-    region_id: RegionId,
-    captured_dyn_filter: &CapturedDynFilter,
-) -> Result<ResolvedDynFilter> {
+fn resolve_dyn_filter(captured_dyn_filter: &CapturedDynFilter) -> Result<ResolvedDynFilter> {
     let children = captured_dyn_filter
         .alive_dyn_filter
         .children()
@@ -126,7 +123,6 @@ fn resolve_dyn_filter(
         .cloned()
         .collect::<Vec<_>>();
     let filter_id = build_remote_dyn_filter_id(
-        region_id,
         captured_dyn_filter.producer_scope_id,
         captured_dyn_filter.producer_local_ordinal,
         &children,
@@ -139,22 +135,18 @@ fn resolve_dyn_filter(
     })
 }
 
-fn resolved_dyn_filters(
-    region_id: RegionId,
-    captured_dyn_filters: &[CapturedDynFilter],
-) -> Vec<ResolvedDynFilter> {
+fn resolved_dyn_filters(captured_dyn_filters: &[CapturedDynFilter]) -> Vec<ResolvedDynFilter> {
     captured_dyn_filters
         .iter()
-        .filter_map(|captured_dyn_filter| resolve_dyn_filter(region_id, captured_dyn_filter).ok())
+        .filter_map(|captured_dyn_filter| resolve_dyn_filter(captured_dyn_filter).ok())
         .collect()
 }
 
 fn build_initial_dyn_filter_regs_for_region(
-    region_id: RegionId,
     captured_dyn_filters: &[CapturedDynFilter],
 ) -> InitialDynFilterRegs {
     InitialDynFilterRegs::new(
-        resolved_dyn_filters(region_id, captured_dyn_filters)
+        resolved_dyn_filters(captured_dyn_filters)
             .into_iter()
             .filter_map(|resolved_filter| {
                 match InitialDynFilterReg::from_filter_id_and_children(
@@ -178,7 +170,7 @@ pub(crate) fn query_context_with_initial_dyn_filter_regs(
     captured_dyn_filters: &[CapturedDynFilter],
 ) -> QueryContext {
     let mut region_query_ctx = query_ctx.as_ref().clone();
-    let regs = build_initial_dyn_filter_regs_for_region(region_id, captured_dyn_filters);
+    let regs = build_initial_dyn_filter_regs_for_region(captured_dyn_filters);
     if regs.is_empty() {
         return region_query_ctx;
     }
@@ -249,10 +241,11 @@ mod tests {
                 lit(true) as _,
             )),
         }];
-        let region_id = RegionId::new(1024, 7);
+        let first_region_id = RegionId::new(1024, 7);
+        let second_region_id = RegionId::new(1024, 8);
 
-        register_dyn_filters_for_region(&registry, region_id, &captured_dyn_filters);
-        register_dyn_filters_for_region(&registry, region_id, &captured_dyn_filters);
+        register_dyn_filters_for_region(&registry, first_region_id, &captured_dyn_filters);
+        register_dyn_filters_for_region(&registry, second_region_id, &captured_dyn_filters);
 
         assert_eq!(registry.entry_count(), 1);
         let entry = registry.entries().pop().unwrap();
@@ -261,8 +254,18 @@ mod tests {
             test_producer_scope(42)
         );
         assert_eq!(entry.filter_id().producer_ordinal(), 2);
-        assert_eq!(entry.subscribers().len(), 1);
-        assert_eq!(entry.subscribers()[0].region_id(), region_id);
+        let subscribers = entry.subscribers();
+        assert_eq!(subscribers.len(), 2);
+        assert!(
+            subscribers
+                .iter()
+                .any(|subscriber| subscriber.region_id() == first_region_id)
+        );
+        assert!(
+            subscribers
+                .iter()
+                .any(|subscriber| subscriber.region_id() == second_region_id)
+        );
     }
 
     #[test]
@@ -326,7 +329,6 @@ mod tests {
             )
             .unwrap();
         let expected_filter_id = build_remote_dyn_filter_id(
-            region_id,
             captured_dyn_filters[0].producer_scope_id,
             captured_dyn_filters[0].producer_local_ordinal,
             &[Arc::new(Column::new("host", 0)) as Arc<_>],

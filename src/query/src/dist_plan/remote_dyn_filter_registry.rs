@@ -275,9 +275,8 @@ mod tests {
         QueryId::from(Uuid::from_u128(value))
     }
 
-    fn test_filter_id(region_id: RegionId, producer_ordinal: u32) -> FilterId {
+    fn test_filter_id(producer_ordinal: u32) -> FilterId {
         FilterId::new(
-            region_id,
             ProducerScopeId::new(42),
             producer_ordinal,
             FilterFingerprint::new(0xabc),
@@ -351,7 +350,7 @@ mod tests {
     fn registry_stores_filter_and_deduplicates_subscribers() {
         let registry = QueryDynFilterRegistry::new(test_query_id(1));
         let filter = test_dyn_filter(&["host"]);
-        let filter_id = test_filter_id(RegionId::new(1024, 7), 1);
+        let filter_id = test_filter_id(1);
         let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
             EntryRegistration::Inserted(entry) => entry,
             other => panic!("unexpected registration result: {other:?}"),
