@@ -17,6 +17,7 @@ use common_base::Plugins;
 use common_meta::cache::CacheRegistryBuilder;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
+use frontend::instance::Instance;
 use snafu::ResultExt;
 
 use crate::options::PluginOptions;
@@ -51,7 +52,7 @@ pub async fn setup_frontend_dynamic_plugins(
     Ok(())
 }
 
-pub async fn start_frontend_plugins(_plugins: Plugins) -> Result<()> {
+pub async fn start_frontend_plugins(_instance: &Instance) -> Result<()> {
     Ok(())
 }
 

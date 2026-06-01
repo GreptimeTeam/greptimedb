@@ -164,7 +164,7 @@ impl App for Instance {
             .start(self.leader_services_context.clone())
             .await?;
 
-        plugins::start_frontend_plugins(self.frontend.instance.plugins().clone())
+        plugins::start_frontend_plugins(&self.frontend.instance)
             .await
             .context(error::StartFrontendSnafu)?;
 
