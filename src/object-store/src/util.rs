@@ -22,6 +22,7 @@ use opendal::layers::{
     LoggingInterceptor, LoggingLayer, RetryEvent, RetryInterceptor, RetryLayer, TracingLayer,
 };
 use opendal::raw::{AccessorInfo, HttpClient, Operation};
+use opendal::services::FS_SCHEME;
 use snafu::ResultExt;
 
 use crate::config::HttpClientConfig;
@@ -29,7 +30,7 @@ use crate::{ObjectStore, error};
 
 /// Returns true if the object store is not backed by local filesystem.
 pub fn is_object_storage(object_store: &ObjectStore) -> bool {
-    object_store.info().scheme() != "fs"
+    object_store.info().scheme() != FS_SCHEME
 }
 
 /// Join two paths and normalize the output dir.
@@ -305,7 +306,7 @@ mod tests {
             .unwrap()
             .finish();
 
-        assert_eq!("fs", object_store.info().scheme());
+        assert_eq!(FS_SCHEME, object_store.info().scheme());
         assert!(!is_object_storage(&object_store));
     }
 }

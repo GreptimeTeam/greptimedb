@@ -632,7 +632,8 @@ fn supports_open_region_object_storage_requirement(object_store: &ObjectStore) -
     // temporary home dir. That makes file storage accessible to all test
     // datanodes, but production file storage still does not satisfy this
     // requirement.
-    is_object_storage(object_store) || object_store.info().scheme() == "fs"
+    is_object_storage(object_store)
+        || object_store.info().scheme() == object_store::services::FS_SCHEME
 }
 
 /// Creates a version builder from a region manifest.
