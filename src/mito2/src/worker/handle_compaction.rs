@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::region::compact_request;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
@@ -80,7 +80,6 @@ impl<S> RegionWorkerLoop<S> {
                 return;
             }
         };
-        region.update_compaction_millis();
 
         region.version_control.apply_edit(
             Some(request.edit.clone()),
@@ -118,6 +117,31 @@ impl<S> RegionWorkerLoop<S> {
             )
             .await;
         self.handle_ddl_requests(&mut pending_ddls).await;
+
+        if self.compaction_scheduler.is_compacting(region_id) {
+            return;
+        }
+
+        let now = self.time_provider.current_time_millis();
+        if now - region.last_schedule_compaction_millis()
+            >= self.config.min_compaction_interval.as_millis() as i64
+        {
+            debug!(
+                "minimal compaction interval time {:?} has passed, scheduling next compaction",
+                self.config.min_compaction_interval
+            );
+            if self
+                .compaction_scheduler
+                .schedule_next_compaction(
+                    region_id,
+                    &region.manifest_ctx,
+                    self.schema_metadata_manager.clone(),
+                )
+                .await
+            {
+                region.update_schedule_compaction_millis();
+            }
+        }
     }
 
     pub(crate) async fn handle_compaction_cancelled(
@@ -160,9 +184,14 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
         let now = self.time_provider.current_time_millis();
-        if now - region.last_compaction_millis()
+        if now - region.last_schedule_compaction_millis()
             >= self.config.min_compaction_interval.as_millis() as i64
-            && let Err(e) = self
+        {
+            debug!(
+                "minimal compaction interval time {:?} has passed, scheduling next compaction",
+                self.config.min_compaction_interval
+            );
+            match self
                 .compaction_scheduler
                 .schedule_compaction(
                     region.region_id,
@@ -175,11 +204,13 @@ impl<S> RegionWorkerLoop<S> {
                     1, // Default for automatic compaction
                 )
                 .await
-        {
-            warn!(
-                "Failed to schedule compaction for region: {}, err: {}",
-                region.region_id, e
-            );
+            {
+                Ok(true) => region.update_schedule_compaction_millis(),
+                Ok(false) => {}
+                Err(e) => {
+                    error!(e; "Failed to schedule compaction for region: {}", region.region_id)
+                }
+            }
         }
     }
 }
