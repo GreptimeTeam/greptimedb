@@ -18,7 +18,6 @@ pub use opendal::{
     FuturesAsyncWriter, Lister, Operator as ObjectStore, Reader, Result, Writer, services,
 };
 
-pub mod compat;
 pub mod config;
 pub mod error;
 pub mod factory;
