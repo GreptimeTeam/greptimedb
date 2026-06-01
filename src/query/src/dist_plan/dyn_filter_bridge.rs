@@ -23,14 +23,8 @@ use datafusion::execution::TaskContext;
 use datafusion_common::Result;
 use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
-#[cfg(test)]
-use datafusion_physical_expr::expressions::{Column, lit};
 use session::context::{QueryContext, QueryContextRef};
-#[cfg(test)]
-use session::query_id::QueryId;
 use store_api::storage::RegionId;
-#[cfg(test)]
-use uuid::Uuid;
 
 use crate::dist_plan::filter_id::build_remote_dyn_filter_id;
 use crate::dist_plan::{FilterId, ProducerScopeId, QueryDynFilterRegistry, Subscriber};
@@ -195,6 +189,10 @@ pub(crate) fn query_context_with_initial_dyn_filter_regs(
 
 #[cfg(test)]
 mod tests {
+    use datafusion_physical_expr::expressions::{Column, lit};
+    use session::query_id::QueryId;
+    use uuid::Uuid;
+
     use super::*;
 
     fn test_query_id(value: u128) -> QueryId {
