@@ -49,6 +49,7 @@ use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
+use datatypes::schema::SchemaRef;
 use either::Either;
 use futures_util::Stream;
 use futures_util::future::try_join_all;
@@ -82,7 +83,7 @@ use store_api::region_request::{
     RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 use tonic::{Request, Response, Result as TonicResult};
 
@@ -257,7 +258,7 @@ impl RegionServer {
         request: api::v1::region::QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
-        let _permit = if let Some(p) = &self.inner.parallelism {
+        let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
             None
@@ -298,14 +299,13 @@ impl RegionServer {
             )
             .await?;
 
-        Ok(wrap_flow_region_watermark_stream(
-            stream, region_id, &query_ctx,
-        ))
+        let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
+        Ok(maybe_guard_stream(stream, permit))
     }
 
     #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
-        let _permit = if let Some(p) = &self.inner.parallelism {
+        let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
             None
@@ -332,9 +332,8 @@ impl RegionServer {
             .handle_read(QueryRequest { plan, ..request }, query_ctx.clone())
             .await?;
 
-        Ok(wrap_flow_region_watermark_stream(
-            stream, region_id, &query_ctx,
-        ))
+        let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
+        Ok(maybe_guard_stream(stream, permit))
     }
 
     /// Returns all opened and reportable regions.
@@ -1058,7 +1057,7 @@ struct RegionServerInner {
 }
 
 struct RegionServerParallelism {
-    semaphore: Semaphore,
+    semaphore: Arc<Semaphore>,
     timeout: Duration,
 }
 
@@ -1071,16 +1070,65 @@ impl RegionServerParallelism {
             return None;
         }
         Some(RegionServerParallelism {
-            semaphore: Semaphore::new(max_concurrent_queries),
+            semaphore: Arc::new(Semaphore::new(max_concurrent_queries)),
             timeout: concurrent_query_limiter_timeout,
         })
     }
 
-    pub async fn acquire(&self) -> Result<SemaphorePermit<'_>> {
-        timeout(self.timeout, self.semaphore.acquire())
+    pub async fn acquire(&self) -> Result<OwnedSemaphorePermit> {
+        timeout(self.timeout, self.semaphore.clone().acquire_owned())
             .await
             .context(ConcurrentQueryLimiterTimeoutSnafu)?
             .context(ConcurrentQueryLimiterClosedSnafu)
+    }
+}
+
+/// Wraps a record batch stream and holds a concurrency permit until the stream is
+/// fully consumed (dropped), so `max_concurrent_queries` bounds the number of
+/// in-flight read streams, not just query planning.
+struct PermitGuardedStream {
+    inner: SendableRecordBatchStream,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl RecordBatchStream for PermitGuardedStream {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.inner.output_ordering()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.inner.metrics()
+    }
+}
+
+impl Stream for PermitGuardedStream {
+    type Item = common_recordbatch::error::Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+/// Wraps `stream` so it holds `permit` until fully consumed. Returns `stream`
+/// unchanged when no permit was acquired (limiter disabled).
+fn maybe_guard_stream(
+    stream: SendableRecordBatchStream,
+    permit: Option<OwnedSemaphorePermit>,
+) -> SendableRecordBatchStream {
+    match permit {
+        Some(permit) => Box::pin(PermitGuardedStream {
+            inner: stream,
+            _permit: permit,
+        }),
+        None => stream,
     }
 }
 

@@ -14,6 +14,8 @@
 
 //! Datanode configurations
 
+use std::time::Duration;
+
 use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::memory::MemoryOptions;
@@ -75,6 +77,10 @@ pub struct DatanodeOptions {
     pub wal: DatanodeWalConfig,
     pub storage: StorageConfig,
     pub max_concurrent_queries: usize,
+    /// Timeout to acquire a permit from the concurrent query limiter when
+    /// `max_concurrent_queries` is reached. Only effective when the limiter is enabled.
+    #[serde(with = "humantime_serde")]
+    pub concurrent_query_limiter_timeout: Duration,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
@@ -131,6 +137,7 @@ impl Default for DatanodeOptions {
             wal: DatanodeWalConfig::default(),
             storage: StorageConfig::default(),
             max_concurrent_queries: 0,
+            concurrent_query_limiter_timeout: Duration::from_millis(100),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
                 RegionEngineConfig::File(FileEngineConfig::default()),
