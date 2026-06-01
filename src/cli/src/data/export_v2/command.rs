@@ -1130,7 +1130,8 @@ struct VerifyPlan {
     problems: Vec<VerifyProblem>,
 }
 
-/// Actual data files discovered under `data/` (the only object-store IO in verify).
+/// Actual data files discovered under `data/` (the only object-store IO in
+/// chunk/data-file verification).
 #[derive(Debug)]
 struct VerifyDataScan {
     existing_data_files: HashSet<String>,
@@ -1244,7 +1245,8 @@ fn build_verify_plan(manifest: &Manifest) -> VerifyPlan {
     plan
 }
 
-/// Lists all data files under `data/`. This is the only object-store IO in verify.
+/// Lists all data files under `data/`. This is the only object-store IO in
+/// chunk/data-file verification.
 async fn scan_data_files(storage: &OpenDalStorage) -> Result<VerifyDataScan> {
     let existing_data_files = storage
         .list_files_recursive("data/")
