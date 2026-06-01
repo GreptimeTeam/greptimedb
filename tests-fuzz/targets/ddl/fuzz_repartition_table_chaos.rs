@@ -34,14 +34,15 @@ use tests_fuzz::fake::{
     uppercase_and_keyword_backtick_map,
 };
 use tests_fuzz::generator::Generator;
-use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
+use tests_fuzz::generator::create_expr::{CreateTableExprGeneratorBuilder, generate_partition_def};
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::repartition_expr::{
     MergePartitionExprGeneratorBuilder, SplitPartitionExprGeneratorBuilder,
 };
 use tests_fuzz::ir::{
-    CreateTableExpr, InsertIntoExpr, MySQLTsColumnTypeGenerator, RepartitionExpr, RowValue,
-    SimplePartitions, generate_partition_value, generate_unique_timestamp_for_mysql_with_clock,
+    AlterTablePartitionsExpr, CreateTableExpr, InsertIntoExpr, MySQLTsColumnTypeGenerator,
+    PartitionDef, RepartitionExpr, RowValue, SimplePartitions, generate_partition_value,
+    generate_unique_timestamp_for_mysql_with_clock,
 };
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
@@ -93,13 +94,17 @@ impl Arbitrary<'_> for FuzzInput {
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let rows = get_fuzz_override::<usize>("ROWS")
             .unwrap_or_else(|| rng.random_range(2..get_gt_fuzz_input_max_rows()));
-        let partitions =
-            get_fuzz_override::<usize>("PARTITIONS").unwrap_or_else(|| rng.random_range(2..8));
+        let partitions = get_fuzz_override::<usize>("PARTITIONS").unwrap_or_else(|| {
+            if rng.random_bool(0.5) {
+                1
+            } else {
+                rng.random_range(2..8)
+            }
+        });
         let chaos_delay_ms =
             get_fuzz_override::<u64>("CHAOS_DELAY_MS").unwrap_or_else(|| rng.random_range(0..5000));
         let chaos_hold_secs =
             get_fuzz_override::<u64>("CHAOS_HOLD_SECS").unwrap_or_else(|| rng.random_range(10..20));
-
         Ok(FuzzInput {
             seed,
             rows,
@@ -127,6 +132,7 @@ fn generate_create_expr<R: Rng + 'static>(
         )))
         .columns(5)
         .partition(input.partitions)
+        .partition_column(input.partitions <= 1)
         .engine("mito")
         .ts_column_type_generator(Box::new(MySQLTsColumnTypeGenerator))
         .build()
@@ -144,7 +150,7 @@ fn build_insert_expr<R: Rng + 'static>(
     let ts_value_generator = generate_unique_timestamp_for_mysql_with_clock(clock.clone());
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
-    let partition_len = table_ctx.partition.as_ref().unwrap().exprs.len();
+    let partition_len = partitions.bounds.len() + 1;
     let moved_partitions = partitions.clone();
     let insert_generator = InsertExprGeneratorBuilder::default()
         .table_ctx(table_ctx.clone())
@@ -202,10 +208,12 @@ async fn create_table(ctx: &FuzzContext, expr: &CreateTableExpr) -> Result<Table
 async fn insert_initial_rows<R: Rng + 'static>(
     ctx: &FuzzContext,
     table_ctx: &TableContextRef,
+    partition_def: &PartitionDef,
     rng: &mut R,
     rows: usize,
 ) -> Result<u64> {
-    let partitions = SimplePartitions::from_table_ctx(table_ctx).unwrap();
+    let partitions =
+        SimplePartitions::from_exprs(partition_def.columns[0].clone(), &partition_def.exprs)?;
     let clock = Arc::new(Mutex::new(Timestamp::current_millis()));
     let insert_expr = build_insert_expr(table_ctx, rng, &partitions, &clock, rows);
     let inserted_rows = insert_expr.values_list.len() as u64;
@@ -258,6 +266,28 @@ fn repartition_operation<R: Rng + 'static>(
             .generate(rng)?;
         Ok(RepartitionExpr::Merge(expr))
     }
+}
+
+fn alter_table_partitions_expr(
+    table_ctx: &TableContextRef,
+    partition: PartitionDef,
+    wait: bool,
+) -> RepartitionExpr {
+    RepartitionExpr::AlterPartitions(AlterTablePartitionsExpr {
+        table_name: table_ctx.name.clone(),
+        partition,
+        wait,
+    })
+}
+
+fn alter_table_partitions_expr_from_table_ctx<R: Rng + 'static>(
+    table_ctx: &TableContextRef,
+    rng: &mut R,
+    wait: bool,
+) -> RepartitionExpr {
+    let column = table_ctx.columns[0].clone();
+    let partition = generate_partition_def(rng.random_range(2..8), column.column_type, column.name);
+    alter_table_partitions_expr(table_ctx, partition, wait)
 }
 
 async fn submit_repartition_procedure(ctx: &FuzzContext, expr: &RepartitionExpr) -> Result<String> {
@@ -334,10 +364,13 @@ async fn validate_terminal_metadata(
             after_table_ctx.partition.as_ref().unwrap(),
             &partition_entries,
         )?,
-        ProcedureTerminalState::Failed => validator::partition::assert_partitions(
-            before_table_ctx.partition.as_ref().unwrap(),
-            &partition_entries,
-        )?,
+        ProcedureTerminalState::Failed => {
+            if let Some(partition) = before_table_ctx.partition.as_ref() {
+                validator::partition::assert_partitions(partition, &partition_entries)?;
+            } else {
+                validator::partition::assert_unpartitioned(&partition_entries)?;
+            }
+        }
     }
 
     Ok(())
@@ -359,7 +392,21 @@ async fn execute_repartition_chaos(ctx: FuzzContext, input: FuzzInput) -> Result
 
     let create_expr = generate_create_expr(&input, &mut rng)?;
     let before_table_ctx = create_table(&ctx, &create_expr).await?;
-    let inserted_rows = insert_initial_rows(&ctx, &before_table_ctx, &mut rng, input.rows).await?;
+    let insert_partition = create_expr.partition.clone().unwrap_or_else(|| {
+        generate_partition_def(
+            2,
+            before_table_ctx.columns[0].column_type.clone(),
+            before_table_ctx.columns[0].name.clone(),
+        )
+    });
+    let inserted_rows = insert_initial_rows(
+        &ctx,
+        &before_table_ctx,
+        &insert_partition,
+        &mut rng,
+        input.rows,
+    )
+    .await?;
     validate_table_rows(&ctx, &before_table_ctx, inserted_rows).await?;
 
     let before_entries = validator::partition::fetch_partitions_info_schema(
@@ -370,7 +417,11 @@ async fn execute_repartition_chaos(ctx: FuzzContext, input: FuzzInput) -> Result
     .await?;
     info!("Before repartition partition entries: {before_entries:?}");
 
-    let repartition_expr = repartition_operation(&before_table_ctx, &mut rng, false)?;
+    let repartition_expr = if before_table_ctx.partition.is_some() {
+        repartition_operation(&before_table_ctx, &mut rng, false)?
+    } else {
+        alter_table_partitions_expr_from_table_ctx(&before_table_ctx, &mut rng, false)
+    };
     let after_table_ctx = Arc::new(
         Arc::unwrap_or_clone(before_table_ctx.clone())
             .repartition(repartition_expr.clone())
