@@ -35,7 +35,9 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_reado
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
-use common_meta::ddl::create_flow::{DEFER_ON_MISSING_SOURCE_KEY, FlowType};
+use common_meta::ddl::create_flow::{
+    DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
+};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::procedure_executor::ExecutorContext;
@@ -114,7 +116,10 @@ struct DdlSubmitOptions {
     timeout: Duration,
 }
 
-const ALLOWED_FLOW_OPTIONS: [&str; 1] = [DEFER_ON_MISSING_SOURCE_KEY];
+const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
+    DEFER_ON_MISSING_SOURCE_KEY,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
+];
 
 fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
     let procedure_id = String::from_utf8_lossy(&procedure_id).to_string();
@@ -187,7 +192,9 @@ fn validate_and_normalize_flow_options(
             }
 
             let normalized_value = match key.as_str() {
-                DEFER_ON_MISSING_SOURCE_KEY => normalize_flow_bool_option(&key, &value)?,
+                DEFER_ON_MISSING_SOURCE_KEY | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY => {
+                    normalize_flow_bool_option(&key, &value)?
+                }
                 _ => {
                     return InvalidSqlSnafu {
                         err_msg: format!(
@@ -2478,12 +2485,23 @@ mod test {
 
     #[test]
     fn test_validate_and_normalize_flow_options_valid() {
-        let options =
-            HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "TRUE".to_string())]);
+        let options = HashMap::from([
+            (DEFER_ON_MISSING_SOURCE_KEY.to_string(), "TRUE".to_string()),
+            (
+                FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+                "FALSE".to_string(),
+            ),
+        ]);
 
         assert_eq!(
             validate_and_normalize_flow_options(options).unwrap(),
-            HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string(),)])
+            HashMap::from([
+                (DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string(),),
+                (
+                    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+                    "false".to_string(),
+                )
+            ])
         );
     }
 
@@ -2497,7 +2515,7 @@ mod test {
 
         assert!(
             err.to_string()
-                .contains("unknown flow option 'foo', supported options: defer_on_missing_source")
+                .contains("unknown flow option 'foo', supported options: defer_on_missing_source, experimental_enable_incremental_read")
         );
     }
 

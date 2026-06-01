@@ -1,3 +1,25 @@
+-- Incremental aggregate reads only support append-only source tables because
+-- update/upsert sources need old-value compensation.
+CREATE TABLE incremental_non_append_input (
+    host_id INT,
+    n INT,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(host_id)
+);
+
+CREATE FLOW incremental_non_append_flow SINK TO incremental_non_append_sink
+WITH (experimental_enable_incremental_read = 'true')
+AS
+SELECT
+    sum(n) AS total,
+    date_bin(INTERVAL '1 minute', ts, '2024-01-01 00:00:00') AS time_window
+FROM
+    incremental_non_append_input
+GROUP BY
+    time_window;
+
+DROP TABLE incremental_non_append_input;
+
 CREATE TABLE incremental_aggr_input (
     host_id INT,
     n INT,
@@ -7,7 +29,9 @@ CREATE TABLE incremental_aggr_input (
     append_mode = 'true'
 );
 
-CREATE FLOW incremental_aggr_flow SINK TO incremental_aggr_sink AS
+CREATE FLOW incremental_aggr_flow SINK TO incremental_aggr_sink
+WITH (experimental_enable_incremental_read = 'true')
+AS
 SELECT
     sum(n) AS total,
     min(n) AS min_n,
