@@ -48,6 +48,9 @@ use crate::error::{ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};
 use crate::table_reference::TableReference;
 
+mod semantic;
+pub use semantic::*;
+
 pub const FILE_TABLE_META_KEY: &str = "__private.file_table_meta";
 pub const FILE_TABLE_LOCATION_KEY: &str = "location";
 pub const FILE_TABLE_PATTERN_KEY: &str = "pattern";
@@ -126,6 +129,12 @@ pub fn validate_table_option(key: &str) -> bool {
     }
 
     if is_metric_engine_option_key(key) {
+        return true;
+    }
+
+    // Semantic-layer keys share a reserved prefix instead of a fixed allowlist so
+    // the vocabulary can grow without touching this gate. See `semantic` module.
+    if is_semantic_option_key(key) {
         return true;
     }
 
@@ -490,6 +499,14 @@ mod tests {
         assert!(validate_table_option(STORAGE_KEY));
         assert!(validate_table_option(MEMTABLE_BULK_MERGE_THRESHOLD));
         assert!(!validate_table_option("foo"));
+
+        // Semantic-layer keys are accepted via their reserved prefix.
+        assert!(validate_table_option(SEMANTIC_SIGNAL_TYPE));
+        assert!(validate_table_option(SEMANTIC_METRIC_TYPE));
+        assert!(validate_table_option("greptime.semantic.future.key"));
+        // Near-miss and the internal transport key must be rejected.
+        assert!(!validate_table_option("greptime.semanticx"));
+        assert!(!validate_table_option(SEMANTIC_PER_TABLE_INDEX_KEY));
     }
 
     #[test]

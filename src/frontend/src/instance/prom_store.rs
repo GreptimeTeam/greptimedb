@@ -49,6 +49,10 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::SST_FORMAT_KEY;
+use table::requests::{
+    METADATA_QUALITY_INFERRED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_SIGNAL_TYPE,
+    SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_PROMETHEUS,
+};
 use table::table_reference::TableReference;
 use tracing::instrument;
 
@@ -374,6 +378,16 @@ impl PromStoreProtocolHandler for Instance {
         with_metric_engine: bool,
     ) -> ServerResult<Output> {
         self.pre_write(&request, ctx.clone()).await?;
+
+        // Prom RW v1 metadata is weak, so the type is inferred from naming; there is
+        // no Phase 2 enrichment, so `inferred` is final here.
+        let ctx = {
+            let mut c = (*ctx).clone();
+            c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
+            c.set_extension(SEMANTIC_SOURCE, SOURCE_PROMETHEUS);
+            c.set_extension(SEMANTIC_METRIC_METADATA_QUALITY, METADATA_QUALITY_INFERRED);
+            Arc::new(c)
+        };
 
         let output = if with_metric_engine {
             let physical_table = ctx
