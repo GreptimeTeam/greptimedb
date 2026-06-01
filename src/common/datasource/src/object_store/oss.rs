@@ -27,12 +27,14 @@ const ACCESS_KEY_ID: &str = "access_key_id";
 const ACCESS_KEY_SECRET: &str = "access_key_secret";
 const ROOT: &str = "root";
 const ALLOW_ANONYMOUS: &str = "allow_anonymous";
+const SKIP_SIGNATURE: &str = "skip_signature";
 
 /// Check if the key is supported in OSS configuration.
 pub fn is_supported_in_oss(key: &str) -> bool {
     [
         ROOT,
         ALLOW_ANONYMOUS,
+        SKIP_SIGNATURE,
         BUCKET,
         ENDPOINT,
         ACCESS_KEY_ID,
@@ -61,18 +63,23 @@ pub fn build_oss_backend(
         builder = builder.access_key_secret(access_key_secret);
     }
 
-    if let Some(allow_anonymous) = connection.get(ALLOW_ANONYMOUS) {
-        let allow = allow_anonymous.as_str().parse::<bool>().map_err(|e| {
+    if let Some((key, value)) = connection
+        .get(SKIP_SIGNATURE)
+        .map(|value| (SKIP_SIGNATURE, value))
+        .or_else(|| {
+            connection
+                .get(ALLOW_ANONYMOUS)
+                .map(|value| (ALLOW_ANONYMOUS, value))
+        })
+    {
+        let skip_signature = value.as_str().parse::<bool>().map_err(|e| {
             error::InvalidConnectionSnafu {
-                msg: format!(
-                    "failed to parse the option {}={}, {}",
-                    ALLOW_ANONYMOUS, allow_anonymous, e
-                ),
+                msg: format!("failed to parse the option {}={}, {}", key, value, e),
             }
             .build()
         })?;
-        if allow {
-            builder = builder.allow_anonymous();
+        if skip_signature {
+            builder = builder.skip_signature();
         }
     }
 
@@ -93,6 +100,7 @@ mod tests {
     fn test_is_supported_in_oss() {
         assert!(is_supported_in_oss(ROOT));
         assert!(is_supported_in_oss(ALLOW_ANONYMOUS));
+        assert!(is_supported_in_oss(SKIP_SIGNATURE));
         assert!(is_supported_in_oss(BUCKET));
         assert!(is_supported_in_oss(ENDPOINT));
         assert!(is_supported_in_oss(ACCESS_KEY_ID));

@@ -928,6 +928,7 @@ mod tests {
             type Writer = A::Writer;
             type Lister = A::Lister;
             type Deleter = A::Deleter;
+            type Copier = A::Copier;
 
             fn inner(&self) -> &Self::Inner {
                 &self.inner
@@ -975,8 +976,9 @@ mod tests {
                 from: &str,
                 to: &str,
                 args: opendal::raw::OpCopy,
-            ) -> opendal::Result<opendal::raw::RpCopy> {
-                self.inner.copy(from, to, args).await
+                opts: opendal::raw::OpCopier,
+            ) -> opendal::Result<(opendal::raw::RpCopy, Self::Copier)> {
+                self.inner.copy(from, to, args, opts).await
             }
 
             async fn rename(

@@ -21,7 +21,7 @@ pub use opendal::raw::{
     Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
     RpWrite, oio,
 };
-use opendal::raw::{OpCopy, RpCopy};
+use opendal::raw::{OpCopier, OpCopy, RpCopy};
 pub use opendal::{Buffer, Error, ErrorKind, Metadata, Result};
 
 pub type MockWriterFactory = Arc<dyn Fn(&str, OpWrite, oio::Writer) -> oio::Writer + Send + Sync>;
@@ -146,6 +146,7 @@ impl<A: Access> LayeredAccess for MockAccessor<A> {
     type Writer = MockWriter;
     type Lister = MockLister;
     type Deleter = MockDeleter;
+    type Copier = oio::Copier;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -222,15 +223,24 @@ impl<A: Access> LayeredAccess for MockAccessor<A> {
         }
     }
 
-    async fn copy(&self, from: &str, to: &str, args: OpCopy) -> Result<RpCopy> {
-        let Some(copy_interceptor) = self.copy_interceptor.as_ref() else {
-            return self.inner.copy(from, to, args).await;
-        };
+    async fn copy(
+        &self,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+        opts: OpCopier,
+    ) -> Result<(RpCopy, Self::Copier)> {
+        if let Some(result) = self
+            .copy_interceptor
+            .as_ref()
+            .and_then(|copy_interceptor| copy_interceptor(from, to, args.clone()))
+        {
+            return result.map(|rp_copy| (rp_copy, Box::new(()) as oio::Copier));
+        }
 
-        let Some(result) = copy_interceptor(from, to, args.clone()) else {
-            return self.inner.copy(from, to, args).await;
-        };
-
-        result
+        self.inner
+            .copy(from, to, args, opts)
+            .await
+            .map(|(rp_copy, copier)| (rp_copy, Box::new(copier) as oio::Copier))
     }
 }
