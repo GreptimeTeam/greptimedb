@@ -333,7 +333,7 @@ impl ParquetReaderBuilder {
             file_id = %self.file_handle.file_id()
         )
     )]
-    pub(crate) async fn build_reader_input(
+    pub async fn build_reader_input(
         &self,
         metrics: &mut ReaderMetrics,
     ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
@@ -1557,19 +1557,19 @@ mod vector_index_tests {
 
 /// Metrics for parquet metadata cache operations.
 #[derive(Default, Clone, Copy)]
-pub(crate) struct MetadataCacheMetrics {
+pub struct MetadataCacheMetrics {
     /// Number of memory cache hits for parquet metadata.
-    pub(crate) mem_cache_hit: usize,
+    pub mem_cache_hit: usize,
     /// Number of file cache hits for parquet metadata.
-    pub(crate) file_cache_hit: usize,
+    pub file_cache_hit: usize,
     /// Number of cache misses for parquet metadata.
-    pub(crate) cache_miss: usize,
+    pub cache_miss: usize,
     /// Duration to load parquet metadata.
-    pub(crate) metadata_load_cost: Duration,
+    pub metadata_load_cost: Duration,
     /// Number of read operations performed.
-    pub(crate) num_reads: usize,
+    pub num_reads: usize,
     /// Total bytes read from storage.
-    pub(crate) bytes_read: u64,
+    pub bytes_read: u64,
 }
 
 impl std::fmt::Debug for MetadataCacheMetrics {
@@ -1840,6 +1840,7 @@ impl RowGroupReaderBuilder {
             projection,
             range_fetcher,
             self.file_path.clone(),
+            DEFAULT_READ_BATCH_SIZE,
         )
     }
 }

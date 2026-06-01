@@ -9,6 +9,10 @@ default-run = "greptime"
 name = "greptime"
 path = "src/bin/greptime.rs"
 
+[[bin]]
+name = "dev-tools"
+path = "src/bin/dev_tools.rs"
+
 [features]
 default = [
     "servers/pprof",
@@ -86,6 +90,7 @@ serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true
 session.workspace = true
+smallvec.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true
 standalone.workspace = true

@@ -25,6 +25,7 @@ use crate::error::Result;
 
 pub mod cli;
 pub mod datanode;
+pub mod dev_tools;
 pub mod error;
 pub mod flownode;
 pub mod frontend;

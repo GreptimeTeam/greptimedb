@@ -14,7 +14,7 @@
 
 pub mod builder;
 #[allow(clippy::print_stdout)]
-mod objbench;
+pub(crate) mod objbench;
 #[allow(clippy::print_stdout)]
 mod scanbench;
 
