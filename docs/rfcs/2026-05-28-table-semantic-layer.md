@@ -56,8 +56,7 @@ All keys are flat strings under the `greptime.semantic.` prefix; values are stri
 | --- | --- |
 | `greptime.semantic.signal_type` | `trace` / `log` / `metric` / `event` |
 | `greptime.semantic.source` | `opentelemetry` / `prometheus` / `elasticsearch` / `loki` / `custom` |
-| `greptime.semantic.source_protocol` | `otlp/http` / `prom_remote_write_v2` / `scrape` |
-| `greptime.semantic.source_version` | `1.30.0` (optional) |
+| `greptime.semantic.source_version` | protocol or SDK version, e.g. `v2` (Prom remote write), `1.30.0` (optional) |
 | `greptime.semantic.pipeline` | `greptime_trace_v1` (subsumes the existing `table_data_model` value) |
 
 **Trace**: `greptime.semantic.trace.conventions` (e.g. `otel-semconv-1.27`, lifted from `schema_url`, which is the version of the OpenTelemetry semantic conventions used in this table), `greptime.semantic.trace.has_events`, `greptime.semantic.trace.has_links`.
@@ -95,7 +94,7 @@ SELECT table_catalog, table_schema, table_name, signal_type, source, pipeline
 FROM information_schema.semantic_tables;
 ```
 
-returns one row per semantic-tagged table. The view exposes a stable set of core columns (`table_catalog`, `table_schema`, `table_name`, `signal_type`, `source`, `source_protocol`, `source_version`, `pipeline`) plus a `semantic_options` JSON column carrying the rest of the `greptime.semantic.*` keys verbatim. Future keys appear inside `semantic_options` without forcing a view-schema change; only widely-used keys are ever promoted to first-class columns.
+returns one row per semantic-tagged table. The view exposes a stable set of core columns (`table_catalog`, `table_schema`, `table_name`, `signal_type`, `source`, `source_version`, `pipeline`) plus a `semantic_options` JSON column carrying the rest of the `greptime.semantic.*` keys verbatim. Future keys appear inside `semantic_options` without forcing a view-schema change; only widely-used keys are ever promoted to first-class columns.
 
 # Implementation Plan
 
@@ -129,6 +128,7 @@ This is a real gap. The shape we propose locally (signal-agnostic, `schema_url`-
 # Future Work
 
 - **Cross-table relationships.** Paired trace/services tables, metric/info pairing, JOIN hints. Its own RFC.
+- **Producer SDK/client identity.** An optional `greptime.semantic.source.sdk` key recording the emitting client (e.g. `opentelemetry-go`, `opentelemetry-java`, `opentelemetry-collector`). Because a single table can receive data from multiple SDKs (a shared trace table is the common case), mixed producers collapse to `mixed`, following the same conflict rule as the table-level keys above.
 - **Backfill** for tables created before this feature shipped.
 - **Upstream proposal.** Carry the shape into a community proposal — likely an OTEP for an OTLP-Catalog read API plus an MCP binding — informed by Greptime's local usage data.
 
