@@ -104,7 +104,7 @@ impl OpenCandidateRegion {
                 region_options,
                 region_wal_options,
                 true,
-                reason,
+                Some(reason),
                 RegionRequirements::object_storage(),
             ));
         }
@@ -253,7 +253,7 @@ mod tests {
             Default::default(),
             Default::default(),
             true,
-            OpenRegionReason::RegionMigration,
+            Some(OpenRegionReason::RegionMigration),
             RegionRequirements::object_storage(),
         )])
     }
@@ -302,7 +302,10 @@ mod tests {
             .new_context(persistent_context.clone());
         let instruction = state.build_open_region_instruction(&mut ctx).await.unwrap();
         let open_regions = instruction.into_open_regions().unwrap();
-        assert_eq!(OpenRegionReason::RegionMigration, open_regions[0].reason);
+        assert_eq!(
+            Some(OpenRegionReason::RegionMigration),
+            open_regions[0].reason
+        );
         assert_eq!(
             RegionRequirements::object_storage(),
             open_regions[0].requirements
@@ -312,7 +315,10 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
         let instruction = state.build_open_region_instruction(&mut ctx).await.unwrap();
         let open_regions = instruction.into_open_regions().unwrap();
-        assert_eq!(OpenRegionReason::RegionFailover, open_regions[0].reason);
+        assert_eq!(
+            Some(OpenRegionReason::RegionFailover),
+            open_regions[0].reason
+        );
         assert_eq!(
             RegionRequirements::object_storage(),
             open_regions[0].requirements

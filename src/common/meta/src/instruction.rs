@@ -186,11 +186,8 @@ impl Display for OpenRegion {
 }
 
 /// The reason why an open region instruction is triggered.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OpenRegionReason {
-    /// Open triggered by normal datanode startup or metadata recovery.
-    #[default]
-    NormalOpen,
     /// Open triggered before region migration.
     RegionMigration,
     /// Open triggered by region failover.
@@ -211,8 +208,8 @@ pub struct OpenRegion {
     pub region_wal_options: HashMap<RegionNumber, String>,
     #[serde(default)]
     pub skip_wal_replay: bool,
-    #[serde(default)]
-    pub reason: OpenRegionReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<OpenRegionReason>,
     #[serde(default)]
     pub requirements: RegionRequirements,
 }
@@ -224,7 +221,7 @@ impl OpenRegion {
         region_options: HashMap<String, String>,
         region_wal_options: HashMap<RegionNumber, String>,
         skip_wal_replay: bool,
-        reason: OpenRegionReason,
+        reason: Option<OpenRegionReason>,
         requirements: RegionRequirements,
     ) -> Self {
         Self {
@@ -1149,13 +1146,13 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             false,
-            OpenRegionReason::NormalOpen,
+            None,
             RegionRequirements::empty(),
         )]);
 
         let serialized = serde_json::to_string(&open_region).unwrap();
         assert_eq!(
-            r#"{"OpenRegions":[{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false,"reason":"NormalOpen","requirements":{"object_storage":false}}]}"#,
+            r#"{"OpenRegions":[{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false,"requirements":{"object_storage":false}}]}"#,
             serialized
         );
 
@@ -1238,7 +1235,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             false,
-            OpenRegionReason::NormalOpen,
+            None,
             RegionRequirements::empty(),
         )]);
         assert_eq!(open_region_instruction, open_region);
@@ -1395,14 +1392,14 @@ mod tests {
             region_options,
             region_wal_options: HashMap::new(),
             skip_wal_replay: false,
-            reason: OpenRegionReason::NormalOpen,
+            reason: None,
             requirements: RegionRequirements::empty(),
         };
         assert_eq!(expected, deserialized);
     }
 
     #[test]
-    fn test_serialize_open_region_with_reason_and_capabilities() {
+    fn test_serialize_open_region_with_reason_and_requirements() {
         let open_region = OpenRegion::new(
             RegionIdent {
                 datanode_id: 2,
@@ -1414,7 +1411,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             false,
-            OpenRegionReason::RegionMigration,
+            Some(OpenRegionReason::RegionMigration),
             RegionRequirements::object_storage(),
         );
 
@@ -1423,7 +1420,7 @@ mod tests {
         assert!(serialized.contains(r#""object_storage":true"#));
 
         let deserialized: OpenRegion = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(OpenRegionReason::RegionMigration, deserialized.reason);
+        assert_eq!(Some(OpenRegionReason::RegionMigration), deserialized.reason);
         assert_eq!(
             RegionRequirements::object_storage(),
             deserialized.requirements

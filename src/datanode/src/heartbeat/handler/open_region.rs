@@ -92,7 +92,7 @@ mod tests {
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
     use store_api::path_utils::table_dir;
-    use store_api::region_request::{RegionCloseRequest, RegionRequest};
+    use store_api::region_request::{RegionCloseRequest, RegionRequest, RegionRequirements};
     use store_api::storage::RegionId;
 
     use crate::heartbeat::handler::RegionHeartbeatResponseHandler;
@@ -117,8 +117,8 @@ mod tests {
                     HashMap::new(),
                     HashMap::new(),
                     false,
-                    Default::default(),
-                    Default::default(),
+                    None,
+                    RegionRequirements::empty(),
                 )
             })
             .collect();

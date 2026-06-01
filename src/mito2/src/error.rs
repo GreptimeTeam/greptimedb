@@ -917,14 +917,14 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Region {} does not satisfy open capability '{}': {}",
+        "Region {} does not satisfy open requirement '{}': {}",
         region_id,
-        capability,
+        requirement,
         reason
     ))]
-    OpenRegionCapability {
+    OpenRegionRequirement {
         region_id: RegionId,
-        capability: &'static str,
+        requirement: &'static str,
         reason: &'static str,
         #[snafu(implicit)]
         location: Location,
@@ -1390,7 +1390,7 @@ impl ErrorExt for Error {
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
-            OpenRegionCapability { .. } => StatusCode::InvalidArguments,
+            OpenRegionRequirement { .. } => StatusCode::InvalidArguments,
             DeleteSsts { .. } | DeleteIndex { .. } | DeleteIndexes { .. } => {
                 StatusCode::StorageUnavailable
             }

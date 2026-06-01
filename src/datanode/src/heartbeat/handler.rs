@@ -305,8 +305,7 @@ mod tests {
         HeartbeatMailbox, IncomingMessage, MailboxRef, MessageMeta,
     };
     use common_meta::instruction::{
-        DowngradeRegion, EnterStagingRegion, OpenRegion, OpenRegionReason,
-        StagingPartitionDirective, UpgradeRegion,
+        DowngradeRegion, EnterStagingRegion, OpenRegion, StagingPartitionDirective, UpgradeRegion,
     };
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
@@ -443,7 +442,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             false,
-            OpenRegionReason::NormalOpen,
+            None,
             RegionRequirements::empty(),
         )])
     }

@@ -214,15 +214,15 @@ impl RegionOpener {
         }
 
         let options = self.options.as_ref().context(InvalidRegionOptionsSnafu {
-            reason: "missing region options before capability check".to_string(),
+            reason: "missing region options before requirement check".to_string(),
         })?;
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
 
         ensure!(
             supports_open_region_object_storage_requirement(&object_store),
-            error::OpenRegionCapabilitySnafu {
+            error::OpenRegionRequirementSnafu {
                 region_id: self.region_id,
-                capability: "object storage",
+                requirement: "object storage",
                 reason: "region data must be accessible from another datanode",
             }
         );
