@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::region::compact_request;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
@@ -125,7 +125,12 @@ impl<S> RegionWorkerLoop<S> {
         let now = self.time_provider.current_time_millis();
         if now - region.last_schedule_compaction_millis()
             >= self.config.min_compaction_interval.as_millis() as i64
-            && self
+        {
+            debug!(
+                "minimal compaction interval time {:?} has passed, scheduling next compaction",
+                self.config.min_compaction_interval
+            );
+            if self
                 .compaction_scheduler
                 .schedule_next_compaction(
                     region_id,
@@ -133,8 +138,9 @@ impl<S> RegionWorkerLoop<S> {
                     self.schema_metadata_manager.clone(),
                 )
                 .await
-        {
-            region.update_schedule_compaction_millis();
+            {
+                region.update_schedule_compaction_millis();
+            }
         }
     }
 
@@ -181,6 +187,10 @@ impl<S> RegionWorkerLoop<S> {
         if now - region.last_schedule_compaction_millis()
             >= self.config.min_compaction_interval.as_millis() as i64
         {
+            debug!(
+                "minimal compaction interval time {:?} has passed, scheduling next compaction",
+                self.config.min_compaction_interval
+            );
             match self
                 .compaction_scheduler
                 .schedule_compaction(
