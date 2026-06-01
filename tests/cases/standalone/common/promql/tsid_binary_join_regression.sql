@@ -58,6 +58,20 @@ INSERT INTO tsid_binary_join_right (host, job, ts, greptime_value) VALUES
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 
+-- Repeated operands in a safe arithmetic island should be planned once and reused
+-- in the final projection.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@1,\sts@2\],.* Hash([__tsid@1, ts@2],REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@3,\sts@4\],.* Hash([__tsid@3, ts@4],REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid_binary_join_left;
+
 -- Label modifiers must disable the TSID shortcut and keep matching on the remaining labels.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -100,6 +114,9 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid_binary_join_left;
 
 DROP TABLE tsid_binary_join_right;
 DROP TABLE tsid_binary_join_left;

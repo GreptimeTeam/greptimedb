@@ -93,6 +93,46 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 |_|_| Total rows: 4_|
 +-+-+-+
 
+-- Repeated operands in a safe arithmetic island should be planned once and reused
+-- in the final projection.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@1,\sts@2\],.* Hash([__tsid@1, ts@2],REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@3,\sts@4\],.* Hash([__tsid@3, ts@4],REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid_binary_join_left;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[host@1 as host, job@2 as job, ts@4 as ts, __tsid@3 as __tsid, (greptime_value@0 + greptime_value@5) / greptime_value@0 as tsid_binary_join_left.greptime_value + tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], projection=[greptime_value@0, host@1, job@2, __tsid@3, ts@4, greptime_value@5], NullsEqual: true REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4],REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2],REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
 -- Label modifiers must disable the TSID shortcut and keep matching on the remaining labels.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -222,6 +262,18 @@ TQL EVAL (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 | host2 | job2 | 1970-01-01T00:00:00 | 3.0                                                                          |
 | host2 | job2 | 1970-01-01T00:00:05 | 3.0                                                                          |
 +-------+------+---------------------+------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid_binary_join_left;
+
++-------+------+---------------------+---------------------------------------------------------------------------------------------------------------------+
+| host  | job  | ts                  | tsid_binary_join_left.greptime_value + tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value |
++-------+------+---------------------+---------------------------------------------------------------------------------------------------------------------+
+| host1 | job1 | 1970-01-01T00:00:00 | 1.25                                                                                                                |
+| host1 | job1 | 1970-01-01T00:00:05 | 1.3333333333333333                                                                                                  |
+| host2 | job2 | 1970-01-01T00:00:00 | 1.3333333333333333                                                                                                  |
+| host2 | job2 | 1970-01-01T00:00:05 | 1.3333333333333333                                                                                                  |
++-------+------+---------------------+---------------------------------------------------------------------------------------------------------------------+
 
 DROP TABLE tsid_binary_join_right;
 
