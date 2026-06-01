@@ -397,6 +397,13 @@ impl MergeScanExec {
                     })?;
                 let do_get_cost = do_get_start.elapsed();
 
+                if let Some(remote_dyn_filter_registry_lease) =
+                    remote_dyn_filter_registry_lease.as_ref()
+                {
+                    remote_dyn_filter_registry_lease
+                        .ensure_fanout_task(region_query_handler.clone());
+                }
+
                 ready_timer.stop();
 
                 let mut poll_duration = Duration::ZERO;
