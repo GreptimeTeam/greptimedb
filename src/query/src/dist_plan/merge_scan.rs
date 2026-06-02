@@ -39,7 +39,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion_physical_expr::expressions::{Column, DynamicFilterPhysicalExpr};
+use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
@@ -54,7 +54,7 @@ use tracing::{Instrument, Span};
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::analyzer::utils::patch_batch_timezone;
 use crate::dist_plan::dyn_filter_bridge::{
-    CapturedDynFilter, bridge_dyn_filters_for_region, capture_remote_dyn_filters,
+    CapturedDynFilter, bridge_dyn_filters_for_region, capture_remote_dyn_filters_for_pushdown,
     query_context_with_initial_dyn_filter_regs,
 };
 use crate::dist_plan::{ProducerScopeId, RemoteDynFilterRegistryLease};
@@ -715,23 +715,25 @@ impl ExecutionPlan for MergeScanExec {
             .into_iter()
             .map(|filter| filter.filter)
             .collect::<Vec<_>>();
-        let supported = parent_filters
-            .iter()
-            .map(|filter| filter.as_any().is::<DynamicFilterPhysicalExpr>())
-            .collect::<Vec<_>>();
+        let remote_dyn_filter_pushdown = capture_remote_dyn_filters_for_pushdown(
+            self.remote_dyn_filter_producer_scope_id,
+            parent_filters,
+        );
         *self.captured_remote_dyn_filters.lock().unwrap() =
-            capture_remote_dyn_filters(self.remote_dyn_filter_producer_scope_id, parent_filters);
+            remote_dyn_filter_pushdown.captured_dyn_filters;
         let new_self = Arc::new(self.clone());
 
         Ok(FilterPushdownPropagation {
-            filters: supported
+            filters: remote_dyn_filter_pushdown
+                .pushed_down
                 .into_iter()
-                .map(|supported| {
-                    if supported {
-                        PushedDown::Yes
-                    } else {
-                        PushedDown::No
-                    }
+                .map(|_pushdown_ready| {
+                    // TODO(remote-dyn-filter): Return `PushedDown::Yes` for `_pushdown_ready`
+                    // filters after datanode-side initial registration consumption and runtime
+                    // pending-update application are implemented. Until then, keep the parent-side
+                    // filter as a correctness fallback because the remote side may ignore the
+                    // registration carried in QueryContext.
+                    PushedDown::No
                 })
                 .collect(),
             updated_node: Some(new_self),
@@ -851,11 +853,15 @@ mod tests {
     use std::collections::BTreeSet;
 
     use async_trait::async_trait;
+    use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
+    use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
     use datafusion_common::TableReference;
     use datafusion_expr::{LogicalPlanBuilder, lit};
     use datafusion_physical_expr::Distribution;
-    use datafusion_physical_expr::expressions::Column;
+    use datafusion_physical_expr::expressions::{
+        Column, DynamicFilterPhysicalExpr, lit as physical_lit,
+    };
     use session::ReadPreference;
     use session::context::QueryContext;
     use session::query_id::QueryId;
@@ -996,5 +1002,56 @@ mod tests {
             producer_scope_id,
             "try_with_new_distribution must preserve producer scope id"
         );
+    }
+
+    #[test]
+    fn remote_dyn_filter_preflight_keeps_parent_filter_until_dn_runtime_is_ready() {
+        let producer_scope_id = ProducerScopeId::new(42);
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i32).alias("col1")])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let schema = plan.schema().as_arrow().clone();
+        let table = TableName::new("catalog", "schema", "table");
+        let regions = vec![RegionId::new(1024, 1)];
+        let query_ctx = QueryContext::arc();
+        let session_state = SessionStateBuilder::new().build();
+        let handler = Arc::new(TestRegionQueryHandler);
+        let exec = MergeScanExec::new(
+            &session_state,
+            table,
+            regions,
+            plan,
+            &schema,
+            handler,
+            query_ctx,
+            1,
+            AliasMapping::new(),
+            producer_scope_id,
+        )
+        .unwrap();
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 0)) as Arc<_>],
+            physical_lit(true) as _,
+        )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>;
+
+        let propagation = exec
+            .handle_child_pushdown_result(
+                FilterPushdownPhase::Post,
+                ChildPushdownResult {
+                    parent_filters: vec![ChildFilterPushdownResult {
+                        filter: dyn_filter,
+                        child_results: vec![PushedDown::Yes],
+                    }],
+                    self_filters: Vec::new(),
+                },
+                &ConfigOptions::new(),
+            )
+            .unwrap();
+
+        assert_eq!(exec.captured_remote_dyn_filters().len(), 1);
+        assert!(matches!(propagation.filters.as_slice(), [PushedDown::No]));
     }
 }

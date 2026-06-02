@@ -34,8 +34,9 @@ use store_api::storage::RegionId;
 
 /// Current wire-format version for remote dynamic filter payload updates.
 pub use self::initial_remote_dyn_filter_reg::{
-    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
-    InitialDynFilterRegs,
+    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+    INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES, InitialDynFilterReg,
+    InitialDynFilterRegs, InitialDynFilterSnapshot,
 };
 
 pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;

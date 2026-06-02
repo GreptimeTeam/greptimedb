@@ -21,11 +21,18 @@ use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::Result as DataFusionResult;
 use serde::{Deserialize, Serialize};
 
-use crate::request::{decode_physical_expr_from_bytes, encode_physical_expr_to_bytes};
+use crate::request::{
+    DynFilterPayload, decode_physical_expr_from_bytes, encode_physical_expr_to_bytes,
+};
 
 pub const INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY: &str =
     "initial_remote_dyn_filter_registrations";
 pub const INITIAL_REMOTE_DYN_FILTER_REGS_MAX_COUNT: usize = 64;
+/// Raw encoded registration byte budget for initial remote dynamic filter registrations.
+///
+/// This counts DataFusion physical expression proto bytes and optional initial snapshot payload
+/// bytes before serde JSON/base64 expansion. It is a payload budget, not an exact final
+/// QueryContext extension string-size limit.
 pub const INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,10 +50,10 @@ impl InitialDynFilterRegs {
         self.regs.is_empty()
     }
 
-    pub fn total_encoded_child_expr_bytes(&self) -> usize {
+    pub fn total_encoded_registration_bytes(&self) -> usize {
         self.regs
             .iter()
-            .map(InitialDynFilterReg::encoded_child_expr_bytes)
+            .map(InitialDynFilterReg::encoded_registration_bytes)
             .sum()
     }
 
@@ -70,11 +77,11 @@ impl InitialDynFilterRegs {
             ));
         }
 
-        let total_proto_bytes = self.total_encoded_child_expr_bytes();
-        if total_proto_bytes > max_total_proto_bytes {
+        let total_registration_bytes = self.total_encoded_registration_bytes();
+        if total_registration_bytes > max_total_proto_bytes {
             return Err(format!(
-                "InitialDynFilterRegs contains {} total child expr proto bytes, which exceeds the configured limit of {}",
-                total_proto_bytes, max_total_proto_bytes
+                "InitialDynFilterRegs contains {} total encoded registration bytes, which exceeds the configured limit of {}",
+                total_registration_bytes, max_total_proto_bytes
             ));
         }
 
@@ -104,6 +111,26 @@ impl InitialDynFilterRegs {
 pub struct InitialDynFilterReg {
     pub filter_id: String,
     pub child_exprs_datafusion_proto: Vec<Vec<u8>>,
+    /// Optional producer-side predicate snapshot captured at initial registration time.
+    ///
+    /// It is skipped when absent so older/no-snapshot registrations remain wire-compatible.
+    /// Datanode runtime code should treat this as an update that arrived before the runtime
+    /// `DynamicFilterPhysicalExpr` was created, not as registration identity metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_snapshot: Option<InitialDynFilterSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitialDynFilterSnapshot {
+    pub payload: DynFilterPayload,
+    /// Producer-side snapshot generation. Receivers use this with normal update generation
+    /// ordering to ignore stale payloads and apply newer payloads.
+    pub generation: u64,
+    /// Whether this snapshot completes the dynamic filter stream.
+    ///
+    /// 3a currently sets this conservatively to false because DataFusion exposes synchronous
+    /// generation/current reads but not a synchronous public completion getter.
+    pub is_complete: bool,
 }
 
 impl InitialDynFilterReg {
@@ -111,7 +138,13 @@ impl InitialDynFilterReg {
         Self {
             filter_id: filter_id.into(),
             child_exprs_datafusion_proto,
+            initial_snapshot: None,
         }
+    }
+
+    pub fn with_initial_snapshot(mut self, initial_snapshot: InitialDynFilterSnapshot) -> Self {
+        self.initial_snapshot = Some(initial_snapshot);
+        self
     }
 
     pub fn from_filter_id_and_children(
@@ -128,6 +161,15 @@ impl InitialDynFilterReg {
 
     pub fn encoded_child_expr_bytes(&self) -> usize {
         self.child_exprs_datafusion_proto.iter().map(Vec::len).sum()
+    }
+
+    pub fn encoded_registration_bytes(&self) -> usize {
+        self.encoded_child_expr_bytes()
+            + self
+                .initial_snapshot
+                .as_ref()
+                .map(InitialDynFilterSnapshot::encoded_payload_bytes)
+                .unwrap_or(0)
     }
 
     pub fn decode_children(
@@ -147,6 +189,22 @@ impl InitialDynFilterReg {
                 )
             })
             .collect::<DataFusionResult<Vec<_>>>()
+    }
+}
+
+impl InitialDynFilterSnapshot {
+    pub fn new(payload: DynFilterPayload, generation: u64, is_complete: bool) -> Self {
+        Self {
+            payload,
+            generation,
+            is_complete,
+        }
+    }
+
+    pub fn encoded_payload_bytes(&self) -> usize {
+        match &self.payload {
+            DynFilterPayload::Datafusion(bytes) => bytes.len(),
+        }
     }
 }
 
@@ -172,6 +230,59 @@ mod tests {
         let decoded = InitialDynFilterRegs::from_extension_value(&encoded).unwrap();
 
         assert_eq!(decoded, regs);
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_json_round_trip_with_snapshot() {
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-a", vec![vec![1, 2, 3]]).with_initial_snapshot(
+                InitialDynFilterSnapshot::new(DynFilterPayload::Datafusion(vec![4, 5, 6]), 7, true),
+            ),
+        ]);
+
+        let encoded = regs.to_extension_value().unwrap();
+        let decoded = InitialDynFilterRegs::from_extension_value(&encoded).unwrap();
+
+        assert_eq!(decoded, regs);
+        assert_eq!(
+            decoded.regs[0]
+                .initial_snapshot
+                .as_ref()
+                .unwrap()
+                .generation,
+            7
+        );
+        assert!(
+            decoded.regs[0]
+                .initial_snapshot
+                .as_ref()
+                .unwrap()
+                .is_complete
+        );
+    }
+
+    #[test]
+    fn initial_dyn_filter_reg_json_defaults_missing_snapshot_to_none() {
+        let decoded = InitialDynFilterRegs::from_extension_value(
+            r#"{"registrations":[{"filter_id":"filter-a","child_exprs_datafusion_proto":[[1,2,3]]}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.regs.len(), 1);
+        assert!(decoded.regs[0].initial_snapshot.is_none());
+    }
+
+    #[test]
+    fn initial_dyn_filter_reg_encoded_registration_bytes_include_snapshot_payload() {
+        let reg = InitialDynFilterReg::new("filter-a", vec![vec![1, 2, 3], vec![4]])
+            .with_initial_snapshot(InitialDynFilterSnapshot::new(
+                DynFilterPayload::Datafusion(vec![5, 6]),
+                2,
+                false,
+            ));
+
+        assert_eq!(reg.encoded_child_expr_bytes(), 4);
+        assert_eq!(reg.encoded_registration_bytes(), 6);
     }
 
     #[test]
@@ -207,7 +318,24 @@ mod tests {
 
         let err = regs.validate_bounds(8, 5).unwrap_err();
 
-        assert!(err.contains("6 total child expr proto bytes"));
+        assert!(err.contains("6 total encoded registration bytes"));
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_validate_bounds_rejects_snapshot_bytes_over_limit() {
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-a", vec![vec![1]]).with_initial_snapshot(
+                InitialDynFilterSnapshot::new(
+                    DynFilterPayload::Datafusion(vec![2, 3, 4]),
+                    2,
+                    false,
+                ),
+            ),
+        ]);
+
+        let err = regs.validate_bounds(8, 3).unwrap_err();
+
+        assert!(err.contains("4 total encoded registration bytes"));
     }
 
     #[test]
