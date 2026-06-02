@@ -1091,9 +1091,9 @@ pub fn fill_table_options_for_create(
         }
     }
 
-    // Semantic keys are prefix-matched, not in the fixed allowlist above.
+    // Semantic keys use their own vocabulary instead of the fixed option list.
     for (key, value) in ctx.extensions() {
-        if is_semantic_option_key(&key) {
+        if is_semantic_option_key(&key) && validate_semantic_option(&key, &value) {
             table_options.insert(key, value);
         }
     }
@@ -1438,13 +1438,14 @@ mod tests {
     #[test]
     fn test_fill_table_options_copies_semantic_extensions() {
         use table::requests::{
-            SEMANTIC_PER_TABLE_INDEX_KEY, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE,
-            SIGNAL_TYPE_METRIC, SOURCE_OPENTELEMETRY,
+            SEMANTIC_METRIC_TYPE, SEMANTIC_PER_TABLE_INDEX_KEY, SEMANTIC_SIGNAL_TYPE,
+            SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_OPENTELEMETRY,
         };
 
         let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
         ctx.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+        ctx.set_extension(SEMANTIC_METRIC_TYPE, "bogus");
         // The internal transport key must NOT be copied into table options.
         ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, "{}");
         let ctx = Arc::new(ctx);
@@ -1460,6 +1461,7 @@ mod tests {
             Some(SOURCE_OPENTELEMETRY),
             table_options.get(SEMANTIC_SOURCE).map(String::as_str)
         );
+        assert!(!table_options.contains_key(SEMANTIC_METRIC_TYPE));
         assert!(!table_options.contains_key(SEMANTIC_PER_TABLE_INDEX_KEY));
     }
 
