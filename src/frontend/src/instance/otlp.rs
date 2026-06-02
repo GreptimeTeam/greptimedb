@@ -44,9 +44,9 @@ use servers::query_handler::{
 use session::context::QueryContextRef;
 use snafu::{IntoError, ResultExt};
 use table::requests::{
-    OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM, SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE,
-    SEMANTIC_SOURCE, SEMANTIC_TRACE_CONVENTIONS, SEMANTIC_TRACE_HAS_EVENTS,
-    SEMANTIC_TRACE_HAS_LINKS, SEMANTIC_VALUE_UNKNOWN, SIGNAL_TYPE_LOG, SIGNAL_TYPE_METRIC,
+    OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM, SEMANTIC_PER_TABLE_INDEX_KEY,
+    SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SEMANTIC_TRACE_CONVENTIONS,
+    SEMANTIC_VALUE_MIXED, SEMANTIC_VALUE_UNKNOWN, SIGNAL_TYPE_LOG, SIGNAL_TYPE_METRIC,
     SIGNAL_TYPE_TRACE, SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1,
 };
 
@@ -133,13 +133,19 @@ impl OpenTelemetryProtocolHandler for Instance {
             .unwrap_or_default();
         metric_ctx.is_legacy = is_legacy;
 
-        let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
+        let (requests, rows, semantic_index) =
+            otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
         let ctx = {
             let mut c = (*ctx).clone();
             c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
             c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+            // Per-table metric specifics + resource/scope lineage ride this
+            // internal channel; the auto-create path folds them per table name.
+            if let Some(index) = semantic_index.encode() {
+                c.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
+            }
             if !is_legacy {
                 c.set_extension(OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM.to_string());
             }
@@ -185,6 +191,8 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
+        // `schema_url` is consumed by `parse`, so derive conventions first.
+        let conventions = trace_conventions(&request);
         let spans = otlp::trace::span::parse(request);
         self.ingest_trace_spans(
             pipeline_handler,
@@ -192,6 +200,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             &pipeline_params,
             table_name,
             spans,
+            &conventions,
             ctx,
         )
         .await
@@ -262,6 +271,7 @@ impl OpenTelemetryProtocolHandler for Instance {
 impl Instance {
     /// Ingest OTLP trace spans with chunk-level writes and span-level fallback on
     /// deterministic chunk failures.
+    #[allow(clippy::too_many_arguments)]
     async fn ingest_trace_spans(
         &self,
         pipeline_handler: PipelineHandlerRef,
@@ -269,6 +279,7 @@ impl Instance {
         pipeline_params: &GreptimePipelineParams,
         table_name: String,
         groups: Vec<TraceSpanGroup>,
+        conventions: &str,
         ctx: QueryContextRef,
     ) -> ServerResult<TraceIngestOutcome> {
         let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
@@ -281,10 +292,7 @@ impl Instance {
             c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
             if is_trace_v1_model {
                 c.set_extension(SEMANTIC_PIPELINE, TABLE_DATA_MODEL_TRACE_V1);
-                c.set_extension(SEMANTIC_TRACE_HAS_EVENTS, "true");
-                c.set_extension(SEMANTIC_TRACE_HAS_LINKS, "true");
-                // schema_url is row-level, so conventions is unknown at table level.
-                c.set_extension(SEMANTIC_TRACE_CONVENTIONS, SEMANTIC_VALUE_UNKNOWN);
+                c.set_extension(SEMANTIC_TRACE_CONVENTIONS, conventions);
             }
             Arc::new(c)
         };
@@ -838,6 +846,47 @@ where
     error::ExecuteGrpcQuerySnafu.into_error(BoxedError::new(err))
 }
 
+/// Derives `trace.conventions` from the request's resource/scope `schema_url`s.
+/// A single distinct non-empty value is concrete; multiple distinct values are
+/// `mixed`; none is `unknown`. `schema_url` is row-level in OTLP, so the
+/// table-level value is best-effort per the RFC conflict rule.
+fn trace_conventions(request: &ExportTraceServiceRequest) -> String {
+    let mut seen: Option<&str> = None;
+    let mut mixed = false;
+
+    for resource_spans in &request.resource_spans {
+        let urls = std::iter::once(resource_spans.schema_url.as_str()).chain(
+            resource_spans
+                .scope_spans
+                .iter()
+                .map(|s| s.schema_url.as_str()),
+        );
+        for url in urls {
+            if url.is_empty() {
+                continue;
+            }
+            match seen {
+                None => seen = Some(url),
+                Some(prev) if prev == url => {}
+                Some(_) => {
+                    mixed = true;
+                    break;
+                }
+            }
+        }
+        if mixed {
+            break;
+        }
+    }
+
+    if mixed {
+        SEMANTIC_VALUE_MIXED.to_string()
+    } else {
+        seen.map(str::to_string)
+            .unwrap_or_else(|| SEMANTIC_VALUE_UNKNOWN.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use common_error::ext::ErrorExt;
@@ -1010,5 +1059,48 @@ mod tests {
         );
 
         assert_eq!(err.status_code(), StatusCode::TableNotFound);
+    }
+
+    use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans};
+
+    use super::{ExportTraceServiceRequest, trace_conventions};
+
+    fn resource_spans(resource_url: &str, scope_urls: &[&str]) -> ResourceSpans {
+        ResourceSpans {
+            schema_url: resource_url.to_string(),
+            scope_spans: scope_urls
+                .iter()
+                .map(|u| ScopeSpans {
+                    schema_url: u.to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_trace_conventions() {
+        let unknown = ExportTraceServiceRequest::default();
+        assert_eq!(trace_conventions(&unknown), "unknown");
+
+        let url = "https://opentelemetry.io/schemas/1.27.0";
+        let single = ExportTraceServiceRequest {
+            resource_spans: vec![resource_spans("", &[url, url])],
+        };
+        assert_eq!(trace_conventions(&single), url);
+
+        let resource_level = ExportTraceServiceRequest {
+            resource_spans: vec![resource_spans(url, &[""])],
+        };
+        assert_eq!(trace_conventions(&resource_level), url);
+
+        let conflicting = ExportTraceServiceRequest {
+            resource_spans: vec![resource_spans(
+                "",
+                &[url, "https://opentelemetry.io/schemas/1.30.0"],
+            )],
+        };
+        assert_eq!(trace_conventions(&conflicting), "mixed");
     }
 }

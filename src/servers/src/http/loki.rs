@@ -40,6 +40,7 @@ use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
 use snafu::{OptionExt, ResultExt, ensure};
+use table::requests::{SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_LOG, SOURCE_LOKI};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
@@ -110,6 +111,8 @@ pub async fn loki_ingest(
     bytes: Bytes,
 ) -> Result<HttpResponse> {
     ctx.set_channel(Channel::Loki);
+    ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_LOG);
+    ctx.set_extension(SEMANTIC_SOURCE, SOURCE_LOKI);
     let ctx = Arc::new(ctx);
     let table_name = table_name.unwrap_or_else(|| LOKI_TABLE_NAME.to_string());
     let db = ctx.get_db_string();
