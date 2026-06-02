@@ -110,3 +110,44 @@ DROP TABLE plain_timestamp;
 
 Affected Rows: 0
 
+-- Regression test for https://github.com/GreptimeTeam/greptimedb/issues/8214:
+-- string timestamp predicates must align to the time index precision before comparison.
+CREATE TABLE ts_precision_bug (ts TIMESTAMP(3) TIME INDEX, v INT, PRIMARY KEY (v));
+
+Affected Rows: 0
+
+INSERT INTO ts_precision_bug VALUES
+('2026-06-02 03:49:59.999', 1),
+('2026-06-02 03:50:00.000', 2),
+('2026-06-02 03:50:00.195', 3),
+('2026-06-02 03:50:01.000', 4);
+
+Affected Rows: 4
+
+SELECT ts, v
+FROM ts_precision_bug
+WHERE ts <= '2026-06-02 03:50:00'
+ORDER BY ts DESC
+LIMIT 1;
+
++-------------------------+---+
+| ts                      | v |
++-------------------------+---+
+| 2026-06-02T03:50:00.000 | 2 |
++-------------------------+---+
+
+SELECT date_format(ts, '%Y-%m-%d %H:%M:%S:%3f') AS ts, v
+FROM ts_precision_bug
+WHERE ts <= '2026-06-02 03:50:00'
+ORDER BY ts DESC
+LIMIT 1;
+
++-------------------------+---+
+| ts                      | v |
++-------------------------+---+
+| 2026-06-02 03:50:00:000 | 2 |
++-------------------------+---+
+
+DROP TABLE ts_precision_bug;
+
+Affected Rows: 0
