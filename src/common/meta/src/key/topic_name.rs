@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{self, Display};
 
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,7 @@ use crate::key::{
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::rpc::KeyValue;
-use crate::rpc::store::{BatchPutRequest, RangeRequest};
+use crate::rpc::store::{BatchGetRequest, BatchPutRequest, RangeRequest};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicNameKey<'a> {
@@ -205,6 +206,25 @@ impl TopicNameManager {
             .transpose()
     }
 
+    /// Batch get values for specific topics.
+    pub async fn batch_get(
+        &self,
+        topics: Vec<TopicNameKey<'_>>,
+    ) -> Result<HashMap<String, TopicNameValue>> {
+        let raw_keys = topics.iter().map(|key| key.to_bytes()).collect::<Vec<_>>();
+        let req = BatchGetRequest { keys: raw_keys };
+        let resp = self.kv_backend.batch_get(req).await?;
+
+        resp.kvs
+            .into_iter()
+            .map(|kv| {
+                let key = TopicNameKey::from_bytes(&kv.key)?;
+                let value = TopicNameValue::try_from_raw_value(&kv.value)?;
+                Ok((key.topic.to_string(), value))
+            })
+            .collect::<Result<HashMap<_, _>>>()
+    }
+
     /// Update the topic name key and value in the kv backend.
     pub async fn update(
         &self,
@@ -294,6 +314,18 @@ mod tests {
             // Bad cas, emit error
             let err = manager.update(topic, 3, Some(value)).await.unwrap_err();
             assert_matches!(err, error::Error::Unexpected { .. });
+        }
+
+        let batch_topics = topics
+            .iter()
+            .take(2)
+            .map(|topic| TopicNameKey::new(topic))
+            .chain(std::iter::once(TopicNameKey::new("missing-topic")))
+            .collect::<Vec<_>>();
+        let values = manager.batch_get(batch_topics).await.unwrap();
+        assert_eq!(values.len(), 2);
+        for topic in topics.iter().take(2) {
+            assert_eq!(values.get(topic).unwrap().pruned_entry_id, 1);
         }
     }
 }
