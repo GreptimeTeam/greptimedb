@@ -1215,6 +1215,7 @@ impl ColumnMatcherRewriter {
             )));
         }
 
+        let mut positional_matches = Vec::new();
         for expr_idx in extra_expr_indices {
             if !missing_sink_indices.contains(&expr_idx) {
                 return Err(DataFusionError::Plan(format_flow_sink_schema_mismatch(
@@ -1239,12 +1240,19 @@ impl ColumnMatcherRewriter {
             }
 
             let target_name = target_col_schema.name.clone();
-            debug!(
-                "Matching flow output column '{}' to sink column '{}' by position, flow output type: {:?}, sink column type: {:?}",
+            positional_matches.push(format!(
+                "{} -> {} (flow output type: {:?}, sink column type: {:?})",
                 output_names[expr_idx], target_name, expr_type, target_col_schema.data_type
-            );
+            ));
             exprs[expr_idx] = exprs[expr_idx].clone().alias(target_name.clone());
             output_names[expr_idx] = target_name;
+        }
+
+        if !positional_matches.is_empty() {
+            debug!(
+                "Matched flow output columns to sink columns by position: {:?}",
+                positional_matches
+            );
         }
 
         let duplicated_output_names = duplicate_names(&output_names);
