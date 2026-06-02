@@ -233,6 +233,36 @@ transform:
     parse(&Content::Yaml(pipeline_yaml)).unwrap()
 }
 
+fn prepare_vrl_pipeline() -> Pipeline {
+    let pipeline_yaml = r#"
+---
+description: Minimal VRL processor benchmark
+
+processors:
+  - vrl:
+      source: |
+        .service_alias = .service
+        .host_alias = .host
+        del(.unused)
+        .processed = true
+        .
+
+transform:
+  - field: service
+    type: string
+  - field: host
+    type: string
+  - field: service_alias
+    type: string
+  - field: host_alias
+    type: string
+  - field: processed
+    type: boolean
+"#;
+
+    parse(&Content::Yaml(pipeline_yaml)).unwrap()
+}
+
 fn criterion_benchmark(c: &mut Criterion) {
     let input_value_str = include_str!("./data.log");
     let input_value = Deserializer::from_str(input_value_str)
@@ -257,6 +287,41 @@ fn criterion_benchmark(c: &mut Criterion) {
                 black_box(&pipeline_ctx),
                 black_box(&mut schema_info),
                 black_box(input_value.clone()),
+            )
+            .unwrap();
+        })
+    });
+    group.finish();
+
+    let vrl_input_value = (0..128)
+        .map(|i| {
+            serde_json::json!({
+                "service": "frontend",
+                "host": format!("host-{i}"),
+                "unused": "drop-me"
+            })
+            .into()
+        })
+        .collect::<Vec<VrlValue>>();
+    let vrl_pipeline = prepare_vrl_pipeline();
+
+    let (vrl_pipeline, mut vrl_schema_info, vrl_pipeline_def, vrl_pipeline_param) =
+        setup_pipeline!(vrl_pipeline);
+    let vrl_pipeline_ctx = PipelineContext::new(
+        &vrl_pipeline_def,
+        &vrl_pipeline_param,
+        session::context::Channel::Unknown,
+    );
+
+    let mut group = c.benchmark_group("vrl processor");
+    group.sample_size(50);
+    group.bench_function("processor mut", |b| {
+        b.iter(|| {
+            processor_mut(
+                black_box(vrl_pipeline.clone()),
+                black_box(&vrl_pipeline_ctx),
+                black_box(&mut vrl_schema_info),
+                black_box(vrl_input_value.clone()),
             )
             .unwrap();
         })
