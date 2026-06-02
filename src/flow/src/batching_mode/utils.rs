@@ -1239,6 +1239,10 @@ impl ColumnMatcherRewriter {
             }
 
             let target_name = target_col_schema.name.clone();
+            debug!(
+                "Matching flow output column '{}' to sink column '{}' by position, flow output type: {:?}, sink column type: {:?}",
+                output_names[expr_idx], target_name, expr_type, target_col_schema.data_type
+            );
             exprs[expr_idx] = exprs[expr_idx].clone().alias(target_name.clone());
             output_names[expr_idx] = target_name;
         }
@@ -1377,11 +1381,11 @@ fn duplicate_names(names: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut duplicated = BTreeSet::new();
     for name in names {
-        if !seen.insert(name.clone()) {
-            duplicated.insert(name.clone());
+        if !seen.insert(name.as_str()) {
+            duplicated.insert(name.as_str());
         }
     }
-    duplicated.into_iter().collect()
+    duplicated.into_iter().map(str::to_string).collect()
 }
 
 fn format_flow_sink_schema_mismatch(
