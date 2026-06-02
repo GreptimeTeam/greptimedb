@@ -409,6 +409,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = request.region_id.into();
     let partition_expr_version = request.partition_expr_version.map(|v| v.value);
+    let aligned_schema_version = request.aligned_schema_version.map(|v| v.schema_version);
     let Some(Body::ArrowIpc(request)) = request.body else {
         return Ok(vec![]);
     };
@@ -429,6 +430,7 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             payload,
             raw_data: request,
             partition_expr_version,
+            aligned_schema_version,
         }),
     )])
 }
@@ -1510,6 +1512,7 @@ pub struct RegionBulkInsertsRequest {
     pub payload: DfRecordBatch,
     pub raw_data: ArrowIpc,
     pub partition_expr_version: Option<u64>,
+    pub aligned_schema_version: Option<u64>,
 }
 
 impl RegionBulkInsertsRequest {

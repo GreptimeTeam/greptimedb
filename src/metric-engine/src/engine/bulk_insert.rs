@@ -18,9 +18,10 @@ use api::v1::{ArrowIpc, SemanticType};
 use bytes::Bytes;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use datatypes::arrow::record_batch::RecordBatch;
-use snafu::{OptionExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionBulkInsertsRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -117,6 +118,14 @@ impl MetricEngineInner {
         let (schema, data_header, payload) = record_batch_to_ipc(&modified_batch)?;
 
         let partition_expr_version = request.partition_expr_version;
+        let physical_schema_version = self
+            .mito
+            .get_metadata(data_region_id)
+            .await
+            .context(error::MitoReadOperationSnafu)?
+            .schema_version;
+        let aligned_schema_version = Some(physical_schema_version);
+
         let request = RegionBulkInsertsRequest {
             region_id: data_region_id,
             payload: modified_batch,
@@ -126,6 +135,7 @@ impl MetricEngineInner {
                 payload,
             },
             partition_expr_version,
+            aligned_schema_version,
         };
         self.data_region
             .write_data(data_region_id, RegionRequest::BulkInserts(request))
@@ -282,6 +292,7 @@ mod tests {
                 payload,
             },
             partition_expr_version: None,
+            aligned_schema_version: None,
         })
     }
 
@@ -319,6 +330,7 @@ mod tests {
             payload: batch,
             raw_data: ArrowIpc::default(),
             partition_expr_version: None,
+            aligned_schema_version: None,
         });
         let response = env
             .metric()

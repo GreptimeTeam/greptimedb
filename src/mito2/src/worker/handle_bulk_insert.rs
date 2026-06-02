@@ -86,11 +86,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             timestamp_index: ts_index,
             raw_data: Some(request.raw_data),
         };
+
+        let aligned_region_metadata = if request
+            .aligned_schema_version
+            .is_some_and(|aligned| aligned == region_metadata.schema_version)
+        {
+            Some(region_metadata)
+        } else {
+            None
+        };
         pending_bulk_request.push(SenderBulkRequest {
             sender,
             request: part,
             region_id: request.region_id,
-            region_metadata,
+            region_metadata: aligned_region_metadata,
             partition_expr_version: request.partition_expr_version,
         });
     }
