@@ -110,8 +110,8 @@ pub const SEMANTIC_VALUE_MIXED: &str = "mixed";
 
 /// Every recognised public semantic table-option key. The set is a closed
 /// whitelist: keys under [`SEMANTIC_PREFIX`] that are not listed here are rejected,
-/// so a typo like `greptime.semantic.singal_type` does not silently land in a
-/// table's options. Adding a key to the vocabulary means adding it here.
+/// so an unknown key like `greptime.semantic.unknown_key` does not silently land
+/// in a table's options. Adding a key to the vocabulary means adding it here.
 pub const SEMANTIC_OPTION_KEYS: &[&str] = &[
     SEMANTIC_SIGNAL_TYPE,
     SEMANTIC_SOURCE,
@@ -209,7 +209,7 @@ mod tests {
 
         // Unknown keys under the prefix are not whitelisted.
         assert!(!is_semantic_option_key("greptime.semantic.future.key"));
-        assert!(!is_semantic_option_key("greptime.semantic.singal_type"));
+        assert!(!is_semantic_option_key("greptime.semantic.unknown_key"));
         // Near-misses must not match.
         assert!(!is_semantic_option_key("greptime.semanticx"));
         assert!(!is_semantic_option_key("semantic.signal_type"));
