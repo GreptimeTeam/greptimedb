@@ -108,12 +108,94 @@ pub const SEMANTIC_VALUE_UNKNOWN: &str = "unknown";
 /// Sentinel for a single-valued key that saw conflicting sources.
 pub const SEMANTIC_VALUE_MIXED: &str = "mixed";
 
-/// Returns true if `key` is a public semantic table-option key.
+/// Every recognised public semantic table-option key. The set is a closed
+/// whitelist: keys under [`SEMANTIC_PREFIX`] that are not listed here are rejected,
+/// so a typo like `greptime.semantic.singal_type` does not silently land in a
+/// table's options. Adding a key to the vocabulary means adding it here.
+pub const SEMANTIC_OPTION_KEYS: &[&str] = &[
+    SEMANTIC_SIGNAL_TYPE,
+    SEMANTIC_SOURCE,
+    SEMANTIC_SOURCE_VERSION,
+    SEMANTIC_PIPELINE,
+    SEMANTIC_TRACE_CONVENTIONS,
+    SEMANTIC_TRACE_HAS_EVENTS,
+    SEMANTIC_TRACE_HAS_LINKS,
+    SEMANTIC_METRIC_TYPE,
+    SEMANTIC_METRIC_UNIT,
+    SEMANTIC_METRIC_TEMPORALITY,
+    SEMANTIC_METRIC_MONOTONIC,
+    SEMANTIC_METRIC_METADATA_QUALITY,
+    SEMANTIC_METRIC_ORIGINAL_NAME,
+    SEMANTIC_LOG_SEVERITY_SCHEME,
+    SEMANTIC_LOG_BODY_FORMAT,
+    SEMANTIC_RESOURCE_ATTRIBUTES_PRESERVED,
+    SEMANTIC_RESOURCE_ATTRIBUTES_DROPPED,
+    SEMANTIC_SCOPE_PRESERVED,
+];
+
+/// Returns true if `key` is a recognised semantic table-option key (whitelist).
 ///
-/// The internal [`SEMANTIC_PER_TABLE_INDEX_KEY`] is intentionally NOT matched:
-/// it lives outside [`SEMANTIC_PREFIX`] so it can never be a valid table option.
+/// Note this is membership, not a prefix test: unknown keys under
+/// [`SEMANTIC_PREFIX`] are rejected, and the internal
+/// [`SEMANTIC_PER_TABLE_INDEX_KEY`] (outside the prefix) never matches.
 pub fn is_semantic_option_key(key: &str) -> bool {
-    key.starts_with(SEMANTIC_PREFIX)
+    SEMANTIC_OPTION_KEYS.contains(&key)
+}
+
+/// Validates a `greptime.semantic.*` option's `value` against its allowed domain.
+///
+/// Open-value keys (unit, original_name, version, pipeline, conventions, the
+/// preserved-attributes list) accept any non-empty string. Closed-domain keys
+/// accept a fixed set, plus the `unknown` sentinel, plus `mixed` for the keys
+/// where one long-lived table can legitimately see multiple values. Keys not in
+/// [`SEMANTIC_OPTION_KEYS`] are rejected.
+pub fn validate_semantic_option(key: &str, value: &str) -> bool {
+    match key {
+        SEMANTIC_SOURCE_VERSION
+        | SEMANTIC_PIPELINE
+        | SEMANTIC_METRIC_UNIT
+        | SEMANTIC_METRIC_ORIGINAL_NAME
+        | SEMANTIC_TRACE_CONVENTIONS
+        | SEMANTIC_RESOURCE_ATTRIBUTES_PRESERVED => !value.is_empty(),
+
+        SEMANTIC_SIGNAL_TYPE => matches!(value, "trace" | "log" | "metric" | "event" | "unknown"),
+        SEMANTIC_SOURCE => matches!(
+            value,
+            "opentelemetry"
+                | "prometheus"
+                | "elasticsearch"
+                | "loki"
+                | "custom"
+                | "mixed"
+                | "unknown"
+        ),
+        SEMANTIC_METRIC_TYPE => matches!(
+            value,
+            "counter"
+                | "gauge"
+                | "histogram"
+                | "summary"
+                | "updown_counter"
+                | "gauge_histogram"
+                | "info"
+                | "stateset"
+                | "mixed"
+                | "unknown"
+        ),
+        SEMANTIC_METRIC_TEMPORALITY => {
+            matches!(value, "cumulative" | "delta" | "mixed" | "unknown")
+        }
+        SEMANTIC_METRIC_MONOTONIC
+        | SEMANTIC_TRACE_HAS_EVENTS
+        | SEMANTIC_TRACE_HAS_LINKS
+        | SEMANTIC_RESOURCE_ATTRIBUTES_DROPPED
+        | SEMANTIC_SCOPE_PRESERVED => matches!(value, "true" | "false" | "unknown"),
+        SEMANTIC_METRIC_METADATA_QUALITY => matches!(value, "declared" | "inferred" | "unknown"),
+        SEMANTIC_LOG_SEVERITY_SCHEME => matches!(value, "otlp" | "syslog" | "custom" | "unknown"),
+        SEMANTIC_LOG_BODY_FORMAT => matches!(value, "string" | "json" | "mixed" | "unknown"),
+
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -124,15 +206,75 @@ mod tests {
     fn test_is_semantic_option_key() {
         assert!(is_semantic_option_key(SEMANTIC_SIGNAL_TYPE));
         assert!(is_semantic_option_key(SEMANTIC_METRIC_TYPE));
-        assert!(is_semantic_option_key("greptime.semantic.future.key"));
 
+        // Unknown keys under the prefix are not whitelisted.
+        assert!(!is_semantic_option_key("greptime.semantic.future.key"));
+        assert!(!is_semantic_option_key("greptime.semantic.singal_type"));
         // Near-misses must not match.
         assert!(!is_semantic_option_key("greptime.semanticx"));
-        assert!(!is_semantic_option_key("greptime.semantic"));
         assert!(!is_semantic_option_key("semantic.signal_type"));
         assert!(!is_semantic_option_key("table_data_model"));
-
         // The internal transport key must never be treated as a table option.
         assert!(!is_semantic_option_key(SEMANTIC_PER_TABLE_INDEX_KEY));
+    }
+
+    #[test]
+    fn test_validate_semantic_option() {
+        // Enum keys reject out-of-domain values.
+        assert!(validate_semantic_option(SEMANTIC_SIGNAL_TYPE, "metric"));
+        assert!(!validate_semantic_option(SEMANTIC_SIGNAL_TYPE, "spans"));
+        assert!(validate_semantic_option(SEMANTIC_METRIC_TYPE, "counter"));
+        assert!(validate_semantic_option(SEMANTIC_METRIC_TYPE, "mixed"));
+        assert!(!validate_semantic_option(SEMANTIC_METRIC_TYPE, "bogus"));
+
+        // Booleans, sentinels, open values.
+        assert!(validate_semantic_option(SEMANTIC_TRACE_HAS_EVENTS, "true"));
+        assert!(!validate_semantic_option(SEMANTIC_TRACE_HAS_EVENTS, "yes"));
+        assert!(validate_semantic_option(
+            SEMANTIC_METRIC_TEMPORALITY,
+            "unknown"
+        ));
+        assert!(validate_semantic_option(SEMANTIC_METRIC_UNIT, "By"));
+        assert!(!validate_semantic_option(SEMANTIC_METRIC_UNIT, ""));
+
+        // Unknown key is rejected regardless of value.
+        assert!(!validate_semantic_option(
+            "greptime.semantic.future.key",
+            "x"
+        ));
+
+        // Drift guard: every value stamped by the ingestion path must validate.
+        assert!(validate_semantic_option(
+            SEMANTIC_SIGNAL_TYPE,
+            SIGNAL_TYPE_TRACE
+        ));
+        assert!(validate_semantic_option(
+            SEMANTIC_SIGNAL_TYPE,
+            SIGNAL_TYPE_METRIC
+        ));
+        assert!(validate_semantic_option(
+            SEMANTIC_SIGNAL_TYPE,
+            SIGNAL_TYPE_LOG
+        ));
+        assert!(validate_semantic_option(
+            SEMANTIC_SOURCE,
+            SOURCE_OPENTELEMETRY
+        ));
+        assert!(validate_semantic_option(SEMANTIC_SOURCE, SOURCE_PROMETHEUS));
+        assert!(validate_semantic_option(
+            SEMANTIC_METRIC_METADATA_QUALITY,
+            METADATA_QUALITY_INFERRED
+        ));
+        assert!(validate_semantic_option(
+            SEMANTIC_TRACE_CONVENTIONS,
+            SEMANTIC_VALUE_UNKNOWN
+        ));
+        // An empty value never validates, for any whitelisted key.
+        for key in SEMANTIC_OPTION_KEYS {
+            assert!(
+                !validate_semantic_option(key, ""),
+                "empty value should never validate for {key}"
+            );
+        }
     }
 }

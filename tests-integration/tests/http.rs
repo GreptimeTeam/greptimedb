@@ -71,6 +71,7 @@ use tests_integration::test_util::{
     StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
+    setup_test_prom_app_with_frontend_batched,
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
@@ -117,6 +118,7 @@ macro_rules! http_tests {
                 test_dashboard_path,
                 test_dashboard_api,
                 test_prometheus_remote_write,
+                test_prometheus_remote_write_batched,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
@@ -1985,6 +1987,48 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
         .await;
 
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}
+
+/// Covers the batched (pending-rows-batcher) Prometheus remote write path, which
+/// bypasses `PromStoreProtocolHandler::write`. Verifies the metric table is created
+/// asynchronously and still carries the Prometheus semantic identity stamped on the
+/// shared request context.
+pub async fn test_prometheus_remote_write_batched(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend_batched(store_type, "prometheus_remote_write_batched")
+            .await;
+    let client = TestClient::new(app).await;
+
+    let write_request = WriteRequest {
+        timeseries: prom_store::mock_timeseries(),
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // The batcher flushes asynchronously, so poll until the table exists and carries
+    // the semantic identity (signal_type/source/metadata_quality).
+    wait_for_data(
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'metric2' \
+         and create_options like '%greptime.semantic.signal_type=metric%' \
+         and create_options like '%greptime.semantic.source=prometheus%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=inferred%'",
+        "[[1]]",
+    )
+    .await;
 
     guard.remove_all().await;
 }

@@ -500,11 +500,11 @@ mod tests {
         assert!(validate_table_option(MEMTABLE_BULK_MERGE_THRESHOLD));
         assert!(!validate_table_option("foo"));
 
-        // Semantic-layer keys are accepted via their reserved prefix.
+        // Only whitelisted semantic keys are accepted.
         assert!(validate_table_option(SEMANTIC_SIGNAL_TYPE));
         assert!(validate_table_option(SEMANTIC_METRIC_TYPE));
-        assert!(validate_table_option("greptime.semantic.future.key"));
-        // Near-miss and the internal transport key must be rejected.
+        // Unknown semantic key, near-miss, and the internal transport key are rejected.
+        assert!(!validate_table_option("greptime.semantic.future.key"));
         assert!(!validate_table_option("greptime.semanticx"));
         assert!(!validate_table_option(SEMANTIC_PER_TABLE_INDEX_KEY));
     }
