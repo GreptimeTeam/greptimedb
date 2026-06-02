@@ -1073,11 +1073,16 @@ impl PromPlanner {
             .chain(field_exprs)
             .collect::<Result<Vec<_>>>()?;
 
-        LogicalPlanBuilder::from(input)
+        let plan = LogicalPlanBuilder::from(input)
             .project(project_exprs)
             .context(DataFusionPlanningSnafu)?
             .build()
-            .context(DataFusionPlanningSnafu)
+            .context(DataFusionPlanningSnafu)?;
+
+        self.ctx.table_name = None;
+        self.ctx.schema_name = None;
+
+        Ok(plan)
     }
 
     async fn prom_binary_expr_to_plan(
@@ -5624,6 +5629,36 @@ mod test {
         assert_eq!(
             plan_str.matches("PromInstantManipulate").count(),
             3,
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_island_clears_qualifier_for_nested_unary_projection() {
+        let eval_stmt = build_eval_stmt("-((some_metric + some_alt_metric) / some_metric)");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 1, "{plan_str}");
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            2,
             "{plan_str}"
         );
     }
