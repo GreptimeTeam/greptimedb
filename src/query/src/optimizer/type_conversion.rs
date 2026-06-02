@@ -144,7 +144,9 @@ impl TypeConverter {
     ) -> Result<ScalarValue> {
         match (target_type, value) {
             (DataType::Timestamp(_, _), ScalarValue::Utf8(Some(v))) => {
-                string_to_timestamp_ms(v, Some(&self.query_ctx.timezone()))
+                let parsed = string_to_timestamp_scalar(v, Some(&self.query_ctx.timezone()))?;
+                // Align the parsed timestamp scalar to the compared column's exact unit.
+                self.cast_scalar_value(&parsed, target_type)
             }
             (DataType::Boolean, ScalarValue::Utf8(Some(v))) => match v.to_lowercase().as_str() {
                 "true" => Ok(ScalarValue::Boolean(Some(true))),
@@ -290,7 +292,7 @@ fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
     )
 }
 
-fn string_to_timestamp_ms(string: &str, timezone: Option<&Timezone>) -> Result<ScalarValue> {
+fn string_to_timestamp_scalar(string: &str, timezone: Option<&Timezone>) -> Result<ScalarValue> {
     let ts = Timestamp::from_str(string, timezone)
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
@@ -318,18 +320,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_string_to_timestamp_ms() {
+    fn test_string_to_timestamp_scalar() {
         assert_eq!(
-            string_to_timestamp_ms("2022-02-02 19:00:00+08:00", None).unwrap(),
+            string_to_timestamp_scalar("2022-02-02 19:00:00+08:00", None).unwrap(),
             ScalarValue::TimestampSecond(Some(1643799600), None)
         );
         assert_eq!(
-            string_to_timestamp_ms("2009-02-13 23:31:30Z", None).unwrap(),
+            string_to_timestamp_scalar("2009-02-13 23:31:30Z", None).unwrap(),
             ScalarValue::TimestampSecond(Some(1234567890), None)
         );
 
         assert_eq!(
-            string_to_timestamp_ms(
+            string_to_timestamp_scalar(
                 "2009-02-13 23:31:30",
                 Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
             )
@@ -338,7 +340,7 @@ mod tests {
         );
 
         assert_eq!(
-            string_to_timestamp_ms(
+            string_to_timestamp_scalar(
                 "2009-02-13 23:31:30",
                 Some(&Timezone::from_tz_string("-8:00").unwrap())
             )
@@ -408,8 +410,8 @@ mod tests {
         };
 
         assert_eq!(
-            Expr::Column(Column::from_name("ts")).gt(ScalarValue::TimestampSecond(
-                Some(1599514949),
+            Expr::Column(Column::from_name("ts")).gt(ScalarValue::TimestampMillisecond(
+                Some(1599514949000),
                 None
             )
             .lit()),
@@ -486,11 +488,50 @@ mod tests {
             .unwrap();
         let expected = String::from(
             "Aggregate: groupBy=[[]], aggr=[[count(column1)]]\
-            \n  Filter: TimestampSecond(-28800, None) <= column3\
-            \n    Filter: column3 > TimestampSecond(-28800, None)\
+            \n  Filter: TimestampMillisecond(-28800000, None) <= column3\
+            \n    Filter: column3 > TimestampMillisecond(-28800000, None)\
             \n      Values: (Int64(1), Float64(1), TimestampMillisecond(1, None))",
         );
         assert_eq!(format!("{}", transformed_plan.display_indent()), expected);
+    }
+
+    #[test]
+    fn test_convert_timestamp_str_to_column_precision() {
+        use datatypes::arrow::datatypes::TimeUnit as ArrowTimeUnit;
+
+        let query_ctx = QueryContext::arc();
+        let schema = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![(
+                    None::<TableReference>,
+                    Arc::new(Field::new(
+                        "ts",
+                        DataType::Timestamp(ArrowTimeUnit::Microsecond, None),
+                        true,
+                    )),
+                )],
+                HashMap::new(),
+            )
+            .unwrap(),
+        );
+        let mut converter = TypeConverter {
+            schema,
+            query_ctx: query_ctx.clone(),
+        };
+        let expected = Timestamp::from_str("2026-06-02 03:50:00", Some(&query_ctx.timezone()))
+            .unwrap()
+            .convert_to(TimeUnit::Microsecond)
+            .unwrap()
+            .value();
+
+        assert_eq!(
+            Expr::Column(Column::from_name("ts"))
+                .lt_eq(ScalarValue::TimestampMicrosecond(Some(expected), None,).lit()),
+            converter
+                .f_up(Expr::Column(Column::from_name("ts")).lt_eq("2026-06-02 03:50:00".lit()))
+                .unwrap()
+                .data
+        );
     }
 
     #[test]
