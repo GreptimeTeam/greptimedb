@@ -348,6 +348,7 @@ async fn test_alter_append_mode_clears_merge_mode_with_format(flat_format: bool)
                 options,
                 skip_wal_replay: false,
                 checkpoint: None,
+                requirements: Default::default(),
             }),
         )
         .await

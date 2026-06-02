@@ -32,7 +32,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
-    RegionRequest,
+    RegionRequest, RegionRequirements,
 };
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::Mutex;
@@ -186,6 +186,24 @@ struct EngineInner {
 
 type EngineInnerRef = Arc<EngineInner>;
 
+fn ensure_open_requirements(
+    requirements: RegionRequirements,
+    object_store: &ObjectStore,
+) -> EngineResult<()> {
+    if !requirements.object_storage {
+        return Ok(());
+    }
+
+    ensure!(
+        object_store::util::is_object_storage(object_store),
+        UnsupportedSnafu {
+            operation: "open region with object storage requirement on non-object storage"
+        }
+    );
+
+    Ok(())
+}
+
 impl EngineInner {
     fn new(object_store: ObjectStore) -> Self {
         Self {
@@ -289,6 +307,8 @@ impl EngineInner {
             return Ok(0);
         }
 
+        ensure_open_requirements(request.requirements, &self.object_store)?;
+
         let res = FileRegion::open(region_id, request, &self.object_store).await;
         let region = res.inspect_err(|err| {
             error!(
@@ -354,5 +374,55 @@ impl EngineInner {
 
     async fn exists(&self, region_id: RegionId) -> bool {
         self.regions.read().unwrap().contains_key(&region_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use object_store::services::{Fs, S3};
+
+    use super::*;
+    use crate::error::Error;
+
+    fn build_fs_object_store() -> ObjectStore {
+        ObjectStore::new(Fs::default().root("/tmp"))
+            .unwrap()
+            .finish()
+    }
+
+    fn build_s3_object_store() -> ObjectStore {
+        ObjectStore::new(
+            S3::default()
+                .bucket("test-bucket")
+                .region("us-east-1")
+                .disable_ec2_metadata(),
+        )
+        .unwrap()
+        .finish()
+    }
+
+    #[test]
+    fn test_empty_open_requirements_are_supported() {
+        ensure_open_requirements(RegionRequirements::empty(), &build_fs_object_store()).unwrap();
+    }
+
+    #[test]
+    fn test_object_storage_open_requirement_rejects_fs_object_store() {
+        let err = ensure_open_requirements(
+            RegionRequirements::object_storage(),
+            &build_fs_object_store(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Unsupported { .. }));
+    }
+
+    #[test]
+    fn test_object_storage_open_requirement_accepts_s3_object_store() {
+        ensure_open_requirements(
+            RegionRequirements::object_storage(),
+            &build_s3_object_store(),
+        )
+        .unwrap();
     }
 }
