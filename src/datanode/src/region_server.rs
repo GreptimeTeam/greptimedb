@@ -1113,7 +1113,7 @@ impl Stream for PermitGuardedStream {
     type Item = common_recordbatch::error::Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
+        self.inner.as_mut().poll_next(cx)
     }
 }
 
