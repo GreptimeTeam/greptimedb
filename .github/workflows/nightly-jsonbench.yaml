@@ -11,6 +11,10 @@ on:
         required: true
         type: string
 
+permissions:
+  actions: read
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -171,7 +175,7 @@ jobs:
           cp ./greptime JSONBench/greptimedb/greptime
 
           cd JSONBench/greptimedb
-          echo "Running JSONBench main.sh with dataset choice 2 and install=false"
+          echo "Running JSONBench main.sh with dataset choice ${JSONBENCH_DATASET} and install=false"
           ./main.sh ${JSONBENCH_DATASET} "${JSONBENCH_DATA_DIR}" success.log error.log "${JSONBENCH_OUTPUT_PREFIX}" false
           echo "JSONBench finished"
 
