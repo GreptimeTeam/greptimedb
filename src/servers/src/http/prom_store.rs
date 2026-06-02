@@ -31,6 +31,10 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
+use table::requests::{
+    METADATA_QUALITY_INFERRED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_SIGNAL_TYPE,
+    SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_PROMETHEUS,
+};
 
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
@@ -108,6 +112,13 @@ pub async fn remote_write(
         .clone()
         .unwrap_or_else(|| GREPTIME_PHYSICAL_TABLE.to_string());
     query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table.clone());
+    // Stamp the Prometheus metric identity here, before `as_req_iter` splits into the
+    // batched and direct write paths, so both inherit it (the batched path bypasses
+    // `PromStoreProtocolHandler::write`). Prom RW v1 metadata is weak, so the type is
+    // inferred from naming.
+    query_ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
+    query_ctx.set_extension(SEMANTIC_SOURCE, SOURCE_PROMETHEUS);
+    query_ctx.set_extension(SEMANTIC_METRIC_METADATA_QUALITY, METADATA_QUALITY_INFERRED);
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])

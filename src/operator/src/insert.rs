@@ -63,6 +63,7 @@ use table::metadata::TableInfo;
 use table::requests::{
     AUTO_CREATE_TABLE_KEY, InsertRequest as TableInsertRequest, TABLE_DATA_MODEL,
     TABLE_DATA_MODEL_TRACE_V1, TRACE_TABLE_PARTITIONS_HINT_KEY, VALID_TABLE_OPTION_KEYS,
+    is_semantic_option_key,
 };
 use table::table_reference::TableReference;
 
@@ -1089,6 +1090,13 @@ pub fn fill_table_options_for_create(
         }
     }
 
+    // Semantic keys are prefix-matched, not in the fixed allowlist above.
+    for (key, value) in ctx.extensions() {
+        if is_semantic_option_key(&key) {
+            table_options.insert(key, value);
+        }
+    }
+
     match create_type {
         AutoCreateTableType::Logical(physical_table) => {
             table_options.insert(
@@ -1389,6 +1397,34 @@ mod tests {
             table_options.get(MERGE_MODE_KEY).map(String::as_str)
         );
         assert!(!table_options.contains_key(APPEND_MODE_KEY));
+    }
+
+    #[test]
+    fn test_fill_table_options_copies_semantic_extensions() {
+        use table::requests::{
+            SEMANTIC_PER_TABLE_INDEX_KEY, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE,
+            SIGNAL_TYPE_METRIC, SOURCE_OPENTELEMETRY,
+        };
+
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
+        ctx.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+        // The internal transport key must NOT be copied into table options.
+        ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, "{}");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(&mut table_options, &AutoCreateTableType::Physical, &ctx);
+
+        assert_eq!(
+            Some(SIGNAL_TYPE_METRIC),
+            table_options.get(SEMANTIC_SIGNAL_TYPE).map(String::as_str)
+        );
+        assert_eq!(
+            Some(SOURCE_OPENTELEMETRY),
+            table_options.get(SEMANTIC_SOURCE).map(String::as_str)
+        );
+        assert!(!table_options.contains_key(SEMANTIC_PER_TABLE_INDEX_KEY));
     }
 
     #[test]

@@ -43,7 +43,12 @@ use servers::query_handler::{
 };
 use session::context::QueryContextRef;
 use snafu::{IntoError, ResultExt};
-use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
+use table::requests::{
+    OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM, SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE,
+    SEMANTIC_SOURCE, SEMANTIC_TRACE_CONVENTIONS, SEMANTIC_TRACE_HAS_EVENTS,
+    SEMANTIC_TRACE_HAS_LINKS, SEMANTIC_VALUE_UNKNOWN, SIGNAL_TYPE_LOG, SIGNAL_TYPE_METRIC,
+    SIGNAL_TYPE_TRACE, SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1,
+};
 
 use crate::instance::Instance;
 use crate::instance::otlp::trace_semconv::trace_semconv_fixed_type;
@@ -131,12 +136,14 @@ impl OpenTelemetryProtocolHandler for Instance {
         let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
-        let ctx = if !is_legacy {
+        let ctx = {
             let mut c = (*ctx).clone();
-            c.set_extension(OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM.to_string());
+            c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
+            c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+            if !is_legacy {
+                c.set_extension(OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM.to_string());
+            }
             Arc::new(c)
-        } else {
-            ctx
         };
 
         // If the user uses the legacy path, it is by default without metric engine.
@@ -211,6 +218,15 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
+        // `as_req_iter` clones this ctx into each `temp_ctx`, so identity set here
+        // reaches the context that drives table auto-create.
+        let ctx = {
+            let mut c = (*ctx).clone();
+            c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_LOG);
+            c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+            Arc::new(c)
+        };
+
         let opt_req = otlp::logs::to_grpc_insert_requests(
             request,
             pipeline,
@@ -256,6 +272,23 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> ServerResult<TraceIngestOutcome> {
         let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
+
+        // Only the main span table gets the identity; the derived `_services` /
+        // `_operations` lookup tables keep the unstamped `ctx`.
+        let main_ctx = {
+            let mut c = (*ctx).clone();
+            c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_TRACE);
+            c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+            if is_trace_v1_model {
+                c.set_extension(SEMANTIC_PIPELINE, TABLE_DATA_MODEL_TRACE_V1);
+                c.set_extension(SEMANTIC_TRACE_HAS_EVENTS, "true");
+                c.set_extension(SEMANTIC_TRACE_HAS_LINKS, "true");
+                // schema_url is row-level, so conventions is unknown at table level.
+                c.set_extension(SEMANTIC_TRACE_CONVENTIONS, SEMANTIC_VALUE_UNKNOWN);
+            }
+            Arc::new(c)
+        };
+
         let ingest_ctx = TraceChunkIngestContext {
             pipeline_handler,
             pipeline,
@@ -278,7 +311,7 @@ impl Instance {
                 .map(|chunk| chunk.collect::<Vec<_>>())
                 .collect::<Vec<_>>();
             for chunk in chunks {
-                self.ingest_trace_chunk(&ingest_ctx, chunk, ctx.clone(), &mut ingest_state)
+                self.ingest_trace_chunk(&ingest_ctx, chunk, main_ctx.clone(), &mut ingest_state)
                     .await?;
             }
         }

@@ -40,7 +40,7 @@ use snafu::{ResultExt, ensure};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
-use table::requests::validate_table_option;
+use table::requests::{SEMANTIC_PREFIX, validate_semantic_option, validate_table_option};
 
 use crate::error::{
     ConvertToLogicalExpressionSnafu, InvalidSqlSnafu, InvalidTableOptionSnafu, ParseSqlValueSnafu,
@@ -395,8 +395,18 @@ pub fn parse_with_options(parser: &mut Parser) -> Result<OptionMap> {
         .into_iter()
         .map(parse_option_string)
         .collect::<Result<HashMap<String, OptionValue>>>()?;
-    for key in options.keys() {
-        ensure!(validate_table_option(key), InvalidTableOptionSnafu { key });
+    for (key, value) in &options {
+        if key.starts_with(SEMANTIC_PREFIX) {
+            // Semantic keys are whitelisted and value-checked against their domain,
+            // so a user cannot set an unknown key or an out-of-range value.
+            let value = value.as_string().unwrap_or_default();
+            ensure!(
+                validate_semantic_option(key, value),
+                InvalidTableOptionSnafu { key }
+            );
+        } else {
+            ensure!(validate_table_option(key), InvalidTableOptionSnafu { key });
+        }
     }
     Ok(OptionMap::new(options))
 }
