@@ -27,6 +27,7 @@ pub mod schemata;
 mod ssts;
 mod table_constraints;
 mod table_names;
+mod table_semantics;
 pub mod tables;
 mod views;
 
@@ -72,6 +73,7 @@ use crate::system_schema::information_schema::ssts::{
     InformationSchemaSstsIndexMeta, InformationSchemaSstsManifest, InformationSchemaSstsStorage,
 };
 use crate::system_schema::information_schema::table_constraints::InformationSchemaTableConstraints;
+use crate::system_schema::information_schema::table_semantics::InformationSchemaTableSemantics;
 use crate::system_schema::information_schema::tables::InformationSchemaTables;
 use crate::system_schema::memory_table::MemoryTable;
 pub(crate) use crate::system_schema::predicate::Predicates;
@@ -261,6 +263,10 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
             SSTS_INDEX_META => Some(Arc::new(InformationSchemaSstsIndexMeta::new(
                 self.catalog_manager.clone(),
             )) as _),
+            TABLE_SEMANTICS => Some(Arc::new(InformationSchemaTableSemantics::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
             _ => None,
         }
     }
@@ -357,6 +363,10 @@ impl InformationSchemaProvider {
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
+        tables.insert(
+            TABLE_SEMANTICS.to_string(),
+            self.build_table(TABLE_SEMANTICS).unwrap(),
+        );
         if let Some(process_list) = self.build_table(PROCESS_LIST) {
             tables.insert(PROCESS_LIST.to_string(), process_list);
         }

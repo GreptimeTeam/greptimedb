@@ -114,6 +114,8 @@ pub const INFORMATION_SCHEMA_SSTS_INDEX_META_TABLE_ID: u32 = 39;
 pub const INFORMATION_SCHEMA_ALERTS_TABLE_ID: u32 = 40;
 /// id for information_schema.region_info
 pub const INFORMATION_SCHEMA_REGION_INFO_TABLE_ID: u32 = 41;
+/// id for information_schema.table_semantics
+pub const INFORMATION_SCHEMA_TABLE_SEMANTICS_TABLE_ID: u32 = 42;
 
 // ----- End of information_schema tables -----
 
