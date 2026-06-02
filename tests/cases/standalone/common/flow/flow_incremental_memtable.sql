@@ -10,7 +10,9 @@ CREATE TABLE flow_incr_memtable_input (
     append_mode = 'true'
 );
 
-CREATE FLOW flow_incr_memtable SINK TO flow_incr_memtable_sink AS
+CREATE FLOW flow_incr_memtable SINK TO flow_incr_memtable_sink
+WITH (experimental_enable_incremental_read = 'true')
+AS
 SELECT
     sum(n) AS total,
     min(n) AS min_n,

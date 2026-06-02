@@ -80,6 +80,7 @@ pub struct GreptimeDbStandaloneBuilder {
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
     slow_query_options: SlowQueryOptions,
+    auto_create_table: bool,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -97,7 +98,14 @@ impl GreptimeDbStandaloneBuilder {
                 threshold: Duration::from_secs(1),
                 ..Default::default()
             },
+            auto_create_table: true,
         }
+    }
+
+    #[must_use]
+    pub fn with_auto_create_table(mut self, auto_create_table: bool) -> Self {
+        self.auto_create_table = auto_create_table;
+        self
     }
 
     #[must_use]
@@ -347,6 +355,7 @@ impl GreptimeDbStandaloneBuilder {
             wal: self.metasrv_wal_config.clone().into(),
             grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
             slow_query: self.slow_query_options.clone(),
+            auto_create_table: self.auto_create_table,
             ..StandaloneOptions::default()
         };
 

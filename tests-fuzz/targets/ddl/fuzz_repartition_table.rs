@@ -33,14 +33,15 @@ use tests_fuzz::fake::{
     uppercase_and_keyword_backtick_map,
 };
 use tests_fuzz::generator::Generator;
-use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
+use tests_fuzz::generator::create_expr::{CreateTableExprGeneratorBuilder, generate_partition_def};
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::repartition_expr::{
     MergePartitionExprGeneratorBuilder, SplitPartitionExprGeneratorBuilder,
 };
 use tests_fuzz::ir::{
-    CreateTableExpr, InsertIntoExpr, MySQLTsColumnTypeGenerator, RepartitionExpr, RowValue,
-    SimplePartitions, generate_partition_value, generate_unique_timestamp_for_mysql_with_clock,
+    AlterTablePartitionsExpr, CreateTableExpr, InsertIntoExpr, MySQLTsColumnTypeGenerator,
+    PartitionDef, RepartitionExpr, RowValue, SimplePartitions, generate_partition_value,
+    generate_unique_timestamp_for_mysql_with_clock,
 };
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
@@ -75,8 +76,13 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = get_fuzz_override::<u64>("SEED").unwrap_or(u.int_in_range(u64::MIN..=u64::MAX)?);
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let partitions =
-            get_fuzz_override::<usize>("PARTITIONS").unwrap_or_else(|| rng.random_range(2..8));
+        let partitions = get_fuzz_override::<usize>("PARTITIONS").unwrap_or_else(|| {
+            if rng.random_bool(0.5) {
+                1
+            } else {
+                rng.random_range(2..8)
+            }
+        });
         let max_actions = get_gt_fuzz_input_max_alter_actions();
         let actions = get_fuzz_override::<usize>("ACTIONS")
             .unwrap_or_else(|| rng.random_range(1..max_actions));
@@ -99,6 +105,7 @@ fn generate_create_expr<R: Rng + 'static>(
         )))
         .columns(5)
         .partition(input.partitions)
+        .partition_column(input.partitions <= 1)
         .engine("mito")
         .ts_column_type_generator(Box::new(MySQLTsColumnTypeGenerator))
         .build()
@@ -122,7 +129,7 @@ fn build_insert_expr<R: Rng + 'static>(
     let ts_value_generator = generate_unique_timestamp_for_mysql_with_clock(clock.clone());
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
-    let partition_len = table_ctx.partition.as_ref().unwrap().exprs.len();
+    let partition_len = partitions.bounds.len() + 1;
     let row = rng.random_range(partition_len..partition_len * 2);
 
     let moved_partitions = partitions.clone();
@@ -148,6 +155,28 @@ fn build_insert_expr<R: Rng + 'static>(
         .build()
         .unwrap();
     insert_generator.generate(rng).unwrap()
+}
+
+fn alter_table_partitions_expr(
+    table_ctx: &TableContextRef,
+    partition: PartitionDef,
+    wait: bool,
+) -> RepartitionExpr {
+    RepartitionExpr::AlterPartitions(AlterTablePartitionsExpr {
+        table_name: table_ctx.name.clone(),
+        partition,
+        wait,
+    })
+}
+
+fn alter_table_partitions_expr_from_table_ctx<R: Rng + 'static>(
+    table_ctx: &TableContextRef,
+    rng: &mut R,
+    wait: bool,
+) -> RepartitionExpr {
+    let column = table_ctx.columns[0].clone();
+    let partition = generate_partition_def(rng.random_range(2..8), column.column_type, column.name);
+    alter_table_partitions_expr(table_ctx, partition, wait)
 }
 
 async fn execute_insert_with_retry(ctx: &FuzzContext, sql: &str) -> Result<()> {
@@ -236,9 +265,36 @@ async fn execute_repartition_table(ctx: FuzzContext, input: FuzzInput) -> Result
         inserted_rows: 0,
     }));
 
+    let mut action_start = 0;
+    if table_ctx.partition.is_none() {
+        let expr = alter_table_partitions_expr_from_table_ctx(&table_ctx, &mut rng, true);
+        let translator = RepartitionExprTranslator;
+        let sql = translator.translate(&expr)?;
+        info!("Initial partition sql: {sql}");
+        let result = sqlx::query(&sql)
+            .execute(&ctx.greptime)
+            .await
+            .context(error::ExecuteQuerySnafu { sql: &sql })?;
+        info!("Initial partition result: {result:?}");
+        table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).repartition(expr).unwrap());
+        shared_state.lock().unwrap().table_ctx = table_ctx.clone();
+
+        let partition_entries = validator::partition::fetch_partitions_info_schema(
+            &ctx.greptime,
+            "public".into(),
+            &table_ctx.name,
+        )
+        .await?;
+        validator::partition::assert_partitions(
+            table_ctx.partition.as_ref().unwrap(),
+            &partition_entries,
+        )?;
+        action_start = 1;
+    }
+
     let writer_rng = ChaChaRng::seed_from_u64(input.seed);
     let writer_task = tokio::spawn(write_loop(writer_rng, ctx.clone(), shared_state.clone()));
-    for i in 0..input.actions {
+    for i in action_start..input.actions {
         let partition_num = table_ctx.partition.as_ref().unwrap().exprs.len();
         info!(
             "partition_num: {partition_num}, action: {}/{}",

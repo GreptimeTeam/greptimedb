@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_base::Plugins;
-use flow::FlownodeOptions;
 use flow::error::Result;
+use flow::{FlownodeInstance, FlownodeOptions};
 
 use crate::options::PluginOptions;
 
@@ -27,7 +27,7 @@ pub async fn setup_flownode_plugins(
     Ok(())
 }
 
-pub async fn start_flownode_plugins(_plugins: Plugins) -> Result<()> {
+pub async fn start_flownode_plugins(_instance: &FlownodeInstance) -> Result<()> {
     Ok(())
 }
 

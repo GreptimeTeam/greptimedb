@@ -44,6 +44,7 @@ pub struct CreateTableExprGenerator<R: Rng + 'static> {
     #[builder(setter(into))]
     engine: String,
     partition: usize,
+    partition_column: bool,
     if_not_exists: bool,
     #[builder(setter(into))]
     name: Ident,
@@ -67,6 +68,7 @@ impl<R: Rng + 'static> Default for CreateTableExprGenerator<R> {
             engine: DEFAULT_ENGINE.to_string(),
             if_not_exists: false,
             partition: 0,
+            partition_column: false,
             name: Ident::new(""),
             with_clause: HashMap::default(),
             name_generator: Box::new(MappedGenerator::new(WordGenerator, random_capitalize_map)),
@@ -95,7 +97,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
         let mut builder = CreateTableExprBuilder::default();
         let mut columns = Vec::with_capacity(self.columns);
         let mut primary_keys = vec![];
-        let need_partible_column = self.partition > 1;
+        let need_partible_column = self.partition > 1 || self.partition_column;
         let mut column_names = self.name_generator.choose(rng, self.columns);
 
         if self.columns == 1 {
@@ -123,13 +125,15 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
                 )
                 .remove(0);
 
-                // Generates partition bounds.
-                let partition_def = generate_partition_def(
-                    self.partition,
-                    column.column_type.clone(),
-                    name.clone(),
-                );
-                builder.partition(partition_def);
+                if self.partition > 1 {
+                    // Generates partition bounds.
+                    let partition_def = generate_partition_def(
+                        self.partition,
+                        column.column_type.clone(),
+                        name.clone(),
+                    );
+                    builder.partition(partition_def);
+                }
                 columns.push(column);
             }
             // Generates the ts column.
@@ -178,11 +182,12 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
     }
 }
 
-fn generate_partition_def(
+pub fn generate_partition_def(
     partitions: usize,
     column_type: ConcreteDataType,
     column_name: Ident,
 ) -> PartitionDef {
+    assert!(partitions > 1, "partitions must be greater than 1");
     let bounds = generate_partition_bounds(&column_type, partitions - 1);
     let partitions = SimplePartitions::new(column_name.clone(), bounds);
     let partition_exprs = partitions.generate().unwrap();
@@ -193,24 +198,23 @@ fn generate_partition_def(
     }
 }
 
-fn generate_metric_partition(partitions: usize) -> Option<(Column, PartitionDef)> {
-    if partitions <= 1 {
-        return None;
-    }
-
-    let partition_column = Column {
+fn metric_partition_column() -> Column {
+    Column {
         name: Ident::new("host"),
         column_type: ConcreteDataType::string_datatype(),
         options: vec![ColumnOption::PrimaryKey],
-    };
+    }
+}
+
+pub fn generate_metric_partition_def(partitions: usize) -> PartitionDef {
+    assert!(partitions > 1, "partitions must be greater than 1");
+    let partition_column = metric_partition_column();
     let bounds = generate_partition_bounds(&partition_column.column_type, partitions - 1);
     let partitions = SimplePartitions::new(partition_column.name.clone(), bounds);
-    let partition_def = PartitionDef {
+    PartitionDef {
         columns: vec![partitions.column_name.clone()],
         exprs: partitions.generate().unwrap(),
-    };
-
-    Some((partition_column, partition_def))
+    }
 }
 
 /// Generate a physical table with 2 columns: ts of TimestampType::Millisecond as time index and val of Float64Type.
@@ -223,6 +227,8 @@ pub struct CreatePhysicalTableExprGenerator<R: Rng + 'static> {
     if_not_exists: bool,
     #[builder(default = "0")]
     partition: usize,
+    #[builder(default = "false")]
+    partition_column: bool,
     #[builder(default, setter(into))]
     with_clause: HashMap<String, String>,
 }
@@ -252,10 +258,12 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExpr
 
         let mut partition = None;
         let mut primary_keys = vec![];
-        if let Some((partition_column, partition_def)) = generate_metric_partition(self.partition) {
-            columns.push(partition_column);
-            partition = Some(partition_def);
+        if self.partition > 1 || self.partition_column {
+            columns.push(metric_partition_column());
             primary_keys.push(columns.len() - 1);
+        }
+        if self.partition > 1 {
+            partition = Some(generate_metric_partition_def(self.partition));
         }
 
         Ok(CreateTableExpr {
@@ -387,6 +395,7 @@ mod tests {
 
     use super::*;
     use crate::context::TableContext;
+    use crate::ir::PARTIBLE_DATA_TYPES;
 
     #[test]
     fn test_float64() {
@@ -423,6 +432,18 @@ mod tests {
             .unwrap();
         assert_eq!(expr.columns.len(), 10);
         assert!(expr.partition.is_none());
+
+        let expr = CreateTableExprGeneratorBuilder::default()
+            .columns(10)
+            .partition(1)
+            .partition_column(true)
+            .build()
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+        assert_eq!(expr.columns.len(), 10);
+        assert!(expr.partition.is_none());
+        assert!(PARTIBLE_DATA_TYPES.contains(&expr.columns[0].column_type));
     }
 
     #[test]
@@ -514,6 +535,25 @@ mod tests {
         assert_eq!(physical_table_expr.engine, "metric");
         assert!(physical_table_expr.partition.is_some());
         assert_eq!(physical_table_expr.partition.unwrap().exprs.len(), 3);
+    }
+
+    #[test]
+    fn test_create_physical_table_expr_generator_with_partition_column() {
+        let mut rng = rand::rng();
+        let physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
+            .partition(1)
+            .partition_column(true)
+            .if_not_exists(false)
+            .build()
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+
+        assert_eq!(physical_table_expr.engine, "metric");
+        assert!(physical_table_expr.partition.is_none());
+        assert_eq!(physical_table_expr.columns.len(), 3);
+        assert_eq!(physical_table_expr.columns[2].name, Ident::new("host"));
+        assert_eq!(physical_table_expr.primary_keys, vec![2]);
     }
 
     #[test]

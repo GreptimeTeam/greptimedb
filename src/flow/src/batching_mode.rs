@@ -23,7 +23,6 @@ use session::ReadPreference;
 mod checkpoint;
 pub(crate) mod engine;
 pub(crate) mod frontend_client;
-mod incremental_filter;
 mod state;
 mod table_creator;
 mod task;
@@ -55,6 +54,10 @@ pub struct BatchingModeOptions {
     pub experimental_max_filter_num_per_query: usize,
     /// Time window merge distance
     pub experimental_time_window_merge_threshold: usize,
+    /// Whether to enable experimental flow incremental source reads.
+    ///
+    /// When disabled, batching flows always execute full-snapshot queries.
+    pub experimental_enable_incremental_read: bool,
     /// Read preference of the Frontend client.
     pub read_preference: ReadPreference,
     /// TLS option for client connections to frontends.
@@ -72,6 +75,7 @@ impl Default for BatchingModeOptions {
             experimental_frontend_scan_timeout: Duration::from_secs(30),
             experimental_max_filter_num_per_query: 20,
             experimental_time_window_merge_threshold: 3,
+            experimental_enable_incremental_read: false,
             read_preference: Default::default(),
             frontend_tls: None,
         }

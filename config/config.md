@@ -14,6 +14,7 @@
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | Unset | The default timezone of the server. |
 | `default_column_prefix` | String | Unset | The default column prefix for auto-created time index and value columns. |
+| `auto_create_table` | Bool | `true` | Server-side global switch for auto table creation on write.<br/>When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`. |
 | `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd" |
 | `max_in_flight_write_bytes` | String | Unset | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
 | `write_bytes_exhausted_policy` | String | Unset | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
@@ -230,6 +231,7 @@
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | Unset | The default timezone of the server. |
 | `default_column_prefix` | String | Unset | The default column prefix for auto-created time index and value columns. |
+| `auto_create_table` | Bool | `true` | Server-side global switch for auto table creation on write.<br/>When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`. |
 | `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd" |
 | `max_in_flight_write_bytes` | String | Unset | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
 | `write_bytes_exhausted_policy` | String | Unset | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
@@ -628,6 +630,7 @@
 | `flow.batching_mode.experimental_frontend_scan_timeout` | String | `30s` | Flow wait for available frontend timeout,<br/>if failed to find available frontend after frontend_scan_timeout elapsed, return error<br/>which prevent flownode from starting |
 | `flow.batching_mode.experimental_max_filter_num_per_query` | Integer | `20` | Maximum number of filters allowed in a single query |
 | `flow.batching_mode.experimental_time_window_merge_threshold` | Integer | `3` | Time window merge distance |
+| `flow.batching_mode.experimental_enable_incremental_read` | Bool | `false` | Whether to enable experimental flow incremental source reads.<br/>When disabled, batching flows always execute full-snapshot queries.<br/>Can be overridden per flow with WITH (experimental_enable_incremental_read = 'true'). |
 | `flow.batching_mode.read_preference` | String | `Leader` | Read preference of the Frontend client. |
 | `flow.batching_mode.frontend_tls` | -- | -- | -- |
 | `flow.batching_mode.frontend_tls.enabled` | Bool | `false` | Whether to enable TLS for client. |

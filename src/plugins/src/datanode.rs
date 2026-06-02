@@ -14,6 +14,7 @@
 
 use common_base::Plugins;
 use datanode::config::DatanodeOptions;
+use datanode::datanode::Datanode;
 use datanode::error::Result;
 
 use crate::options::PluginOptions;
@@ -28,6 +29,6 @@ pub async fn setup_datanode_plugins(
     Ok(())
 }
 
-pub async fn start_datanode_plugins(_plugins: Plugins) -> Result<()> {
+pub async fn start_datanode_plugins(_instance: &Datanode) -> Result<()> {
     Ok(())
 }

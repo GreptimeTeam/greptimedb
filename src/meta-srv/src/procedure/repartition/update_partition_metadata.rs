@@ -95,10 +95,19 @@ impl State for UpdatePartitionMetadata {
 
         let mut new_table_info = table_info_value.table_info.clone();
         new_table_info.meta.partition_key_indices = partition_key_indices;
+        common_telemetry::info!(
+            "Update table partition metadata, table_id: {}, partition_key_indices: {:?}, partition_columns: {:?}",
+            table_id,
+            new_table_info.meta.partition_key_indices,
+            new_table_info
+                .meta
+                .partition_column_names()
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
         ctx.update_table_info(&table_info_value, table_info_value.update(new_table_info))
             .await?;
-        // We don't invalidate cache here because the subsequent AllocateRegion step
-        // will update the table route and invalidate the cache accordingly.
+        ctx.invalidate_table_cache().await?;
 
         Ok((
             Box::new(AllocateRegion::new(self.plan_entries.clone())),

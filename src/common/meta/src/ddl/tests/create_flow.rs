@@ -24,8 +24,9 @@ use table::table_name::TableName;
 
 use crate::ddl::DdlContext;
 use crate::ddl::create_flow::{
-    CreateFlowData, CreateFlowProcedure, CreateFlowState, DEFER_ON_MISSING_SOURCE_KEY, FlowType,
-    defer_on_missing_source,
+    CreateFlowData, CreateFlowProcedure, CreateFlowState, DEFER_ON_MISSING_SOURCE_KEY,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, defer_on_missing_source,
+    validate_flow_options,
 };
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
@@ -273,6 +274,22 @@ fn test_defer_on_missing_source_invalid_value() {
         err.to_string()
             .contains("Invalid flow option 'defer_on_missing_source': invalid")
     );
+}
+
+#[test]
+fn test_validate_flow_options_allows_incremental_read_option() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options.insert(
+        FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+        "true".to_string(),
+    );
+
+    validate_flow_options(&task).unwrap();
 }
 
 #[tokio::test]

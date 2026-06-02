@@ -36,14 +36,15 @@ use tests_fuzz::fake::{
 use tests_fuzz::generator::Generator;
 use tests_fuzz::generator::create_expr::{
     CreateLogicalTableExprGeneratorBuilder, CreatePhysicalTableExprGeneratorBuilder,
+    generate_metric_partition_def,
 };
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::repartition_expr::{
     MergePartitionExprGeneratorBuilder, SplitPartitionExprGeneratorBuilder,
 };
 use tests_fuzz::ir::{
-    CreateTableExpr, Ident, InsertIntoExpr, RepartitionExpr, generate_random_value,
-    generate_unique_timestamp_for_mysql_with_clock,
+    AlterTablePartitionsExpr, CreateTableExpr, Ident, InsertIntoExpr, PartitionDef,
+    RepartitionExpr, generate_random_value, generate_unique_timestamp_for_mysql_with_clock,
 };
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::csv::InsertExprToCsvRecordsTranslator;
@@ -94,6 +95,7 @@ fn generate_create_physical_table_expr<R: Rng + 'static>(
         ))))
         .if_not_exists(rng.random_bool(0.5))
         .partition(partitions)
+        .partition_column(partitions <= 1)
         .build()
         .unwrap()
         .generate(rng)
@@ -158,12 +160,6 @@ async fn create_metric_tables<R: Rng + 'static>(
         })?;
     info!("Create physical table: {create_physical_sql}, result: {result:?}");
     let physical_table_ctx = Arc::new(TableContext::from(&create_physical_expr));
-    ensure!(
-        physical_table_ctx.partition.is_some(),
-        error::AssertSnafu {
-            reason: "Physical metric table must have partition".to_string()
-        }
-    );
 
     let mut logical_tables = BTreeMap::new();
     let mut create_logical_sqls = HashMap::new();
@@ -436,6 +432,11 @@ fn repartition_operation<R: Rng + 'static>(
     table_ctx: &TableContextRef,
     rng: &mut R,
 ) -> Result<RepartitionExpr> {
+    if table_ctx.partition.is_none() {
+        let partition = generate_metric_partition_def(rng.random_range(2..8));
+        return Ok(alter_table_partitions_expr(table_ctx, partition, true));
+    }
+
     let split = rng.random_bool(0.5);
     if table_ctx.partition.as_ref().unwrap().exprs.len() <= 2 || split {
         let expr = SplitPartitionExprGeneratorBuilder::default()
@@ -454,19 +455,35 @@ fn repartition_operation<R: Rng + 'static>(
     }
 }
 
+fn alter_table_partitions_expr(
+    table_ctx: &TableContextRef,
+    partition: PartitionDef,
+    wait: bool,
+) -> RepartitionExpr {
+    RepartitionExpr::AlterPartitions(AlterTablePartitionsExpr {
+        table_name: table_ctx.name.clone(),
+        partition,
+        wait,
+    })
+}
+
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = get_fuzz_override::<u64>("SEED").unwrap_or(u.int_in_range(u64::MIN..=u64::MAX)?);
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let partitions =
-            get_fuzz_override::<usize>("PARTITIONS").unwrap_or_else(|| rng.random_range(2..8));
+        let partitions = get_fuzz_override::<usize>("PARTITIONS").unwrap_or_else(|| {
+            if rng.random_bool(0.5) {
+                1
+            } else {
+                rng.random_range(2..8)
+            }
+        });
         let max_tables = get_gt_fuzz_input_max_tables();
         let tables = get_fuzz_override::<usize>("TABLES")
             .unwrap_or_else(|| rng.random_range(1..=std::cmp::max(1, max_tables)));
-        let max_actions = get_gt_fuzz_input_max_alter_actions();
+        let max_actions = std::cmp::min(128, get_gt_fuzz_input_max_alter_actions());
         let actions = get_fuzz_override::<usize>("ACTIONS")
             .unwrap_or_else(|| rng.random_range(1..max_actions));
-
         Ok(FuzzInput {
             seed,
             actions,
@@ -536,7 +553,11 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     for i in 0..input.actions {
-        let partition_num = physical_table_ctx.partition.as_ref().unwrap().exprs.len();
+        let partition_num = physical_table_ctx
+            .partition
+            .as_ref()
+            .map(|partition| partition.exprs.len())
+            .unwrap_or_default();
         info!(
             "partition_num: {partition_num}, action: {}/{}, table: {}, logical table num: {}",
             i + 1,

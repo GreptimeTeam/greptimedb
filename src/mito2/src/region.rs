@@ -157,8 +157,8 @@ pub struct MitoRegion {
     pub(crate) provider: Provider,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
-    /// Last compaction time in millis.
-    last_compaction_millis: AtomicI64,
+    /// Last schedule compaction time in millis.
+    last_schedule_compaction_millis: AtomicI64,
     /// Provider to get current time.
     time_provider: TimeProviderRef,
     /// The topic's latest entry id since the region's last flushing.
@@ -251,15 +251,16 @@ impl MitoRegion {
         self.last_flush_millis.store(now, Ordering::Relaxed);
     }
 
-    /// Returns last compaction timestamp in millis.
-    pub(crate) fn last_compaction_millis(&self) -> i64 {
-        self.last_compaction_millis.load(Ordering::Relaxed)
+    /// Returns last schedule compaction timestamp in millis.
+    pub(crate) fn last_schedule_compaction_millis(&self) -> i64 {
+        self.last_schedule_compaction_millis.load(Ordering::Relaxed)
     }
 
-    /// Update compaction time to current time.
-    pub(crate) fn update_compaction_millis(&self) {
+    /// Update schedule compaction time to current time.
+    pub(crate) fn update_schedule_compaction_millis(&self) {
         let now = self.time_provider.current_time_millis();
-        self.last_compaction_millis.store(now, Ordering::Relaxed);
+        self.last_schedule_compaction_millis
+            .store(now, Ordering::Relaxed);
     }
 
     /// Returns the table dir.
@@ -1727,7 +1728,7 @@ mod tests {
             file_purger: crate::test_util::new_noop_file_purger(),
             provider: Provider::noop_provider(),
             last_flush_millis: Default::default(),
-            last_compaction_millis: Default::default(),
+            last_schedule_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
             written_bytes: Arc::new(AtomicU64::new(0)),
@@ -2084,7 +2085,7 @@ mod tests {
             file_purger: crate::test_util::new_noop_file_purger(),
             provider: Provider::noop_provider(),
             last_flush_millis: Default::default(),
-            last_compaction_millis: Default::default(),
+            last_schedule_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
             written_bytes: Arc::new(AtomicU64::new(0)),

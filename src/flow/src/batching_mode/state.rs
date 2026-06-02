@@ -66,12 +66,20 @@ pub struct TaskState {
 }
 impl TaskState {
     pub fn new(query_ctx: QueryContextRef, shutdown_rx: oneshot::Receiver<()>) -> Self {
+        Self::with_dirty_time_windows(query_ctx, shutdown_rx, DirtyTimeWindows::default())
+    }
+
+    pub fn with_dirty_time_windows(
+        query_ctx: QueryContextRef,
+        shutdown_rx: oneshot::Receiver<()>,
+        dirty_time_windows: DirtyTimeWindows,
+    ) -> Self {
         Self {
             query_ctx,
             last_update_time: Instant::now(),
             last_query_duration: Duration::from_secs(0),
             last_exec_time_millis: None,
-            dirty_time_windows: Default::default(),
+            dirty_time_windows,
             checkpoint_mode: CheckpointMode::FullSnapshot,
             checkpoints: Default::default(),
             incremental_disabled: false,
@@ -263,6 +271,16 @@ impl DirtyTimeWindows {
             max_filter_num_per_query,
             time_window_merge_threshold,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_filter_num_per_query(&self) -> usize {
+        self.max_filter_num_per_query
+    }
+
+    #[cfg(test)]
+    pub(crate) fn time_window_merge_threshold(&self) -> usize {
+        self.time_window_merge_threshold
     }
 }
 
@@ -681,7 +699,7 @@ impl DirtyTimeWindows {
     }
 }
 
-fn to_df_literal(value: Timestamp) -> Result<datafusion_common::ScalarValue, Error> {
+pub(crate) fn to_df_literal(value: Timestamp) -> Result<datafusion_common::ScalarValue, Error> {
     let value = Value::from(value);
     let value = value
         .try_to_scalar_value(&value.data_type())

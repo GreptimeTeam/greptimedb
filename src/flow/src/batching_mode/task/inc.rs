@@ -26,8 +26,7 @@ use snafu::ResultExt;
 use table::metadata::TableId;
 
 use crate::Error;
-use crate::batching_mode::incremental_filter::build_sink_dirty_time_window_filter_expr;
-use crate::batching_mode::state::{CheckpointMode, FilterExprInfo};
+use crate::batching_mode::state::CheckpointMode;
 use crate::batching_mode::table_creator::QueryType;
 use crate::batching_mode::task::BatchingTask;
 use crate::batching_mode::utils::{
@@ -74,7 +73,6 @@ impl BatchingTask {
     pub(super) async fn prepare_plan_for_incremental(
         &self,
         plan: &LogicalPlan,
-        dirty_filter: Option<&FilterExprInfo>,
     ) -> Result<Option<LogicalPlan>, Error> {
         let is_incremental_sql = {
             let state = self.state.read().unwrap();
@@ -152,31 +150,12 @@ impl BatchingTask {
                 return Ok(None);
             }
         };
-        let sink_schema = sink_table.table_info().meta.schema.clone();
-        let sink_dirty_filter = match build_sink_dirty_time_window_filter_expr(
-            self.config.flow_id,
-            &analysis,
-            &sink_schema,
-            dirty_filter,
-        ) {
-            Ok(filter) => filter,
-            Err(err) => {
-                warn!(
-                    "Flow {} failed to build sink dirty time window filter; \
-                     falling back to full snapshot for this round: {:?}",
-                    self.config.flow_id, err
-                );
-                self.state.write().unwrap().mark_full_snapshot();
-                return Ok(None);
-            }
-        };
-
         let rewritten_inner = match rewrite_incremental_aggregate_with_sink_merge(
             &inner_plan,
             &analysis,
             sink_table,
             &self.config.sink_table_name,
-            sink_dirty_filter,
+            None,
         )
         .await
         {

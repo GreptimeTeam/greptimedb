@@ -476,7 +476,7 @@ SINK TO out_num_cnt_show
 WITH (access_key_id = [true])
 AS SELECT number AS n1 FROM numbers_input_show where number > 10;
 
-Error: 1004(InvalidArguments), Invalid SQL, error: unknown flow option 'access_key_id', supported options: defer_on_missing_source
+Error: 1004(InvalidArguments), Invalid SQL, error: unknown flow option 'access_key_id', supported options: defer_on_missing_source, experimental_enable_incremental_read
 
 DROP FLOW filter_numbers_show;
 

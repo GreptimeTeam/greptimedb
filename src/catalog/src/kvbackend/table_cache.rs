@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use common_meta::cache::{CacheContainer, Initializer, TableInfoCacheRef, TableNameCacheRef};
+use common_meta::cache::{
+    CacheContainer, InitStrategy, Initializer, TableInfoCacheRef, TableNameCacheRef,
+};
 use common_meta::error::{Result as MetaResult, ValueNotExistSnafu};
 use common_meta::instruction::CacheIdent;
 use futures::future::BoxFuture;
@@ -38,7 +40,14 @@ pub fn new_table_cache(
 ) -> TableCache {
     let init = init_factory(table_info_cache, table_name_cache);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
+    CacheContainer::with_strategy(
+        name,
+        cache,
+        Box::new(invalidator),
+        init,
+        filter,
+        InitStrategy::VersionChecked,
+    )
 }
 
 fn init_factory(

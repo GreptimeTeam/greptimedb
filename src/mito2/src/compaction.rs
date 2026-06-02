@@ -150,6 +150,7 @@ impl CompactionScheduler {
     }
 
     /// Schedules a compaction for the region.
+    /// Returns whether a compaction is scheduled.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn schedule_compaction(
         &mut self,
@@ -161,7 +162,7 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         max_parallelism: usize,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // skip compaction if region is in staging state
         let current_state = manifest_ctx.current_state();
         if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
@@ -170,7 +171,7 @@ impl CompactionScheduler {
                 region_id, compact_options
             );
             waiter.send(Ok(0));
-            return Ok(());
+            return Ok(false);
         }
 
         if let Some(status) = self.region_status.get_mut(&region_id) {
@@ -192,7 +193,7 @@ impl CompactionScheduler {
                     );
                 }
             }
-            return Ok(());
+            return Ok(false);
         }
 
         // The region can compact directly.
@@ -209,7 +210,7 @@ impl CompactionScheduler {
             max_parallelism,
         );
 
-        let result = match self
+        match self
             .schedule_compaction_request(request, compact_options)
             .await
         {
@@ -220,14 +221,12 @@ impl CompactionScheduler {
                 status.active_compaction = Some(active_compaction);
                 self.region_status.insert(region_id, status);
 
-                Ok(())
+                self.listener.on_compaction_scheduled(region_id);
+                Ok(true)
             }
-            Ok(None) => Ok(()),
+            Ok(None) => Ok(false),
             Err(e) => Err(e),
-        };
-
-        self.listener.on_compaction_scheduled(region_id);
-        result
+        }
     }
 
     // Handle pending manual compaction request for the region.
@@ -334,6 +333,27 @@ impl CompactionScheduler {
             // And skip try to schedule next compaction task.
             return pending_ddl_requests;
         }
+        Vec::new()
+    }
+
+    pub(crate) fn is_compacting(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .map(|status| status.active_compaction.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Schedules next compaction upon a finished compaction.
+    /// Returns whether the compaction is scheduled.
+    pub(crate) async fn schedule_next_compaction(
+        &mut self,
+        region_id: RegionId,
+        manifest_ctx: &ManifestContextRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
+    ) -> bool {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return false;
+        };
 
         // We should always try to compact the region until picker returns None.
         let request = status.new_compaction_request(
@@ -364,20 +384,21 @@ impl CompactionScheduler {
                     "Successfully scheduled next compaction for region id: {}",
                     region_id
                 );
+                true
             }
             Ok(None) => {
                 // No further compaction tasks can be scheduled; cleanup the `CompactionStatus` for this region.
                 // All DDL requests and pending compaction requests have already been processed.
                 // Safe to remove the region from status tracking.
                 self.region_status.remove(&region_id);
+                false
             }
             Err(e) => {
                 error!(e; "Failed to schedule next compaction for region {}", region_id);
                 self.remove_region_on_failure(region_id, Arc::new(e));
+                false
             }
         }
-
-        Vec::new()
     }
 
     /// Notifies the scheduler that the compaction job is cancelled cooperatively.
@@ -1435,7 +1456,7 @@ mod tests {
         let manifest_ctx = env
             .mock_manifest_context(version_control.current().version.metadata.clone())
             .await;
-        scheduler
+        let scheduled = scheduler
             .schedule_compaction(
                 builder.region_id(),
                 compact_request::Options::Regular(Default::default()),
@@ -1448,6 +1469,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(!scheduled);
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
         assert!(scheduler.region_status.is_empty());
@@ -1456,7 +1478,7 @@ mod tests {
         let version_control = Arc::new(builder.push_l0_file(0, 1000).build());
         let (output_tx, output_rx) = oneshot::channel();
         let waiter = OptionOutputTx::from(output_tx);
-        scheduler
+        let scheduled = scheduler
             .schedule_compaction(
                 builder.region_id(),
                 compact_request::Options::Regular(Default::default()),
@@ -1469,9 +1491,65 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(!scheduled);
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
         assert!(scheduler.region_status.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_schedule_compaction_returns_true_when_task_scheduled() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let mut builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let end = 1000 * 1000;
+        // Five overlapping L0 files are enough for the regular picker to create a task.
+        let version_control = Arc::new(
+            builder
+                .push_l0_file(0, end)
+                .push_l0_file(10, end)
+                .push_l0_file(50, end)
+                .push_l0_file(80, end)
+                .push_l0_file(90, end)
+                .build(),
+        );
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+        schema_metadata_manager
+            .register_region_table_info(
+                region_id.table_id(),
+                "test_table",
+                "test_catalog",
+                "test_schema",
+                None,
+                kv_backend,
+            )
+            .await;
+
+        let scheduled = scheduler
+            .schedule_compaction(
+                region_id,
+                Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::none(),
+                &manifest_ctx,
+                schema_metadata_manager,
+                1,
+            )
+            .await
+            .unwrap();
+
+        // The boolean result is what the worker uses to decide whether to update
+        // last_schedule_compaction_millis.
+        assert!(scheduled);
+        assert_eq!(1, job_scheduler.num_jobs());
+        assert!(scheduler.region_status.contains_key(&region_id));
     }
 
     #[tokio::test]
@@ -1511,7 +1589,7 @@ mod tests {
         let manifest_ctx = env
             .mock_manifest_context(version_control.current().version.metadata.clone())
             .await;
-        scheduler
+        let scheduled = scheduler
             .schedule_compaction(
                 region_id,
                 compact_request::Options::Regular(Default::default()),
@@ -1525,6 +1603,7 @@ mod tests {
             .await
             .unwrap();
         // Should schedule 1 compaction.
+        assert!(scheduled);
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(1, job_scheduler.num_jobs());
         let data = version_control.current();
@@ -1543,7 +1622,7 @@ mod tests {
         );
         // The task is pending.
         let (tx, _rx) = oneshot::channel();
-        scheduler
+        let scheduled = scheduler
             .schedule_compaction(
                 region_id,
                 compact_request::Options::Regular(Default::default()),
@@ -1556,6 +1635,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(!scheduled);
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(1, job_scheduler.num_jobs());
         assert!(
@@ -1571,6 +1651,10 @@ mod tests {
         scheduler
             .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
             .await;
+        let scheduled = scheduler
+            .schedule_next_compaction(region_id, &manifest_ctx, schema_metadata_manager.clone())
+            .await;
+        assert!(scheduled);
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(2, job_scheduler.num_jobs());
 
@@ -1583,7 +1667,7 @@ mod tests {
         );
         let (tx, _rx) = oneshot::channel();
         // The task is pending.
-        scheduler
+        let scheduled = scheduler
             .schedule_compaction(
                 region_id,
                 compact_request::Options::Regular(Default::default()),
@@ -1596,6 +1680,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(!scheduled);
         assert_eq!(2, job_scheduler.num_jobs());
         assert!(
             !scheduler
@@ -2329,6 +2414,15 @@ mod tests {
             .await;
 
         assert!(pending_ddls.is_empty());
+        assert!(scheduler.region_status.contains_key(&region_id));
+
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+        // With no compactable files, next scheduling returns false and removes
+        // the status without creating a background task.
+        let scheduled = scheduler
+            .schedule_next_compaction(region_id, &manifest_ctx, schema_metadata_manager)
+            .await;
+        assert!(!scheduled);
         assert!(!scheduler.region_status.contains_key(&region_id));
     }
 
@@ -2371,6 +2465,14 @@ mod tests {
             .await;
 
         assert!(pending_ddls.is_empty());
+        assert!(scheduler.region_status.contains_key(&region_id));
+
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+        // The failing scheduler simulates a submit error; callers must see false.
+        let scheduled = scheduler
+            .schedule_next_compaction(region_id, &manifest_ctx, schema_metadata_manager)
+            .await;
+        assert!(!scheduled);
         assert!(!scheduler.region_status.contains_key(&region_id));
     }
 
