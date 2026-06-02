@@ -90,7 +90,7 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
-        plugins::start_flownode_plugins(self.flownode.flow_engine().plugins().clone())
+        plugins::start_flownode_plugins(&self.flownode)
             .await
             .context(StartFlownodeSnafu)?;
 

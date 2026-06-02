@@ -79,7 +79,7 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
-        plugins::start_datanode_plugins(self.datanode.plugins())
+        plugins::start_datanode_plugins(&self.datanode)
             .await
             .context(StartDatanodeSnafu)?;
 

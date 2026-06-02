@@ -68,7 +68,7 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
-        plugins::start_metasrv_plugins(self.instance.plugins())
+        plugins::start_metasrv_plugins(&self.instance)
             .await
             .context(StartMetaServerSnafu)?;
 

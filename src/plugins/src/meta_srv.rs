@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_base::Plugins;
+use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::error::Result;
 use meta_srv::metasrv::MetasrvOptions;
 
@@ -27,6 +28,6 @@ pub async fn setup_metasrv_plugins(
     Ok(())
 }
 
-pub async fn start_metasrv_plugins(_plugins: Plugins) -> Result<()> {
+pub async fn start_metasrv_plugins(_instance: &MetasrvInstance) -> Result<()> {
     Ok(())
 }

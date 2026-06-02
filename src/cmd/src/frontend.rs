@@ -95,8 +95,7 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
-        let plugins = self.frontend.instance.plugins().clone();
-        plugins::start_frontend_plugins(plugins)
+        plugins::start_frontend_plugins(&self.frontend.instance)
             .await
             .context(error::StartFrontendSnafu)?;
 
