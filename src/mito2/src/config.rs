@@ -147,7 +147,8 @@ pub struct MitoConfig {
     pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
-    /// Memory limit for table scans across all queries. Setting it to 0 disables the limit.
+    /// Memory limit for table scans across all queries.
+    /// Setting it to 0 or "unlimited" disables the limit.
     /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
     pub scan_memory_limit: MemoryLimit,
     /// Behavior when scan memory tracking cannot acquire memory from the budget.
