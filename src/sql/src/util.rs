@@ -213,7 +213,9 @@ fn extract_tables_from_hybrid_cte_query(query: &Query, sql_names: &mut HashSet<O
             .collect();
         remove_cte_names(sql_names, &cte_names);
 
-        cte_names.clear();
+        if !hybrid_cte.recursive {
+            cte_names.clear();
+        }
         for cte in &hybrid_cte.cte_tables {
             let cte_name = ParserContext::canonicalize_identifier(cte.name.clone()).value;
             let mut cte_query_names = HashSet::new();
@@ -222,9 +224,6 @@ fn extract_tables_from_hybrid_cte_query(query: &Query, sql_names: &mut HashSet<O
                     extract_tables_from_sql_query(cte_query, &mut cte_query_names)
                 }
                 CteContent::Tql(tql) => extract_tables_from_tql(tql, &mut cte_query_names),
-            }
-            if hybrid_cte.recursive {
-                cte_names.insert(cte_name.clone());
             }
             remove_cte_names(&mut cte_query_names, &cte_names);
             sql_names.extend(cte_query_names);
@@ -353,13 +352,17 @@ pub fn location_to_index(sql: &str, location: &sqlparser::tokenizer::Location) -
 fn extract_tables_from_sql_query(query: &sqlparser::ast::Query, names: &mut HashSet<ObjectName>) {
     let mut cte_names = HashSet::new();
     if let Some(with) = &query.with {
+        if with.recursive {
+            cte_names.extend(
+                with.cte_tables.iter().map(|cte| {
+                    ParserContext::canonicalize_identifier(cte.alias.name.clone()).value
+                }),
+            );
+        }
         for cte in &with.cte_tables {
             let cte_name = ParserContext::canonicalize_identifier(cte.alias.name.clone()).value;
             let mut cte_query_names = HashSet::new();
             extract_tables_from_sql_query(&cte.query, &mut cte_query_names);
-            if with.recursive {
-                cte_names.insert(cte_name.clone());
-            }
             remove_cte_names(&mut cte_query_names, &cte_names);
             names.extend(cte_query_names);
             if !with.recursive {
@@ -585,6 +588,21 @@ WITH first_cte AS (
 SELECT * FROM second_cte;
 "#,
                 vec!["physical_source".to_string()],
+            ),
+            (
+                r#"
+WITH RECURSIVE first_cte AS (
+    SELECT * FROM second_cte
+    UNION ALL
+    SELECT * FROM physical_source
+), second_cte AS (
+    SELECT * FROM first_cte
+    UNION ALL
+    SELECT * FROM other_source
+)
+SELECT * FROM first_cte;
+"#,
+                vec!["other_source".to_string(), "physical_source".to_string()],
             ),
         ];
 
