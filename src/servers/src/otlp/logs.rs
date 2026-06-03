@@ -668,7 +668,7 @@ fn align_rows_with_existing_schema(
 fn coerce_log_value_data(
     value_data: Option<ValueData>,
     target_type: ColumnDataType,
-    semantic_type: SemanticType,
+    _semantic_type: SemanticType,
     request_type: ColumnDataType,
     column_name: &str,
     table_name: &str,
@@ -687,7 +687,7 @@ fn coerce_log_value_data(
         return align_timestamp_value(value_data, target_unit, column_name, table_name).map(Some);
     }
 
-    if target_type == ColumnDataType::String && semantic_type == SemanticType::Tag {
+    if target_type == ColumnDataType::String {
         if let Ok(value_data) =
             coerce_value_data(&Some(value_data.clone()), target_type, request_type)
         {
@@ -1152,6 +1152,37 @@ mod tests {
         assert_eq!(
             rows.schema[host_idx].semantic_type,
             SemanticType::Tag as i32
+        );
+        assert_eq!(
+            rows.rows[0].values[host_idx].value_data,
+            Some(ValueData::StringValue("42".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_existing_string_field_stringifies_selected_scalar_values() {
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("host", ConcreteDataType::string_datatype()),
+            ],
+            &[],
+        );
+        let rows = parse_with_select(
+            request_with_log_attrs(vec![kv("host", OtlpValue::IntValue(42))]),
+            "host",
+            Some(&existing),
+        )
+        .unwrap();
+        let host_idx = column_index(&rows, "host");
+
+        assert_eq!(
+            rows.schema[host_idx].datatype,
+            ColumnDataType::String as i32
+        );
+        assert_eq!(
+            rows.schema[host_idx].semantic_type,
+            SemanticType::Field as i32
         );
         assert_eq!(
             rows.rows[0].values[host_idx].value_data,

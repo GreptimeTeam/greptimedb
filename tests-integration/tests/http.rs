@@ -6507,6 +6507,45 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     }
 
     {
+        let existing_field_table_name = "otlp_logs_existing_string_field";
+        let res = execute_sql(
+            &client,
+            &format!(
+                "create table {existing_field_table_name} (\"timestamp\" timestamp(3) time index, host string, body string)"
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        let req = make_log_request(vec![make_log_record(
+            "00000000000000000000000000000004",
+            "0000000000000004",
+            1_736_413_568_497_700_000,
+            "existing string field",
+            vec![make_int_attr("host", 42)],
+        )]);
+        let res = send_log_req(&client, existing_field_table_name, Some("host"), req, false).await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        validate_data(
+            "otlp_logs_existing_string_field_rows",
+            &client,
+            &format!(
+                "select host, body, \"timestamp\" from {existing_field_table_name} order by body;"
+            ),
+            r#"[["42","existing string field",1736413568497]]"#,
+        )
+        .await;
+        validate_data(
+            "otlp_logs_existing_string_field_semantic_type",
+            &client,
+            "select column_name, semantic_type from information_schema.columns where table_name = 'otlp_logs_existing_string_field' and column_name = 'host';",
+            r#"[["host","FIELD"]]"#,
+        )
+        .await;
+    }
+
+    {
         let missing_pk_table_name = "otlp_logs_missing_pk";
         let res = execute_sql(
             &client,
