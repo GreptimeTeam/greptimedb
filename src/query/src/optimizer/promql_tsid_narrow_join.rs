@@ -82,20 +82,19 @@ impl PromqlTsidNarrowJoin {
     }
 
     fn is_promql_value_tsid_time_schema(schema: &SchemaRef) -> bool {
-        let mut has_value = false;
+        let mut value_columns = 0;
         let mut has_tsid = false;
         let mut has_time = false;
 
         for field in schema.fields() {
             match field.name().as_str() {
-                "greptime_value" => has_value = true,
                 DATA_SCHEMA_TSID_COLUMN_NAME => has_tsid = true,
                 _ if matches!(field.data_type(), DataType::Timestamp(_, _)) => has_time = true,
-                _ => return false,
+                _ => value_columns += 1,
             }
         }
 
-        has_value && has_tsid && has_time
+        value_columns == 1 && has_tsid && has_time
     }
 
     fn joins_on_tsid_and_time(hash_join: &HashJoinExec) -> bool {
@@ -212,6 +211,60 @@ mod tests {
                     "projection=[greptime_value@0, greptime_value@3, host@4, __tsid@5, greptime_timestamp@6]"
                 )
         );
+    }
+
+    #[test]
+    fn chooses_collect_left_for_computed_narrow_value_column() {
+        let left = Arc::new(EmptyExec::new(Arc::new(Schema::new(vec![
+            Field::new("prom_rate(greptime_value)", DataType::Float64, true),
+            Field::new(DATA_SCHEMA_TSID_COLUMN_NAME, DataType::UInt64, false),
+            Field::new(
+                "greptime_timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ])))) as Arc<dyn ExecutionPlan>;
+        let right = Arc::new(EmptyExec::new(Arc::new(Schema::new(vec![
+            Field::new("greptime_value", DataType::Float64, true),
+            Field::new("host", DataType::Utf8, true),
+            Field::new(DATA_SCHEMA_TSID_COLUMN_NAME, DataType::UInt64, false),
+            Field::new(
+                "greptime_timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ])))) as Arc<dyn ExecutionPlan>;
+        let on = vec![
+            (
+                Arc::new(Column::new(DATA_SCHEMA_TSID_COLUMN_NAME, 1)) as Arc<dyn PhysicalExpr>,
+                Arc::new(Column::new(DATA_SCHEMA_TSID_COLUMN_NAME, 2)) as Arc<dyn PhysicalExpr>,
+            ),
+            (
+                Arc::new(Column::new("greptime_timestamp", 2)) as Arc<dyn PhysicalExpr>,
+                Arc::new(Column::new("greptime_timestamp", 3)) as Arc<dyn PhysicalExpr>,
+            ),
+        ];
+        let join = Arc::new(
+            HashJoinExec::try_new(
+                left,
+                right,
+                on,
+                None,
+                &JoinType::Inner,
+                Some(vec![0, 3, 4, 5, 6]),
+                PartitionMode::Partitioned,
+                NullEquality::NullEqualsNull,
+                false,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        let optimized = PromqlTsidNarrowJoin
+            .optimize(join, &ConfigOptions::default())
+            .unwrap();
+        let optimized_join = optimized.as_any().downcast_ref::<HashJoinExec>().unwrap();
+
+        assert_eq!(optimized_join.partition_mode(), &PartitionMode::CollectLeft);
     }
 
     #[test]

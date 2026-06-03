@@ -1115,6 +1115,11 @@ impl PromPlanner {
             self.create_function_expr(func, args.literals.clone(), query_engine_state)?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
+        if let Some(tsid_col) =
+            Self::optional_tsid_projection(input.schema(), None, self.ctx.use_tsid)
+        {
+            func_exprs.push(tsid_col);
+        }
 
         let builder = LogicalPlanBuilder::from(input)
             .project(func_exprs)
@@ -2363,6 +2368,7 @@ impl PromPlanner {
             }
 
             "label_join" => {
+                self.ctx.use_tsid = false;
                 let (concat_expr, dst_label) = Self::build_concat_labels_expr(
                     &mut other_input_exprs,
                     &self.ctx,
@@ -2386,6 +2392,7 @@ impl PromPlanner {
                 ScalarFunc::GeneratedExpr
             }
             "label_replace" => {
+                self.ctx.use_tsid = false;
                 if let Some((replace_expr, dst_label)) = self
                     .build_regexp_replace_label_expr(&mut other_input_exprs, query_engine_state)?
                 {
@@ -5158,6 +5165,37 @@ mod test {
     #[tokio::test]
     async fn ignoring_absent_label_keeps_tsid_binary_join() {
         let eval_stmt = build_eval_stmt("some_metric / ignoring(missing) some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("some_metric.__tsid = some_alt_metric.__tsid"),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+        assert!(!plan_str.contains("tag_1 ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn range_function_keeps_tsid_for_absent_ignoring_binary_join() {
+        let eval_stmt =
+            build_eval_stmt("rate(some_metric[5m]) / ignoring(missing) some_alt_metric");
 
         let table_provider = build_test_table_provider_with_tsid(
             &[
