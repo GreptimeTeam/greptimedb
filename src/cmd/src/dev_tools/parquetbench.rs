@@ -122,6 +122,8 @@ struct ParquetScanConfig {
 struct IterationStats {
     rows: usize,
     record_batches: usize,
+    /// Number of columns in the output record batches.
+    columns: usize,
     elapsed: Duration,
 }
 
@@ -342,9 +344,10 @@ impl ParquetbenchCommand {
             total_batches_all += stats.record_batches;
 
             println!(
-                "  Iteration {}: {} rows, {} record batches in {:?} ({}/s, {}/s)",
+                "  Iteration {}: {} rows, {} columns, {} record batches in {:?} ({}/s, {}/s)",
                 iteration + 1,
                 stats.rows,
+                stats.columns,
                 stats.record_batches,
                 stats.elapsed,
                 format_rate(stats.rows as f64 / stats.elapsed.as_secs_f64()),
@@ -496,6 +499,7 @@ async fn run_direct_iteration(
         })? {
             stats.rows += batch.num_rows();
             stats.record_batches += 1;
+            stats.columns = batch.num_columns();
         }
     }
     stats.elapsed = start.elapsed();
@@ -562,6 +566,7 @@ async fn run_flat_prune_iteration(
         })? {
             stats.rows += batch.num_rows();
             stats.record_batches += 1;
+            stats.columns = batch.num_columns();
         }
     }
 
