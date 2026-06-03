@@ -96,7 +96,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE Hash\(\[job@1,\sts@2\],.* Hash([job@1, ts@2],REDACTED
--- SQLNESS REPLACE Hash\(\[job@2,\sts@4\],.* Hash([job@2, ts@4],REDACTED
+-- SQLNESS REPLACE Hash\(\[job@1,\sts@3\],.* Hash([job@1, ts@3],REDACTED
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
