@@ -3496,15 +3496,25 @@ impl PromPlanner {
 
     fn binary_join_key_columns(
         &self,
+        left_schema: &DFSchemaRef,
+        right_schema: &DFSchemaRef,
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
         only_join_time_index: bool,
         modifier: &Option<BinModifier>,
     ) -> (BTreeSet<String>, BTreeSet<String>) {
+        let has_tsid = |schema: &DFSchemaRef| {
+            schema
+                .fields()
+                .iter()
+                .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+        };
         let use_tsid_join = !only_join_time_index
             && self.binary_modifier_preserves_tsid_join_key(left_context, right_context, modifier)
             && left_context.use_tsid
-            && right_context.use_tsid;
+            && right_context.use_tsid
+            && has_tsid(left_schema)
+            && has_tsid(right_schema);
 
         let (mut left_tag_columns, mut right_tag_columns) = if use_tsid_join {
             (
@@ -3602,6 +3612,8 @@ impl PromPlanner {
         right_context: &PromPlannerContext,
     ) -> Result<LogicalPlan> {
         let (mut left_tag_columns, mut right_tag_columns) = self.binary_join_key_columns(
+            left.schema(),
+            right.schema(),
             left_context,
             right_context,
             only_join_time_index,
@@ -5002,6 +5014,42 @@ mod test {
             !plan_str.contains("some_metric.tag_0 = some_alt_metric.tag_0"),
             "{plan_str}"
         );
+    }
+
+    #[tokio::test]
+    async fn timestamp_binary_join_falls_back_when_tsid_is_projected_out() {
+        for query in [
+            "timestamp(some_metric) / some_metric",
+            "some_metric / timestamp(some_metric)",
+        ] {
+            let eval_stmt = build_eval_stmt(query);
+
+            let table_provider = build_test_table_provider_with_tsid(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                1,
+                1,
+            )
+            .await;
+            let plan =
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                    .await
+                    .unwrap();
+
+            let plan_str = plan.display_indent_schema().to_string();
+            assert!(!plan_str.contains("__tsid ="), "{query}: {plan_str}");
+            assert!(
+                plan_str.contains("lhs.tag_0 = rhs.tag_0"),
+                "{query}: {plan_str}"
+            );
+            assert!(
+                !plan
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME),
+                "{query}: {plan_str}"
+            );
+        }
     }
 
     #[tokio::test]
