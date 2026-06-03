@@ -205,27 +205,34 @@ pub fn extract_tables_from_query(query: &SqlOrTql) -> impl Iterator<Item = Objec
 }
 
 fn extract_tables_from_hybrid_cte_query(query: &Query, sql_names: &mut HashSet<ObjectName>) {
-    let mut tql_names = HashSet::new();
-    let mut cte_names: HashSet<String> = HashSet::new();
     if let Some(hybrid_cte) = &query.hybrid_cte {
+        let mut cte_names: HashSet<String> = hybrid_cte
+            .cte_tables
+            .iter()
+            .map(|cte| ParserContext::canonicalize_identifier(cte.name.clone()).value)
+            .collect();
+        remove_cte_names(sql_names, &cte_names);
+
+        cte_names.clear();
         for cte in &hybrid_cte.cte_tables {
-            cte_names.insert(ParserContext::canonicalize_identifier(cte.name.clone()).value);
+            let cte_name = ParserContext::canonicalize_identifier(cte.name.clone()).value;
+            let mut cte_query_names = HashSet::new();
             match &cte.content {
-                CteContent::Sql(query) => extract_tables_from_sql_query(query, sql_names),
-                CteContent::Tql(tql) => extract_tables_from_tql(tql, &mut tql_names),
+                CteContent::Sql(cte_query) => {
+                    extract_tables_from_sql_query(cte_query, &mut cte_query_names)
+                }
+                CteContent::Tql(tql) => extract_tables_from_tql(tql, &mut cte_query_names),
+            }
+            if hybrid_cte.recursive {
+                cte_names.insert(cte_name.clone());
+            }
+            remove_cte_names(&mut cte_query_names, &cte_names);
+            sql_names.extend(cte_query_names);
+            if !hybrid_cte.recursive {
+                cte_names.insert(cte_name);
             }
         }
     }
-
-    if let Some(with) = &query.inner.with {
-        for cte in &with.cte_tables {
-            cte_names.insert(ParserContext::canonicalize_identifier(cte.alias.name.clone()).value);
-        }
-    }
-
-    remove_cte_names(sql_names, &cte_names);
-
-    sql_names.extend(tql_names);
 }
 
 fn remove_cte_names(names: &mut HashSet<ObjectName>, cte_names: &HashSet<String>) {
@@ -347,13 +354,24 @@ fn extract_tables_from_sql_query(query: &sqlparser::ast::Query, names: &mut Hash
     let mut cte_names = HashSet::new();
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
-            cte_names.insert(ParserContext::canonicalize_identifier(cte.alias.name.clone()).value);
-            extract_tables_from_sql_query(&cte.query, names);
+            let cte_name = ParserContext::canonicalize_identifier(cte.alias.name.clone()).value;
+            let mut cte_query_names = HashSet::new();
+            extract_tables_from_sql_query(&cte.query, &mut cte_query_names);
+            if with.recursive {
+                cte_names.insert(cte_name.clone());
+            }
+            remove_cte_names(&mut cte_query_names, &cte_names);
+            names.extend(cte_query_names);
+            if !with.recursive {
+                cte_names.insert(cte_name);
+            }
         }
     }
 
-    extract_tables_from_set_expr(&query.body, names);
-    remove_cte_names(names, &cte_names);
+    let mut body_names = HashSet::new();
+    extract_tables_from_set_expr(&query.body, &mut body_names);
+    remove_cte_names(&mut body_names, &cte_names);
+    names.extend(body_names);
 }
 
 /// Helper function for [extract_tables_from_query].
@@ -543,6 +561,53 @@ LEFT JOIN (
             ],
             tables
         );
+    }
+
+    #[test]
+    fn test_extract_tables_from_sql_query_with_cte_scopes() {
+        let testcases = vec![
+            (
+                r#"
+WITH source AS (
+    SELECT * FROM source
+)
+SELECT * FROM source;
+"#,
+                vec!["source".to_string()],
+            ),
+            (
+                r#"
+WITH first_cte AS (
+    SELECT * FROM physical_source
+), second_cte AS (
+    SELECT * FROM first_cte
+)
+SELECT * FROM second_cte;
+"#,
+                vec!["physical_source".to_string()],
+            ),
+        ];
+
+        for (sql, expected_tables) in testcases {
+            let mut stmts = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let Statement::Query(query) = stmts.pop().unwrap() else {
+                unreachable!()
+            };
+
+            let mut tables = HashSet::new();
+            extract_tables_from_sql_query(&query.inner, &mut tables);
+            let mut tables = tables
+                .into_iter()
+                .map(|table| format_raw_object_name(&table))
+                .collect_vec();
+            tables.sort();
+            assert_eq!(expected_tables, tables);
+        }
     }
 
     #[test]
