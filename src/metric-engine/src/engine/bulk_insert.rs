@@ -74,6 +74,8 @@ impl MetricEngineInner {
         region_id: RegionId,
         mut request: RegionBulkInsertsRequest,
     ) -> Result<AffectedRows> {
+        // Simply set the aligned schema to the data region schema version to avoid filling missing columns
+        // because that schema should be constant and callers have ensured request has the same schema.
         request.aligned_schema_version = Some(self.physical_schema_version(region_id).await?);
         self.data_region
             .write_data(region_id, RegionRequest::BulkInserts(request))
