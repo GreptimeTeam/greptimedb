@@ -959,7 +959,7 @@ impl BatchingTask {
         let (expire_lower_bound, expire_upper_bound) =
             match (expire_time_window_bound, &self.config.query_type) {
                 (Some((Some(l), Some(u))), QueryType::Sql) => (l, u),
-                (None, QueryType::Sql) => {
+                (None, QueryType::Sql) if self.config.flow_eval_interval.is_none() => {
                     // if it's sql query and no time window lower/upper bound is found, just return the original query(with auto columns)
                     // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
                     debug!(
@@ -980,7 +980,8 @@ impl BatchingTask {
                 }
                 _ => {
                     // Clean dirty windows for full-query/non-scoped paths,
-                    // such as TQL, that cannot use a time-window filter.
+                    // such as TQL or evaluation-interval SQL without a recognized
+                    // time-window expression, that cannot use a time-window filter.
                     let (_, dirty_windows_to_restore) = self.drain_dirty_windows_signal();
 
                     let plan_info = self
