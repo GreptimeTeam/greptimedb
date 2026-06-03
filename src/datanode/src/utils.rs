@@ -71,12 +71,15 @@ fn region_pruned_entry_ids(
 ) -> HashMap<RegionId, u64> {
     topic_regions
         .iter()
-        .flat_map(|(topic, region_ids)| match topic_name_values.get(topic) {
-            Some(value) => region_ids
-                .iter()
-                .map(|region_id| (*region_id, value.pruned_entry_id))
-                .collect(),
-            None => Vec::new(),
+        .flat_map(|(topic, region_ids)| {
+            topic_name_values
+                .get(topic)
+                .into_iter()
+                .flat_map(move |value| {
+                    region_ids
+                        .iter()
+                        .map(move |region_id| (*region_id, value.pruned_entry_id))
+                })
         })
         .collect()
 }
