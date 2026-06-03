@@ -3500,10 +3500,7 @@ impl PromPlanner {
         modifier: &Option<BinModifier>,
     ) -> (BTreeSet<String>, BTreeSet<String>) {
         let use_tsid_join = !only_join_time_index
-            && modifier.as_ref().is_none_or(|modifier| {
-                modifier.matching.is_none()
-                    && matches!(modifier.card, VectorMatchCardinality::OneToOne)
-            })
+            && self.binary_modifier_preserves_tsid_join_key(left, right, modifier)
             && Self::plan_has_tsid_column(left)
             && Self::plan_has_tsid_column(right);
 
@@ -3546,6 +3543,44 @@ impl PromPlanner {
         }
 
         (left_tag_columns, right_tag_columns)
+    }
+
+    fn binary_modifier_preserves_tsid_join_key(
+        &self,
+        left: &LogicalPlan,
+        right: &LogicalPlan,
+        modifier: &Option<BinModifier>,
+    ) -> bool {
+        let Some(modifier) = modifier else {
+            return true;
+        };
+
+        if !matches!(modifier.card, VectorMatchCardinality::OneToOne) {
+            return false;
+        }
+
+        match &modifier.matching {
+            None => true,
+            Some(LabelModifier::Exclude(ignoring)) => ignoring.labels.iter().all(|label| {
+                !left.schema().has_column_with_unqualified_name(label)
+                    && !right.schema().has_column_with_unqualified_name(label)
+            }),
+            Some(LabelModifier::Include(on)) => {
+                let on_labels = on.labels.iter().cloned().collect::<BTreeSet<_>>();
+                let full_label_set = self
+                    .ctx
+                    .tag_columns
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+
+                on_labels == full_label_set
+                    && on_labels.iter().all(|label| {
+                        left.schema().has_column_with_unqualified_name(label)
+                            && right.schema().has_column_with_unqualified_name(label)
+                    })
+            }
+        }
     }
 
     /// Build a inner join on time index column and tag columns to concat two logical plans.
@@ -5118,6 +5153,96 @@ mod test {
             plan_str.contains("some_metric.tag_1 = some_alt_metric.tag_1"),
             "{plan_str}"
         );
+    }
+
+    #[tokio::test]
+    async fn ignoring_absent_label_keeps_tsid_binary_join() {
+        let eval_stmt = build_eval_stmt("some_metric / ignoring(missing) some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("some_metric.__tsid = some_alt_metric.__tsid"),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+        assert!(!plan_str.contains("tag_1 ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn on_full_label_set_keeps_tsid_binary_join() {
+        let eval_stmt = build_eval_stmt("some_metric / on(tag_0, tag_1) some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("some_metric.__tsid = some_alt_metric.__tsid"),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+        assert!(!plan_str.contains("tag_1 ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn on_partial_label_set_disables_tsid_binary_join() {
+        let eval_stmt = build_eval_stmt("some_metric / on(tag_0) some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(!plan_str.contains("__tsid ="), "{plan_str}");
+        assert!(
+            plan_str.contains("some_metric.tag_0 = some_alt_metric.tag_0"),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains("tag_1 ="), "{plan_str}");
     }
 
     #[tokio::test]
