@@ -865,11 +865,19 @@ impl BatchingTask {
                 }
                 // no new data, sleep for some time before checking for new data
                 Ok(None) => {
-                    debug!(
-                        "Flow id = {:?} found no new data, sleep for {:?} then continue",
-                        self.config.flow_id, min_refresh
-                    );
-                    tokio::time::sleep(min_refresh).await;
+                    if let Some(eval_interval) = &mut interval {
+                        debug!(
+                            "Flow id = {:?} found no new data, wait for eval interval tick then continue",
+                            self.config.flow_id
+                        );
+                        eval_interval.tick().await;
+                    } else {
+                        debug!(
+                            "Flow id = {:?} found no new data, sleep for {:?} then continue",
+                            self.config.flow_id, min_refresh
+                        );
+                        tokio::time::sleep(min_refresh).await;
+                    }
                     continue;
                 }
                 // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
@@ -966,6 +974,27 @@ impl BatchingTask {
                         "Flow id = {:?}, no time window, using the same query",
                         self.config.flow_id
                     );
+                    if self.config.flow_eval_interval.is_some()
+                        && self.config.time_window_expr.is_none()
+                    {
+                        // Evaluation-interval SQL without a recognized time-window expression is
+                        // an unscoped full-query flow. Its cadence is controlled by the interval,
+                        // not by source dirty-window signals, so each interval tick should execute
+                        // the original query even when no dirty signal has arrived.
+                        let (_, dirty_windows_to_restore) = self.drain_dirty_windows_signal();
+                        let plan_info = self
+                            .gen_unfiltered_plan_info(
+                                engine,
+                                query_ctx,
+                                sink_table_schema.clone(),
+                                primary_key_indices,
+                                allow_partial,
+                                dirty_windows_to_restore,
+                                None,
+                            )
+                            .await?;
+                        return Ok(Some(plan_info));
+                    }
                     // clean dirty time window too, this could be from create flow's check_execute
                     return self
                         .gen_unfiltered_plan_info_if_dirty(

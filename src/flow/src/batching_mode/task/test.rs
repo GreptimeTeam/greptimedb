@@ -975,6 +975,38 @@ async fn test_non_scoped_path_generates_plan_with_empty_dirty_signal() {
 }
 
 #[tokio::test]
+async fn test_no_time_window_sql_with_eval_interval_generates_plan_without_dirty_signal() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "missing_sink",
+    )
+    .await;
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .flow_eval_interval = Some(Duration::from_secs(60));
+    task.state.write().unwrap().dirty_time_windows.clean();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), false).with_time_index(true),
+    ]));
+
+    let plan = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, None)
+        .await
+        .unwrap()
+        .expect(
+            "eval-interval SQL without a time-window expr should run by interval, not dirty signal",
+        );
+
+    assert!(plan.can_advance_checkpoints);
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+}
+
+#[tokio::test]
 async fn test_executed_query_failure_restores_scoped_dirty_windows_for_flush_path() {
     let (task, plan) = new_test_task_and_plan_with_missing_sink().await;
     {

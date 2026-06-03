@@ -27,7 +27,7 @@ use serde::Serialize;
 use snafu::ensure;
 use sqlparser::ast::{
     Array, Expr, Ident, ObjectName, ObjectNamePart, SetExpr, SqlOption, StructField, TableFactor,
-    Value, ValueWithSpan,
+    TableWithJoins, Value, ValueWithSpan,
 };
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -195,7 +195,7 @@ pub fn extract_tables_from_query(query: &SqlOrTql) -> impl Iterator<Item = Objec
 
     match query {
         SqlOrTql::Sql(query, _) => {
-            extract_tables_from_set_expr(&query.inner.body, &mut names);
+            extract_tables_from_sql_query(&query.inner, &mut names);
             extract_tables_from_hybrid_cte_query(query, &mut names);
         }
         SqlOrTql::Tql(tql, _) => extract_tables_from_tql(tql, &mut names),
@@ -210,8 +210,9 @@ fn extract_tables_from_hybrid_cte_query(query: &Query, sql_names: &mut HashSet<O
     if let Some(hybrid_cte) = &query.hybrid_cte {
         for cte in &hybrid_cte.cte_tables {
             cte_names.insert(ParserContext::canonicalize_identifier(cte.name.clone()).value);
-            if let CteContent::Tql(tql) = &cte.content {
-                extract_tables_from_tql(tql, &mut tql_names);
+            match &cte.content {
+                CteContent::Sql(query) => extract_tables_from_sql_query(query, sql_names),
+                CteContent::Tql(tql) => extract_tables_from_tql(tql, &mut tql_names),
             }
         }
     }
@@ -341,19 +342,32 @@ pub fn location_to_index(sql: &str, location: &sqlparser::tokenizer::Location) -
 
 /// Helper function for [extract_tables_from_query].
 ///
+/// Handle [sqlparser::ast::Query].
+fn extract_tables_from_sql_query(query: &sqlparser::ast::Query, names: &mut HashSet<ObjectName>) {
+    let mut cte_names = HashSet::new();
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            cte_names.insert(ParserContext::canonicalize_identifier(cte.alias.name.clone()).value);
+            extract_tables_from_sql_query(&cte.query, names);
+        }
+    }
+
+    extract_tables_from_set_expr(&query.body, names);
+    remove_cte_names(names, &cte_names);
+}
+
+/// Helper function for [extract_tables_from_query].
+///
 /// Handle [SetExpr].
 fn extract_tables_from_set_expr(set_expr: &SetExpr, names: &mut HashSet<ObjectName>) {
     match set_expr {
         SetExpr::Select(select) => {
             for from in &select.from {
-                table_factor_to_object_name(&from.relation, names);
-                for join in &from.joins {
-                    table_factor_to_object_name(&join.relation, names);
-                }
+                extract_tables_from_table_with_joins(from, names);
             }
         }
         SetExpr::Query(query) => {
-            extract_tables_from_set_expr(&query.body, names);
+            extract_tables_from_sql_query(query, names);
         }
         SetExpr::SetOperation { left, right, .. } => {
             extract_tables_from_set_expr(left, names);
@@ -365,10 +379,45 @@ fn extract_tables_from_set_expr(set_expr: &SetExpr, names: &mut HashSet<ObjectNa
 
 /// Helper function for [extract_tables_from_query].
 ///
+/// Handle [TableWithJoins].
+fn extract_tables_from_table_with_joins(
+    table_with_joins: &TableWithJoins,
+    names: &mut HashSet<ObjectName>,
+) {
+    table_factor_to_object_name(&table_with_joins.relation, names);
+    for join in &table_with_joins.joins {
+        table_factor_to_object_name(&join.relation, names);
+    }
+}
+
+/// Helper function for [extract_tables_from_query].
+///
 /// Handle [TableFactor].
 fn table_factor_to_object_name(table_factor: &TableFactor, names: &mut HashSet<ObjectName>) {
-    if let TableFactor::Table { name, .. } = table_factor {
-        names.insert(name.to_owned());
+    match table_factor {
+        TableFactor::Table { name, .. } => {
+            names.insert(name.to_owned());
+        }
+        TableFactor::Derived { subquery, .. } => {
+            extract_tables_from_sql_query(subquery, names);
+        }
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => {
+            extract_tables_from_table_with_joins(table_with_joins, names);
+        }
+        TableFactor::Pivot { table, .. }
+        | TableFactor::Unpivot { table, .. }
+        | TableFactor::MatchRecognize { table, .. } => {
+            table_factor_to_object_name(table, names);
+        }
+        TableFactor::TableFunction { .. }
+        | TableFactor::Function { .. }
+        | TableFactor::UNNEST { .. }
+        | TableFactor::JsonTable { .. }
+        | TableFactor::OpenJsonTable { .. }
+        | TableFactor::XmlTable { .. }
+        | TableFactor::SemanticView { .. } => {}
     }
 }
 
@@ -456,6 +505,44 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", {__n
             tables.sort();
             assert_eq!(expected_tables, tables);
         }
+    }
+
+    #[test]
+    fn test_extract_tables_from_sql_query_with_derived_join() {
+        let sql = r#"
+CREATE FLOW flow_batch_join_subquery SINK TO flow_batch_join_sink
+EVAL INTERVAL '1m' AS
+SELECT a.symbol, b.mark_price
+FROM (
+    SELECT inst_id AS symbol, max(ts) AS mark_iv_ts
+    FROM flow_batch_join_opt_summary
+    GROUP BY inst_id
+) a
+LEFT JOIN (
+    SELECT symbol, max(mark_price) AS mark_price
+    FROM flow_batch_join_market_v5
+    WHERE "type" = 'OPTION_MARK'
+    GROUP BY symbol
+) b ON a.symbol = b.symbol;
+"#;
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        let Statement::CreateFlow(create_flow) = stmts.pop().unwrap() else {
+            unreachable!()
+        };
+
+        let mut tables = extract_tables_from_query(&create_flow.query)
+            .map(|table| format_raw_object_name(&table))
+            .collect_vec();
+        tables.sort();
+        assert_eq!(
+            vec![
+                "flow_batch_join_market_v5".to_string(),
+                "flow_batch_join_opt_summary".to_string(),
+            ],
+            tables
+        );
     }
 
     #[test]
