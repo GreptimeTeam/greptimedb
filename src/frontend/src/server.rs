@@ -288,7 +288,6 @@ where
 
         let http_server = builder
             .with_metrics_handler(MetricsHandler)
-            .with_plugins(self.plugins.clone())
             .with_greptime_config_options(toml)
             .build();
         Ok(http_server)
