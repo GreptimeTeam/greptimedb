@@ -208,9 +208,11 @@ impl DfRecordBatchEncoder for csv::Writer<SharedBuffer> {
 
 /// Builds a CSV stream that can skip selected record-level parse/cast errors.
 ///
-/// The decoder intentionally uses one-record batches. Arrow's CSV decoder clears
-/// buffered rows before type parsing, so a failed multi-row flush cannot be
-/// safely retried row by row without replaying input bytes.
+/// This recovery path intentionally uses one-record batches. It is slower than
+/// normal CSV scanning, but keeps each parse/cast failure isolated to a single
+/// record. Arrow's CSV decoder clears buffered rows before type parsing, so a
+/// failed multi-row flush cannot be safely retried row by row without replaying
+/// input bytes.
 pub async fn tolerant_csv_stream(
     store: &ObjectStore,
     path: &str,
