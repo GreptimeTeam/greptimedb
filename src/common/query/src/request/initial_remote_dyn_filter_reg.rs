@@ -110,6 +110,7 @@ impl InitialDynFilterRegs {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialDynFilterReg {
     pub filter_id: String,
+    #[serde(with = "super::base64_serde::bytes_vec")]
     pub child_exprs_datafusion_proto: Vec<Vec<u8>>,
     /// Optional producer-side predicate snapshot captured at initial registration time.
     ///
@@ -227,8 +228,17 @@ mod tests {
         ]);
 
         let encoded = regs.to_extension_value().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         let decoded = InitialDynFilterRegs::from_extension_value(&encoded).unwrap();
 
+        assert_eq!(
+            json["registrations"][0]["child_exprs_datafusion_proto"],
+            serde_json::json!(["AQID"])
+        );
+        assert_eq!(
+            json["registrations"][1]["child_exprs_datafusion_proto"],
+            serde_json::json!(["BAU="])
+        );
         assert_eq!(decoded, regs);
     }
 
@@ -241,8 +251,17 @@ mod tests {
         ]);
 
         let encoded = regs.to_extension_value().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         let decoded = InitialDynFilterRegs::from_extension_value(&encoded).unwrap();
 
+        assert_eq!(
+            json["registrations"][0]["child_exprs_datafusion_proto"],
+            serde_json::json!(["AQID"])
+        );
+        assert_eq!(
+            json["registrations"][0]["initial_snapshot"]["payload"],
+            serde_json::json!({"kind":"datafusion","payload":"BAUG"})
+        );
         assert_eq!(decoded, regs);
         assert_eq!(
             decoded.regs[0]
@@ -264,7 +283,7 @@ mod tests {
     #[test]
     fn initial_dyn_filter_reg_json_defaults_missing_snapshot_to_none() {
         let decoded = InitialDynFilterRegs::from_extension_value(
-            r#"{"registrations":[{"filter_id":"filter-a","child_exprs_datafusion_proto":[[1,2,3]]}]}"#,
+            r#"{"registrations":[{"filter_id":"filter-a","child_exprs_datafusion_proto":["AQID"]}]}"#,
         )
         .unwrap();
 

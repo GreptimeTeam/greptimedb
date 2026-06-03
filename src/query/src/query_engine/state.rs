@@ -57,7 +57,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::QueryEngineContext;
 use crate::dist_plan::{
     DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, DynFilterRegistryManager,
-    MergeSortExtensionPlanner, QueryDynFilterRegistry,
+    MergeSortExtensionPlanner, RemoteDynFilterRegistryLease,
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -404,12 +404,16 @@ impl QueryEngineState {
         self.dyn_filter_registry_manager.clone()
     }
 
-    pub fn get_or_init_remote_dyn_filter_registry(
+    pub fn acquire_remote_dyn_filter_registry_lease(
         &self,
         query_ctx: &QueryContextRef,
-    ) -> Option<Arc<QueryDynFilterRegistry>> {
+    ) -> Option<RemoteDynFilterRegistryLease> {
         let query_id = query_ctx.remote_query_id_value()?;
-        Some(self.dyn_filter_registry_manager.get_or_init(query_id))
+        Some(
+            self.dyn_filter_registry_manager
+                .clone()
+                .acquire_lease(query_id),
+        )
     }
 
     pub fn function_state(&self) -> Arc<FunctionState> {
@@ -617,20 +621,23 @@ mod tests {
     }
 
     #[test]
-    fn query_engine_state_reuses_query_scoped_dyn_filter_registry() {
+    fn query_engine_state_reuses_query_scoped_dyn_filter_registry_lease() {
         let state = new_query_engine_state();
         let query_ctx = QueryContext::arc();
 
         let first = state
-            .get_or_init_remote_dyn_filter_registry(&query_ctx)
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
         let second = state
-            .get_or_init_remote_dyn_filter_registry(&query_ctx)
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
 
-        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first.ptr_eq(&second));
         assert_eq!(state.dyn_filter_registry_manager().registry_count(), 1);
-        assert_eq!(first.query_id(), query_ctx.remote_query_id_value().unwrap());
+        assert_eq!(
+            first.registry().query_id(),
+            query_ctx.remote_query_id_value().unwrap()
+        );
     }
 
     #[test]
@@ -640,12 +647,12 @@ mod tests {
 
         assert!(query_ctx.remote_query_id_value().is_some());
 
-        let registry = state
-            .get_or_init_remote_dyn_filter_registry(&query_ctx)
+        let lease = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
 
         assert_eq!(
-            registry.query_id(),
+            lease.registry().query_id(),
             query_ctx.remote_query_id_value().unwrap()
         );
         assert_eq!(state.dyn_filter_registry_manager().registry_count(), 1);
@@ -658,20 +665,20 @@ mod tests {
         let second_query_ctx = QueryContext::arc();
 
         let first = state
-            .get_or_init_remote_dyn_filter_registry(&first_query_ctx)
+            .acquire_remote_dyn_filter_registry_lease(&first_query_ctx)
             .unwrap();
         let second = state
-            .get_or_init_remote_dyn_filter_registry(&second_query_ctx)
+            .acquire_remote_dyn_filter_registry_lease(&second_query_ctx)
             .unwrap();
 
-        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(!first.ptr_eq(&second));
         assert_eq!(state.dyn_filter_registry_manager().registry_count(), 2);
         assert_eq!(
-            first.query_id(),
+            first.registry().query_id(),
             first_query_ctx.remote_query_id_value().unwrap()
         );
         assert_eq!(
-            second.query_id(),
+            second.registry().query_id(),
             second_query_ctx.remote_query_id_value().unwrap()
         );
     }

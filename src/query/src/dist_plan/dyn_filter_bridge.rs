@@ -20,7 +20,6 @@ use common_query::request::{
     INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES, InitialDynFilterReg,
     InitialDynFilterRegs, InitialDynFilterSnapshot,
 };
-use datafusion::execution::TaskContext;
 use datafusion_common::Result;
 use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
@@ -28,8 +27,7 @@ use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
 
 use crate::dist_plan::filter_id::build_remote_dyn_filter_id;
-use crate::dist_plan::{FilterId, ProducerScopeId, QueryDynFilterRegistry, Subscriber};
-use crate::query_engine::QueryEngineState;
+use crate::dist_plan::{FilterId, QueryDynFilterRegistry, RemoteDynFilterProducerId, Subscriber};
 
 #[derive(Debug, Clone)]
 pub(crate) struct CapturedDynFilter {
@@ -48,7 +46,7 @@ pub(crate) struct RemoteDynFilterPushdown {
 }
 
 pub(crate) fn capture_remote_dyn_filters_for_pushdown(
-    producer_scope_id: ProducerScopeId,
+    remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
     parent_filters: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
 ) -> RemoteDynFilterPushdown {
     let mut pushed_down = Vec::with_capacity(parent_filters.len());
@@ -60,8 +58,11 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
             continue;
         };
 
-        match build_captured_dyn_filter(producer_scope_id, producer_local_ordinal, alive_dyn_filter)
-        {
+        match build_captured_dyn_filter(
+            remote_dyn_filter_producer_id,
+            producer_local_ordinal,
+            alive_dyn_filter,
+        ) {
             Ok(captured_dyn_filter) => {
                 pushed_down.push(true);
                 captured_dyn_filters.push(captured_dyn_filter);
@@ -106,10 +107,6 @@ fn downcast_dynamic_filter(
         .ok()
 }
 
-fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
-    context.session_config().get_extension()
-}
-
 pub(crate) fn register_dyn_filters_for_region(
     registry: &QueryDynFilterRegistry,
     region_id: RegionId,
@@ -125,29 +122,8 @@ pub(crate) fn register_dyn_filters_for_region(
     }
 }
 
-pub(crate) fn bridge_dyn_filters_for_region(
-    context: &TaskContext,
-    query_ctx: &QueryContextRef,
-    region_id: RegionId,
-    captured_dyn_filters: &[CapturedDynFilter],
-) {
-    if captured_dyn_filters.is_empty() {
-        return;
-    }
-
-    let Some(query_engine_state) = query_engine_state_from_task_context(context) else {
-        return;
-    };
-    let Some(registry) = query_engine_state.get_or_init_remote_dyn_filter_registry(query_ctx)
-    else {
-        return;
-    };
-
-    register_dyn_filters_for_region(&registry, region_id, captured_dyn_filters);
-}
-
 fn build_captured_dyn_filter(
-    producer_scope_id: ProducerScopeId,
+    remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
     producer_local_ordinal: usize,
     alive_dyn_filter: Arc<DynamicFilterPhysicalExpr>,
 ) -> Result<CapturedDynFilter> {
@@ -156,8 +132,11 @@ fn build_captured_dyn_filter(
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
-    let filter_id =
-        build_remote_dyn_filter_id(producer_scope_id, producer_local_ordinal, &children)?;
+    let filter_id = build_remote_dyn_filter_id(
+        remote_dyn_filter_producer_id,
+        producer_local_ordinal,
+        &children,
+    )?;
     let initial_registration =
         InitialDynFilterReg::from_filter_id_and_children(filter_id.to_string(), &children)?;
 
@@ -295,6 +274,7 @@ mod tests {
     use std::fmt;
     use std::hash::{Hash, Hasher};
 
+    use datafusion::execution::TaskContext;
     use datafusion_common::ScalarValue;
     use datafusion_expr::ColumnarValue;
     use datafusion_physical_expr::expressions::{Column, lit};
@@ -372,18 +352,18 @@ mod tests {
         QueryId::from(Uuid::from_u128(value))
     }
 
-    fn test_producer_scope(value: u64) -> ProducerScopeId {
-        ProducerScopeId::new(value)
+    fn test_remote_dyn_filter_producer_id(value: u64) -> RemoteDynFilterProducerId {
+        RemoteDynFilterProducerId::new(value)
     }
 
     fn test_captured_dyn_filter(
-        producer_scope_id: ProducerScopeId,
+        remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
         producer_local_ordinal: usize,
         column_name: &str,
         column_index: usize,
     ) -> CapturedDynFilter {
         build_captured_dyn_filter(
-            producer_scope_id,
+            remote_dyn_filter_producer_id,
             producer_local_ordinal,
             Arc::new(DynamicFilterPhysicalExpr::new(
                 vec![Arc::new(Column::new(column_name, column_index)) as Arc<_>],
@@ -423,13 +403,20 @@ mod tests {
             )) as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
         ];
 
-        let producer_scope_id = test_producer_scope(42);
-        let captured = capture_remote_dyn_filters_for_pushdown(producer_scope_id, parent_filters)
-            .captured_dyn_filters;
+        let remote_dyn_filter_producer_id = test_remote_dyn_filter_producer_id(42);
+        let captured =
+            capture_remote_dyn_filters_for_pushdown(remote_dyn_filter_producer_id, parent_filters)
+                .captured_dyn_filters;
 
         assert_eq!(captured.len(), 2);
-        assert_eq!(captured[0].filter_id.producer_scope_id(), producer_scope_id);
-        assert_eq!(captured[1].filter_id.producer_scope_id(), producer_scope_id);
+        assert_eq!(
+            captured[0].filter_id.remote_dyn_filter_producer_id(),
+            remote_dyn_filter_producer_id
+        );
+        assert_eq!(
+            captured[1].filter_id.remote_dyn_filter_producer_id(),
+            remote_dyn_filter_producer_id
+        );
         assert_eq!(captured[0].filter_id.producer_ordinal(), 1);
         assert_eq!(captured[1].filter_id.producer_ordinal(), 3);
     }
@@ -445,16 +432,17 @@ mod tests {
             Arc::new(Column::new("zone", 2)) as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
         ];
 
-        let producer_scope_id = test_producer_scope(42);
-        let pushdown = capture_remote_dyn_filters_for_pushdown(producer_scope_id, parent_filters);
+        let remote_dyn_filter_producer_id = test_remote_dyn_filter_producer_id(42);
+        let pushdown =
+            capture_remote_dyn_filters_for_pushdown(remote_dyn_filter_producer_id, parent_filters);
 
         assert_eq!(pushdown.pushed_down, vec![false, true, false]);
         assert_eq!(pushdown.captured_dyn_filters.len(), 1);
         assert_eq!(
             pushdown.captured_dyn_filters[0]
                 .filter_id
-                .producer_scope_id(),
-            producer_scope_id
+                .remote_dyn_filter_producer_id(),
+            remote_dyn_filter_producer_id
         );
         assert_eq!(
             pushdown.captured_dyn_filters[0]
@@ -478,8 +466,10 @@ mod tests {
         ))
             as Arc<dyn datafusion::physical_plan::PhysicalExpr>];
 
-        let pushdown =
-            capture_remote_dyn_filters_for_pushdown(test_producer_scope(42), parent_filters);
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            parent_filters,
+        );
 
         assert_eq!(pushdown.pushed_down, vec![false]);
         assert!(pushdown.captured_dyn_filters.is_empty());
@@ -493,8 +483,10 @@ mod tests {
         ))
             as Arc<dyn datafusion::physical_plan::PhysicalExpr>];
 
-        let pushdown =
-            capture_remote_dyn_filters_for_pushdown(test_producer_scope(42), parent_filters);
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            parent_filters,
+        );
 
         assert_eq!(pushdown.pushed_down, vec![true]);
         assert!(
@@ -514,8 +506,10 @@ mod tests {
         dyn_filter.update(lit(false) as _).unwrap();
         let parent_filters = vec![dyn_filter as Arc<dyn datafusion::physical_plan::PhysicalExpr>];
 
-        let pushdown =
-            capture_remote_dyn_filters_for_pushdown(test_producer_scope(42), parent_filters);
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            parent_filters,
+        );
 
         assert_eq!(pushdown.pushed_down, vec![true]);
         let snapshot = pushdown.captured_dyn_filters[0]
@@ -540,8 +534,10 @@ mod tests {
                 as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
         ];
 
-        let pushdown =
-            capture_remote_dyn_filters_for_pushdown(test_producer_scope(42), parent_filters);
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            parent_filters,
+        );
 
         assert_eq!(pushdown.pushed_down, vec![true, true]);
         assert_eq!(pushdown.captured_dyn_filters.len(), 2);
@@ -564,8 +560,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let pushdown =
-            capture_remote_dyn_filters_for_pushdown(test_producer_scope(42), parent_filters);
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            parent_filters,
+        );
 
         assert!(pushdown.captured_dyn_filters.is_empty());
         assert_eq!(pushdown.pushed_down, vec![false; TOO_MANY_INITIAL_REGS]);
@@ -584,8 +582,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let pushdown =
-            capture_remote_dyn_filters_for_pushdown(test_producer_scope(42), parent_filters);
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            parent_filters,
+        );
 
         assert!(pushdown.captured_dyn_filters.is_empty());
         assert_eq!(pushdown.pushed_down, vec![false; TOO_MANY_INITIAL_REGS]);
@@ -595,7 +595,7 @@ mod tests {
     fn register_dyn_filters_for_region_reuses_existing_entry() {
         let registry = QueryDynFilterRegistry::new(test_query_id(1));
         let captured_dyn_filters = vec![test_captured_dyn_filter(
-            test_producer_scope(42),
+            test_remote_dyn_filter_producer_id(42),
             2,
             "host",
             0,
@@ -609,8 +609,8 @@ mod tests {
         assert_eq!(registry.entry_count(), 1);
         let entry = registry.entries().pop().unwrap();
         assert_eq!(
-            entry.filter_id().producer_scope_id(),
-            test_producer_scope(42)
+            entry.filter_id().remote_dyn_filter_producer_id(),
+            test_remote_dyn_filter_producer_id(42)
         );
         assert_eq!(entry.filter_id().producer_ordinal(), 2);
         let subscribers = entry.subscribers();
@@ -628,21 +628,22 @@ mod tests {
     }
 
     #[test]
-    fn register_dyn_filters_for_region_keeps_independent_producer_scopes_distinct() {
+    fn register_dyn_filters_for_region_keeps_independent_producer_ids_distinct() {
         let registry = QueryDynFilterRegistry::new(test_query_id(1));
         let region_id = RegionId::new(1024, 7);
-        let make_filter =
-            |producer_scope_id| test_captured_dyn_filter(producer_scope_id, 2, "host", 0);
+        let make_filter = |remote_dyn_filter_producer_id| {
+            test_captured_dyn_filter(remote_dyn_filter_producer_id, 2, "host", 0)
+        };
 
         register_dyn_filters_for_region(
             &registry,
             region_id,
-            &[make_filter(test_producer_scope(42))],
+            &[make_filter(test_remote_dyn_filter_producer_id(42))],
         );
         register_dyn_filters_for_region(
             &registry,
             region_id,
-            &[make_filter(test_producer_scope(43))],
+            &[make_filter(test_remote_dyn_filter_producer_id(43))],
         );
 
         assert_eq!(registry.entry_count(), 2);
@@ -651,7 +652,7 @@ mod tests {
     #[test]
     fn query_context_includes_region_initial_dyn_filter_regs() {
         let captured_dyn_filters = vec![test_captured_dyn_filter(
-            test_producer_scope(42),
+            test_remote_dyn_filter_producer_id(42),
             2,
             "host",
             0,
@@ -691,8 +692,8 @@ mod tests {
     #[test]
     fn query_context_drops_initial_regs_when_duplicate_filter_ids_exceed_bounds() {
         let captured_dyn_filters = vec![
-            test_captured_dyn_filter(test_producer_scope(42), 2, "host", 0),
-            test_captured_dyn_filter(test_producer_scope(42), 2, "host", 0),
+            test_captured_dyn_filter(test_remote_dyn_filter_producer_id(42), 2, "host", 0),
+            test_captured_dyn_filter(test_remote_dyn_filter_producer_id(42), 2, "host", 0),
         ];
         let region_id = RegionId::new(1024, 7);
         let query_ctx = QueryContext::arc();

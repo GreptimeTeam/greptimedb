@@ -27,31 +27,15 @@ use datafusion_expr::LogicalPlan;
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::dist_plan::analyzer::{
-    AliasMapping, OTHER_PHY_PART_COL_PLACEHOLDER, ProducerScopeAllocator,
-};
-use crate::dist_plan::{MergeScanLogicalPlan, ProducerScopeId};
+use crate::dist_plan::MergeScanLogicalPlan;
+use crate::dist_plan::analyzer::{AliasMapping, OTHER_PHY_PART_COL_PLACEHOLDER};
 
 /// FallbackPlanRewriter is a plan rewriter that will only push down table scan node
 /// This is used when `PlanRewriter` produce errors when trying to rewrite the plan
 /// This is a temporary solution, and will be removed once we have a more robust plan rewriter
 /// It will traverse the logical plan and rewrite table scan node to merge scan node
 #[derive(Debug, Clone, Default)]
-pub struct FallbackPlanRewriter {
-    producer_scope_allocator: ProducerScopeAllocator,
-}
-
-impl FallbackPlanRewriter {
-    pub fn new(producer_scope_allocator: ProducerScopeAllocator) -> Self {
-        Self {
-            producer_scope_allocator,
-        }
-    }
-
-    fn allocate_remote_dyn_filter_producer_scope_id(&self) -> ProducerScopeId {
-        self.producer_scope_allocator.allocate()
-    }
-}
+pub struct FallbackPlanRewriter;
 
 impl TreeNodeRewriter for FallbackPlanRewriter {
     type Node = LogicalPlan;
@@ -121,7 +105,6 @@ impl TreeNodeRewriter for FallbackPlanRewriter {
                 // at this stage, the partition cols should be set
                 // treat it as non-partitioned if None
                 partition_cols.clone().unwrap_or_default(),
-                self.allocate_remote_dyn_filter_producer_scope_id(),
             )
             .into_logical_plan();
             Ok(Transformed::yes(node))

@@ -154,7 +154,7 @@ mod tests {
     use table::table_name::TableName;
 
     use super::*;
-    use crate::dist_plan::ProducerScopeId;
+    use crate::dist_plan::RemoteDynFilterProducerId;
     use crate::error::Result as QueryResult;
     use crate::region_query::RegionQueryHandler;
 
@@ -292,7 +292,7 @@ mod tests {
             QueryContext::arc(),
             32,
             partition_cols,
-            ProducerScopeId::new(1),
+            Some(RemoteDynFilterProducerId::new(1)),
         )
         .unwrap()
     }

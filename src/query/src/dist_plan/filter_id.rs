@@ -51,10 +51,15 @@ impl FromStr for FilterFingerprint {
     }
 }
 
+/// Query-local identity for one remote dynamic filter producer.
+///
+/// The analyzer assigns a new id to each frontend-side `MergeScan` rewrite so filters from
+/// independent producers cannot collide even when their producer-local ordinals and child
+/// fingerprints match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProducerScopeId(u64);
+pub struct RemoteDynFilterProducerId(u64);
 
-impl ProducerScopeId {
+impl RemoteDynFilterProducerId {
     pub fn new(value: u64) -> Self {
         Self(value)
     }
@@ -64,13 +69,13 @@ impl ProducerScopeId {
     }
 }
 
-impl Display for ProducerScopeId {
+impl Display for RemoteDynFilterProducerId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:016x}", self.0)
     }
 }
 
-impl FromStr for ProducerScopeId {
+impl FromStr for RemoteDynFilterProducerId {
     type Err = ParseIntError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -80,7 +85,7 @@ impl FromStr for ProducerScopeId {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FilterId {
-    producer_scope_id: ProducerScopeId,
+    remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
     producer_ordinal: u32,
     children_fingerprint: FilterFingerprint,
 }
@@ -91,12 +96,12 @@ pub struct FilterId {
 
 impl FilterId {
     pub fn new(
-        producer_scope_id: ProducerScopeId,
+        remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
         producer_ordinal: u32,
         children_fingerprint: FilterFingerprint,
     ) -> Self {
         Self {
-            producer_scope_id,
+            remote_dyn_filter_producer_id,
             producer_ordinal,
             children_fingerprint,
         }
@@ -106,8 +111,8 @@ impl FilterId {
         self.producer_ordinal
     }
 
-    pub fn producer_scope_id(&self) -> ProducerScopeId {
-        self.producer_scope_id
+    pub fn remote_dyn_filter_producer_id(&self) -> RemoteDynFilterProducerId {
+        self.remote_dyn_filter_producer_id
     }
 
     pub fn children_fingerprint(&self) -> FilterFingerprint {
@@ -120,7 +125,7 @@ impl Display for FilterId {
         write!(
             f,
             "{}:{}:{}",
-            self.producer_scope_id, self.producer_ordinal, self.children_fingerprint
+            self.remote_dyn_filter_producer_id, self.producer_ordinal, self.children_fingerprint
         )
     }
 }
@@ -130,10 +135,10 @@ impl FromStr for FilterId {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut parts = s.split(':');
-        let producer_scope_id = parts
+        let remote_dyn_filter_producer_id = parts
             .next()
             .ok_or(ParseFilterIdError)?
-            .parse::<ProducerScopeId>()
+            .parse::<RemoteDynFilterProducerId>()
             .map_err(|_| ParseFilterIdError)?;
         let producer_local_ordinal = parts
             .next()
@@ -150,7 +155,7 @@ impl FromStr for FilterId {
         }
 
         Ok(Self::new(
-            producer_scope_id,
+            remote_dyn_filter_producer_id,
             producer_local_ordinal,
             children_fingerprint,
         ))
@@ -168,15 +173,12 @@ impl Display for ParseFilterIdError {
 
 /// Builds the query-local remote dynamic filter identity.
 ///
-/// The identity is `producer scope + producer-local ordinal + canonicalized child fingerprint`.
+/// The identity is `remote dynamic filter producer id + producer-local ordinal + canonicalized child fingerprint`.
 /// Subscriber routing details such as `region_id` and `partition` stay outside this key so they
 /// can remain in the later fanout/subscriber map instead of splitting one shared remote filter state.
-///
-/// NOTE(remote-dyn-filter): This id is generated once on the source side and then propagated.
-/// Consumers should reuse the propagated `FilterId` instead of independently recomputing it from
-/// local state.
+/// See [`FilterId`] for the propagation contract.
 pub(crate) fn build_remote_dyn_filter_id(
-    producer_scope_id: ProducerScopeId,
+    remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
     producer_local_ordinal: usize,
     children: &[Arc<dyn PhysicalExpr>],
 ) -> Result<FilterId> {
@@ -186,7 +188,7 @@ pub(crate) fn build_remote_dyn_filter_id(
         DataFusionError::Execution("producer ordinal out of range for filter id".to_string())
     })?;
     Ok(FilterId::new(
-        producer_scope_id,
+        remote_dyn_filter_producer_id,
         producer_local_ordinal,
         children_fingerprint,
     ))
@@ -228,7 +230,11 @@ mod tests {
 
     #[test]
     fn filter_id_round_trips_through_string() {
-        let filter_id = FilterId::new(ProducerScopeId::new(42), 3, FilterFingerprint::new(0xabc));
+        let filter_id = FilterId::new(
+            RemoteDynFilterProducerId::new(42),
+            3,
+            FilterFingerprint::new(0xabc),
+        );
         let encoded = filter_id.to_string();
 
         assert_eq!(encoded, "000000000000002a:3:0000000000000abc");
@@ -249,37 +255,48 @@ mod tests {
 
     #[test]
     fn remote_dyn_filter_id_is_stable_for_equivalent_children() {
-        let producer_scope_id = ProducerScopeId::new(42);
-        let first =
-            build_remote_dyn_filter_id(producer_scope_id, 3, &test_children(&["host", "pod"]))
-                .unwrap();
-        let second =
-            build_remote_dyn_filter_id(producer_scope_id, 3, &test_children(&["host", "pod"]))
-                .unwrap();
+        let remote_dyn_filter_producer_id = RemoteDynFilterProducerId::new(42);
+        let first = build_remote_dyn_filter_id(
+            remote_dyn_filter_producer_id,
+            3,
+            &test_children(&["host", "pod"]),
+        )
+        .unwrap();
+        let second = build_remote_dyn_filter_id(
+            remote_dyn_filter_producer_id,
+            3,
+            &test_children(&["host", "pod"]),
+        )
+        .unwrap();
 
         assert_eq!(first, second);
     }
 
     #[test]
-    fn remote_dyn_filter_id_changes_when_producer_scope_changes() {
+    fn remote_dyn_filter_id_changes_when_remote_dyn_filter_producer_changes() {
         let children = test_children(&["host", "pod"]);
-        let baseline = build_remote_dyn_filter_id(ProducerScopeId::new(42), 3, &children).unwrap();
-        let different_scope =
-            build_remote_dyn_filter_id(ProducerScopeId::new(43), 3, &children).unwrap();
+        let baseline =
+            build_remote_dyn_filter_id(RemoteDynFilterProducerId::new(42), 3, &children).unwrap();
+        let different_producer_id =
+            build_remote_dyn_filter_id(RemoteDynFilterProducerId::new(43), 3, &children).unwrap();
 
-        assert_ne!(baseline, different_scope);
+        assert_ne!(baseline, different_producer_id);
     }
 
     #[test]
     fn remote_dyn_filter_id_changes_when_identity_inputs_change() {
         let children = test_children(&["host", "pod"]);
-        let producer_scope_id = ProducerScopeId::new(42);
-        let baseline = build_remote_dyn_filter_id(producer_scope_id, 3, &children).unwrap();
+        let remote_dyn_filter_producer_id = RemoteDynFilterProducerId::new(42);
+        let baseline =
+            build_remote_dyn_filter_id(remote_dyn_filter_producer_id, 3, &children).unwrap();
         let different_ordinal =
-            build_remote_dyn_filter_id(producer_scope_id, 4, &children).unwrap();
-        let different_children =
-            build_remote_dyn_filter_id(producer_scope_id, 3, &test_children(&["pod", "host"]))
-                .unwrap();
+            build_remote_dyn_filter_id(remote_dyn_filter_producer_id, 4, &children).unwrap();
+        let different_children = build_remote_dyn_filter_id(
+            remote_dyn_filter_producer_id,
+            3,
+            &test_children(&["pod", "host"]),
+        )
+        .unwrap();
 
         assert_ne!(baseline, different_ordinal);
         assert_ne!(baseline, different_children);
@@ -287,19 +304,22 @@ mod tests {
 
     #[test]
     fn remote_dyn_filter_id_supports_empty_children() {
-        let producer_scope_id = ProducerScopeId::new(42);
-        let first = build_remote_dyn_filter_id(producer_scope_id, 1, &[]).unwrap();
-        let second = build_remote_dyn_filter_id(producer_scope_id, 1, &[]).unwrap();
+        let remote_dyn_filter_producer_id = RemoteDynFilterProducerId::new(42);
+        let first = build_remote_dyn_filter_id(remote_dyn_filter_producer_id, 1, &[]).unwrap();
+        let second = build_remote_dyn_filter_id(remote_dyn_filter_producer_id, 1, &[]).unwrap();
 
         assert_eq!(first, second);
-        assert_eq!(first.producer_scope_id(), producer_scope_id);
+        assert_eq!(
+            first.remote_dyn_filter_producer_id(),
+            remote_dyn_filter_producer_id
+        );
         assert_eq!(first.producer_ordinal(), 1);
         assert_eq!(first.children_fingerprint(), second.children_fingerprint());
     }
 
     #[test]
     fn remote_dyn_filter_id_rejects_out_of_range_producer_ordinal() {
-        let error = build_remote_dyn_filter_id(ProducerScopeId::new(42), usize::MAX, &[])
+        let error = build_remote_dyn_filter_id(RemoteDynFilterProducerId::new(42), usize::MAX, &[])
             .unwrap_err()
             .to_string();
 

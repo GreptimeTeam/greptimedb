@@ -395,7 +395,7 @@ mod tests {
     use table::table_name::TableName;
 
     use super::*;
-    use crate::dist_plan::ProducerScopeId;
+    use crate::dist_plan::RemoteDynFilterProducerId;
     use crate::options::{FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID};
     use crate::region_query::RegionQueryHandler;
 
@@ -459,7 +459,7 @@ mod tests {
                 query_ctx,
                 1,
                 BTreeMap::<String, BTreeSet<datafusion_common::Column>>::new(),
-                ProducerScopeId::new(0),
+                Some(RemoteDynFilterProducerId::new(0)),
             )
             .unwrap(),
         )

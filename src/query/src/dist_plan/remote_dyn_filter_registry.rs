@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, Weak};
 
 use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
@@ -23,7 +22,7 @@ use store_api::storage::RegionId;
 use crate::dist_plan::FilterId;
 
 /// Routing metadata for a remote dynamic filter subscriber.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Subscriber {
     region_id: RegionId,
 }
@@ -42,6 +41,7 @@ impl Subscriber {
 #[derive(Debug, Clone)]
 pub enum EntryRegistration {
     Inserted(Arc<DynFilterEntry>),
+    /// The filter already existed; this contains the previously registered entry.
     Existing(Arc<DynFilterEntry>),
 }
 
@@ -60,7 +60,7 @@ pub enum SubscriberRegistration {
 pub struct DynFilterEntry {
     filter_id: FilterId,
     alive_dyn_filter: Weak<DynamicFilterPhysicalExpr>,
-    subscribers: RwLock<Vec<Subscriber>>,
+    subscribers: RwLock<HashSet<Subscriber>>,
 }
 
 #[derive(Debug)]
@@ -73,7 +73,7 @@ impl DynFilterEntry {
         Self {
             filter_id,
             alive_dyn_filter: Arc::downgrade(&alive_dyn_filter),
-            subscribers: RwLock::new(Vec::new()),
+            subscribers: RwLock::new(HashSet::new()),
         }
     }
 
@@ -86,17 +86,12 @@ impl DynFilterEntry {
     }
 
     pub fn subscribers(&self) -> Vec<Subscriber> {
-        self.subscribers.read().unwrap().clone()
+        self.subscribers.read().unwrap().iter().cloned().collect()
     }
 
     pub fn register_subscriber(&self, subscriber: Subscriber) -> bool {
         let mut subscribers = self.subscribers.write().unwrap();
-        if subscribers.contains(&subscriber) {
-            return false;
-        }
-
-        subscribers.push(subscriber);
-        true
+        subscribers.insert(subscriber)
     }
 }
 
@@ -104,7 +99,6 @@ impl DynFilterEntry {
 #[derive(Debug)]
 pub struct QueryDynFilterRegistry {
     query_id: QueryId,
-    active_streams: AtomicUsize,
     inner: RwLock<QueryDynFilterRegistryInner>,
 }
 
@@ -112,7 +106,6 @@ impl QueryDynFilterRegistry {
     pub fn new(query_id: QueryId) -> Self {
         Self {
             query_id,
-            active_streams: AtomicUsize::new(0),
             inner: RwLock::new(QueryDynFilterRegistryInner {
                 entries: HashMap::new(),
             }),
@@ -121,18 +114,6 @@ impl QueryDynFilterRegistry {
 
     pub fn query_id(&self) -> QueryId {
         self.query_id
-    }
-
-    fn acquire_stream(&self) {
-        self.active_streams.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn release_stream(&self) {
-        self.active_streams.fetch_sub(1, Ordering::SeqCst);
-    }
-
-    fn active_stream_count(&self) -> usize {
-        self.active_streams.load(Ordering::SeqCst)
     }
 
     pub fn entry_count(&self) -> usize {
@@ -185,10 +166,20 @@ impl QueryDynFilterRegistry {
     }
 }
 
+/// Stream-scoped lease that keeps a query registry alive.
+///
+/// The manager only stores a weak index. Holding this lease is the production path for owning a
+/// strong registry reference; this keeps cleanup tied to stream lifetime instead of a hand-rolled
+/// active-stream counter.
 #[derive(Debug)]
 pub struct RemoteDynFilterRegistryLease {
     registry_manager: Arc<DynFilterRegistryManager>,
-    registry: Arc<QueryDynFilterRegistry>,
+    /// Always `Some` while the lease is alive.
+    ///
+    /// This is wrapped in `Option` only so `Drop` can `take()` and release the strong `Arc` before
+    /// checking whether the manager's weak index became dead. Without this explicit drop order,
+    /// the field would remain alive until after `Drop::drop` returns.
+    registry: Option<Arc<QueryDynFilterRegistry>>,
 }
 
 impl RemoteDynFilterRegistryLease {
@@ -196,80 +187,167 @@ impl RemoteDynFilterRegistryLease {
         registry_manager: Arc<DynFilterRegistryManager>,
         registry: Arc<QueryDynFilterRegistry>,
     ) -> Self {
-        registry.acquire_stream();
         Self {
             registry_manager,
-            registry,
+            registry: Some(registry),
         }
+    }
+
+    pub fn registry(&self) -> &QueryDynFilterRegistry {
+        self.registry
+            .as_deref()
+            .expect("remote dyn filter registry lease must hold a registry")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(
+            self.registry.as_ref().unwrap(),
+            other.registry.as_ref().unwrap(),
+        )
     }
 }
 
 impl Drop for RemoteDynFilterRegistryLease {
     fn drop(&mut self) {
-        self.registry.release_stream();
+        let Some(registry) = self.registry.take() else {
+            return;
+        };
+        let query_id = registry.query_id();
+        let registry_weak = Arc::downgrade(&registry);
+
+        // Release this lease's strong reference before checking whether the manager's weak entry is
+        // dead. If two leases drop concurrently, checking `Arc::strong_count` before the fields are
+        // dropped can make both drops observe each other and both skip cleanup.
+        drop(registry);
+
         let _ = self
             .registry_manager
-            .remove_if_inactive(&self.registry.query_id(), &self.registry);
+            .remove_if_dropped_registry(&query_id, &registry_weak);
     }
 }
 
 /// Query-engine manager for query-scoped remote dynamic filter registries.
+///
+/// This is an index, not an owner: the map stores `Weak` pointers and active streams own the
+/// registry through [`RemoteDynFilterRegistryLease`]. Keep production access lease-based so
+/// dropping a lease releases one strong owner before the manager prunes a dead weak entry.
 #[derive(Debug, Default)]
 pub struct DynFilterRegistryManager {
-    registries: RwLock<HashMap<QueryId, Arc<QueryDynFilterRegistry>>>,
+    registries: RwLock<HashMap<QueryId, Weak<QueryDynFilterRegistry>>>,
 }
 
 impl DynFilterRegistryManager {
-    pub fn get(&self, query_id: &QueryId) -> Option<Arc<QueryDynFilterRegistry>> {
-        self.registries.read().unwrap().get(query_id).cloned()
+    #[cfg(test)]
+    fn get(&self, query_id: &QueryId) -> Option<Arc<QueryDynFilterRegistry>> {
+        let (registry, stale_entry) = {
+            let registries = self.registries.read().unwrap();
+            let registry = registries.get(query_id)?;
+
+            (registry.upgrade(), registry.clone())
+        };
+
+        if registry.is_none() {
+            self.remove_stale_entry(query_id, &stale_entry);
+        }
+
+        registry
     }
 
     #[cfg(test)]
-    fn remove(&self, query_id: &QueryId) -> Option<Arc<QueryDynFilterRegistry>> {
+    fn remove(&self, query_id: &QueryId) -> Option<Weak<QueryDynFilterRegistry>> {
         self.registries.write().unwrap().remove(query_id)
     }
 
-    fn remove_if_inactive(
+    fn remove_if_dropped_registry(
         &self,
         query_id: &QueryId,
-        registry: &Arc<QueryDynFilterRegistry>,
-    ) -> Option<Arc<QueryDynFilterRegistry>> {
-        let mut registries = self.registries.write().unwrap();
+        dropped_registry: &Weak<QueryDynFilterRegistry>,
+    ) -> Option<Weak<QueryDynFilterRegistry>> {
+        let mut registries = self
+            .registries
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let current = registries.get(query_id)?;
 
-        if Arc::ptr_eq(current, registry) && registry.active_stream_count() == 0 {
+        // Compare `Weak` handles rather than raw pointers. The weak control block stays alive while
+        // either this drop's local weak handle or the manager's weak entry exists. `ptr_eq` prevents
+        // an old lease drop from removing a different registry installed for the same query id, and
+        // `upgrade().is_none()` ensures we only prune dead entries.
+        if current.ptr_eq(dropped_registry) && current.upgrade().is_none() {
             registries.remove(query_id)
         } else {
             None
         }
     }
 
+    #[cfg(test)]
+    fn remove_stale_entry(
+        &self,
+        query_id: &QueryId,
+        stale_registry: &Weak<QueryDynFilterRegistry>,
+    ) {
+        let mut registries = self.registries.write().unwrap();
+        let Some(current) = registries.get(query_id) else {
+            return;
+        };
+
+        if current.ptr_eq(stale_registry) && current.upgrade().is_none() {
+            registries.remove(query_id);
+        }
+    }
+
+    /// Acquires the stream-owned registry lease for `query_id`.
+    ///
+    /// This is the only production API that returns a live registry handle. A concurrent final
+    /// lease drop cannot remove the map entry between lookup and ownership transfer because the
+    /// upgraded `Arc` returned by `get_or_init` is already a strong owner before the manager lock is
+    /// released.
     pub fn acquire_lease(self: &Arc<Self>, query_id: QueryId) -> RemoteDynFilterRegistryLease {
         let registry = self.get_or_init(query_id);
         RemoteDynFilterRegistryLease::new(self.clone(), registry)
     }
 
-    pub fn get_or_init(&self, query_id: QueryId) -> Arc<QueryDynFilterRegistry> {
+    fn get_or_init(&self, query_id: QueryId) -> Arc<QueryDynFilterRegistry> {
         let mut registries = self.registries.write().unwrap();
 
-        registries
-            .entry(query_id)
-            .or_insert_with(|| Arc::new(QueryDynFilterRegistry::new(query_id)))
-            .clone()
+        if let Some(registry) = registries.get(&query_id).and_then(Weak::upgrade) {
+            return registry;
+        }
+
+        let registry = Arc::new(QueryDynFilterRegistry::new(query_id));
+        registries.insert(query_id, Arc::downgrade(&registry));
+        registry
     }
 
+    #[cfg(test)]
     pub fn registry_count(&self) -> usize {
+        // Snapshot helper for tests. Lifecycle decisions must not depend on this count; cleanup uses
+        // the lease-owned `Arc` and weak-entry pruning instead.
+        self.registries
+            .read()
+            .unwrap()
+            .values()
+            .filter(|registry| registry.strong_count() > 0)
+            .count()
+    }
+
+    #[cfg(test)]
+    fn weak_entry_count(&self) -> usize {
         self.registries.read().unwrap().len()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+    use std::thread;
+
     use datafusion_physical_expr::expressions::{Column, lit};
     use uuid::Uuid;
 
     use super::*;
-    use crate::dist_plan::{FilterFingerprint, ProducerScopeId};
+    use crate::dist_plan::{FilterFingerprint, RemoteDynFilterProducerId};
 
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
@@ -277,7 +355,7 @@ mod tests {
 
     fn test_filter_id(producer_ordinal: u32) -> FilterId {
         FilterId::new(
-            ProducerScopeId::new(42),
+            RemoteDynFilterProducerId::new(42),
             producer_ordinal,
             FilterFingerprint::new(0xabc),
         )
@@ -295,25 +373,32 @@ mod tests {
 
     #[test]
     fn registry_manager_returns_same_registry_for_same_query() {
-        let manager = DynFilterRegistryManager::default();
+        let manager = Arc::new(DynFilterRegistryManager::default());
         let query_id = test_query_id(1);
-        let first = manager.get_or_init(query_id);
-        let second = manager.get_or_init(query_id);
+        let first = manager.acquire_lease(query_id);
+        let second = manager.acquire_lease(query_id);
 
-        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first.ptr_eq(&second));
         assert_eq!(manager.registry_count(), 1);
+        assert_eq!(manager.weak_entry_count(), 1);
     }
 
     #[test]
     fn registry_manager_removes_registry_for_query() {
-        let manager = DynFilterRegistryManager::default();
+        let manager = Arc::new(DynFilterRegistryManager::default());
         let query_id = test_query_id(1);
 
-        let registry = manager.get_or_init(query_id);
+        let lease = manager.acquire_lease(query_id);
 
-        assert!(Arc::ptr_eq(&manager.remove(&query_id).unwrap(), &registry));
+        assert!(
+            manager
+                .remove(&query_id)
+                .unwrap()
+                .ptr_eq(&Arc::downgrade(lease.registry.as_ref().unwrap()))
+        );
         assert!(manager.get(&query_id).is_none());
         assert_eq!(manager.registry_count(), 0);
+        assert_eq!(manager.weak_entry_count(), 0);
     }
 
     #[test]
@@ -324,12 +409,16 @@ mod tests {
         let first = manager.acquire_lease(query_id);
         let second = manager.acquire_lease(query_id);
 
+        assert!(first.ptr_eq(&second));
         assert_eq!(manager.registry_count(), 1);
+        assert_eq!(manager.weak_entry_count(), 1);
         drop(first);
         assert_eq!(manager.registry_count(), 1);
+        assert_eq!(manager.weak_entry_count(), 1);
 
         drop(second);
         assert_eq!(manager.registry_count(), 0);
+        assert_eq!(manager.weak_entry_count(), 0);
     }
 
     #[test]
@@ -339,11 +428,141 @@ mod tests {
 
         let first = manager.acquire_lease(query_id);
         drop(first);
+        assert_eq!(manager.registry_count(), 0);
+        assert_eq!(manager.weak_entry_count(), 0);
+
         let second = manager.acquire_lease(query_id);
 
         assert_eq!(manager.registry_count(), 1);
+        assert_eq!(manager.weak_entry_count(), 1);
         drop(second);
         assert_eq!(manager.registry_count(), 0);
+        assert_eq!(manager.weak_entry_count(), 0);
+    }
+
+    #[test]
+    fn registry_manager_concurrent_final_lease_drop_cleans_weak_entry() {
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let query_id = test_query_id(1);
+        let first = manager.acquire_lease(query_id);
+        let second = manager.acquire_lease(query_id);
+        let barrier = Arc::new(Barrier::new(3));
+
+        let first_barrier = barrier.clone();
+        let first_drop = thread::spawn(move || {
+            first_barrier.wait();
+            drop(first);
+        });
+
+        let second_barrier = barrier.clone();
+        let second_drop = thread::spawn(move || {
+            second_barrier.wait();
+            drop(second);
+        });
+
+        barrier.wait();
+        first_drop.join().unwrap();
+        second_drop.join().unwrap();
+
+        assert_eq!(manager.registry_count(), 0);
+        assert_eq!(manager.weak_entry_count(), 0);
+    }
+
+    #[test]
+    fn registry_manager_concurrent_first_acquire_shares_registry() {
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let query_id = test_query_id(1);
+        let worker_count = 8;
+        let barrier = Arc::new(Barrier::new(worker_count + 1));
+
+        let handles = (0..worker_count)
+            .map(|_| {
+                let manager = manager.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    manager.acquire_lease(query_id)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        let leases = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        let first = leases.first().unwrap();
+        assert!(leases.iter().all(|lease| first.ptr_eq(lease)));
+        assert_eq!(manager.registry_count(), 1);
+        assert_eq!(manager.weak_entry_count(), 1);
+
+        drop(leases);
+        assert_eq!(manager.registry_count(), 0);
+        assert_eq!(manager.weak_entry_count(), 0);
+    }
+
+    #[test]
+    fn registry_manager_drop_racing_acquire_does_not_leave_stale_entry() {
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let query_id = test_query_id(1);
+
+        for _ in 0..64 {
+            let old_lease = manager.acquire_lease(query_id);
+            let barrier = Arc::new(Barrier::new(3));
+
+            let drop_barrier = barrier.clone();
+            let drop_thread = thread::spawn(move || {
+                drop_barrier.wait();
+                drop(old_lease);
+            });
+
+            let acquire_manager = manager.clone();
+            let acquire_barrier = barrier.clone();
+            let acquire_thread = thread::spawn(move || {
+                acquire_barrier.wait();
+                acquire_manager.acquire_lease(query_id)
+            });
+
+            barrier.wait();
+            drop_thread.join().unwrap();
+            let new_lease = acquire_thread.join().unwrap();
+
+            assert_eq!(manager.registry_count(), 1);
+            assert_eq!(manager.weak_entry_count(), 1);
+            drop(new_lease);
+            assert_eq!(manager.registry_count(), 0);
+            assert_eq!(manager.weak_entry_count(), 0);
+        }
+    }
+
+    #[test]
+    fn registry_manager_old_drop_cannot_remove_replacement_registry() {
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let query_id = test_query_id(1);
+        let old_lease = manager.acquire_lease(query_id);
+        let old_registry = Arc::downgrade(old_lease.registry.as_ref().unwrap());
+
+        drop(old_lease);
+        assert_eq!(manager.registry_count(), 0);
+        assert_eq!(manager.weak_entry_count(), 0);
+
+        let replacement_lease = manager.acquire_lease(query_id);
+        assert_eq!(manager.registry_count(), 1);
+        assert_eq!(manager.weak_entry_count(), 1);
+
+        assert!(
+            manager
+                .remove_if_dropped_registry(&query_id, &old_registry)
+                .is_none(),
+            "old registry cleanup must not remove the replacement weak entry"
+        );
+        assert_eq!(manager.registry_count(), 1);
+        assert_eq!(manager.weak_entry_count(), 1);
+
+        drop(replacement_lease);
+        assert_eq!(manager.registry_count(), 0);
+        assert_eq!(manager.weak_entry_count(), 0);
     }
 
     #[test]

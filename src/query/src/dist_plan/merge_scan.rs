@@ -54,10 +54,10 @@ use tracing::{Instrument, Span};
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::analyzer::utils::patch_batch_timezone;
 use crate::dist_plan::dyn_filter_bridge::{
-    CapturedDynFilter, bridge_dyn_filters_for_region, capture_remote_dyn_filters_for_pushdown,
-    query_context_with_initial_dyn_filter_regs,
+    CapturedDynFilter, capture_remote_dyn_filters_for_pushdown,
+    query_context_with_initial_dyn_filter_regs, register_dyn_filters_for_region,
 };
-use crate::dist_plan::{ProducerScopeId, RemoteDynFilterRegistryLease};
+use crate::dist_plan::{RemoteDynFilterProducerId, RemoteDynFilterRegistryLease};
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::options::FlowQueryExtensions;
 use crate::query_engine::QueryEngineState;
@@ -67,7 +67,7 @@ fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<Que
     context.session_config().get_extension()
 }
 
-fn acquire_remote_dyn_filter_registry_cleanup(
+fn acquire_remote_dyn_filter_registry_lease(
     context: &TaskContext,
     query_ctx: &QueryContextRef,
     captured_dyn_filters: &[CapturedDynFilter],
@@ -92,7 +92,8 @@ pub struct MergeScanLogicalPlan {
     /// If this plan is a placeholder
     is_placeholder: bool,
     partition_cols: AliasMapping,
-    producer_scope_id: ProducerScopeId,
+    /// Assigned after dist-plan rewriting so rewriters only deal with plan shape.
+    remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -133,18 +134,21 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
-    pub fn new(
-        input: LogicalPlan,
-        is_placeholder: bool,
-        partition_cols: AliasMapping,
-        producer_scope_id: ProducerScopeId,
-    ) -> Self {
+    pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: AliasMapping) -> Self {
         Self {
             input,
             is_placeholder,
             partition_cols,
-            producer_scope_id,
+            remote_dyn_filter_producer_id: None,
         }
+    }
+
+    pub(crate) fn with_remote_dyn_filter_producer_id(
+        mut self,
+        remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
+    ) -> Self {
+        self.remote_dyn_filter_producer_id = Some(remote_dyn_filter_producer_id);
+        self
     }
 
     pub fn name() -> &'static str {
@@ -170,8 +174,8 @@ impl MergeScanLogicalPlan {
         &self.partition_cols
     }
 
-    pub fn producer_scope_id(&self) -> ProducerScopeId {
-        self.producer_scope_id
+    pub fn remote_dyn_filter_producer_id(&self) -> Option<RemoteDynFilterProducerId> {
+        self.remote_dyn_filter_producer_id
     }
 }
 
@@ -189,7 +193,12 @@ pub struct MergeScanExec {
     /// Metrics for each partition
     partition_metrics: Arc<Mutex<HashMap<usize, PartitionMetrics>>>,
     query_ctx: QueryContextRef,
-    remote_dyn_filter_producer_scope_id: ProducerScopeId,
+    /// Optional because remote dynamic filters must fail open.
+    ///
+    /// If producer id assignment is missing, `MergeScanExec` still executes the query normally and
+    /// only skips RDF pushdown/registration while keeping parent-side filters as the correctness
+    /// fallback.
+    remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
     captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
     target_partition: usize,
     partition_cols: AliasMapping,
@@ -217,7 +226,7 @@ impl MergeScanExec {
         query_ctx: QueryContextRef,
         target_partition: usize,
         partition_cols: AliasMapping,
-        producer_scope_id: ProducerScopeId,
+        remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
     ) -> Result<Self> {
         // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
         // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
@@ -290,7 +299,7 @@ impl MergeScanExec {
             partition_metrics: Arc::default(),
             properties,
             query_ctx,
-            remote_dyn_filter_producer_scope_id: producer_scope_id,
+            remote_dyn_filter_producer_id,
             captured_remote_dyn_filters: Arc::default(),
             target_partition,
             partition_cols,
@@ -318,14 +327,14 @@ impl MergeScanExec {
         let current_channel = self.query_ctx.channel();
         let read_preference = self.query_ctx.read_preference();
         let explain_verbose = self.query_ctx.explain_verbose();
-        let remote_dyn_filter_registry_cleanup = acquire_remote_dyn_filter_registry_cleanup(
+        let remote_dyn_filter_registry_lease = acquire_remote_dyn_filter_registry_lease(
             context.as_ref(),
             &query_ctx,
             &captured_remote_dyn_filters,
         );
 
         let stream = Box::pin(stream!({
-            let _remote_dyn_filter_registry_cleanup = remote_dyn_filter_registry_cleanup;
+            let remote_dyn_filter_registry_lease = remote_dyn_filter_registry_lease;
             // only report metrics once for each MergeScan
             if partition == 0 {
                 MERGE_SCAN_REGIONS.observe(regions.len() as f64);
@@ -341,12 +350,15 @@ impl MergeScanExec {
                 .step_by(target_partition)
                 .copied()
             {
-                bridge_dyn_filters_for_region(
-                    context.as_ref(),
-                    &query_ctx,
-                    region_id,
-                    &captured_remote_dyn_filters,
-                );
+                if let Some(remote_dyn_filter_registry_lease) =
+                    remote_dyn_filter_registry_lease.as_ref()
+                {
+                    register_dyn_filters_for_region(
+                        remote_dyn_filter_registry_lease.registry(),
+                        region_id,
+                        &captured_remote_dyn_filters,
+                    );
+                }
 
                 let region_span = tracing_context.attach(tracing::info_span!(
                     parent: &Span::current(),
@@ -531,7 +543,7 @@ impl MergeScanExec {
             sub_stage_metrics: self.sub_stage_metrics.clone(),
             partition_metrics: self.partition_metrics.clone(),
             query_ctx: self.query_ctx.clone(),
-            remote_dyn_filter_producer_scope_id: self.remote_dyn_filter_producer_scope_id,
+            remote_dyn_filter_producer_id: self.remote_dyn_filter_producer_id,
             captured_remote_dyn_filters: self.captured_remote_dyn_filters.clone(),
             target_partition: self.target_partition,
             partition_cols: self.partition_cols.clone(),
@@ -592,8 +604,8 @@ impl MergeScanExec {
 
 #[cfg(test)]
 impl MergeScanExec {
-    fn remote_dyn_filter_producer_scope_id(&self) -> ProducerScopeId {
-        self.remote_dyn_filter_producer_scope_id
+    fn remote_dyn_filter_producer_id(&self) -> Option<RemoteDynFilterProducerId> {
+        self.remote_dyn_filter_producer_id
     }
 }
 
@@ -715,10 +727,22 @@ impl ExecutionPlan for MergeScanExec {
             .into_iter()
             .map(|filter| filter.filter)
             .collect::<Vec<_>>();
-        let remote_dyn_filter_pushdown = capture_remote_dyn_filters_for_pushdown(
-            self.remote_dyn_filter_producer_scope_id,
-            parent_filters,
-        );
+        let Some(remote_dyn_filter_producer_id) = self.remote_dyn_filter_producer_id else {
+            // RDF is an optimization: missing producer identity must only disable RDF, never block
+            // normal query execution or remove the parent-side filter fallback.
+            common_telemetry::warn!(
+                "MergeScan remote dynamic filter producer id is not assigned; skipping remote dynamic filter pushdown"
+            );
+            self.captured_remote_dyn_filters.lock().unwrap().clear();
+            let new_self = Arc::new(self.clone());
+
+            return Ok(FilterPushdownPropagation {
+                filters: parent_filters.into_iter().map(|_| PushedDown::No).collect(),
+                updated_node: Some(new_self),
+            });
+        };
+        let remote_dyn_filter_pushdown =
+            capture_remote_dyn_filters_for_pushdown(remote_dyn_filter_producer_id, parent_filters);
         *self.captured_remote_dyn_filters.lock().unwrap() =
             remote_dyn_filter_pushdown.captured_dyn_filters;
         let new_self = Arc::new(self.clone());
@@ -881,7 +905,6 @@ mod tests {
         let registry_manager = Arc::new(DynFilterRegistryManager::default());
         let query_id = test_query_id(1);
 
-        registry_manager.get_or_init(query_id);
         let first = registry_manager.acquire_lease(query_id);
         let second = registry_manager.acquire_lease(query_id);
 
@@ -939,8 +962,8 @@ mod tests {
     }
 
     #[test]
-    fn try_with_new_distribution_preserves_producer_scope_id() {
-        let producer_scope_id = ProducerScopeId::new(42);
+    fn try_with_new_distribution_preserves_remote_dyn_filter_producer_id() {
+        let remote_dyn_filter_producer_id = RemoteDynFilterProducerId::new(42);
 
         // Build a plan whose schema contains "col1"
         let plan = LogicalPlanBuilder::empty(true)
@@ -976,13 +999,13 @@ mod tests {
             query_ctx,
             target_partition,
             partition_cols,
-            producer_scope_id,
+            Some(remote_dyn_filter_producer_id),
         )
         .unwrap();
 
         assert_eq!(
-            exec.remote_dyn_filter_producer_scope_id(),
-            producer_scope_id
+            exec.remote_dyn_filter_producer_id(),
+            Some(remote_dyn_filter_producer_id)
         );
 
         // A distribution that differs from the current partitioning but shares a
@@ -998,15 +1021,15 @@ mod tests {
             .expect("expected a cloned exec with overlapping partition col");
 
         assert_eq!(
-            cloned.remote_dyn_filter_producer_scope_id(),
-            producer_scope_id,
-            "try_with_new_distribution must preserve producer scope id"
+            cloned.remote_dyn_filter_producer_id(),
+            Some(remote_dyn_filter_producer_id),
+            "try_with_new_distribution must preserve remote dynamic filter producer id"
         );
     }
 
     #[test]
     fn remote_dyn_filter_preflight_keeps_parent_filter_until_dn_runtime_is_ready() {
-        let producer_scope_id = ProducerScopeId::new(42);
+        let remote_dyn_filter_producer_id = RemoteDynFilterProducerId::new(42);
         let plan = LogicalPlanBuilder::empty(true)
             .project(vec![lit(1i32).alias("col1")])
             .unwrap()
@@ -1029,7 +1052,7 @@ mod tests {
             query_ctx,
             1,
             AliasMapping::new(),
-            producer_scope_id,
+            Some(remote_dyn_filter_producer_id),
         )
         .unwrap();
         let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(

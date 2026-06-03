@@ -30,7 +30,7 @@ use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion::prelude::SessionContext;
 use datafusion_common::{JoinType, ScalarValue};
-use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::expr::{Exists, ScalarFunction};
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, Subquery, binary_expr,
     col, lit,
@@ -55,40 +55,48 @@ use table::{Table, TableRef};
 
 use super::*;
 
-fn collect_merge_scan_producer_scope_ids(
+fn collect_merge_scan_remote_dyn_filter_producer_ids(
     plan: &LogicalPlan,
-    scopes: &mut BTreeSet<ProducerScopeId>,
+    producer_ids: &mut BTreeSet<RemoteDynFilterProducerId>,
 ) {
-    if let LogicalPlan::Extension(extension) = plan
-        && let Some(merge_scan) = extension
-            .node
-            .as_any()
-            .downcast_ref::<MergeScanLogicalPlan>()
-    {
-        scopes.insert(merge_scan.producer_scope_id());
-    }
+    let mut producer_id_list = Vec::new();
+    collect_merge_scan_remote_dyn_filter_producer_id_list(plan, &mut producer_id_list);
+    producer_ids.extend(producer_id_list);
+}
 
-    for input in plan.inputs() {
-        collect_merge_scan_producer_scope_ids(input, scopes);
+struct MergeScanRemoteDynFilterProducerIdCollector<'a> {
+    producer_ids: &'a mut Vec<RemoteDynFilterProducerId>,
+}
+
+impl TreeNodeRewriter for MergeScanRemoteDynFilterProducerIdCollector<'_> {
+    type Node = LogicalPlan;
+
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        if let LogicalPlan::Extension(extension) = &node
+            && let Some(merge_scan) = extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
+        {
+            self.producer_ids.push(
+                merge_scan
+                    .remote_dyn_filter_producer_id()
+                    .expect("MergeScan remote dynamic filter producer id must be assigned"),
+            );
+        }
+
+        Ok(Transformed::no(node))
     }
 }
 
-fn collect_merge_scan_producer_scope_id_list(
+fn collect_merge_scan_remote_dyn_filter_producer_id_list(
     plan: &LogicalPlan,
-    scopes: &mut Vec<ProducerScopeId>,
+    producer_ids: &mut Vec<RemoteDynFilterProducerId>,
 ) {
-    if let LogicalPlan::Extension(extension) = plan
-        && let Some(merge_scan) = extension
-            .node
-            .as_any()
-            .downcast_ref::<MergeScanLogicalPlan>()
-    {
-        scopes.push(merge_scan.producer_scope_id());
-    }
-
-    for input in plan.inputs() {
-        collect_merge_scan_producer_scope_id_list(input, scopes);
-    }
+    let _ = plan
+        .clone()
+        .rewrite_with_subqueries(&mut MergeScanRemoteDynFilterProducerIdCollector { producer_ids })
+        .unwrap();
 }
 
 pub(crate) struct TestTable;
@@ -1399,7 +1407,7 @@ fn test_simplify_select_now_expression() {
 }
 
 #[test]
-fn sibling_merge_scan_producers_have_unique_scope_ids() {
+fn sibling_merge_scans_have_unique_remote_dyn_filter_producer_ids() {
     init_default_ut_logging();
     let left_table = TestTable::table_with_name(0, "left_table".to_string());
     let right_table = TestTable::table_with_name(1, "right_table".to_string());
@@ -1436,19 +1444,19 @@ fn sibling_merge_scan_producers_have_unique_scope_ids() {
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
-    let mut scopes = Vec::new();
-    collect_merge_scan_producer_scope_id_list(&result, &mut scopes);
-    let unique_scopes = scopes.iter().copied().collect::<BTreeSet<_>>();
+    let mut producer_ids = Vec::new();
+    collect_merge_scan_remote_dyn_filter_producer_id_list(&result, &mut producer_ids);
+    let unique_producer_ids = producer_ids.iter().copied().collect::<BTreeSet<_>>();
 
     assert!(
-        scopes.len() >= 2,
-        "Expected at least 2 ProducerScopeIds, got {}: {scopes:?}",
-        scopes.len()
+        producer_ids.len() >= 2,
+        "Expected at least 2 RemoteDynFilterProducerIds, got {}: {producer_ids:?}",
+        producer_ids.len()
     );
     assert_eq!(
-        scopes.len(),
-        unique_scopes.len(),
-        "Expected all sibling ProducerScopeIds to be unique, got scopes: {scopes:?}"
+        producer_ids.len(),
+        unique_producer_ids.len(),
+        "Expected all sibling RemoteDynFilterProducerIds to be unique, got ids: {producer_ids:?}"
     );
 }
 
@@ -1916,7 +1924,7 @@ fn transform_sort_subquery_alias() {
 }
 
 #[test]
-fn producer_scope_ids_do_not_collide_between_subquery_and_outer_plan() {
+fn remote_dyn_filter_producer_ids_do_not_collide_between_subquery_and_outer_plan() {
     let test_table = TestTable::table_with_name(0, "numbers".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
@@ -1931,28 +1939,21 @@ fn producer_scope_ids_do_not_collide_between_subquery_and_outer_plan() {
         outer_ref_columns: Default::default(),
         spans: Default::default(),
     };
-    let allocator = ProducerScopeAllocator::default();
-    let rewritten_subquery =
-        DistPlannerAnalyzer::handle_subquery(subquery, allocator.clone()).unwrap();
     let outer_plan = LogicalPlanBuilder::scan_with_filters("outer", table_source, None, vec![])
+        .unwrap()
+        .filter(Expr::Exists(Exists {
+            subquery,
+            negated: false,
+        }))
         .unwrap()
         .build()
         .unwrap();
-    let rewritten_outer = DistPlannerAnalyzer {}
-        .try_push_down(outer_plan, allocator)
-        .unwrap();
+    let rewritten = DistPlannerAnalyzer {}.try_push_down(outer_plan).unwrap();
 
-    let mut subquery_scopes = BTreeSet::new();
-    collect_merge_scan_producer_scope_ids(
-        rewritten_subquery.subquery.as_ref(),
-        &mut subquery_scopes,
-    );
-    let mut outer_scopes = BTreeSet::new();
-    collect_merge_scan_producer_scope_ids(&rewritten_outer, &mut outer_scopes);
+    let mut producer_ids = BTreeSet::new();
+    collect_merge_scan_remote_dyn_filter_producer_ids(&rewritten, &mut producer_ids);
 
-    assert_eq!(subquery_scopes.len(), 1);
-    assert_eq!(outer_scopes.len(), 1);
-    assert_ne!(subquery_scopes, outer_scopes);
+    assert_eq!(producer_ids.len(), 2);
 }
 
 #[test]

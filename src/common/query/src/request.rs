@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod base64_serde;
 mod initial_remote_dyn_filter_reg;
 
 use std::sync::Arc;
@@ -56,31 +57,7 @@ pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;
 pub enum DynFilterPayload {
     /// A serialized DataFusion [`PhysicalExpr`] encoded as a protobuf
     /// [`PhysicalExprNode`].
-    Datafusion(#[serde(with = "base64_bytes")] Vec<u8>),
-}
-
-mod base64_bytes {
-    use base64::Engine;
-    use base64::prelude::BASE64_STANDARD;
-    use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&BASE64_STANDARD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let encoded = String::deserialize(deserializer)?;
-        BASE64_STANDARD.decode(encoded).map_err(|err| {
-            D::Error::custom(format!("invalid base64 dynamic filter payload: {err}"))
-        })
-    }
+    Datafusion(#[serde(with = "base64_serde::bytes")] Vec<u8>),
 }
 
 impl DynFilterPayload {

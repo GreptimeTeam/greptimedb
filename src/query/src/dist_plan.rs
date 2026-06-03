@@ -24,7 +24,7 @@ mod region_pruner;
 mod remote_dyn_filter_registry;
 
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
-pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, ProducerScopeId};
+pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
 pub use predicate_extractor::PredicateExtractor;
