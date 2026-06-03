@@ -14,6 +14,7 @@
 
 //! Flush tests for mito engine.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -21,11 +22,14 @@ use std::time::Duration;
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
-use common_wal::options::WAL_OPTIONS_KEY;
+use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionFlushRequest, RegionRequest};
+use store_api::region_request::{
+    PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
+    ReplayCheckpoint,
+};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -319,8 +323,6 @@ async fn test_flush_empty_with_format(flat_format: bool) {
 async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
     use std::collections::HashMap;
 
-    use common_wal::options::{KafkaWalOptions, WalOptions};
-
     common_telemetry::init_default_ut_logging();
     let Some(factory) = factory else {
         return;
@@ -392,6 +394,235 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
     let version_data = region.version_control.current();
     assert_eq!(2, version_data.last_entry_id);
     assert_eq!(5, version_data.committed_sequence);
+}
+
+#[apply(single_kafka_log_store_factory)]
+async fn test_skip_remote_wal_replay_sets_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env = TestEnv::new().await.with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    let options = kafka_wal_options(&topic);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows_for_key("a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    flush_region(&engine, region_id, None).await;
+    // The empty flush updates `topic_latest_entry_id` from KafkaLogStore's topic stats.
+    flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(1, region.topic_latest_entry_id.load(Ordering::Relaxed));
+
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options,
+                skip_wal_replay: true,
+                checkpoint: Some(ReplayCheckpoint {
+                    entry_id: 1,
+                    metadata_entry_id: None,
+                }),
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(1, region.topic_latest_entry_id.load(Ordering::Relaxed));
+}
+
+#[apply(single_kafka_log_store_factory)]
+async fn test_remote_wal_open_with_replayed_memtable_sets_topic_latest_entry_id(
+    factory: Option<LogStoreFactory>,
+) {
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env = TestEnv::new().await.with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    let options = kafka_wal_options(&topic);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    flush_region(&engine, region_id, None).await;
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows_for_key("b", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options,
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(1, region.version().flushed_entry_id);
+    assert!(!region.version().memtables.is_empty());
+    assert_eq!(1, region.topic_latest_entry_id.load(Ordering::Relaxed));
+}
+
+#[apply(single_kafka_log_store_factory)]
+async fn test_remote_wal_open_without_replayed_memtable_sets_topic_latest_entry_id(
+    factory: Option<LogStoreFactory>,
+) {
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env = TestEnv::new().await.with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    let options = kafka_wal_options(&topic);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows_for_key("a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    flush_region(&engine, region_id, None).await;
+    // The empty flush updates `topic_latest_entry_id` from KafkaLogStore's topic stats.
+    flush_region(&engine, region_id, None).await;
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options,
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert!(region.version().memtables.is_empty());
+    assert_eq!(1, region.topic_latest_entry_id.load(Ordering::Relaxed));
+}
+
+fn kafka_wal_options(topic: &Option<String>) -> HashMap<String, String> {
+    topic
+        .as_ref()
+        .map(|topic| {
+            HashMap::from([(
+                WAL_OPTIONS_KEY.to_string(),
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: topic.clone(),
+                }))
+                .unwrap(),
+            )])
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug)]

@@ -334,9 +334,7 @@ impl RegionFlushTrigger {
         for batch in regions.chunks(batch_size) {
             let batch = batch
                 .iter()
-                .map(|(region_id, value)| {
-                    (TopicRegionKey::new(*region_id, topic), Some(value.clone()))
-                })
+                .map(|(region_id, value)| (TopicRegionKey::new(*region_id, topic), Some(*value)))
                 .collect::<Vec<_>>();
             self.table_metadata_manager
                 .topic_region_manager()
