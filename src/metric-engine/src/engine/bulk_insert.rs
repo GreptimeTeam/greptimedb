@@ -72,8 +72,9 @@ impl MetricEngineInner {
     async fn bulk_insert_physical_region(
         &self,
         region_id: RegionId,
-        request: RegionBulkInsertsRequest,
+        mut request: RegionBulkInsertsRequest,
     ) -> Result<AffectedRows> {
+        request.aligned_schema_version = Some(self.physical_schema_version(region_id).await?);
         self.data_region
             .write_data(region_id, RegionRequest::BulkInserts(request))
             .await
@@ -118,13 +119,7 @@ impl MetricEngineInner {
         let (schema, data_header, payload) = record_batch_to_ipc(&modified_batch)?;
 
         let partition_expr_version = request.partition_expr_version;
-        let physical_schema_version = self
-            .mito
-            .get_metadata(data_region_id)
-            .await
-            .context(error::MitoReadOperationSnafu)?
-            .schema_version;
-        let aligned_schema_version = Some(physical_schema_version);
+        let aligned_schema_version = Some(self.physical_schema_version(data_region_id).await?);
 
         let request = RegionBulkInsertsRequest {
             region_id: data_region_id,
@@ -140,6 +135,15 @@ impl MetricEngineInner {
         self.data_region
             .write_data(data_region_id, RegionRequest::BulkInserts(request))
             .await
+    }
+
+    async fn physical_schema_version(&self, region_id: RegionId) -> Result<u64> {
+        Ok(self
+            .mito
+            .get_metadata(region_id)
+            .await
+            .context(error::MitoReadOperationSnafu)?
+            .schema_version)
     }
 
     fn resolve_tag_columns_from_metadata(
