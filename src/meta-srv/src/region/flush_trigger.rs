@@ -29,6 +29,7 @@ use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use common_wal::config::kafka::common::{
     DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE,
+    DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL, DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
 };
 use snafu::{OptionExt, ResultExt};
 use store_api::region_request::RegionFlushReason;
@@ -39,14 +40,8 @@ use crate::error::{self, Result};
 use crate::service::mailbox::{Channel, MailboxRef};
 use crate::{define_ticker, metrics};
 
-/// The interval of the region flush ticker.
-const TICKER_INTERVAL: Duration = Duration::from_secs(60);
-
 /// The duration of the recent period.
 const RECENT_DURATION: Duration = Duration::from_secs(300);
-
-/// The interval to periodically persist region checkpoints regardless of replay size.
-const PERIODIC_CHECKPOINT_PERSIST_INTERVAL: Duration = Duration::from_mins(60);
 
 /// [`Event`] represents various types of events that can be processed by the region flush ticker.
 ///
@@ -87,6 +82,10 @@ pub struct RegionFlushTrigger {
     flush_trigger_size: ReadableSize,
     /// The checkpoint trigger size.
     checkpoint_trigger_size: ReadableSize,
+    /// The interval of the region flush trigger.
+    region_flush_trigger_interval: Duration,
+    /// The interval to periodically persist region checkpoints regardless of replay size.
+    periodic_checkpoint_persist_interval: Duration,
     /// The last timestamp in milliseconds when a region checkpoint was persisted.
     last_checkpoint_persist_millis_by_region: HashMap<RegionId, i64>,
     /// The receiver of events.
@@ -95,6 +94,7 @@ pub struct RegionFlushTrigger {
 
 impl RegionFlushTrigger {
     /// Creates a new [`RegionFlushTrigger`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         table_metadata_manager: TableMetadataManagerRef,
         leader_region_registry: LeaderRegionRegistryRef,
@@ -103,6 +103,8 @@ impl RegionFlushTrigger {
         server_addr: String,
         mut flush_trigger_size: ReadableSize,
         mut checkpoint_trigger_size: ReadableSize,
+        mut region_flush_trigger_interval: Duration,
+        mut periodic_checkpoint_persist_interval: Duration,
     ) -> (Self, RegionFlushTicker) {
         if flush_trigger_size.as_bytes() == 0 {
             flush_trigger_size = DEFAULT_FLUSH_TRIGGER_SIZE;
@@ -118,8 +120,22 @@ impl RegionFlushTrigger {
                 checkpoint_trigger_size
             );
         }
+        if region_flush_trigger_interval.is_zero() {
+            region_flush_trigger_interval = DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL;
+            warn!(
+                "region_flush_trigger_interval is not set, using default value: {:?}",
+                region_flush_trigger_interval
+            );
+        }
+        if periodic_checkpoint_persist_interval.is_zero() {
+            periodic_checkpoint_persist_interval = DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL;
+            warn!(
+                "periodic_checkpoint_persist_interval is not set, using default value: {:?}",
+                periodic_checkpoint_persist_interval
+            );
+        }
         let (tx, rx) = Self::channel();
-        let region_flush_ticker = RegionFlushTicker::new(TICKER_INTERVAL, tx);
+        let region_flush_ticker = RegionFlushTicker::new(region_flush_trigger_interval, tx);
         let region_flush_trigger = Self {
             table_metadata_manager,
             leader_region_registry,
@@ -128,6 +144,8 @@ impl RegionFlushTrigger {
             server_addr,
             flush_trigger_size,
             checkpoint_trigger_size,
+            region_flush_trigger_interval,
+            periodic_checkpoint_persist_interval,
             last_checkpoint_persist_millis_by_region: HashMap::new(),
             receiver: rx,
         };
@@ -230,7 +248,7 @@ impl RegionFlushTrigger {
             topic_regions.keys().copied(),
             &self.last_checkpoint_persist_millis_by_region,
             now_millis,
-            PERIODIC_CHECKPOINT_PERSIST_INTERVAL,
+            self.periodic_checkpoint_persist_interval,
         );
         let regions_to_persist = merge_region_ids(size_based_regions, periodic_regions);
         let region_manifests = self
@@ -284,7 +302,7 @@ impl RegionFlushTrigger {
 
         let Some(stat) = self
             .topic_stats_registry
-            .get_calculated_topic_stat(topic, TICKER_INTERVAL)
+            .get_calculated_topic_stat(topic, self.region_flush_trigger_interval)
         else {
             debug!("No topic stat found for topic: {}", topic);
             return None;
@@ -992,6 +1010,8 @@ mod tests {
             "127.0.0.1:3002".to_string(),
             ReadableSize(1),
             ReadableSize(1),
+            DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
+            DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL,
         );
 
         let topic = "test_topic";
@@ -1064,6 +1084,8 @@ mod tests {
             "127.0.0.1:3002".to_string(),
             ReadableSize(1),
             ReadableSize(1),
+            DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
+            DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL,
         );
 
         let topic = "test_topic".to_string();

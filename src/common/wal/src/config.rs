@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::kafka::common::{
     DEFAULT_AUTO_PRUNE_INTERVAL, DEFAULT_AUTO_PRUNE_LOGICAL_DELETE, DEFAULT_AUTO_PRUNE_PARALLELISM,
     DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE,
+    DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL, DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
 };
 use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use crate::config::raft_engine::RaftEngineConfig;
@@ -73,6 +74,10 @@ impl TryFrom<DatanodeWalConfig> for MetasrvWalConfig {
                 flush_trigger_size: DEFAULT_FLUSH_TRIGGER_SIZE,
                 // This field won't be used in standalone mode
                 checkpoint_trigger_size: DEFAULT_CHECKPOINT_TRIGGER_SIZE,
+                // This field won't be used in standalone mode
+                region_flush_trigger_interval: DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
+                // This field won't be used in standalone mode
+                periodic_checkpoint_persist_interval: DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL,
             })),
             DatanodeWalConfig::Noop => UnsupportedWalProviderSnafu {
                 provider: "noop".to_string(),
@@ -225,6 +230,8 @@ mod tests {
             auto_prune_parallelism: 10,
             flush_trigger_size: ReadableSize::mb(512),
             checkpoint_trigger_size: ReadableSize::mb(128),
+            region_flush_trigger_interval: Duration::from_secs(60),
+            periodic_checkpoint_persist_interval: Duration::from_secs(60 * 60),
         };
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
 
