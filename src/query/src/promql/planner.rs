@@ -782,6 +782,8 @@ impl PromPlanner {
                     // under this case we only join on time index
                     left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty(),
                     modifier,
+                    &left_context,
+                    &right_context,
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
 
@@ -3479,13 +3481,6 @@ impl PromPlanner {
         (output_field_columns, field_pairs)
     }
 
-    fn plan_has_tsid_column(plan: &LogicalPlan) -> bool {
-        plan.schema()
-            .fields()
-            .iter()
-            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
-    }
-
     fn optional_tsid_projection(
         schema: &DFSchemaRef,
         table_ref: Option<&TableReference>,
@@ -3501,15 +3496,15 @@ impl PromPlanner {
 
     fn binary_join_key_columns(
         &self,
-        left: &LogicalPlan,
-        right: &LogicalPlan,
+        left_context: &PromPlannerContext,
+        right_context: &PromPlannerContext,
         only_join_time_index: bool,
         modifier: &Option<BinModifier>,
     ) -> (BTreeSet<String>, BTreeSet<String>) {
         let use_tsid_join = !only_join_time_index
-            && self.binary_modifier_preserves_tsid_join_key(left, right, modifier)
-            && Self::plan_has_tsid_column(left)
-            && Self::plan_has_tsid_column(right);
+            && self.binary_modifier_preserves_tsid_join_key(left_context, right_context, modifier)
+            && left_context.use_tsid
+            && right_context.use_tsid;
 
         let (mut left_tag_columns, mut right_tag_columns) = if use_tsid_join {
             (
@@ -3554,8 +3549,8 @@ impl PromPlanner {
 
     fn binary_modifier_preserves_tsid_join_key(
         &self,
-        left: &LogicalPlan,
-        right: &LogicalPlan,
+        left_context: &PromPlannerContext,
+        right_context: &PromPlannerContext,
         modifier: &Option<BinModifier>,
     ) -> bool {
         let Some(modifier) = modifier else {
@@ -3569,23 +3564,23 @@ impl PromPlanner {
         match &modifier.matching {
             None => true,
             Some(LabelModifier::Exclude(ignoring)) => ignoring.labels.iter().all(|label| {
-                !left.schema().has_column_with_unqualified_name(label)
-                    && !right.schema().has_column_with_unqualified_name(label)
+                !left_context.tag_columns.contains(label)
+                    && !right_context.tag_columns.contains(label)
             }),
             Some(LabelModifier::Include(on)) => {
                 let on_labels = on.labels.iter().cloned().collect::<BTreeSet<_>>();
-                let full_label_set = self
-                    .ctx
+                let left_labels = left_context
+                    .tag_columns
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let right_labels = right_context
                     .tag_columns
                     .iter()
                     .cloned()
                     .collect::<BTreeSet<_>>();
 
-                on_labels == full_label_set
-                    && on_labels.iter().all(|label| {
-                        left.schema().has_column_with_unqualified_name(label)
-                            && right.schema().has_column_with_unqualified_name(label)
-                    })
+                on_labels == left_labels && on_labels == right_labels
             }
         }
     }
@@ -3603,9 +3598,15 @@ impl PromPlanner {
         right_time_index_column: Option<String>,
         only_join_time_index: bool,
         modifier: &Option<BinModifier>,
+        left_context: &PromPlannerContext,
+        right_context: &PromPlannerContext,
     ) -> Result<LogicalPlan> {
-        let (mut left_tag_columns, mut right_tag_columns) =
-            self.binary_join_key_columns(&left, &right, only_join_time_index, modifier);
+        let (mut left_tag_columns, mut right_tag_columns) = self.binary_join_key_columns(
+            left_context,
+            right_context,
+            only_join_time_index,
+            modifier,
+        );
 
         // push time index column if it exists
         if let (Some(left_time_index_column), Some(right_time_index_column)) =
@@ -4402,13 +4403,28 @@ mod test {
         table_specs: &[((String, String), usize)],
         num_tag: usize,
     ) -> DfTableSourceProvider {
+        let table_specs = table_specs
+            .iter()
+            .map(|(table_name_tuple, num_field)| (table_name_tuple.clone(), num_tag, *num_field))
+            .collect::<Vec<_>>();
+        build_test_table_provider_with_tsid_tag_fields(&table_specs).await
+    }
+
+    async fn build_test_table_provider_with_tsid_tag_fields(
+        table_specs: &[((String, String), usize, usize)],
+    ) -> DfTableSourceProvider {
         let catalog_list = MemoryCatalogManager::with_default_setup();
 
         let physical_table_name = "phy";
         let physical_table_id = 999u32;
+        let physical_num_tag = table_specs
+            .iter()
+            .map(|(_, num_tag, _)| *num_tag)
+            .max()
+            .unwrap_or(0);
         let physical_num_field = table_specs
             .iter()
-            .map(|(_, num_field)| *num_field)
+            .map(|(_, _, num_field)| *num_field)
             .max()
             .unwrap_or(0);
 
@@ -4426,7 +4442,7 @@ mod test {
                     false,
                 ),
             ];
-            for i in 0..num_tag {
+            for i in 0..physical_num_tag {
                 columns.push(ColumnSchema::new(
                     format!("tag_{i}"),
                     ConcreteDataType::string_datatype(),
@@ -4450,11 +4466,13 @@ mod test {
             }
 
             let schema = Arc::new(Schema::new(columns));
-            let primary_key_indices = (0..(2 + num_tag)).collect::<Vec<_>>();
+            let primary_key_indices = (0..(2 + physical_num_tag)).collect::<Vec<_>>();
             let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
                 .primary_key_indices(primary_key_indices)
-                .value_indices((2 + num_tag..2 + num_tag + 1 + physical_num_field).collect())
+                .value_indices(
+                    (2 + physical_num_tag..2 + physical_num_tag + 1 + physical_num_field).collect(),
+                )
                 .engine(METRIC_ENGINE_NAME.to_string())
                 .next_column_id(1024)
                 .build()
@@ -4481,9 +4499,10 @@ mod test {
         }
 
         // Register metric engine logical tables without `__tsid`, referencing the physical table.
-        for (idx, ((schema_name, table_name), num_field)) in table_specs.iter().enumerate() {
+        for (idx, ((schema_name, table_name), num_tag, num_field)) in table_specs.iter().enumerate()
+        {
             let mut columns = vec![];
-            for i in 0..num_tag {
+            for i in 0..*num_tag {
                 columns.push(ColumnSchema::new(
                     format!("tag_{i}"),
                     ConcreteDataType::string_datatype(),
@@ -4515,8 +4534,8 @@ mod test {
             let table_id = 1024u32 + idx as u32;
             let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
-                .primary_key_indices((0..num_tag).collect())
-                .value_indices((num_tag + 1..num_tag + 1 + *num_field).collect())
+                .primary_key_indices((0..*num_tag).collect())
+                .value_indices((*num_tag + 1..*num_tag + 1 + *num_field).collect())
                 .engine(METRIC_ENGINE_NAME.to_string())
                 .options(options)
                 .next_column_id(1024)
@@ -5268,6 +5287,40 @@ mod test {
             2,
             1,
         )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(!plan_str.contains("__tsid ="), "{plan_str}");
+        assert!(
+            plan_str.contains("some_metric.tag_0 = some_alt_metric.tag_0"),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains("tag_1 ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn on_label_set_must_cover_both_sides_to_use_tsid_binary_join() {
+        let eval_stmt = build_eval_stmt("some_metric / on(tag_0) some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid_tag_fields(&[
+            (
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                2,
+                1,
+            ),
+            (
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+                1,
+                1,
+            ),
+        ])
         .await;
         let plan =
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())

@@ -33,6 +33,18 @@ WITH(
   on_physical_table = 'tsid_binary_join_physical'
 );
 
+CREATE TABLE tsid_binary_join_right_by_job (
+  job STRING NULL,
+  ts TIMESTAMP(3) NOT NULL,
+  greptime_value DOUBLE NULL,
+  TIME INDEX (ts),
+  PRIMARY KEY(job),
+)
+ENGINE = metric
+WITH(
+  on_physical_table = 'tsid_binary_join_physical'
+);
+
 INSERT INTO tsid_binary_join_left (host, job, ts, greptime_value) VALUES
   ('host1', 'job1', 0, 12),
   ('host2', 'job2', 0, 18),
@@ -44,6 +56,12 @@ INSERT INTO tsid_binary_join_right (host, job, ts, greptime_value) VALUES
   ('host2', 'job2', 0, 6),
   ('host1', 'job1', 5000, 5),
   ('host2', 'job2', 5000, 7);
+
+INSERT INTO tsid_binary_join_right_by_job (job, ts, greptime_value) VALUES
+  ('job1', 0, 3),
+  ('job2', 0, 6),
+  ('job1', 5000, 5),
+  ('job2', 5000, 7);
 
 -- Default vector-vector arithmetic should join on `__tsid` and time index.
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -70,6 +88,19 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join_right;
+
+-- `on(job)` must stay label-based when only the left side has extra row-key labels.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[job@1,\sts@2\],.* Hash([job@1, ts@2],REDACTED
+-- SQLNESS REPLACE Hash\(\[job@2,\sts@4\],.* Hash([job@2, ts@4],REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_by_job;
 
 -- Comparison filters can join on `__tsid`, but the filtered result must still behave like
 -- a regular derived vector downstream.
@@ -101,6 +132,10 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_by_job;
+
+DROP TABLE tsid_binary_join_right_by_job;
 DROP TABLE tsid_binary_join_right;
 DROP TABLE tsid_binary_join_left;
 DROP TABLE tsid_binary_join_physical;
