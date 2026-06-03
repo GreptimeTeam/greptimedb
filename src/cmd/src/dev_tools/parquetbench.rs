@@ -118,12 +118,14 @@ struct ParquetScanConfig {
     row_groups: Option<Vec<usize>>,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct IterationStats {
     rows: usize,
     record_batches: usize,
     /// Number of columns in the output record batches.
     columns: usize,
+    /// Schema of the output record batches, captured from the first batch.
+    schema: Option<SchemaRef>,
     elapsed: Duration,
 }
 
@@ -286,6 +288,7 @@ impl ParquetbenchCommand {
         let mut total_elapsed_all = Duration::ZERO;
         let mut total_rows_all = 0usize;
         let mut total_batches_all = 0usize;
+        let mut schema_printed = false;
         let file_handle = FileHandle::new(
             FileMeta {
                 region_id,
@@ -342,6 +345,18 @@ impl ParquetbenchCommand {
             total_elapsed_all += stats.elapsed;
             total_rows_all += stats.rows;
             total_batches_all += stats.record_batches;
+
+            if !schema_printed && let Some(schema) = &stats.schema {
+                println!(
+                    "{} Output schema ({} columns):",
+                    "✓".green(),
+                    schema.fields().len()
+                );
+                for field in schema.fields() {
+                    println!("    - {}: {}", field.name().cyan(), field.data_type());
+                }
+                schema_printed = true;
+            }
 
             println!(
                 "  Iteration {}: {} rows, {} columns, {} record batches in {:?} ({}/s, {}/s)",
@@ -500,6 +515,9 @@ async fn run_direct_iteration(
             stats.rows += batch.num_rows();
             stats.record_batches += 1;
             stats.columns = batch.num_columns();
+            if stats.schema.is_none() {
+                stats.schema = Some(batch.schema());
+            }
         }
     }
     stats.elapsed = start.elapsed();
@@ -567,6 +585,9 @@ async fn run_flat_prune_iteration(
             stats.rows += batch.num_rows();
             stats.record_batches += 1;
             stats.columns = batch.num_columns();
+            if stats.schema.is_none() {
+                stats.schema = Some(batch.schema());
+            }
         }
     }
 
