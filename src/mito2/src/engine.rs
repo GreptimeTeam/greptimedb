@@ -117,6 +117,7 @@ use store_api::region_engine::{
     RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
     SyncRegionFromRequest, SyncRegionFromResponse,
 };
+use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{
     AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
 };
@@ -455,11 +456,7 @@ impl MitoEngine {
         );
 
         let (tx, rx) = oneshot::channel();
-        let request = WorkerRequest::EditRegion(RegionEditRequest {
-            region_id,
-            edit,
-            tx,
-        });
+        let request = WorkerRequest::EditRegion(RegionEditRequest::new(region_id, edit, true, tx));
         self.inner
             .workers
             .submit_to_worker(region_id, request)
@@ -616,8 +613,10 @@ impl MitoEngine {
                             return Vec::new();
                         }
                     };
+                    // The index file path is derived from the physical file owner. After
+                    // repartition, `entry.region_id` is only the referring region.
                     let region_index_id = RegionIndexId::new(
-                        RegionFileId::new(entry.region_id, file_id),
+                        RegionFileId::new(entry.origin_region_id, file_id),
                         index_version,
                     );
                     let context = IndexEntryContext {
@@ -655,6 +654,16 @@ impl MitoEngine {
         }
 
         results
+    }
+
+    /// Lists region info entries of all regions in the engine.
+    pub async fn all_region_infos(&self) -> Vec<RegionInfoEntry> {
+        let node_id = self.inner.workers.file_ref_manager().node_id();
+        self.inner
+            .workers
+            .all_regions()
+            .map(|region| region.region_info_entry(node_id))
+            .collect()
     }
 
     /// Lists all SSTs from the storage layer of all regions in the engine.

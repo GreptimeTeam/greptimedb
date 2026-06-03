@@ -124,6 +124,9 @@ pub struct ScanRequest {
     /// Optional constraint on the minimal sequence number in the SST files.
     /// If set, only the SST files that contain sequences greater than this value will be scanned.
     pub sst_min_sequence: Option<SequenceNumber>,
+    /// Whether to skip all SST files.
+    /// This is stronger than `sst_min_sequence` and also skips SST files without sequence metadata.
+    pub skip_sst_files: bool,
     /// Whether to bind the effective snapshot upper bound when opening the scan.
     pub snapshot_on_scan: bool,
     /// Optional hint for the distribution of time-series data.
@@ -209,6 +212,14 @@ impl Display for ScanRequest {
                 "{}sst_min_sequence: {}",
                 delimiter.as_str(),
                 sst_min_sequence
+            )?;
+        }
+        if self.skip_sst_files {
+            write!(
+                f,
+                "{}skip_sst_files: {}",
+                delimiter.as_str(),
+                self.skip_sst_files
             )?;
         }
         if self.snapshot_on_scan {
@@ -321,5 +332,11 @@ mod tests {
             request.to_string(),
             "ScanRequest { snapshot_on_scan: true }"
         );
+
+        let request = ScanRequest {
+            skip_sst_files: true,
+            ..Default::default()
+        };
+        assert_eq!(request.to_string(), "ScanRequest { skip_sst_files: true }");
     }
 }

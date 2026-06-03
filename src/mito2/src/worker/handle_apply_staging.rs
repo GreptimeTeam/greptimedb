@@ -136,11 +136,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
             let _ = worker_sender
                 .send(WorkerRequestWithTime::new(WorkerRequest::EditRegion(
-                    RegionEditRequest {
-                        region_id: region.region_id,
-                        edit,
-                        tx,
-                    },
+                    RegionEditRequest::new(
+                        region_id, edit,
+                        // we don't need to preload sst cache during repartition, as it may cause extra network overhead.
+                        false, tx,
+                    ),
                 )))
                 .await;
 

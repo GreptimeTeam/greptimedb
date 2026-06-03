@@ -13,8 +13,9 @@
 // limitations under the License.
 
 //! Batching mode task state, which changes frequently
+//!
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use common_telemetry::debug;
@@ -49,6 +50,14 @@ pub struct TaskState {
     /// Dirty Time windows need to be updated
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
+    checkpoint_mode: CheckpointMode,
+    /// Region id -> last consumed watermark sequence. Incremental scans use
+    /// this as the next lower sequence bound for each source region.
+    checkpoints: BTreeMap<u64, u64>,
+    /// Once set, the task will never attempt incremental mode again.
+    /// Set when the flow's query shape is deterministically incompatible
+    /// with incremental execution (e.g. unsupported aggregate expressions).
+    incremental_disabled: bool,
     exec_state: ExecState,
     /// Shutdown receiver
     pub(crate) shutdown_rx: oneshot::Receiver<()>,
@@ -63,6 +72,9 @@ impl TaskState {
             last_query_duration: Duration::from_secs(0),
             last_exec_time_millis: None,
             dirty_time_windows: Default::default(),
+            checkpoint_mode: CheckpointMode::FullSnapshot,
+            checkpoints: Default::default(),
+            incremental_disabled: false,
             exec_state: ExecState::Idle,
             shutdown_rx,
             task_handle: None,
@@ -84,6 +96,84 @@ impl TaskState {
         self.last_exec_time_millis
     }
 
+    pub fn checkpoint_mode(&self) -> CheckpointMode {
+        self.checkpoint_mode
+    }
+
+    pub fn checkpoints(&self) -> &BTreeMap<u64, u64> {
+        &self.checkpoints
+    }
+
+    pub fn is_incremental_disabled(&self) -> bool {
+        self.incremental_disabled
+    }
+
+    /// Permanently disable incremental mode for this task and
+    /// immediately fall back to full snapshot for the current cycle.
+    pub fn disable_incremental(&mut self) {
+        self.incremental_disabled = true;
+        self.mark_full_snapshot();
+    }
+
+    pub fn mark_full_snapshot(&mut self) {
+        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+    }
+
+    pub fn advance_checkpoints(&mut self, watermark_map: HashMap<u64, u64>) {
+        self.checkpoints = watermark_map.into_iter().collect();
+        if !self.incremental_disabled {
+            self.checkpoint_mode = CheckpointMode::Incremental;
+        }
+    }
+
+    pub fn advance_incremental_checkpoints_with_participation(
+        &mut self,
+        participating_regions: &BTreeSet<u64>,
+        watermark_map: HashMap<u64, u64>,
+    ) {
+        for region_id in participating_regions {
+            if let Some(seq) = watermark_map.get(region_id) {
+                self.checkpoints.insert(*region_id, *seq);
+            }
+        }
+        if !self.incremental_disabled {
+            self.checkpoint_mode = CheckpointMode::Incremental;
+        }
+    }
+
+    pub fn can_advance_full_snapshot_checkpoints(
+        &self,
+        participating_regions: &BTreeSet<u64>,
+        watermark_map: &HashMap<u64, u64>,
+    ) -> bool {
+        !participating_regions.is_empty()
+            && participating_regions.len() == watermark_map.len()
+            && participating_regions
+                .iter()
+                .all(|region_id| watermark_map.contains_key(region_id))
+    }
+
+    pub fn can_advance_incremental_checkpoints_with_participation(
+        &self,
+        participating_regions: &BTreeSet<u64>,
+        watermark_map: &HashMap<u64, u64>,
+    ) -> bool {
+        !self.incremental_disabled
+            && !self.checkpoints.is_empty()
+            && !participating_regions.is_empty()
+            && participating_regions.len() == watermark_map.len()
+            && participating_regions
+                .iter()
+                .all(|region_id| self.checkpoints.contains_key(region_id))
+            && participating_regions.iter().all(|region_id| {
+                let checkpoint = self.checkpoints.get(region_id);
+                watermark_map
+                    .get(region_id)
+                    .zip(checkpoint)
+                    .is_some_and(|(seq, checkpoint)| seq >= checkpoint)
+            })
+    }
+
     /// Compute the next query delay based on the time window size or the last query duration.
     /// Aiming to avoid too frequent queries. But also not too long delay.
     ///
@@ -94,6 +184,10 @@ impl TaskState {
     /// if current the dirty time range is longer than one query can handle,
     /// execute immediately to faster clean up dirty time windows.
     ///
+    /// If `prefer_short_incremental_cadence` is true, run incremental queries
+    /// more often when there is no large dirty backlog. This only reduces the
+    /// chance of hitting a stale cursor after flush; it is not required for
+    /// correctness.
     pub fn get_next_start_query_time(
         &self,
         flow_id: FlowId,
@@ -101,6 +195,7 @@ impl TaskState {
         min_refresh_duration: Duration,
         max_timeout: Option<Duration>,
         max_filter_num_per_query: usize,
+        prefer_short_incremental_cadence: bool,
     ) -> Instant {
         // = last query duration, capped by [max(min_run_interval, time_window_size), max_timeout], note at most `max_timeout`
         let lower = time_window_size.unwrap_or(min_refresh_duration);
@@ -119,7 +214,20 @@ impl TaskState {
         // if dirty time range is more than one query can handle, execute immediately
         // to faster clean up dirty time windows
         if cur_dirty_window_size < max_query_update_range {
-            self.last_update_time + next_duration
+            if prefer_short_incremental_cadence {
+                // Run incremental queries sooner than the normal time-window
+                // cadence, while still backing off by at least the previous
+                // query duration and respecting the max-timeout cap.
+                let next_duration = self.last_query_duration.max(min_refresh_duration);
+                let next_duration = if let Some(max_timeout) = max_timeout {
+                    next_duration.min(max_timeout)
+                } else {
+                    next_duration
+                };
+                self.last_update_time + next_duration
+            } else {
+                self.last_update_time + next_duration
+            }
         } else {
             // if dirty time windows can't be clean up in one query, execute immediately to faster
             // clean up dirty time windows
@@ -199,12 +307,42 @@ impl DirtyTimeWindows {
     }
 
     pub fn add_window(&mut self, start: Timestamp, end: Option<Timestamp>) {
-        self.windows.insert(start, end);
+        self.add_or_merge_window(start, end);
     }
 
     pub fn add_windows(&mut self, time_ranges: Vec<(Timestamp, Timestamp)>) {
         for (start, end) in time_ranges {
-            self.windows.insert(start, Some(end));
+            self.add_or_merge_window(start, Some(end));
+        }
+    }
+
+    /// Add all dirty markers from another dirty-window set.
+    pub fn add_dirty_windows(&mut self, dirty_windows: &DirtyTimeWindows) {
+        for (start, end) in &dirty_windows.windows {
+            self.add_or_merge_window(*start, *end);
+        }
+    }
+
+    fn add_or_merge_window(&mut self, start: Timestamp, end: Option<Timestamp>) {
+        self.windows
+            .entry(start)
+            .and_modify(|current_end| {
+                *current_end = Self::union_window_end(*current_end, end);
+            })
+            .or_insert(end);
+    }
+
+    fn union_window_end(
+        current_end: Option<Timestamp>,
+        incoming_end: Option<Timestamp>,
+    ) -> Option<Timestamp> {
+        match (current_end, incoming_end) {
+            (Some(current), Some(incoming)) => Some(current.max(incoming)),
+            // `None` is a dirty marker without a known upper bound.  When one
+            // side has a concrete end, keep it so merging a restored snapshot
+            // never shrinks an already-known dirty range with the same start.
+            (Some(end), None) | (None, Some(end)) => Some(end),
+            (None, None) => None,
         }
     }
 
@@ -216,7 +354,7 @@ impl DirtyTimeWindows {
     /// Set windows to be dirty, only useful for full aggr without time window
     /// to mark some new data is inserted
     pub fn set_dirty(&mut self) {
-        self.windows.insert(Timestamp::new_second(0), None);
+        self.add_or_merge_window(Timestamp::new_second(0), None);
     }
 
     /// Number of dirty windows.
@@ -283,7 +421,7 @@ impl DirtyTimeWindows {
         );
         self.merge_dirty_time_windows(window_size, expire_lower_bound)?;
 
-        if self.windows.len() > self.max_filter_num_per_query {
+        if self.windows.len() > window_cnt {
             let first_time_window = self.windows.first_key_value();
             let last_time_window = self.windows.last_key_value();
 
@@ -292,7 +430,7 @@ impl DirtyTimeWindows {
                     "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
                     task_ctx.config.flow_id,
                     self.windows.len(),
-                    self.max_filter_num_per_query,
+                    window_cnt,
                     task_ctx.config.time_window_expr,
                     task_ctx.config.expire_after,
                     first_time_window,
@@ -304,7 +442,7 @@ impl DirtyTimeWindows {
                     "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
                     flow_id,
                     self.windows.len(),
-                    self.max_filter_num_per_query,
+                    window_cnt,
                     first_time_window,
                     last_time_window
                 )
@@ -559,6 +697,12 @@ enum ExecState {
     Executing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointMode {
+    FullSnapshot,
+    Incremental,
+}
+
 /// Filter Expression's information
 #[derive(Debug, Clone)]
 pub struct FilterExprInfo {
@@ -575,6 +719,28 @@ impl FilterExprInfo {
             .fold(chrono::Duration::zero(), |acc, (start, end)| {
                 acc + end.sub(start).unwrap_or(chrono::Duration::zero())
             })
+    }
+
+    pub fn predicate_for_col(
+        &self,
+        col_name: &str,
+    ) -> Result<Option<datafusion_expr::Expr>, Error> {
+        use datafusion_common::Column;
+        use datafusion_expr::{Expr, lit};
+
+        let mut expr_lst = Vec::with_capacity(self.time_ranges.len());
+        for (start, end) in &self.time_ranges {
+            let lower = to_df_literal(*start)?;
+            let upper = to_df_literal(*end)?;
+            let filter_col = || Expr::Column(Column::new_unqualified(col_name));
+            expr_lst.push(
+                filter_col()
+                    .gt_eq(lit(lower))
+                    .and(filter_col().lt(lit(upper))),
+            );
+        }
+
+        Ok(expr_lst.into_iter().reduce(|a, b| a.or(b)))
     }
 }
 
@@ -819,5 +985,371 @@ mod test {
                 assert_eq!(expected_after_align, after_align);
             }
         }
+    }
+
+    #[test]
+    fn test_task_state_checkpoint_mode_and_advancement() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(state.checkpoints().is_empty());
+
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+
+        state.mark_full_snapshot();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+    }
+
+    #[test]
+    fn test_disable_incremental_persists_full_snapshot_mode() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+
+        assert!(!state.is_incremental_disabled());
+
+        // After disable, mode becomes FullSnapshot and flag is set.
+        state.disable_incremental();
+        assert!(state.is_incremental_disabled());
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+
+        // `advance_checkpoints` will NOT transition to Incremental when disabled.
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+
+        // `mark_full_snapshot` does not re-enable incremental.
+        state.mark_full_snapshot();
+        assert!(state.is_incremental_disabled());
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    }
+
+    #[test]
+    fn test_full_snapshot_checkpoint_advancement_requires_participating_regions() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let state = TaskState::new(query_ctx, rx);
+
+        assert!(!state.can_advance_full_snapshot_checkpoints(&BTreeSet::new(), &HashMap::new()));
+        assert!(!state.can_advance_full_snapshot_checkpoints(
+            &BTreeSet::from([1_u64, 2_u64]),
+            &HashMap::from([(1_u64, 10_u64)]),
+        ));
+        assert!(state.can_advance_full_snapshot_checkpoints(
+            &BTreeSet::from([1_u64, 2_u64]),
+            &HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]),
+        ));
+    }
+
+    #[test]
+    fn test_incremental_checkpoint_advancement_requires_participation_alignment() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+
+        assert!(
+            state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([1_u64]),
+                &HashMap::from([(1_u64, 11_u64)]),
+            )
+        );
+        assert!(
+            !state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([1_u64, 2_u64]),
+                &HashMap::from([(1_u64, 11_u64)]),
+            )
+        );
+        assert!(
+            !state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([3_u64]),
+                &HashMap::from([(3_u64, 11_u64)]),
+            )
+        );
+        assert!(
+            !state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([1_u64]),
+                &HashMap::from([(1_u64, 9_u64)]),
+            )
+        );
+        assert!(
+            state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([1_u64, 2_u64]),
+                &HashMap::from([(1_u64, 11_u64), (2_u64, 21_u64)]),
+            )
+        );
+
+        state.disable_incremental();
+        assert!(
+            !state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([1_u64, 2_u64]),
+                &HashMap::from([(1_u64, 12_u64), (2_u64, 22_u64)]),
+            )
+        );
+    }
+
+    #[test]
+    fn test_incremental_checkpoint_advancement_merges_participating_subset() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([
+            (1_u64, 10_u64),
+            (2_u64, 20_u64),
+            (3_u64, 30_u64),
+        ]));
+
+        state.advance_incremental_checkpoints_with_participation(
+            &BTreeSet::from([1_u64, 3_u64]),
+            HashMap::from([(1_u64, 12_u64), (3_u64, 35_u64)]),
+        );
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 12_u64), (2_u64, 20_u64), (3_u64, 35_u64)])
+        );
+    }
+
+    #[test]
+    fn test_filter_expr_info_predicate_for_col_empty_ranges() {
+        let filter = FilterExprInfo {
+            expr: datafusion_expr::col("ts"),
+            col_name: "ts".to_string(),
+            time_ranges: vec![],
+            window_size: chrono::Duration::seconds(1),
+        };
+
+        assert!(filter.predicate_for_col("time_window").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_filter_expr_info_predicate_for_col_single_range() {
+        let filter = FilterExprInfo {
+            expr: datafusion_expr::col("ts"),
+            col_name: "ts".to_string(),
+            time_ranges: vec![(Timestamp::new_second(0), Timestamp::new_second(1))],
+            window_size: chrono::Duration::seconds(1),
+        };
+
+        let predicate = filter.predicate_for_col("time_window").unwrap().unwrap();
+        let unparser = datafusion::sql::unparser::Unparser::default();
+        assert_eq!(
+            "((time_window >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (time_window < CAST('1970-01-01 00:00:01' AS TIMESTAMP)))",
+            unparser.expr_to_sql(&predicate).unwrap().to_string()
+        );
+    }
+
+    #[test]
+    fn test_filter_expr_info_predicate_for_col_multiple_ranges() {
+        let filter = FilterExprInfo {
+            expr: datafusion_expr::col("ts"),
+            col_name: "ts".to_string(),
+            time_ranges: vec![
+                (Timestamp::new_second(0), Timestamp::new_second(1)),
+                (Timestamp::new_second(10), Timestamp::new_second(11)),
+            ],
+            window_size: chrono::Duration::seconds(1),
+        };
+
+        let predicate = filter.predicate_for_col("time_window").unwrap().unwrap();
+        let unparser = datafusion::sql::unparser::Unparser::default();
+        assert_eq!(
+            "(((time_window >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (time_window < CAST('1970-01-01 00:00:01' AS TIMESTAMP))) OR ((time_window >= CAST('1970-01-01 00:00:10' AS TIMESTAMP)) AND (time_window < CAST('1970-01-01 00:00:11' AS TIMESTAMP))))",
+            unparser.expr_to_sql(&predicate).unwrap().to_string()
+        );
+    }
+
+    /// Helper: create a `TaskState` whose `last_update_time` is a known duration in the past.
+    fn state_with_past_update(age: Duration) -> TaskState {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.last_update_time = Instant::now() - age;
+        state
+    }
+
+    #[test]
+    fn test_short_incremental_cadence_uses_min_refresh() {
+        // When prefer_short_incremental_cadence is true and dirty backlog is manageable,
+        // the next start time should be last_update_time + min_refresh (short cadence),
+        // ignoring the longer time_window_size.
+        let state = state_with_past_update(Duration::from_secs(10));
+
+        let time_window_size = Some(Duration::from_secs(60)); // large window
+        let min_refresh = Duration::from_secs(5);
+        let flow_id = 1;
+
+        let result = state.get_next_start_query_time(
+            flow_id,
+            &time_window_size,
+            min_refresh,
+            None,
+            20,
+            true, // prefer_short_incremental_cadence
+        );
+
+        // With short cadence, result should be last_update_time + min_refresh.
+        let expected = state.last_update_time + min_refresh;
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_short_incremental_cadence_respects_last_query_duration() {
+        let mut state = state_with_past_update(Duration::from_secs(10));
+        state.last_query_duration = Duration::from_secs(20);
+
+        let time_window_size = Some(Duration::from_secs(60));
+        let min_refresh = Duration::from_secs(5);
+        let flow_id = 1;
+
+        let result = state.get_next_start_query_time(
+            flow_id,
+            &time_window_size,
+            min_refresh,
+            None,
+            20,
+            true,
+        );
+
+        assert_eq!(result, state.last_update_time + state.last_query_duration);
+    }
+
+    #[test]
+    fn test_short_incremental_cadence_respects_max_timeout() {
+        let mut state = state_with_past_update(Duration::from_secs(10));
+        state.last_query_duration = Duration::from_secs(20);
+
+        let time_window_size = Some(Duration::from_secs(60));
+        let min_refresh = Duration::from_secs(30);
+        let max_timeout = Duration::from_secs(5);
+        let flow_id = 1;
+
+        let result = state.get_next_start_query_time(
+            flow_id,
+            &time_window_size,
+            min_refresh,
+            Some(max_timeout),
+            20,
+            true,
+        );
+
+        assert_eq!(result, state.last_update_time + max_timeout);
+    }
+
+    #[test]
+    fn test_full_snapshot_ignores_short_cadence() {
+        // When prefer_short_incremental_cadence is false (full snapshot mode),
+        // the normal long-cadence based on time_window_size applies.
+        let mut state = state_with_past_update(Duration::from_secs(10));
+        // Make last_query_duration small so the lower bound (time_window_size) dominates.
+        state.last_query_duration = Duration::from_secs(1);
+
+        let time_window_size = Some(Duration::from_secs(60)); // large window
+        let min_refresh = Duration::from_secs(5);
+        let flow_id = 1;
+
+        let result = state.get_next_start_query_time(
+            flow_id,
+            &time_window_size,
+            min_refresh,
+            None,
+            20,
+            false, // prefer_short_incremental_cadence = false
+        );
+
+        // With normal cadence, result should be last_update_time + time_window_size
+        // (since last_query_duration < time_window_size).
+        let expected = state.last_update_time + Duration::from_secs(60);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_dirty_window_overflow_schedules_immediately_even_with_short_cadence() {
+        // Dirty-window overflow must always schedule immediately,
+        // regardless of prefer_short_incremental_cadence.
+        let mut state = state_with_past_update(Duration::from_secs(10));
+        // Create a very large dirty backlog.
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(3600)));
+
+        let time_window_size = Some(Duration::from_secs(1)); // tiny window => overflow
+        let min_refresh = Duration::from_secs(5);
+        let flow_id = 1;
+
+        // With short cadence flag.
+        let result = state.get_next_start_query_time(
+            flow_id,
+            &time_window_size,
+            min_refresh,
+            None,
+            1, // max 1 filter => tiny capacity
+            true,
+        );
+        assert!(
+            result <= Instant::now(),
+            "dirty overflow should schedule immediately"
+        );
+
+        // Without short cadence flag — same behavior.
+        let result2 = state.get_next_start_query_time(
+            flow_id,
+            &time_window_size,
+            min_refresh,
+            None,
+            1,
+            false,
+        );
+        assert!(
+            result2 <= Instant::now(),
+            "dirty overflow should schedule immediately"
+        );
+    }
+
+    #[test]
+    fn test_incremental_disabled_ignores_short_cadence() {
+        // When prefer_short_incremental_cadence is true but the dirty backlog is
+        // manageable, the short cadence is applied. This test verifies that the
+        // caller-side guard (checkpoint_mode + !is_incremental_disabled) controls
+        // whether short cadence is requested at all — when incremental is disabled,
+        // the flag is false, and the long cadence applies.
+        //
+        // This simulates the case where the caller computed
+        // prefer_short_incremental_cadence = false (e.g. incremental disabled
+        // or FullSnapshot mode), so the long cadence is used.
+        let mut state = state_with_past_update(Duration::from_secs(10));
+        state.last_query_duration = Duration::from_secs(1);
+
+        let time_window_size = Some(Duration::from_secs(60));
+        let min_refresh = Duration::from_secs(5);
+        let flow_id = 1;
+
+        let result = state.get_next_start_query_time(
+            flow_id,
+            &time_window_size,
+            min_refresh,
+            None,
+            20,
+            false, // prefer_short_incremental_cadence = false
+        );
+
+        // With normal cadence, result should be last_update_time + time_window_size.
+        let expected = state.last_update_time + Duration::from_secs(60);
+        assert_eq!(result, expected);
     }
 }

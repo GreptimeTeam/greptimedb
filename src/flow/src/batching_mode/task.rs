@@ -28,13 +28,12 @@ use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::DFSchemaRef;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp};
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
-use operator::expr_helper::column_schemas_to_defs;
+use datatypes::schema::Schema;
 use query::QueryEngineRef;
+use query::options::FLOW_INCREMENTAL_MODE;
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use sql::parsers::utils::is_tql;
 use store_api::mito_engine_options::MERGE_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -43,19 +42,20 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::Instant;
 
-use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::BatchingModeOptions;
-use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::{FilterExprInfo, TaskState};
+use crate::batching_mode::checkpoint::checkpoint_mode_label;
+use crate::batching_mode::frontend_client::{FrontendClient, PeerDesc};
+use crate::batching_mode::state::{CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState};
+use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    AddFilterRewriter, ColumnMatcherRewriter, FindGroupByFinalName, gen_plan_with_matching_schema,
+    AddFilterRewriter, ColumnMatcherRewriter, gen_plan_with_matching_schema,
     get_table_info_df_schema, sql_to_df_plan,
 };
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
-    ConvertColumnSchemaSnafu, DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu,
-    SubstraitEncodeLogicalPlanSnafu, UnexpectedSnafu,
+    DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu, SubstraitEncodeLogicalPlanSnafu,
+    UnexpectedSnafu,
 };
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
@@ -63,6 +63,15 @@ use crate::metrics::{
     METRIC_FLOW_ROWS,
 };
 use crate::{Error, FlowId};
+
+mod ckpt;
+mod inc;
+
+/// Maximum number of dirty time-window predicates attached to one incremental
+/// SQL query. This keeps generated OR filters bounded so Substrait encoding and
+/// downstream planning remain predictable; if the backlog is larger, the flow
+/// drains one capped batch and postpones checkpoint advancement to a later run.
+const MAX_INCREMENTAL_DIRTY_WINDOW_FILTERS: usize = 4096;
 
 /// The task's config, immutable once created
 #[derive(Clone)]
@@ -100,14 +109,6 @@ fn is_merge_mode_last_non_null(options: &HashMap<String, String>) -> bool {
         .unwrap_or(false)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueryType {
-    /// query is a tql query
-    Tql,
-    /// query is a sql query
-    Sql,
-}
-
 #[derive(Clone)]
 pub struct BatchingTask {
     pub config: Arc<TaskConfig>,
@@ -132,7 +133,21 @@ pub struct TaskArgs<'a> {
 
 pub struct PlanInfo {
     pub plan: LogicalPlan,
-    pub filter: Option<FilterExprInfo>,
+    pub dirty_restore: DirtyRestore,
+    pub can_advance_checkpoints: bool,
+}
+
+pub enum DirtyRestore {
+    /// The query was scoped to dirty time ranges; restore those ranges if the
+    /// run fails.
+    Scoped(FilterExprInfo),
+    /// The query could not be scoped to dirty time ranges, so the dirty-window
+    /// state is only a dirty signal. Restore the consumed signal if the full
+    /// run fails.
+    ///
+    /// TODO(discord9): Full-query runs only need a dirty bool flag. Refactor
+    /// the unscoped path to stop reusing `DirtyTimeWindows` for this signal.
+    Unscoped(DirtyTimeWindows),
 }
 
 impl BatchingTask {
@@ -210,7 +225,7 @@ impl BatchingTask {
         &self,
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
-    ) -> Result<Option<(u32, Duration)>, Error> {
+    ) -> Result<Option<(usize, Duration)>, Error> {
         if !self.is_table_exist(&self.config.sink_table_name).await? {
             let create_table = self.gen_create_table_expr(engine.clone()).await?;
             info!(
@@ -241,11 +256,28 @@ impl BatchingTask {
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
         max_window_cnt: Option<usize>,
-    ) -> Result<Option<(u32, Duration)>, Error> {
+    ) -> Result<Option<(usize, Duration)>, Error> {
         if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
             debug!("Generate new query: {}", new_query.plan);
-            self.execute_logical_plan(frontend_client, &new_query.plan)
+            let dirty_filter = match &new_query.dirty_restore {
+                DirtyRestore::Scoped(f) => Some(f),
+                _ => None,
+            };
+            match self
+                .execute_logical_plan(
+                    frontend_client,
+                    &new_query.plan,
+                    dirty_filter,
+                    new_query.can_advance_checkpoints,
+                )
                 .await
+            {
+                Ok(result) => Ok(result),
+                Err(err) => {
+                    self.handle_executed_query_failure(Some(&new_query));
+                    Err(err)
+                }
+            }
         } else {
             debug!("Generate no query");
             Ok(None)
@@ -278,57 +310,68 @@ impl BatchingTask {
             )
             .await?;
 
-        let insert_into_info = if let Some(new_query) = new_query {
-            // first check if all columns in input query exists in sink table
-            // since insert into ref to names in record batch generate by given query
-            let table_columns = df_schema
-                .columns()
-                .into_iter()
-                .map(|c| c.name)
-                .collect::<BTreeSet<_>>();
-            for column in new_query.plan.schema().columns() {
-                ensure!(
-                    table_columns.contains(column.name()),
-                    InvalidQuerySnafu {
-                        reason: format!(
-                            "Column {} not found in sink table with columns {:?}",
-                            column, table_columns
-                        ),
-                    }
-                );
-            }
-
-            let table_provider = Arc::new(DfTableProviderAdapter::new(table));
-            let table_source = Arc::new(DefaultTableSource::new(table_provider));
-
-            // update_at& time index placeholder (if exists) should have default value
-            let plan = LogicalPlan::Dml(DmlStatement::new(
-                datafusion_common::TableReference::Full {
-                    catalog: self.config.sink_table_name[0].clone().into(),
-                    schema: self.config.sink_table_name[1].clone().into(),
-                    table: self.config.sink_table_name[2].clone().into(),
-                },
-                table_source,
-                WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
-                Arc::new(new_query.plan),
-            ));
-            PlanInfo {
-                plan,
-                filter: new_query.filter,
-            }
-        } else {
+        let Some(new_query) = new_query else {
             return Ok(None);
         };
-        let insert_into = insert_into_info
-            .plan
-            .recompute_schema()
-            .context(DatafusionSnafu {
-                context: "Failed to recompute schema",
-            })?;
+
+        // first check if all columns in input query exists in sink table
+        // since insert into ref to names in record batch generate by given query
+        let table_columns = df_schema
+            .columns()
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<BTreeSet<_>>();
+        for column in new_query.plan.schema().columns() {
+            if !table_columns.contains(column.name()) {
+                self.restore_dirty_windows_after_failure(&new_query);
+                return InvalidQuerySnafu {
+                    reason: format!(
+                        "Column {} not found in sink table with columns {:?}",
+                        column, table_columns
+                    ),
+                }
+                .fail();
+            }
+        }
+
+        let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
+
+        // update_at& time index placeholder (if exists) should have default value
+        let plan = LogicalPlan::Dml(DmlStatement::new(
+            datafusion_common::TableReference::Full {
+                catalog: self.config.sink_table_name[0].clone().into(),
+                schema: self.config.sink_table_name[1].clone().into(),
+                table: self.config.sink_table_name[2].clone().into(),
+            },
+            table_source,
+            WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+            Arc::new(new_query.plan.clone()),
+        ));
+        let insert_into_info = PlanInfo {
+            plan,
+            dirty_restore: new_query.dirty_restore,
+            can_advance_checkpoints: new_query.can_advance_checkpoints,
+        };
+        let insert_into =
+            match insert_into_info
+                .plan
+                .clone()
+                .recompute_schema()
+                .context(DatafusionSnafu {
+                    context: "Failed to recompute schema",
+                }) {
+                Ok(insert_into) => insert_into,
+                Err(err) => {
+                    self.restore_dirty_windows_after_failure(&insert_into_info);
+                    return Err(err);
+                }
+            };
 
         Ok(Some(PlanInfo {
             plan: insert_into,
-            filter: insert_into_info.filter,
+            dirty_restore: insert_into_info.dirty_restore,
+            can_advance_checkpoints: insert_into_info.can_advance_checkpoints,
         }))
     }
 
@@ -349,7 +392,9 @@ impl BatchingTask {
         &self,
         frontend_client: &Arc<FrontendClient>,
         plan: &LogicalPlan,
-    ) -> Result<Option<(u32, Duration)>, Error> {
+        dirty_filter: Option<&FilterExprInfo>,
+        can_advance_checkpoints: bool,
+    ) -> Result<Option<(usize, Duration)>, Error> {
         let instant = Instant::now();
         let flow_id = self.config.flow_id;
 
@@ -378,81 +423,167 @@ impl BatchingTask {
             })?
             .data;
 
-        let mut peer_desc = None;
+        // For incremental-mode SQL queries, attempt to rewrite the delta aggregate
+        // plan into a safe delta-LEFT-JOIN-sink form before deciding on extensions.
+        let incremental_plan = if can_advance_checkpoints {
+            self.prepare_plan_for_incremental(&plan, dirty_filter)
+                .await?
+        } else {
+            None
+        };
+        let incremental_safe = incremental_plan.is_some();
+        let plan = incremental_plan.unwrap_or_else(|| plan.clone());
 
+        let extensions = self
+            .build_flow_query_extensions(incremental_safe, can_advance_checkpoints)
+            .await?;
+        let extension_refs = extensions
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        let query_mode = if extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_MODE)
+        {
+            CheckpointMode::Incremental
+        } else {
+            CheckpointMode::FullSnapshot
+        };
+        Self::record_query_mode(flow_id, query_mode);
+        debug!(
+            "Flow {flow_id} executing batching query with checkpoint_mode={}, extension_count={}",
+            checkpoint_mode_label(query_mode),
+            extensions.len()
+        );
+
+        let mut peer_desc = None;
         let res = {
             let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
                 .with_label_values(&[flow_id.to_string().as_str()])
                 .start_timer();
 
-            // hack and special handling the insert logical plan
             let req = if let Some((insert_to, insert_plan)) =
                 breakup_insert_plan(&plan, catalog, schema)
             {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&insert_plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
-                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::InsertIntoPlan(
                         api::v1::InsertIntoPlan {
                             table_name: Some(insert_to),
                             logical_plan: message.to_vec(),
                         },
                     )),
-                })
+                }
             } else {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
 
-                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
-                })
+                }
             };
 
             frontend_client
-                .handle(req, catalog, schema, &mut peer_desc)
+                .query_with_terminal_metrics(catalog, schema, req, &extension_refs, &mut peer_desc)
                 .await
         };
 
         let elapsed = instant.elapsed();
-        if let Ok(affected_rows) = &res {
-            debug!(
-                "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}",
-                elapsed
-            );
-            METRIC_FLOW_ROWS
-                .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
-                .inc_by(*affected_rows as _);
-        } else if let Err(err) = &res {
+        let peer_label = peer_desc
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| PeerDesc::default().to_string());
+        if let Err(err) = &res {
             warn!(
-                "Failed to execute Flow {flow_id} on frontend {:?}, result: {err:?}, elapsed: {:?} with query: {}",
-                peer_desc, elapsed, &plan
+                "Failed to execute Flow {flow_id} on frontend {peer_label}, result: {err:?}, elapsed: {:?} with query: {}",
+                elapsed, &plan
             );
+            let decision = {
+                let mut state = self.state.write().unwrap();
+                let reason = Self::query_failure_reason(err);
+                Self::apply_query_failure_to_state(&mut state, elapsed, reason)
+            };
+            if let Some(decision) = decision {
+                Self::record_checkpoint_decision(flow_id, decision);
+            }
         }
 
         // record slow query
         if elapsed >= self.config.batch_opts.slow_query_threshold {
             warn!(
-                "Flow {flow_id} on frontend {:?} executed for {:?} before complete, query: {}",
-                peer_desc, elapsed, &plan
+                "Flow {flow_id} on frontend {peer_label} executed for {:?} before complete, query: {}",
+                elapsed, &plan
             );
+            let flow_id = flow_id.to_string();
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
-                .with_label_values(&[
-                    flow_id.to_string().as_str(),
-                    &peer_desc.unwrap_or_default().to_string(),
-                ])
+                .with_label_values(&[flow_id.as_str(), peer_label.as_str()])
                 .observe(elapsed.as_secs_f64());
         }
 
+        let res = res?;
+        let (affected_rows, _) = res.output.extract_rows_and_cost();
+        debug!(
+            "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
+            elapsed,
+            res.region_watermark_map()
+        );
+        METRIC_FLOW_ROWS
+            .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
+            .inc_by(affected_rows as _);
+        {
+            let mut state = self.state.write().unwrap();
+            let decision = Self::apply_query_result_to_state(
+                &mut state,
+                &res,
+                elapsed,
+                can_advance_checkpoints,
+            );
+            Self::record_checkpoint_decision(flow_id, decision);
+        }
+
+        Ok(Some((affected_rows, elapsed)))
+    }
+
+    /// Restore dirty windows consumed by a failed query so they are retried on
+    /// the next execution.
+    ///
+    fn restore_dirty_windows_after_failure(&self, query: &PlanInfo) {
+        match &query.dirty_restore {
+            DirtyRestore::Scoped(filter) => self.restore_scoped_dirty_windows(filter),
+            DirtyRestore::Unscoped(dirty_windows) => self
+                .state
+                .write()
+                .unwrap()
+                .dirty_time_windows
+                .add_dirty_windows(dirty_windows),
+        }
+    }
+
+    fn restore_scoped_dirty_windows(&self, filter: &FilterExprInfo) {
         self.state
             .write()
             .unwrap()
-            .after_query_exec(elapsed, res.is_ok());
+            .dirty_time_windows
+            .add_windows(filter.time_ranges.clone());
+    }
 
-        let res = res?;
+    fn restore_scoped_dirty_windows_on_err<T>(
+        &self,
+        filter: &FilterExprInfo,
+        result: Result<T, Error>,
+    ) -> Result<T, Error> {
+        result.inspect_err(|_| {
+            self.restore_scoped_dirty_windows(filter);
+        })
+    }
 
-        Ok(Some((res, elapsed)))
+    fn handle_executed_query_failure(&self, query: Option<&PlanInfo>) {
+        if let Some(query) = query {
+            self.restore_dirty_windows_after_failure(query);
+        }
     }
 
     /// start executing query in a loop, break when receive shutdown signal
@@ -506,8 +637,17 @@ impl BatchingTask {
             };
 
             let res = if let Some(new_query) = &new_query {
-                self.execute_logical_plan(&frontend_client, &new_query.plan)
-                    .await
+                let dirty_filter = match &new_query.dirty_restore {
+                    DirtyRestore::Scoped(f) => Some(f),
+                    _ => None,
+                };
+                self.execute_logical_plan(
+                    &frontend_client,
+                    &new_query.plan,
+                    dirty_filter,
+                    new_query.can_advance_checkpoints,
+                )
+                .await
             } else {
                 Ok(None)
             };
@@ -535,12 +675,17 @@ impl BatchingTask {
                                 .as_ref()
                                 .and_then(|t| *t.time_window_size());
 
+                            let prefer_short_incremental_cadence = state.checkpoint_mode()
+                                == CheckpointMode::Incremental
+                                && !state.is_incremental_disabled();
+
                             state.get_next_start_query_time(
                                 self.config.flow_id,
                                 &time_window_size,
                                 min_refresh,
                                 Some(self.config.batch_opts.query_timeout),
                                 self.config.batch_opts.experimental_max_filter_num_per_query,
+                                prefer_short_incremental_cadence,
                             )
                         };
 
@@ -558,16 +703,13 @@ impl BatchingTask {
                 }
                 // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
                 Err(err) => {
+                    self.handle_executed_query_failure(new_query.as_ref());
                     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT
                         .with_label_values(&[&flow_id_str])
                         .inc();
                     match new_query {
                         Some(query) => {
                             common_telemetry::error!(err; "Failed to execute query for flow={} with query: {}", self.config.flow_id, query.plan);
-                            // Re-add dirty windows back since query failed
-                            self.state.write().unwrap().dirty_time_windows.add_windows(
-                                query.filter.map(|f| f.time_ranges).unwrap_or_default(),
-                            );
                             // TODO(discord9): add some backoff here? half the query time window or what
                             // backoff meaning use smaller `max_window_cnt` for next query
 
@@ -641,8 +783,13 @@ impl BatchingTask {
                         self.config.flow_id
                     );
                     // clean dirty time window too, this could be from create flow's check_execute
-                    let is_dirty = !self.state.read().unwrap().dirty_time_windows.is_empty();
-                    self.state.write().unwrap().dirty_time_windows.clean();
+                    let (is_dirty, dirty_windows_to_restore) = {
+                        let mut state = self.state.write().unwrap();
+                        let dirty_windows_to_restore = state.dirty_time_windows.clone();
+                        let is_dirty = !dirty_windows_to_restore.is_empty();
+                        state.dirty_time_windows.clean();
+                        (is_dirty, dirty_windows_to_restore)
+                    };
 
                     if !is_dirty {
                         // no dirty data, hence no need to update
@@ -650,7 +797,7 @@ impl BatchingTask {
                         return Ok(None);
                     }
 
-                    let plan = gen_plan_with_matching_schema(
+                    let plan = match gen_plan_with_matching_schema(
                         &self.config.query,
                         query_ctx,
                         engine,
@@ -658,15 +805,36 @@ impl BatchingTask {
                         primary_key_indices,
                         allow_partial,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(plan) => plan,
+                        Err(err) => {
+                            self.state
+                                .write()
+                                .unwrap()
+                                .dirty_time_windows
+                                .add_dirty_windows(&dirty_windows_to_restore);
+                            return Err(err);
+                        }
+                    };
 
-                    return Ok(Some(PlanInfo { plan, filter: None }));
+                    return Ok(Some(PlanInfo {
+                        plan,
+                        dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
+                        can_advance_checkpoints: true,
+                    }));
                 }
                 _ => {
-                    // clean for tql have no use for time window
-                    self.state.write().unwrap().dirty_time_windows.clean();
+                    // Clean dirty windows for full-query/non-scoped paths,
+                    // such as TQL, that cannot use a time-window filter.
+                    let dirty_windows_to_restore = {
+                        let mut state = self.state.write().unwrap();
+                        let dirty_windows_to_restore = state.dirty_time_windows.clone();
+                        state.dirty_time_windows.clean();
+                        dirty_windows_to_restore
+                    };
 
-                    let plan = gen_plan_with_matching_schema(
+                    let plan = match gen_plan_with_matching_schema(
                         &self.config.query,
                         query_ctx,
                         engine,
@@ -674,9 +842,24 @@ impl BatchingTask {
                         primary_key_indices,
                         allow_partial,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(plan) => plan,
+                        Err(err) => {
+                            self.state
+                                .write()
+                                .unwrap()
+                                .dirty_time_windows
+                                .add_dirty_windows(&dirty_windows_to_restore);
+                            return Err(err);
+                        }
+                    };
 
-                    return Ok(Some(PlanInfo { plan, filter: None }));
+                    return Ok(Some(PlanInfo {
+                        plan,
+                        dirty_restore: DirtyRestore::Unscoped(dirty_windows_to_restore),
+                        can_advance_checkpoints: true,
+                    }));
                 }
             };
 
@@ -706,39 +889,48 @@ impl BatchingTask {
                 ),
             })?;
 
-        let expr = self
-            .state
-            .write()
-            .unwrap()
-            .dirty_time_windows
-            .gen_filter_exprs(
+        let (expr, can_advance_checkpoints) = {
+            let mut state = self.state.write().unwrap();
+            let window_cnt = if state.checkpoint_mode() == CheckpointMode::Incremental
+                && !state.is_incremental_disabled()
+                && matches!(self.config.query_type, QueryType::Sql)
+            {
+                // Incremental scans are bounded by region sequence checkpoints,
+                // so the dirty-window filter only narrows sink-side/time-window
+                // work. Drain more windows than normal, but keep a hard cap to
+                // avoid building a huge OR filter after a long downtime. If
+                // windows remain, checkpoints won't advance this round.
+                MAX_INCREMENTAL_DIRTY_WINDOW_FILTERS
+            } else {
+                max_window_cnt
+                    .unwrap_or(self.config.batch_opts.experimental_max_filter_num_per_query)
+            };
+            let expr = state.dirty_time_windows.gen_filter_exprs(
                 &col_name,
                 Some(expire_lower_bound),
                 window_size,
-                max_window_cnt
-                    .unwrap_or(self.config.batch_opts.experimental_max_filter_num_per_query),
+                window_cnt,
                 self.config.flow_id,
                 Some(self),
             )?;
-
-        debug!(
-            "Flow id={:?}, Generated filter expr: {:?}",
-            self.config.flow_id,
-            expr.as_ref()
-                .map(
-                    |expr| expr_to_sql(&expr.expr).with_context(|_| DatafusionSnafu {
-                        context: format!("Failed to generate filter expr from {expr:?}"),
-                    })
-                )
-                .transpose()?
-                .map(|s| s.to_string())
-        );
+            let can_advance_checkpoints = state.dirty_time_windows.is_empty();
+            (expr, can_advance_checkpoints)
+        };
 
         let Some(expr) = expr else {
             // no new data, hence no need to update
             debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
             return Ok(None);
         };
+
+        let filter_sql = expr_to_sql(&expr.expr)
+            .map(|sql| sql.to_string())
+            .unwrap_or_else(|err| format!("<failed to format filter expr: {err}>"));
+
+        debug!(
+            "Flow id={:?}, Generated filter expr: {:?}",
+            self.config.flow_id, filter_sql
+        );
 
         let mut add_filter = AddFilterRewriter::new(expr.expr.clone());
         let mut add_auto_column = ColumnMatcherRewriter::new(
@@ -747,363 +939,35 @@ impl BatchingTask {
             allow_partial,
         );
 
-        let plan =
-            sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false).await?;
-        let rewrite = plan
-            .clone()
-            .rewrite(&mut add_filter)
-            .and_then(|p| p.data.rewrite(&mut add_auto_column))
-            .with_context(|_| DatafusionSnafu {
-                context: format!("Failed to rewrite plan:\n {}\n", plan),
-            })?
-            .data;
+        let plan = self.restore_scoped_dirty_windows_on_err(
+            &expr,
+            sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false).await,
+        )?;
+        let rewrite = self.restore_scoped_dirty_windows_on_err(
+            &expr,
+            plan.clone()
+                .rewrite(&mut add_filter)
+                .and_then(|p| p.data.rewrite(&mut add_auto_column))
+                .with_context(|_| DatafusionSnafu {
+                    context: format!("Failed to rewrite plan:\n {}\n", plan),
+                })
+                .map(|rewrite| rewrite.data),
+        )?;
         // only apply optimize after complex rewrite is done
-        let new_plan = apply_df_optimizer(rewrite, &query_ctx).await?;
+        let new_plan = self.restore_scoped_dirty_windows_on_err(
+            &expr,
+            apply_df_optimizer(rewrite, &query_ctx).await,
+        )?;
 
         let info = PlanInfo {
             plan: new_plan.clone(),
-            filter: Some(expr),
+            dirty_restore: DirtyRestore::Scoped(expr),
+            can_advance_checkpoints,
         };
 
         Ok(Some(info))
     }
 }
 
-// auto created table have a auto added column `update_at`, and optional have a `AUTO_CREATED_PLACEHOLDER_TS_COL` column for time index placeholder if no timestamp column is specified
-// TODO(discord9): for now no default value is set for auto added column for compatibility reason with streaming mode, but this might change in favor of simpler code?
-fn create_table_with_expr(
-    plan: &LogicalPlan,
-    sink_table_name: &[String; 3],
-    query_type: &QueryType,
-) -> Result<CreateTableExpr, Error> {
-    let table_def = match query_type {
-        &QueryType::Sql => {
-            if let Some(def) = build_pk_from_aggr(plan)? {
-                def
-            } else {
-                build_by_sql_schema(plan)?
-            }
-        }
-        QueryType::Tql => {
-            // first try build from aggr, then from tql schema because tql query might not have aggr node
-            if let Some(table_def) = build_pk_from_aggr(plan)? {
-                table_def
-            } else {
-                build_by_tql_schema(plan)?
-            }
-        }
-    };
-    let first_time_stamp = table_def.ts_col;
-    let primary_keys = table_def.pks;
-
-    let mut column_schemas = Vec::new();
-    for field in plan.schema().fields() {
-        let name = field.name();
-        let ty = ConcreteDataType::from_arrow_type(field.data_type());
-        let col_schema = if first_time_stamp == Some(name.clone()) {
-            ColumnSchema::new(name, ty, false).with_time_index(true)
-        } else {
-            ColumnSchema::new(name, ty, true)
-        };
-
-        match query_type {
-            QueryType::Sql => {
-                column_schemas.push(col_schema);
-            }
-            QueryType::Tql => {
-                // if is val column, need to rename as val DOUBLE NULL
-                // if is tag column, need to cast type as STRING NULL
-                let is_tag_column = primary_keys.contains(name);
-                let is_val_column = !is_tag_column && first_time_stamp.as_ref() != Some(name);
-                if is_val_column {
-                    let col_schema =
-                        ColumnSchema::new(name, ConcreteDataType::float64_datatype(), true);
-                    column_schemas.push(col_schema);
-                } else if is_tag_column {
-                    let col_schema =
-                        ColumnSchema::new(name, ConcreteDataType::string_datatype(), true);
-                    column_schemas.push(col_schema);
-                } else {
-                    // time index column
-                    column_schemas.push(col_schema);
-                }
-            }
-        }
-    }
-
-    if query_type == &QueryType::Sql {
-        let update_at_schema = ColumnSchema::new(
-            AUTO_CREATED_UPDATE_AT_TS_COL,
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            true,
-        );
-        column_schemas.push(update_at_schema);
-    }
-
-    let time_index = if let Some(time_index) = first_time_stamp {
-        time_index
-    } else {
-        column_schemas.push(
-            ColumnSchema::new(
-                AUTO_CREATED_PLACEHOLDER_TS_COL,
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true),
-        );
-        AUTO_CREATED_PLACEHOLDER_TS_COL.to_string()
-    };
-
-    let column_defs =
-        column_schemas_to_defs(column_schemas, &primary_keys).context(ConvertColumnSchemaSnafu)?;
-    Ok(CreateTableExpr {
-        catalog_name: sink_table_name[0].clone(),
-        schema_name: sink_table_name[1].clone(),
-        table_name: sink_table_name[2].clone(),
-        desc: "Auto created table by flow engine".to_string(),
-        column_defs,
-        time_index,
-        primary_keys,
-        create_if_not_exists: true,
-        table_options: Default::default(),
-        table_id: None,
-        engine: "mito".to_string(),
-    })
-}
-
-/// simply build by schema, return first timestamp column and no primary key
-fn build_by_sql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
-    let first_time_stamp = plan.schema().fields().iter().find_map(|f| {
-        if ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp() {
-            Some(f.name().clone())
-        } else {
-            None
-        }
-    });
-    Ok(TableDef {
-        ts_col: first_time_stamp,
-        pks: vec![],
-    })
-}
-
-/// Return first timestamp column found in output schema and all string columns
-fn build_by_tql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
-    let first_time_stamp = plan.schema().fields().iter().find_map(|f| {
-        if ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp() {
-            Some(f.name().clone())
-        } else {
-            None
-        }
-    });
-    let string_columns = plan
-        .schema()
-        .fields()
-        .iter()
-        .filter_map(|f| {
-            if ConcreteDataType::from_arrow_type(f.data_type()).is_string() {
-                Some(f.name().clone())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-
-    Ok(TableDef {
-        ts_col: first_time_stamp,
-        pks: string_columns,
-    })
-}
-
-struct TableDef {
-    ts_col: Option<String>,
-    pks: Vec<String>,
-}
-
-/// Return first timestamp column which is in group by clause and other columns which are also in group by clause
-///
-/// # Returns
-///
-/// * `Option<String>` - first timestamp column which is in group by clause
-/// * `Vec<String>` - other columns which are also in group by clause
-///
-/// if no aggregation found, return None
-fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
-    let fields = plan.schema().fields();
-    let mut pk_names = FindGroupByFinalName::default();
-
-    plan.visit(&mut pk_names)
-        .with_context(|_| DatafusionSnafu {
-            context: format!("Can't find aggr expr in plan {plan:?}"),
-        })?;
-
-    // if no group by clause, return empty with first timestamp column found in output schema
-    let Some(pk_final_names) = pk_names.get_group_expr_names() else {
-        return Ok(None);
-    };
-    if pk_final_names.is_empty() {
-        let first_ts_col = fields
-            .iter()
-            .find(|f| ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp())
-            .map(|f| f.name().clone());
-        return Ok(Some(TableDef {
-            ts_col: first_ts_col,
-            pks: vec![],
-        }));
-    }
-
-    let all_pk_cols: Vec<_> = fields
-        .iter()
-        .filter(|f| pk_final_names.contains(f.name()))
-        .map(|f| f.name().clone())
-        .collect();
-    // auto create table use first timestamp column in group by clause as time index
-    let first_time_stamp = fields
-        .iter()
-        .find(|f| {
-            all_pk_cols.contains(&f.name().clone())
-                && ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp()
-        })
-        .map(|f| f.name().clone());
-
-    let all_pk_cols: Vec<_> = all_pk_cols
-        .into_iter()
-        .filter(|col| first_time_stamp.as_ref() != Some(col))
-        .collect();
-
-    Ok(Some(TableDef {
-        ts_col: first_time_stamp,
-        pks: all_pk_cols,
-    }))
-}
-
 #[cfg(test)]
-mod test {
-    use api::v1::column_def::try_as_column_schema;
-    use pretty_assertions::assert_eq;
-    use session::context::QueryContext;
-
-    use super::*;
-    use crate::test_utils::create_test_query_engine;
-
-    #[tokio::test]
-    async fn test_gen_create_table_sql() {
-        let query_engine = create_test_query_engine();
-        let ctx = QueryContext::arc();
-        struct TestCase {
-            sql: String,
-            sink_table_name: String,
-            column_schemas: Vec<ColumnSchema>,
-            primary_keys: Vec<String>,
-            time_index: String,
-        }
-
-        let update_at_schema = ColumnSchema::new(
-            AUTO_CREATED_UPDATE_AT_TS_COL,
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            true,
-        );
-
-        let ts_placeholder_schema = ColumnSchema::new(
-            AUTO_CREATED_PLACEHOLDER_TS_COL,
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-        )
-        .with_time_index(true);
-
-        let testcases = vec![
-            TestCase {
-                sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
-                sink_table_name: "new_table".to_string(),
-                column_schemas: vec![
-                    ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                    update_at_schema.clone(),
-                ],
-                primary_keys: vec![],
-                time_index: "ts".to_string(),
-            },
-            TestCase {
-                sql: "SELECT number, max(ts) FROM numbers_with_ts GROUP BY number".to_string(),
-                sink_table_name: "new_table".to_string(),
-                column_schemas: vec![
-                    ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-                    ColumnSchema::new(
-                        "max(numbers_with_ts.ts)",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        true,
-                    ),
-                    update_at_schema.clone(),
-                    ts_placeholder_schema.clone(),
-                ],
-                primary_keys: vec!["number".to_string()],
-                time_index: AUTO_CREATED_PLACEHOLDER_TS_COL.to_string(),
-            },
-            TestCase {
-                sql: "SELECT max(number), ts FROM numbers_with_ts GROUP BY ts".to_string(),
-                sink_table_name: "new_table".to_string(),
-                column_schemas: vec![
-                    ColumnSchema::new(
-                        "max(numbers_with_ts.number)",
-                        ConcreteDataType::uint32_datatype(),
-                        true,
-                    ),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                    update_at_schema.clone(),
-                ],
-                primary_keys: vec![],
-                time_index: "ts".to_string(),
-            },
-            TestCase {
-                sql: "SELECT number, ts FROM numbers_with_ts GROUP BY ts, number".to_string(),
-                sink_table_name: "new_table".to_string(),
-                column_schemas: vec![
-                    ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                    update_at_schema.clone(),
-                ],
-                primary_keys: vec!["number".to_string()],
-                time_index: "ts".to_string(),
-            },
-        ];
-
-        for tc in testcases {
-            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), &tc.sql, true)
-                .await
-                .unwrap();
-            let expr = create_table_with_expr(
-                &plan,
-                &[
-                    "greptime".to_string(),
-                    "public".to_string(),
-                    tc.sink_table_name.clone(),
-                ],
-                &QueryType::Sql,
-            )
-            .unwrap();
-            // TODO(discord9): assert expr
-            let column_schemas = expr
-                .column_defs
-                .iter()
-                .map(|c| try_as_column_schema(c).unwrap())
-                .collect::<Vec<_>>();
-            assert_eq!(tc.column_schemas, column_schemas, "{:?}", tc.sql);
-            assert_eq!(tc.primary_keys, expr.primary_keys, "{:?}", tc.sql);
-            assert_eq!(tc.time_index, expr.time_index, "{:?}", tc.sql);
-        }
-    }
-}
+mod test;

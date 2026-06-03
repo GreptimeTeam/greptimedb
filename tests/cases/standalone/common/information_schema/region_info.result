@@ -1,0 +1,63 @@
+DESC TABLE information_schema.region_info;
+
++------------------------+---------+-----+------+---------+---------------+
+| Column                 | Type    | Key | Null | Default | Semantic Type |
++------------------------+---------+-----+------+---------+---------------+
+| region_id              | UInt64  |     | NO   |         | FIELD         |
+| table_id               | UInt32  |     | NO   |         | FIELD         |
+| region_number          | UInt32  |     | NO   |         | FIELD         |
+| region_group           | UInt8   |     | NO   |         | FIELD         |
+| region_sequence        | UInt32  |     | NO   |         | FIELD         |
+| state                  | String  |     | NO   |         | FIELD         |
+| role                   | String  |     | NO   |         | FIELD         |
+| writable               | Boolean |     | NO   |         | FIELD         |
+| committed_sequence     | UInt64  |     | NO   |         | FIELD         |
+| flushed_sequence       | UInt64  |     | YES  |         | FIELD         |
+| manifest_version       | UInt64  |     | NO   |         | FIELD         |
+| compaction_time_window | String  |     | YES  |         | FIELD         |
+| region_options         | String  |     | NO   |         | FIELD         |
+| sst_format             | String  |     | NO   |         | FIELD         |
+| node_id                | UInt64  |     | YES  |         | FIELD         |
++------------------------+---------+-----+------+---------+---------------+
+
+CREATE TABLE region_info_case (
+  a INT PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX,
+)
+WITH ("sst_format" = "flat");
+
+Affected Rows: 0
+
+INSERT INTO region_info_case VALUES (1, 1), (2, 2);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('region_info_case');
+
++---------------------------------------+
+| ADMIN FLUSH_TABLE('region_info_case') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+-- SQLNESS REPLACE (\s+\d+\s+) <NUM>
+-- SQLNESS REPLACE (\{".*"\}) <JSON>
+-- SQLNESS REPLACE (-{40,}) ----------------
+-- SQLNESS REPLACE (region_options\s+\|) region_options |
+SELECT region_id, state, role, writable, committed_sequence, flushed_sequence, manifest_version, compaction_time_window, region_options, sst_format
+FROM information_schema.region_info
+WHERE region_id IN (
+  SELECT region_id FROM information_schema.region_peers WHERE table_name = 'region_info_case'
+)
+ORDER BY region_id;
+
++---------------+------------------+--------+----------+--------------------+------------------+------------------+------------------------+----------------+------------+
+| region_id     | state            | role   | writable | committed_sequence | flushed_sequence | manifest_version | compaction_time_window | region_options | sst_format |
++---------------+------------------+--------+----------+--------------------+------------------+------------------+------------------------+----------------+------------+
+|<NUM>| Leader(Writable) | Leader | true     |<NUM>|<NUM>|<NUM>|                        | <JSON> | flat       |
++---------------+------------------+--------+----------+--------------------+------------------+------------------+------------------------+----------------+------------+
+
+DROP TABLE region_info_case;
+
+Affected Rows: 0
+

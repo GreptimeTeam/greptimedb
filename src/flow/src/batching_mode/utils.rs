@@ -19,15 +19,23 @@ use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
+use common_function::aggrs::aggr_wrapper::get_aggr_func;
 use common_telemetry::debug;
+use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::Expr;
 use datafusion::sql::unparser::Unparser;
 use datafusion_common::tree_node::{
     Transformed, TreeNode as _, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
 };
-use datafusion_common::{DFSchema, DataFusionError, ScalarValue};
-use datafusion_expr::{Distinct, LogicalPlan, Projection};
+use datafusion_common::{
+    Column, DFSchema, DataFusionError, NullEquality, ScalarValue, TableReference,
+};
+use datafusion_expr::logical_plan::{Aggregate, TableScan};
+use datafusion_expr::{
+    Distinct, JoinType, LogicalPlan, LogicalPlanBuilder, Operator, Projection, and, binary_expr,
+    bitwise_and, bitwise_or, bitwise_xor, is_null, or, when,
+};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use query::QueryEngineRef;
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
@@ -37,11 +45,801 @@ use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use table::TableRef;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu, TableNotFoundSnafu};
 use crate::{Error, TableName};
+
+#[cfg(test)]
+mod test;
+
+/// Describes how one aggregate output field should be merged with the
+/// corresponding existing field in the sink table.
+///
+/// `output_field_name` is the final output/sink schema field name produced by
+/// the delta plan and read from the sink table. It is not a DataFusion `Column`
+/// reference. It may contain dots or other non-identifier characters when the
+/// query keeps DataFusion's raw aggregate output name, e.g.
+/// `max(numbers_with_ts.number)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalAggregateMergeColumn {
+    /// Final output/sink field name for the aggregate result/state column.
+    ///
+    pub output_field_name: String,
+    pub merge_op: IncrementalAggregateMergeOp,
+}
+
+impl IncrementalAggregateMergeColumn {
+    /// Create a new merge column.
+    pub fn new(output_field_name: String, merge_op: IncrementalAggregateMergeOp) -> Self {
+        Self {
+            output_field_name,
+            merge_op,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncrementalAggregateMergeOp {
+    Sum,
+    Min,
+    Max,
+    BoolAnd,
+    BoolOr,
+    BitAnd,
+    BitOr,
+    BitXor,
+}
+
+/// Analysis result for an incremental aggregate plan.
+///
+/// `group_key_names` and each merge column's `output_field_name` are final
+/// output/sink schema field names used to project both the delta plan and the
+/// sink table before the left-join merge. They are not DataFusion logical-plan
+/// `Column` references; callers must attach qualifiers structurally instead of
+/// formatting qualified names as strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalAggregateAnalysis {
+    /// Final output/sink field names for group keys used as merge join keys.
+    pub group_key_names: Vec<String>,
+    pub merge_columns: Vec<IncrementalAggregateMergeColumn>,
+    /// Literal output fields that can be passed through from the delta plan.
+    pub literal_columns: Vec<String>,
+    /// Final output field order from the original aggregate plan.
+    pub output_field_names: Vec<String>,
+    pub unsupported_exprs: Vec<String>,
+}
+
+/// Recursively find all `Expr::Column` names inside an expression tree.
+/// Only recurses into wrappers that are merge-transparent.
+/// Non-transparent wrappers (e.g., `ScalarFunction`, `Negative`, `Cast`) are
+/// intentionally not recursed into since their merge semantics would be
+/// incorrect.
+///
+/// `Cast`/`TryCast` are intentionally opaque: merging already-casted aggregate
+/// outputs is not generally equivalent to casting the final merged aggregate.
+fn find_column_names(expr: &Expr, names: &mut Vec<String>) {
+    match expr {
+        Expr::Column(col) => {
+            names.push(col.name.clone());
+        }
+        Expr::Alias(alias) => find_column_names(&alias.expr, names),
+        _ => {}
+    }
+}
+
+fn unqualified_col(name: impl Into<String>) -> Expr {
+    Expr::Column(Column::from_name(name.into()))
+}
+
+fn qualified_col(qualifier: &str, name: impl Into<String>) -> Expr {
+    Expr::Column(Column::new(Some(qualifier), name.into()))
+}
+
+fn qualified_column(qualifier: &str, name: impl Into<String>) -> Column {
+    Column::new(Some(qualifier), name.into())
+}
+
+fn find_group_key_names(plan: &LogicalPlan) -> Result<Vec<String>, Error> {
+    let mut group_finder = FindGroupByFinalName::default();
+    plan.visit(&mut group_finder)
+        .with_context(|_| DatafusionSnafu {
+            context: format!("Failed to inspect group-by columns from logical plan: {plan:?}"),
+        })?;
+
+    let mut group_key_names = group_finder
+        .get_group_expr_names()
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
+    group_key_names.sort();
+    Ok(group_key_names)
+}
+
+fn has_grouping_set(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Aggregate(aggregate) => aggregate
+            .group_expr
+            .iter()
+            .any(|expr| matches!(expr, Expr::GroupingSet(_))),
+        _ => plan.inputs().into_iter().any(has_grouping_set),
+    }
+}
+
+fn has_aggregate(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Aggregate(_) => true,
+        _ => plan.inputs().into_iter().any(has_aggregate),
+    }
+}
+
+fn peel_subquery_aliases(mut plan: &LogicalPlan) -> &LogicalPlan {
+    while let LogicalPlan::SubqueryAlias(alias) = plan {
+        plan = alias.input.as_ref();
+    }
+    plan
+}
+
+fn extract_incremental_aggregate(plan: &LogicalPlan) -> Result<Option<&Aggregate>, String> {
+    // Supported final shape: optional output Projection directly over one
+    // Aggregate. Post-aggregate filters (HAVING), ordering, limits,
+    // distinct/window/union/extension nodes are intentionally not accepted.
+    let plan = match plan {
+        LogicalPlan::Projection(projection) => projection.input.as_ref(),
+        _ => plan,
+    };
+
+    match plan {
+        LogicalPlan::Aggregate(aggregate) => {
+            check_input_plan_shape(aggregate.input.as_ref())?;
+            Ok(Some(aggregate))
+        }
+        LogicalPlan::Filter(filter) if has_aggregate(filter.input.as_ref()) => Err(
+            "unsupported post-aggregate filter (HAVING) in incremental aggregate rewrite"
+                .to_string(),
+        ),
+        _ if has_aggregate(plan) => Err(
+            "unsupported post-aggregate plan shape in incremental aggregate rewrite".to_string(),
+        ),
+        _ => Ok(None),
+    }
+}
+
+fn check_input_plan_shape(plan: &LogicalPlan) -> Result<(), String> {
+    let plan = peel_subquery_aliases(plan);
+    match plan {
+        // Supported aggregate input shape: optional WHERE filter over a table scan.
+        // SubqueryAlias is a transparent naming wrapper for `FROM table AS alias`.
+        LogicalPlan::TableScan(_) => Ok(()),
+        LogicalPlan::Filter(filter) => match peel_subquery_aliases(filter.input.as_ref()) {
+            LogicalPlan::TableScan(_) => Ok(()),
+            _ => Err(
+                "unsupported aggregate input plan shape in incremental aggregate rewrite"
+                    .to_string(),
+            ),
+        },
+        _ => Err(
+            "unsupported aggregate input plan shape in incremental aggregate rewrite".to_string(),
+        ),
+    }
+}
+
+#[derive(Debug, Default)]
+struct OutputProjectionInfo {
+    has_top_level_projection: bool,
+    output_aliases: HashMap<String, String>,
+    duplicate_aggregate_aliases: BTreeSet<String>,
+    literal_columns: HashSet<String>,
+    output_field_names: Vec<String>,
+}
+
+impl OutputProjectionInfo {
+    fn output_field_name_set(&self) -> HashSet<String> {
+        self.output_field_names.iter().cloned().collect()
+    }
+
+    fn duplicate_output_names(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut duplicates = BTreeSet::new();
+        for name in &self.output_field_names {
+            if !seen.insert(name.clone()) {
+                duplicates.insert(name.clone());
+            }
+        }
+        duplicates.into_iter().collect()
+    }
+}
+
+fn collect_output_projection_info(plan: &LogicalPlan) -> OutputProjectionInfo {
+    let mut projection_info = OutputProjectionInfo {
+        has_top_level_projection: matches!(plan, LogicalPlan::Projection(_)),
+        output_field_names: plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect(),
+        ..Default::default()
+    };
+
+    let mut output_aliases = HashMap::new();
+    if let LogicalPlan::Projection(projection) = plan {
+        for expr in &projection.expr {
+            match expr {
+                Expr::Alias(alias) => {
+                    // Alias resolution has three cases:
+                    // - 0 Column refs (e.g., literal `42 AS lit`): record literal output
+                    // - 1 Column ref: record the mapping (e.g., `sum(x) AS total`)
+                    // - >1 Column refs (e.g., `COALESCE(sum(x), sum(y))`):
+                    //   skip — ambiguous merge semantics
+                    let alias_name = alias.name.clone();
+                    let mut col_names = Vec::new();
+                    find_column_names(&alias.expr, &mut col_names);
+                    match col_names.len() {
+                        0 if is_passthrough_output_column(&alias_name, alias.expr.as_ref()) => {
+                            projection_info.literal_columns.insert(alias_name);
+                        }
+                        1 => {
+                            if let Some(col_name) = col_names.into_iter().next() {
+                                if let Some(existing_alias) = output_aliases.get(&col_name) {
+                                    if existing_alias != &alias_name {
+                                        projection_info.duplicate_aggregate_aliases.insert(format!(
+                                            "same aggregate output {col_name} is used by multiple aliases: {existing_alias}, {alias_name}"
+                                        ));
+                                    }
+                                } else {
+                                    output_aliases.insert(col_name, alias_name);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    // If >1 column references detected (e.g., COALESCE(sum(x), sum(y))),
+                    // intentionally skip alias mapping — the merge semantics are ambiguous.
+                }
+                Expr::Column(col) => {
+                    output_aliases
+                        .entry(col.name.clone())
+                        .or_insert(col.name.clone());
+                }
+                Expr::Literal(_, _) => {
+                    projection_info
+                        .literal_columns
+                        .insert(expr.qualified_name().1);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if projection_info
+        .output_field_names
+        .iter()
+        .any(|name| name == AUTO_CREATED_PLACEHOLDER_TS_COL)
+    {
+        projection_info
+            .literal_columns
+            .insert(AUTO_CREATED_PLACEHOLDER_TS_COL.to_string());
+    }
+
+    projection_info.output_aliases = output_aliases;
+    projection_info
+}
+
+fn is_passthrough_output_column(alias_name: &str, expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal(_, _))
+        || match alias_name {
+            AUTO_CREATED_UPDATE_AT_TS_COL => expr == &datafusion::prelude::now(),
+            AUTO_CREATED_PLACEHOLDER_TS_COL => is_literal_or_cast_literal(expr),
+            _ => false,
+        }
+}
+
+fn is_literal_or_cast_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_, _) => true,
+        Expr::Cast(cast) => is_literal_or_cast_literal(cast.expr.as_ref()),
+        Expr::TryCast(cast) => is_literal_or_cast_literal(cast.expr.as_ref()),
+        _ => false,
+    }
+}
+
+fn merge_op_for_aggregate_expr(aggr_expr: &Expr) -> Result<IncrementalAggregateMergeOp, String> {
+    let Some(aggr_func) = get_aggr_func(aggr_expr) else {
+        return Err(aggr_expr.to_string());
+    };
+    if aggr_func.params.distinct {
+        return Err(format!("unsupported DISTINCT aggregate: {aggr_expr}"));
+    }
+    if !aggr_func.params.order_by.is_empty() {
+        return Err(format!("unsupported aggregate ORDER BY: {aggr_expr}"));
+    }
+    if aggr_func.params.null_treatment.is_some() {
+        return Err(format!("unsupported aggregate NULL treatment: {aggr_expr}"));
+    }
+
+    match aggr_func.func.name().to_ascii_lowercase().as_str() {
+        "sum" | "count" => Ok(IncrementalAggregateMergeOp::Sum),
+        "min" => Ok(IncrementalAggregateMergeOp::Min),
+        "max" => Ok(IncrementalAggregateMergeOp::Max),
+        "bool_and" => Ok(IncrementalAggregateMergeOp::BoolAnd),
+        "bool_or" => Ok(IncrementalAggregateMergeOp::BoolOr),
+        "bit_and" => Ok(IncrementalAggregateMergeOp::BitAnd),
+        "bit_or" => Ok(IncrementalAggregateMergeOp::BitOr),
+        "bit_xor" => Ok(IncrementalAggregateMergeOp::BitXor),
+        _ => Err(aggr_expr.to_string()),
+    }
+}
+
+fn resolve_aggregate_output_field_name(
+    aggr_expr: &Expr,
+    projection_info: &OutputProjectionInfo,
+    output_field_name_set: &HashSet<String>,
+) -> Option<String> {
+    // qualified_name() returns (Option<String>, String) where the second
+    // element is the unqualified column/alias name. This relies on
+    // DataFusion's internal naming convention: aggregate expressions
+    // emit a column named after the aggregate itself (e.g. "SUM(x)"),
+    // which matches what the projection aliases reference.
+    let raw_name = aggr_expr.qualified_name().1;
+    if let Some(alias) = projection_info.output_aliases.get(&raw_name) {
+        Some(alias.clone())
+    } else if !projection_info.has_top_level_projection && output_field_name_set.contains(&raw_name)
+    {
+        Some(raw_name)
+    } else {
+        None
+    }
+}
+
+fn find_uncovered_output_fields(
+    projection_info: &OutputProjectionInfo,
+    group_key_names: &[String],
+    merge_columns: &[IncrementalAggregateMergeColumn],
+) -> Vec<String> {
+    let group_key_names = group_key_names.iter().cloned().collect::<HashSet<_>>();
+    let merge_column_names = merge_columns
+        .iter()
+        .map(|c| c.output_field_name.clone())
+        .collect::<HashSet<_>>();
+
+    projection_info
+        .output_field_names
+        .iter()
+        .filter(|name| {
+            !group_key_names.contains(*name)
+                && !merge_column_names.contains(*name)
+                && !projection_info.literal_columns.contains(*name)
+                // Auto-created sink columns injected by ColumnMatcherRewriter
+                // are not part of the original aggregate semantics and must
+                // not prevent incremental aggregate rewrites.
+                && name.as_str() != AUTO_CREATED_UPDATE_AT_TS_COL
+                && name.as_str() != AUTO_CREATED_PLACEHOLDER_TS_COL
+        })
+        .cloned()
+        .collect()
+}
+
+fn find_unsupported_group_key_projection_outputs(
+    plan: &LogicalPlan,
+    aggregate: &Aggregate,
+    group_key_names: &[String],
+) -> Vec<String> {
+    let LogicalPlan::Projection(projection) = plan else {
+        return vec![];
+    };
+
+    let group_key_names = group_key_names.iter().cloned().collect::<HashSet<_>>();
+    let group_expr_names = aggregate
+        .group_expr
+        .iter()
+        .filter_map(|expr| expr.name_for_alias().ok())
+        .collect::<HashSet<_>>();
+    projection
+        .expr
+        .iter()
+        .filter_map(|expr| {
+            let output_name = expr.qualified_name().1;
+            if !group_key_names.contains(&output_name) {
+                return None;
+            }
+
+            let source_name = match expr {
+                Expr::Alias(alias) => alias.expr.name_for_alias().ok(),
+                _ => expr.name_for_alias().ok(),
+            };
+            if source_name.is_some_and(|name| group_expr_names.contains(&name)) {
+                None
+            } else {
+                Some(format!(
+                    "unsupported group key output field is not a transparent group expression: {output_name}"
+                ))
+            }
+        })
+        .collect()
+}
+
+pub fn analyze_incremental_aggregate_plan(
+    plan: &LogicalPlan,
+) -> Result<Option<IncrementalAggregateAnalysis>, Error> {
+    let group_key_names = find_group_key_names(plan)?;
+    let aggregate = match extract_incremental_aggregate(plan) {
+        Ok(Some(aggregate)) => aggregate,
+        Ok(None) => return Ok(None),
+        Err(reason) => {
+            let projection_info = collect_output_projection_info(plan);
+            let mut unsupported_exprs = projection_info
+                .duplicate_output_names()
+                .into_iter()
+                .map(|name| format!("duplicate output field name: {name}"))
+                .collect::<Vec<_>>();
+            unsupported_exprs.push(reason);
+            unsupported_exprs.extend(projection_info.duplicate_aggregate_aliases.iter().cloned());
+            return Ok(Some(IncrementalAggregateAnalysis {
+                group_key_names,
+                merge_columns: vec![],
+                literal_columns: vec![],
+                output_field_names: projection_info.output_field_names,
+                unsupported_exprs,
+            }));
+        }
+    };
+    let aggr_exprs = aggregate.aggr_expr.clone();
+    let projection_info = collect_output_projection_info(plan);
+    let output_field_name_set = projection_info.output_field_name_set();
+
+    let mut merge_columns = Vec::with_capacity(aggr_exprs.len());
+    let mut unsupported_exprs = projection_info
+        .duplicate_output_names()
+        .into_iter()
+        .map(|name| format!("duplicate output field name: {name}"))
+        .collect::<Vec<_>>();
+    if has_grouping_set(plan) {
+        unsupported_exprs.push(
+            "unsupported GROUPING SETS/CUBE/ROLLUP in incremental aggregate rewrite".to_string(),
+        );
+    }
+    if group_key_names.is_empty() {
+        unsupported_exprs
+            .push("unsupported global aggregate in incremental aggregate rewrite".to_string());
+    }
+    unsupported_exprs.extend(find_unsupported_group_key_projection_outputs(
+        plan,
+        aggregate,
+        &group_key_names,
+    ));
+    unsupported_exprs.extend(projection_info.duplicate_aggregate_aliases.iter().cloned());
+    for aggr_expr in aggr_exprs {
+        let merge_op = match merge_op_for_aggregate_expr(&aggr_expr) {
+            Ok(merge_op) => merge_op,
+            Err(reason) => {
+                unsupported_exprs.push(reason);
+                continue;
+            }
+        };
+        let Some(output_field_name) = resolve_aggregate_output_field_name(
+            &aggr_expr,
+            &projection_info,
+            &output_field_name_set,
+        ) else {
+            unsupported_exprs.push(aggr_expr.to_string());
+            continue;
+        };
+        merge_columns.push(IncrementalAggregateMergeColumn::new(
+            output_field_name,
+            merge_op,
+        ));
+    }
+    unsupported_exprs.extend(
+        find_uncovered_output_fields(&projection_info, &group_key_names, &merge_columns)
+            .into_iter()
+            .map(|name| format!("unsupported output field: {name}")),
+    );
+    if !unsupported_exprs.is_empty() {
+        merge_columns.clear();
+    }
+    let mut literal_columns = projection_info
+        .literal_columns
+        .into_iter()
+        .collect::<Vec<_>>();
+    literal_columns.sort();
+
+    Ok(Some(IncrementalAggregateAnalysis {
+        group_key_names,
+        merge_columns,
+        literal_columns,
+        output_field_names: projection_info.output_field_names,
+        unsupported_exprs,
+    }))
+}
+
+/// Rewrites one incremental aggregate delta plan by left-joining it with the
+/// existing sink-table state and projecting merged aggregate outputs.
+///
+/// For a grouped aggregate such as:
+///
+/// ```text
+/// SELECT max(number) AS number, ts FROM numbers_with_ts GROUP BY ts
+/// ```
+///
+/// the rewrite is roughly:
+///
+/// ```text
+/// delta = SELECT ts, number FROM <delta_plan> AS __flow_delta
+/// sink_scan = SELECT * FROM <sink_table> [WHERE <sink_dirty_filter>]
+/// sink  = SELECT ts, number FROM sink_scan AS __flow_sink
+/// SELECT
+///   CASE
+///     WHEN __flow_sink.number IS NULL THEN __flow_delta.number
+///     WHEN __flow_delta.number >= __flow_sink.number THEN __flow_delta.number
+///     ELSE __flow_sink.number
+///   END AS number,
+///   __flow_delta.ts AS ts
+/// FROM delta
+/// LEFT JOIN sink
+///   ON __flow_delta.ts IS NOT DISTINCT FROM __flow_sink.ts
+/// ```
+///
+/// If `sink_dirty_filter` is provided, it is applied to the sink table scan
+/// before projection, aliasing, and the left join. The predicate must reference
+/// raw sink table columns structurally (unqualified), before the `__flow_sink`
+/// alias exists.
+pub async fn rewrite_incremental_aggregate_with_sink_merge(
+    delta_plan: &LogicalPlan,
+    analysis: &IncrementalAggregateAnalysis,
+    sink_table: TableRef,
+    sink_table_name: &TableName,
+    sink_dirty_filter: Option<Expr>,
+) -> Result<LogicalPlan, Error> {
+    ensure!(
+        analysis.unsupported_exprs.is_empty(),
+        InvalidQuerySnafu {
+            reason: format!(
+                "UNSUPPORTED_INCREMENTAL_AGG: unsupported aggregate expressions {:?}",
+                analysis.unsupported_exprs
+            )
+        }
+    );
+
+    ensure!(
+        !analysis.merge_columns.is_empty(),
+        InvalidQuerySnafu {
+            reason:
+                "UNSUPPORTED_INCREMENTAL_AGG: aggregate query has no mergeable aggregate columns"
+                    .to_string()
+        }
+    );
+
+    ensure!(
+        !analysis.group_key_names.is_empty(),
+        InvalidQuerySnafu {
+            reason: "UNSUPPORTED_INCREMENTAL_AGG: global aggregate query is not supported"
+                .to_string()
+        }
+    );
+
+    let delta_alias = "__flow_delta";
+    let sink_alias = "__flow_sink";
+
+    let mut selected_columns = analysis.group_key_names.clone();
+    selected_columns.extend(
+        analysis
+            .merge_columns
+            .iter()
+            .map(|c| c.output_field_name.clone()),
+    );
+    let mut delta_selected_columns = selected_columns.clone();
+    delta_selected_columns.extend(analysis.literal_columns.iter().cloned());
+
+    let delta_selected_exprs = delta_selected_columns
+        .iter()
+        .cloned()
+        .map(unqualified_col)
+        .collect::<Vec<_>>();
+    let delta_selected = LogicalPlanBuilder::from(delta_plan.clone())
+        .project(delta_selected_exprs)
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to project delta plan for incremental sink merge".to_string(),
+        })?
+        .alias(delta_alias)
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to alias delta plan for incremental sink merge".to_string(),
+        })?
+        .build()
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to build projected delta plan for incremental sink merge".to_string(),
+        })?;
+
+    let table_provider = Arc::new(DfTableProviderAdapter::new(sink_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider));
+    let sink_scan = LogicalPlan::TableScan(
+        TableScan::try_new(
+            TableReference::Full {
+                catalog: sink_table_name[0].clone().into(),
+                schema: sink_table_name[1].clone().into(),
+                table: sink_table_name[2].clone().into(),
+            },
+            table_source,
+            None,
+            vec![],
+            None,
+        )
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to build sink table scan for incremental sink merge".to_string(),
+        })?,
+    );
+
+    let sink_selected_exprs = selected_columns
+        .iter()
+        .cloned()
+        .map(unqualified_col)
+        .collect::<Vec<_>>();
+    let sink_input = if let Some(predicate) = sink_dirty_filter {
+        LogicalPlanBuilder::from(sink_scan)
+            .filter(predicate)
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to filter sink table scan for incremental sink merge".to_string(),
+            })?
+            .build()
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build filtered sink plan for incremental sink merge"
+                    .to_string(),
+            })?
+    } else {
+        sink_scan
+    };
+
+    let sink_selected = LogicalPlanBuilder::from(sink_input)
+        .project(sink_selected_exprs)
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to project sink table scan for incremental sink merge".to_string(),
+        })?
+        .alias(sink_alias)
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to alias sink plan for incremental sink merge".to_string(),
+        })?
+        .build()
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to build projected sink plan for incremental sink merge".to_string(),
+        })?;
+
+    let join_keys = (
+        analysis
+            .group_key_names
+            .iter()
+            .cloned()
+            .map(|c| qualified_column(delta_alias, c))
+            .collect::<Vec<_>>(),
+        analysis
+            .group_key_names
+            .iter()
+            .cloned()
+            .map(|c| qualified_column(sink_alias, c))
+            .collect::<Vec<_>>(),
+    );
+
+    let joined = LogicalPlanBuilder::from(delta_selected)
+        .join_detailed(
+            sink_selected,
+            JoinType::Left,
+            join_keys,
+            None,
+            NullEquality::NullEqualsNull,
+        )
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to left join delta and sink plans for incremental sink merge"
+                .to_string(),
+        })?
+        .build()
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to build left join plan for incremental sink merge".to_string(),
+        })?;
+
+    let group_key_names = analysis.group_key_names.iter().collect::<HashSet<_>>();
+    let literal_columns = analysis.literal_columns.iter().collect::<HashSet<_>>();
+    let merge_columns = analysis
+        .merge_columns
+        .iter()
+        .map(|c| (&c.output_field_name, c))
+        .collect::<HashMap<_, _>>();
+
+    let mut projection_exprs = Vec::with_capacity(analysis.output_field_names.len());
+    for output_field_name in &analysis.output_field_names {
+        if group_key_names.contains(output_field_name)
+            || literal_columns.contains(output_field_name)
+        {
+            projection_exprs.push(
+                qualified_col(delta_alias, output_field_name.clone()).alias(output_field_name),
+            );
+        } else if let Some(merge_col) = merge_columns.get(output_field_name) {
+            projection_exprs.push(build_left_join_merge_expr(
+                delta_alias,
+                sink_alias,
+                merge_col,
+            )?);
+        } else {
+            return InvalidQuerySnafu {
+                reason: format!(
+                    "UNSUPPORTED_INCREMENTAL_AGG: output field {output_field_name} is not covered by group keys, literals, or merge columns"
+                ),
+            }
+            .fail();
+        }
+    }
+
+    LogicalPlanBuilder::from(joined)
+        .project(projection_exprs)
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to build projection merge plan for incremental sink merge".to_string(),
+        })?
+        .build()
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to finalize incremental aggregate sink merge plan".to_string(),
+        })
+}
+
+fn build_left_join_merge_expr(
+    delta_alias: &str,
+    sink_alias: &str,
+    merge_col: &IncrementalAggregateMergeColumn,
+) -> Result<Expr, Error> {
+    let left = qualified_col(delta_alias, merge_col.output_field_name.clone());
+    let right = qualified_col(sink_alias, merge_col.output_field_name.clone());
+    let merged = match merge_col.merge_op {
+        IncrementalAggregateMergeOp::Sum => when(is_null(left.clone()), right.clone())
+            .when(is_null(right.clone()), left.clone())
+            .otherwise(binary_expr(left.clone(), Operator::Plus, right.clone()))
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build SUM merge expression".to_string(),
+            })?,
+        IncrementalAggregateMergeOp::Min => when(is_null(right.clone()), left.clone())
+            .when(left.clone().lt_eq(right.clone()), left.clone())
+            .otherwise(right.clone())
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build MIN merge expression".to_string(),
+            })?,
+        IncrementalAggregateMergeOp::Max => when(is_null(right.clone()), left.clone())
+            .when(left.clone().gt_eq(right.clone()), left.clone())
+            .otherwise(right.clone())
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build MAX merge expression".to_string(),
+            })?,
+        IncrementalAggregateMergeOp::BoolAnd => when(is_null(left.clone()), right.clone())
+            .when(is_null(right.clone()), left.clone())
+            .otherwise(and(left.clone(), right.clone()))
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build BOOL_AND merge expression".to_string(),
+            })?,
+        IncrementalAggregateMergeOp::BoolOr => when(is_null(left.clone()), right.clone())
+            .when(is_null(right.clone()), left.clone())
+            .otherwise(or(left.clone(), right.clone()))
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build BOOL_OR merge expression".to_string(),
+            })?,
+        IncrementalAggregateMergeOp::BitAnd => when(is_null(left.clone()), right.clone())
+            .when(is_null(right.clone()), left.clone())
+            .otherwise(bitwise_and(left.clone(), right.clone()))
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build BIT_AND merge expression".to_string(),
+            })?,
+        IncrementalAggregateMergeOp::BitOr => when(is_null(left.clone()), right.clone())
+            .when(is_null(right.clone()), left.clone())
+            .otherwise(bitwise_or(left.clone(), right.clone()))
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build BIT_OR merge expression".to_string(),
+            })?,
+        IncrementalAggregateMergeOp::BitXor => when(is_null(left.clone()), right.clone())
+            .when(is_null(right.clone()), left.clone())
+            .otherwise(bitwise_xor(left.clone(), right.clone()))
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build BIT_XOR merge expression".to_string(),
+            })?,
+    };
+    Ok(merged.alias(merge_col.output_field_name.clone()))
+}
 
 pub async fn get_table_info_df_schema(
     catalog_mr: CatalogManagerRef,
@@ -594,330 +1392,5 @@ impl TreeNodeRewriter for AddFilterRewriter {
             }
             _ => Ok(Transformed::no(node)),
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::sync::Arc;
-
-    use datafusion_common::tree_node::TreeNode as _;
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema};
-    use pretty_assertions::assert_eq;
-    use query::query_engine::DefaultSerializer;
-    use session::context::QueryContext;
-    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
-
-    use super::*;
-    use crate::test_utils::create_test_query_engine;
-
-    /// test if uppercase are handled correctly(with quote)
-    #[tokio::test]
-    async fn test_sql_plan_convert() {
-        let query_engine = create_test_query_engine();
-        let ctx = QueryContext::arc();
-        let old = r#"SELECT "NUMBER" FROM "UPPERCASE_NUMBERS_WITH_TS""#;
-        let new = sql_to_df_plan(ctx.clone(), query_engine.clone(), old, false)
-            .await
-            .unwrap();
-        let new_sql = df_plan_to_sql(&new).unwrap();
-
-        assert_eq!(
-            r#"SELECT `UPPERCASE_NUMBERS_WITH_TS`.`NUMBER` FROM `UPPERCASE_NUMBERS_WITH_TS`"#,
-            new_sql
-        );
-    }
-
-    #[tokio::test]
-    async fn test_add_filter() {
-        let testcases = vec![
-            (
-                "SELECT number FROM numbers_with_ts GROUP BY number",
-                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4) GROUP BY numbers_with_ts.number",
-            ),
-            (
-                "SELECT number FROM numbers_with_ts WHERE number < 2 OR number >10",
-                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE ((numbers_with_ts.number < 2) OR (numbers_with_ts.number > 10)) AND (number > 4)",
-            ),
-            (
-                "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window",
-                "SELECT date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts)",
-            ),
-            // subquery
-            (
-                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);",
-                "SELECT numbers_with_ts.number, time_window FROM (SELECT numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts), numbers_with_ts.number)",
-            ),
-            // complex subquery without alias
-            (
-                "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) GROUP BY number, time_window, bucket_name;",
-                "SELECT sum(numbers_with_ts.number), numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window, bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) GROUP BY numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts), bucket_name",
-            ),
-            // complex subquery alias
-            (
-                "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) as cte WHERE number > 1 GROUP BY number, time_window, bucket_name;",
-                "SELECT sum(cte.number), cte.number, date_bin('5 minutes', cte.ts) AS time_window, cte.bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) AS cte WHERE (cte.number > 1) GROUP BY cte.number, date_bin('5 minutes', cte.ts), cte.bucket_name",
-            ),
-        ];
-        use datafusion_expr::{col, lit};
-        let query_engine = create_test_query_engine();
-        let ctx = QueryContext::arc();
-
-        for (before, after) in testcases {
-            let sql = before;
-            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
-                .await
-                .unwrap();
-
-            let mut add_filter = AddFilterRewriter::new(col("number").gt(lit(4u32)));
-            let plan = plan.rewrite(&mut add_filter).unwrap().data;
-            let new_sql = df_plan_to_sql(&plan).unwrap();
-            assert_eq!(after, new_sql);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_add_auto_column_rewriter() {
-        let testcases = vec![
-            // add update_at
-            (
-                "SELECT number FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, now() AS ts FROM numbers_with_ts"),
-                vec![
-                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                ],
-            ),
-            // add ts placeholder
-            (
-                "SELECT number FROM numbers_with_ts",
-                Ok(
-                    "SELECT numbers_with_ts.number, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts",
-                ),
-                vec![
-                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
-                    ColumnSchema::new(
-                        AUTO_CREATED_PLACEHOLDER_TS_COL,
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                ],
-            ),
-            // no modify
-            (
-                "SELECT number, ts FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts FROM numbers_with_ts"),
-                vec![
-                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                ],
-            ),
-            // add update_at and ts placeholder
-            (
-                "SELECT number FROM numbers_with_ts",
-                Ok(
-                    "SELECT numbers_with_ts.number, now() AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts",
-                ),
-                vec![
-                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
-                    ColumnSchema::new(
-                        "update_at",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    ),
-                    ColumnSchema::new(
-                        AUTO_CREATED_PLACEHOLDER_TS_COL,
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                ],
-            ),
-            // add ts placeholder
-            (
-                "SELECT number, ts FROM numbers_with_ts",
-                Ok(
-                    "SELECT numbers_with_ts.number, numbers_with_ts.ts AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts",
-                ),
-                vec![
-                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
-                    ColumnSchema::new(
-                        "update_at",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    ),
-                    ColumnSchema::new(
-                        AUTO_CREATED_PLACEHOLDER_TS_COL,
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                ],
-            ),
-            // add update_at after time index column
-            (
-                "SELECT number, ts FROM numbers_with_ts",
-                Ok(
-                    "SELECT numbers_with_ts.number, numbers_with_ts.ts, now() AS update_atat FROM numbers_with_ts",
-                ),
-                vec![
-                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                    ColumnSchema::new(
-                        // name is irrelevant for update_at column
-                        "update_atat",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    ),
-                ],
-            ),
-            // error datatype mismatch
-            (
-                "SELECT number, ts FROM numbers_with_ts",
-                Err(
-                    "Expect the last column in table to be timestamp column, found column atat with type Int8",
-                ),
-                vec![
-                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                    ColumnSchema::new(
-                        // name is irrelevant for update_at column
-                        "atat",
-                        ConcreteDataType::int8_datatype(),
-                        false,
-                    ),
-                ],
-            ),
-            // error datatype mismatch on second last column
-            (
-                "SELECT number FROM numbers_with_ts",
-                Err(
-                    "Expect the second last column in the table to be timestamp column, found column ts with type Int8",
-                ),
-                vec![
-                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
-                    ColumnSchema::new("ts", ConcreteDataType::int8_datatype(), false),
-                    ColumnSchema::new(
-                        // name is irrelevant for update_at column
-                        "atat",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    )
-                    .with_time_index(true),
-                ],
-            ),
-        ];
-
-        let query_engine = create_test_query_engine();
-        let ctx = QueryContext::arc();
-        for (before, after, column_schemas) in testcases {
-            let schema = Arc::new(Schema::new(column_schemas));
-            let mut add_auto_column_rewriter =
-                ColumnMatcherRewriter::new(schema, Vec::new(), false);
-
-            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), before, false)
-                .await
-                .unwrap();
-            let new_sql = (|| {
-                let plan = plan
-                    .rewrite(&mut add_auto_column_rewriter)
-                    .map_err(|e| e.to_string())?
-                    .data;
-                df_plan_to_sql(&plan).map_err(|e| e.to_string())
-            })();
-            match (after, new_sql.clone()) {
-                (Ok(after), Ok(new_sql)) => assert_eq!(after, new_sql),
-                (Err(expected), Err(real_err_msg)) => assert!(
-                    real_err_msg.contains(expected),
-                    "expected: {expected}, real: {real_err_msg}"
-                ),
-                _ => panic!("expected: {:?}, real: {:?}", after, new_sql),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_find_group_by_exprs() {
-        let testcases = vec![
-            (
-                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts GROUP BY ts;",
-                vec!["ts"],
-            ),
-            (
-                "SELECT number FROM numbers_with_ts GROUP BY number",
-                vec!["number"],
-            ),
-            (
-                "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window",
-                vec!["time_window"],
-            ),
-            // subquery
-            (
-                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);",
-                vec!["time_window", "number"],
-            ),
-            // complex subquery without alias
-            (
-                "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) GROUP BY number, time_window, bucket_name;",
-                vec!["number", "time_window", "bucket_name"],
-            ),
-            // complex subquery alias
-            (
-                "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) as cte GROUP BY number, time_window, bucket_name;",
-                vec!["number", "time_window", "bucket_name"],
-            ),
-        ];
-
-        let query_engine = create_test_query_engine();
-        let ctx = QueryContext::arc();
-        for (sql, expected) in testcases {
-            // need to be unoptimize for better readiability
-            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
-                .await
-                .unwrap();
-            let mut group_by_exprs = FindGroupByFinalName::default();
-            plan.visit(&mut group_by_exprs).unwrap();
-            let expected: HashSet<String> = expected.into_iter().map(|s| s.to_string()).collect();
-            assert_eq!(
-                expected,
-                group_by_exprs.get_group_expr_names().unwrap_or_default()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_null_cast() {
-        let query_engine = create_test_query_engine();
-        let ctx = QueryContext::arc();
-        let sql = "SELECT NULL::DOUBLE FROM numbers_with_ts";
-        let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
-            .await
-            .unwrap();
-
-        let _sub_plan = DFLogicalSubstraitConvertor {}
-            .encode(&plan, DefaultSerializer)
-            .unwrap();
     }
 }

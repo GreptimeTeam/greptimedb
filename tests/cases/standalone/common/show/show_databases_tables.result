@@ -49,6 +49,7 @@ SHOW TABLES;
 | process_list                          |
 | profiling                             |
 | referential_constraints               |
+| region_info                           |
 | region_peers                          |
 | region_statistics                     |
 | routines                              |
@@ -99,6 +100,7 @@ SHOW FULL TABLES;
 | process_list                          | LOCAL TEMPORARY |
 | profiling                             | LOCAL TEMPORARY |
 | referential_constraints               | LOCAL TEMPORARY |
+| region_info                           | LOCAL TEMPORARY |
 | region_peers                          | LOCAL TEMPORARY |
 | region_statistics                     | LOCAL TEMPORARY |
 | routines                              | LOCAL TEMPORARY |
@@ -143,6 +145,7 @@ SHOW TABLE STATUS;
 |process_list||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |profiling||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |referential_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|region_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |region_peers||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |region_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |routines||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||

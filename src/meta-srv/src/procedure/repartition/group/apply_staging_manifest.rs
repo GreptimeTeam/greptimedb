@@ -37,7 +37,7 @@ use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
 use crate::procedure::repartition::group::{Context, State};
-use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::repartition::plan::TargetRegionDescriptor;
 use crate::service::mailbox::{Channel, MailboxRef};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -75,7 +75,7 @@ impl ApplyStagingManifest {
     fn build_apply_staging_manifest_instructions(
         staging_manifest_paths: &HashMap<RegionId, String>,
         target_routes: &[RegionRoute],
-        targets: &[RegionDescriptor],
+        targets: &[TargetRegionDescriptor],
         central_region_id: RegionId,
     ) -> Result<ApplyStagingManifestInstructions> {
         let target_partition_expr_by_region = targets

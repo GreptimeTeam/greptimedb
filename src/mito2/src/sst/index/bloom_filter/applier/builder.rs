@@ -101,12 +101,14 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             return Ok(None);
         }
 
+        let expected_predicate_column_types = self.expected_predicate_column_types();
         let applier = BloomFilterIndexApplier::new(
             self.table_dir,
             self.path_type,
             self.object_store,
             self.puffin_manager_factory,
             self.predicates,
+            expected_predicate_column_types,
         )
         .with_file_cache(self.file_cache)
         .with_puffin_metadata_cache(self.puffin_metadata_cache)
@@ -135,6 +137,17 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         if let Err(err) = res {
             warn!(err; "Failed to collect bloom filter predicates, ignore it. expr: {expr}");
         }
+    }
+
+    /// Returns `(column_id, data_type)` pairs for predicate columns.
+    fn expected_predicate_column_types(&self) -> BTreeMap<ColumnId, ConcreteDataType> {
+        self.predicates
+            .keys()
+            .filter_map(|col_id| {
+                let col = self.metadata.column_by_id(*col_id)?;
+                Some((*col_id, col.column_schema.data_type.clone()))
+            })
+            .collect()
     }
 
     /// Helper function to get the column id and type
@@ -404,7 +417,7 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         assert_eq!(predicates.len(), 1);
 
         let column_predicates = predicates.get(&1).unwrap();
@@ -443,7 +456,7 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         let column_predicates = predicates.get(&2).unwrap();
         assert_eq!(column_predicates.len(), 1);
         assert_eq!(column_predicates[0].list.len(), 3);
@@ -473,7 +486,7 @@ mod tests {
         let result = builder().build(&[expr]).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         let column_predicates = predicates.get(&1).unwrap();
         assert_eq!(column_predicates.len(), 1);
         assert_eq!(column_predicates[0].list.len(), 4);
@@ -537,7 +550,7 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         assert_eq!(predicates.len(), 2);
         assert!(predicates.contains_key(&1));
         assert!(predicates.contains_key(&2));
@@ -575,7 +588,7 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         assert!(!predicates.contains_key(&1)); // Null equality should be ignored
         let column2_predicates = predicates.get(&2).unwrap();
         assert_eq!(column2_predicates[0].list.len(), 2);
@@ -644,7 +657,7 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let predicates = result.unwrap().predicates;
+        let predicates = result.unwrap().default_predicates;
         let column_predicates = predicates.get(&1).unwrap();
         assert_eq!(column_predicates.len(), 2);
     }

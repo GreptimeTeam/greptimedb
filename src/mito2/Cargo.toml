@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = []
 test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
+testing = ["test"]
 enterprise = []
 vector_index = ["dep:roaring", "index/vector_index"]
 
@@ -52,6 +53,7 @@ dashmap.workspace = true
 dotenv.workspace = true
 either.workspace = true
 futures.workspace = true
+humantime.workspace = true
 humantime-serde.workspace = true
 index.workspace = true
 itertools.workspace = true
@@ -123,7 +125,7 @@ required-features = ["test"]
 [[bench]]
 name = "bench_compaction_picker"
 harness = false
-required-features = ["test"]
+required-features = ["testing"]
 
 [[bench]]
 name = "simple_bulk_memtable"

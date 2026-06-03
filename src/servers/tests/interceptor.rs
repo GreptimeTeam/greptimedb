@@ -90,6 +90,7 @@ impl PromQueryInterceptor for NoopInterceptor {
     fn pre_execute(
         &self,
         query: &PromQuery,
+        _expr: &promql_parser::parser::Expr,
         _plan: Option<&LogicalPlan>,
         _query_ctx: QueryContextRef,
     ) -> std::result::Result<(), Self::Error> {
@@ -121,7 +122,13 @@ fn test_prom_interceptor() {
         ..Default::default()
     };
 
-    let fail = PromQueryInterceptor::pre_execute(&di, &query, None, ctx.clone());
+    let fail = PromQueryInterceptor::pre_execute(
+        &di,
+        &query,
+        &promql_parser::parser::parse(&query.query).unwrap(),
+        None,
+        ctx.clone(),
+    );
     assert!(fail.is_err());
 
     let output = Output::new_with_affected_rows(1);

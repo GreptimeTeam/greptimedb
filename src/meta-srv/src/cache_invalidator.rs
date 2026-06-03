@@ -84,4 +84,11 @@ impl CacheInvalidator for MetasrvCacheInvalidator {
         let instruction = Instruction::InvalidateCaches(caches.to_vec());
         self.broadcast(ctx, instruction).await
     }
+
+    fn invalidate_all(&self) -> MetaResult<()> {
+        // MetasrvCacheInvalidator only broadcasts concrete cache identifiers to
+        // remote nodes. The heartbeat instruction protocol has no global
+        // invalidate-all message, so there is no safe broadcast to send here.
+        Ok(())
+    }
 }

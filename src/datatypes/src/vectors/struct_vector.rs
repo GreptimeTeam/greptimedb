@@ -220,7 +220,7 @@ impl TryFrom<StructArray> for StructVector {
 
     fn try_from(array: StructArray) -> Result<Self> {
         let fields = match array.data_type() {
-            ArrowDataType::Struct(fields) => StructType::try_from(fields)?,
+            ArrowDataType::Struct(fields) => StructType::from(fields),
             other => ConversionSnafu {
                 from: other.to_string(),
             }

@@ -71,6 +71,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("I/O error while {}: {}", operation, error))]
+    Io {
+        operation: &'static str,
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Cannot resume snapshot with a different schema_only mode (existing: {}, requested: {}). Use --force to recreate.",
         existing_schema_only,
@@ -183,6 +191,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Snapshot verification failed: {} error(s), {} warning(s)",
+        errors,
+        warnings
+    ))]
+    SnapshotVerifyFailed {
+        errors: usize,
+        warnings: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -195,7 +215,8 @@ impl ErrorExt for Error {
             | Error::SchemaOnlyModeMismatch { .. }
             | Error::ResumeConfigMismatch { .. }
             | Error::ManifestVersionMismatch { .. }
-            | Error::SchemaOnlyArgsNotAllowed { .. } => StatusCode::InvalidArguments,
+            | Error::SchemaOnlyArgsNotAllowed { .. }
+            | Error::SnapshotVerifyFailed { .. } => StatusCode::InvalidArguments,
             Error::TimeParseInvalidFormat { .. }
             | Error::TimeParseEndBeforeStart { .. }
             | Error::ChunkTimeWindowRequiresBounds { .. } => StatusCode::InvalidArguments,
@@ -209,6 +230,8 @@ impl ErrorExt for Error {
             Error::EmptyResult { .. }
             | Error::UnexpectedValueType { .. }
             | Error::UrlParse { .. } => StatusCode::Internal,
+
+            Error::Io { .. } => StatusCode::External,
 
             Error::Database { error, .. } => error.status_code(),
 

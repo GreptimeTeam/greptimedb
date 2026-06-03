@@ -1323,7 +1323,7 @@ mod tests {
         let mut format = FlatReadFormat::new(
             metadata,
             ReadColumns::from_deduped_column_ids(std::iter::once(1)), // Just read tag0
-            Some(8),
+            Some(build_test_flat_sst_schema()),
             "test",
             false,
         )
@@ -1540,7 +1540,7 @@ mod tests {
         let format = FlatReadFormat::new(
             metadata.clone(),
             ReadColumns::from_deduped_column_ids(column_ids),
-            Some(6),
+            Some(build_test_arrow_schema()),
             "test",
             false,
         )

@@ -14,6 +14,7 @@
 
 //! Parquet writer.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::mem;
 use std::pin::Pin;
@@ -31,6 +32,8 @@ use datatypes::arrow::array::{
 use datatypes::arrow::compute::{max, min};
 use datatypes::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::is_json_extension_type;
+use datatypes::schema::ext::ArrowSchemaExt;
 use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -271,12 +274,21 @@ where
         override_sequence: Option<SequenceNumber>,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
+        let mut options = FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding);
+
+        if source.schema().has_json_extension_field() {
+            options.concretized_json_types = source
+                .schema()
+                .fields()
+                .iter()
+                .filter(|&field| is_json_extension_type(field))
+                .map(|field| (field.name().clone(), field.data_type().clone()))
+                .collect::<HashMap<_, _>>();
+        }
+
         let converter = FlatBatchConverter::Flat(
-            FlatWriteFormat::new(
-                self.metadata.clone(),
-                &FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding),
-            )
-            .with_override_sequence(override_sequence),
+            FlatWriteFormat::new(self.metadata.clone(), &options)
+                .with_override_sequence(override_sequence),
         );
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {

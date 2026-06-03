@@ -18,6 +18,7 @@ use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 
 use arrow::datatypes::DataType as ArrowDataType;
+use arrow_schema::{Field, Fields};
 use common_base::bytes::Bytes;
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,7 @@ use crate::error::{
 use crate::prelude::ConcreteDataType;
 use crate::scalars::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
-use crate::types::{ListType, StructField, StructType};
+use crate::types::{StructField, StructType};
 use crate::value::Value;
 use crate::vectors::json::builder::JsonVectorBuilder;
 use crate::vectors::{BinaryVectorBuilder, MutableVector};
@@ -117,30 +118,28 @@ impl JsonNativeType {
             _ => JsonNativeType::Variant,
         };
     }
-}
 
-impl From<&JsonNativeType> for ConcreteDataType {
-    fn from(value: &JsonNativeType) -> Self {
-        match value {
-            JsonNativeType::Null => ConcreteDataType::null_datatype(),
-            JsonNativeType::Bool => ConcreteDataType::boolean_datatype(),
-            JsonNativeType::Number(JsonNumberType::U64) => ConcreteDataType::uint64_datatype(),
-            JsonNativeType::Number(JsonNumberType::I64) => ConcreteDataType::int64_datatype(),
-            JsonNativeType::Number(JsonNumberType::F64) => ConcreteDataType::float64_datatype(),
-            JsonNativeType::String => ConcreteDataType::string_datatype(),
-            JsonNativeType::Array(item_type) => {
-                ConcreteDataType::List(ListType::new(Arc::new(item_type.as_ref().into())))
+    pub fn as_arrow_type(&self) -> ArrowDataType {
+        match self {
+            JsonNativeType::Null => ArrowDataType::Null,
+            JsonNativeType::Bool => ArrowDataType::Boolean,
+            JsonNativeType::Number(n) => match n {
+                JsonNumberType::U64 => ArrowDataType::UInt64,
+                JsonNumberType::I64 => ArrowDataType::Int64,
+                JsonNumberType::F64 => ArrowDataType::Float64,
+            },
+            JsonNativeType::String => ArrowDataType::Utf8View,
+            JsonNativeType::Array(array) => {
+                ArrowDataType::List(Arc::new(Field::new("item", array.as_arrow_type(), true)))
             }
             JsonNativeType::Object(object) => {
                 let fields = object
                     .iter()
-                    .map(|(type_name, field_type)| {
-                        StructField::new(type_name.clone(), field_type.into(), true)
-                    })
-                    .collect();
-                ConcreteDataType::Struct(StructType::new(Arc::new(fields)))
+                    .map(|(k, v)| Arc::new(Field::new(k, v.as_arrow_type(), true)))
+                    .collect::<Vec<_>>();
+                ArrowDataType::Struct(Fields::from(fields))
             }
-            JsonNativeType::Variant => ConcreteDataType::binary_datatype(),
+            JsonNativeType::Variant => ArrowDataType::Binary,
         }
     }
 }
@@ -304,9 +303,10 @@ impl JsonType {
     pub(crate) fn as_struct_type(&self) -> StructType {
         match &self.format {
             JsonFormat::Jsonb => StructType::default(),
-            JsonFormat::Json2(inner) => match ConcreteDataType::from(inner.as_ref()) {
-                ConcreteDataType::Struct(t) => t.clone(),
-                x => plain_json_struct_type(x),
+            JsonFormat::Json2(native_type) => match native_type.as_arrow_type() {
+                // TODO(LFC): Direct use Arrow's Struct datatype here.
+                ArrowDataType::Struct(fields) => StructType::from(&fields),
+                data_type => plain_json_struct_type(&data_type),
             },
         }
     }
@@ -370,8 +370,12 @@ fn is_include(this: &JsonNativeType, that: &JsonNativeType) -> bool {
 
 /// A special struct type for denoting "plain"(not object) json value. It has only one field, with
 /// fixed name [JSON_PLAIN_FIELD_NAME] and with metadata [JSON_PLAIN_FIELD_METADATA_KEY] = `"true"`.
-pub(crate) fn plain_json_struct_type(item_type: ConcreteDataType) -> StructType {
-    let mut field = StructField::new(JSON_PLAIN_FIELD_NAME.to_string(), item_type, true);
+fn plain_json_struct_type(data_type: &ArrowDataType) -> StructType {
+    let mut field = StructField::new(
+        JSON_PLAIN_FIELD_NAME.to_string(),
+        ConcreteDataType::from_arrow_type(data_type),
+        true,
+    );
     field.insert_metadata(JSON_PLAIN_FIELD_METADATA_KEY, true);
     StructType::new(Arc::new(vec![field]))
 }

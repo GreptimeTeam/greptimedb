@@ -14,9 +14,11 @@
 
 //! Sorted strings tables.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use arrow_schema::DataType;
 use common_base::readable_size::ReadableSize;
 use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, FieldRef, Fields, Schema, SchemaRef,
@@ -108,6 +110,9 @@ pub struct FlatSchemaOptions {
     /// when storing primary key columns.
     /// Only takes effect when `raw_pk_columns` is true.
     pub string_pk_use_dict: bool,
+    /// The column's concretized JSON types, to be set into Arrow schema.
+    /// Otherwise it's empty struct in the Arrow schema.
+    pub concretized_json_types: HashMap<String, DataType>,
 }
 
 impl Default for FlatSchemaOptions {
@@ -115,6 +120,7 @@ impl Default for FlatSchemaOptions {
         Self {
             raw_pk_columns: true,
             string_pk_use_dict: true,
+            concretized_json_types: HashMap::new(),
         }
     }
 }
@@ -128,6 +134,7 @@ impl FlatSchemaOptions {
             Self {
                 raw_pk_columns: false,
                 string_pk_use_dict: false,
+                concretized_json_types: HashMap::new(),
             }
         }
     }
@@ -159,6 +166,7 @@ pub fn to_flat_sst_arrow_schema(
                     &metadata.column_metadatas[pk_index].column_schema.data_type,
                     old_field,
                 );
+                let new_field = concretize_json_type(new_field, options);
                 fields.push(Arc::new(with_field_id((*new_field).clone(), column_id)));
             }
         }
@@ -169,8 +177,9 @@ pub fn to_flat_sst_arrow_schema(
         .zip(&metadata.column_metadatas)
         .filter_map(|(field, column_meta)| {
             if column_meta.semantic_type == SemanticType::Field {
+                let field = concretize_json_type(field.clone(), options);
                 Some(Arc::new(with_field_id(
-                    (**field).clone(),
+                    Arc::unwrap_or_clone(field),
                     column_meta.column_id,
                 )))
             } else {
@@ -187,6 +196,16 @@ pub fn to_flat_sst_arrow_schema(
     }
 
     Arc::new(Schema::new(fields))
+}
+
+fn concretize_json_type(field: Arc<Field>, options: &FlatSchemaOptions) -> Arc<Field> {
+    if let Some(data_type) = options.concretized_json_types.get(field.name()) {
+        let mut field = Arc::unwrap_or_clone(field);
+        field.set_data_type(data_type.clone());
+        Arc::new(field)
+    } else {
+        field
+    }
 }
 
 /// Returns the number of columns in the flat format.

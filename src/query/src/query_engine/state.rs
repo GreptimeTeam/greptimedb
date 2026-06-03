@@ -66,6 +66,7 @@ use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
+use crate::optimizer::promql_tsid_narrow_join::PromqlTsidNarrowJoin;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
@@ -189,9 +190,13 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .insert(6, Arc::new(PassDistribution));
+        // Prefer collecting narrow PromQL build sides over repartitioning wide label streams.
+        physical_optimizer
+            .rules
+            .insert(7, Arc::new(PromqlTsidNarrowJoin));
         // Enforce sorting AFTER custom rules that modify the plan structure
         physical_optimizer.rules.insert(
-            7,
+            8,
             Arc::new(datafusion::physical_optimizer::enforce_sorting::EnforceSorting {}),
         );
         // Add rule for windowed sort

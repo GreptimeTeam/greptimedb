@@ -20,7 +20,7 @@ pub mod otlp;
 pub mod postgres;
 pub mod prom_store;
 
-pub use influxdb::InfluxdbOptions;
+pub use influxdb::{InfluxdbMergeMode, InfluxdbOptions};
 pub use jaeger::JaegerOptions;
 pub use mysql::MysqlOptions;
 pub use opentsdb::OpentsdbOptions;

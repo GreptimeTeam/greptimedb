@@ -2115,6 +2115,7 @@ mod tests {
             &FlatSchemaOptions {
                 raw_pk_columns: false,
                 string_pk_use_dict: true,
+                ..Default::default()
             },
         );
 
@@ -2552,6 +2553,7 @@ mod tests {
             &FlatSchemaOptions {
                 raw_pk_columns: false,
                 string_pk_use_dict: true,
+                ..Default::default()
             },
         );
 

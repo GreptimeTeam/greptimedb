@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use common_error::ext::BoxedError;
 use common_meta::ddl::DdlContext;
-use common_meta::ddl_manager::RepartitionProcedureFactory;
+use common_meta::ddl_manager::{RepartitionProcedureFactory, RepartitionSource};
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
@@ -66,7 +66,7 @@ impl RepartitionProcedureFactory for StandaloneRepartitionProcedureFactory {
         _ddl_ctx: &DdlContext,
         _table_name: TableName,
         _table_id: TableId,
-        _from_exprs: Vec<String>,
+        _source: RepartitionSource,
         _to_exprs: Vec<String>,
         _timeout: Option<Duration>,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {

@@ -31,6 +31,7 @@ use std::sync::{Arc, RwLock};
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::warn;
+use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
@@ -39,8 +40,10 @@ use index::result_cache::IndexResultCache;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use object_store::ObjectStore;
+use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
 use parquet::file::metadata::{FileMetaData, PageIndexPolicy, ParquetMetaData};
 use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
+use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
@@ -75,6 +78,8 @@ const INDEX_TYPE: &str = "index";
 const SELECTOR_RESULT_TYPE: &str = "selector_result";
 /// Metrics type key for range scan result cache.
 const RANGE_RESULT_TYPE: &str = "range_result";
+/// Metrics type key for prefilter result cache.
+const PREFILTER_RESULT_TYPE: &str = "prefilter_result";
 const RANGE_RESULT_CONCAT_MEMORY_LIMIT: ReadableSize = ReadableSize::mb(512);
 const RANGE_RESULT_CONCAT_MEMORY_PERMIT: ReadableSize = ReadableSize::kb(1);
 
@@ -149,17 +154,35 @@ pub(crate) struct CachedSstMeta {
     parquet_metadata: Arc<ParquetMetaData>,
     region_metadata: RegionMetadataRef,
     region_metadata_weight: usize,
+    page_index_policy: PageIndexPolicy,
 }
 
 impl CachedSstMeta {
+    #[cfg(test)]
     pub(crate) fn try_new(file_path: &str, parquet_metadata: ParquetMetaData) -> Result<Self> {
-        Self::try_new_with_region_metadata(file_path, parquet_metadata, None)
+        let page_index_policy = infer_loaded_page_index_policy(&parquet_metadata);
+        Self::try_new_with_page_index_policy(file_path, parquet_metadata, None, page_index_policy)
     }
 
     pub(crate) fn try_new_with_region_metadata(
         file_path: &str,
         parquet_metadata: ParquetMetaData,
         region_metadata: Option<RegionMetadataRef>,
+    ) -> Result<Self> {
+        let page_index_policy = infer_loaded_page_index_policy(&parquet_metadata);
+        Self::try_new_with_page_index_policy(
+            file_path,
+            parquet_metadata,
+            region_metadata,
+            page_index_policy,
+        )
+    }
+
+    pub(crate) fn try_new_with_page_index_policy(
+        file_path: &str,
+        parquet_metadata: ParquetMetaData,
+        region_metadata: Option<RegionMetadataRef>,
+        page_index_policy: PageIndexPolicy,
     ) -> Result<Self> {
         let file_metadata = parquet_metadata.file_metadata();
         let key_values = file_metadata
@@ -197,6 +220,7 @@ impl CachedSstMeta {
             parquet_metadata,
             region_metadata,
             region_metadata_weight,
+            page_index_policy,
         })
     }
 
@@ -206,6 +230,22 @@ impl CachedSstMeta {
 
     pub(crate) fn region_metadata(&self) -> RegionMetadataRef {
         self.region_metadata.clone()
+    }
+
+    fn satisfies_page_index_policy(&self, requested: PageIndexPolicy) -> bool {
+        match requested {
+            PageIndexPolicy::Skip => true,
+            PageIndexPolicy::Optional => self.page_index_policy != PageIndexPolicy::Skip,
+            PageIndexPolicy::Required => self.page_index_policy == PageIndexPolicy::Required,
+        }
+    }
+}
+
+fn infer_loaded_page_index_policy(parquet_metadata: &ParquetMetaData) -> PageIndexPolicy {
+    if parquet_metadata.column_index().is_some() || parquet_metadata.offset_index().is_some() {
+        PageIndexPolicy::Optional
+    } else {
+        PageIndexPolicy::Skip
     }
 }
 
@@ -238,6 +278,117 @@ fn strip_region_metadata_from_parquet(parquet_metadata: ParquetMetaData) -> Parq
         .set_column_index(column_index)
         .set_offset_index(offset_index)
         .build()
+}
+
+fn removal_cause_str(cause: RemovalCause) -> &'static str {
+    match cause {
+        RemovalCause::Expired => "expired",
+        RemovalCause::Explicit => "explicit",
+        RemovalCause::Replaced => "replaced",
+        RemovalCause::Size => "size",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PrefilterRowSelector {
+    row_count: usize,
+    skip: bool,
+}
+
+// `parquet::arrow::arrow_reader::RowSelector` does not implement `Hash`, but
+// prefilter cache keys must hash the upstream row-selection snapshot. Keep a
+// local hashable mirror of the two fields that define selector semantics.
+// TODO(yingwen): Remove this mirror if upstream `RowSelector` implements `Hash`.
+impl From<&RowSelector> for PrefilterRowSelector {
+    fn from(selector: &RowSelector) -> Self {
+        Self {
+            row_count: selector.row_count,
+            skip: selector.skip,
+        }
+    }
+}
+
+/// Key for a cached prefilter result.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PrefilterKey {
+    file_id: FileId,
+    row_group_idx: u32,
+    row_selection: Option<Arc<Vec<PrefilterRowSelector>>>,
+    schema_version: u64,
+    filter_exprs: SmallVec<[String; 1]>,
+    mem_usage: usize,
+}
+
+impl PrefilterKey {
+    pub(crate) fn row_selection_snapshot(
+        row_selection: Option<&RowSelection>,
+    ) -> Option<Arc<Vec<PrefilterRowSelector>>> {
+        row_selection.map(|selection| {
+            Arc::new(
+                selection
+                    .iter()
+                    .map(PrefilterRowSelector::from)
+                    .collect::<Vec<_>>(),
+            )
+        })
+    }
+
+    pub(crate) fn new(
+        file_id: FileId,
+        row_group_idx: u32,
+        row_selection: Option<Arc<Vec<PrefilterRowSelector>>>,
+        schema_version: u64,
+        filter_exprs: SmallVec<[String; 1]>,
+    ) -> Self {
+        let row_selection_bytes = row_selection
+            .as_ref()
+            .map(|selection| selection.len() * mem::size_of::<PrefilterRowSelector>())
+            .unwrap_or(0);
+        let spilled_expr_bytes = if filter_exprs.spilled() {
+            filter_exprs.capacity() * mem::size_of::<String>()
+        } else {
+            0
+        };
+        let expr_bytes = filter_exprs.iter().map(|s| s.capacity()).sum::<usize>();
+
+        Self {
+            file_id,
+            row_group_idx,
+            row_selection,
+            schema_version,
+            filter_exprs,
+            mem_usage: mem::size_of::<Self>()
+                + row_selection_bytes
+                + spilled_expr_bytes
+                + expr_bytes,
+        }
+    }
+
+    fn mem_usage(&self) -> usize {
+        self.mem_usage
+    }
+}
+
+type PrefilterResultCache = Cache<PrefilterKey, Arc<BooleanBuffer>>;
+
+fn new_prefilter_result_cache(capacity: u64) -> PrefilterResultCache {
+    Cache::builder()
+        .max_capacity(capacity)
+        .weigher(prefilter_result_cache_weight)
+        .eviction_listener(|k, v, cause| {
+            let size = prefilter_result_cache_weight(&k, &v);
+            CACHE_BYTES
+                .with_label_values(&[PREFILTER_RESULT_TYPE])
+                .sub(size.into());
+            CACHE_EVICTION
+                .with_label_values(&[PREFILTER_RESULT_TYPE, removal_cause_str(cause)])
+                .inc();
+        })
+        .build()
+}
+
+fn prefilter_result_cache_weight(k: &PrefilterKey, v: &Arc<BooleanBuffer>) -> u32 {
+    (k.mem_usage() + mem::size_of::<BooleanBuffer>() + v.values().len()) as u32
 }
 
 /// Cache strategies that may only enable a subset of caches.
@@ -280,10 +431,11 @@ impl CacheStrategy {
     pub(crate) fn get_sst_meta_data_from_mem_cache(
         &self,
         file_id: RegionFileId,
+        page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
         match self {
             CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.get_sst_meta_data_from_mem_cache(file_id)
+                cache_manager.get_sst_meta_data_from_mem_cache(file_id, page_index_policy)
             }
             CacheStrategy::Disabled => None,
         }
@@ -294,7 +446,7 @@ impl CacheStrategy {
         &self,
         file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
-        self.get_sst_meta_data_from_mem_cache(file_id)
+        self.get_sst_meta_data_from_mem_cache(file_id, PageIndexPolicy::Skip)
             .map(|metadata| metadata.parquet_metadata())
     }
 
@@ -320,6 +472,23 @@ impl CacheStrategy {
                 cache_manager.put_parquet_meta_data(file_id, metadata, region_metadata);
             }
             CacheStrategy::Disabled => {}
+        }
+    }
+
+    /// Calls [CacheManager::get_prefilter_result()].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    pub(crate) fn get_prefilter_result(&self, key: &PrefilterKey) -> Option<Arc<BooleanBuffer>> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.get_prefilter_result(key),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Calls [CacheManager::put_prefilter_result()].
+    /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
+    pub(crate) fn put_prefilter_result(&self, key: PrefilterKey, result: Arc<BooleanBuffer>) {
+        if let CacheStrategy::EnableAll(cache_manager) = self {
+            cache_manager.put_prefilter_result(key, result);
         }
     }
 
@@ -588,6 +757,8 @@ pub struct CacheManager {
     range_result_memory_limiter: Arc<RangeResultMemoryLimiter>,
     /// Cache for index result.
     index_result_cache: Option<IndexResultCache>,
+    /// Cache for prefilter result.
+    prefilter_result_cache: Option<PrefilterResultCache>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
@@ -606,7 +777,7 @@ impl CacheManager {
         metrics: &mut MetadataCacheMetrics,
         page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
-        if let Some(metadata) = self.get_sst_meta_data_from_mem_cache(file_id) {
+        if let Some(metadata) = self.get_sst_meta_data_from_mem_cache(file_id, page_index_policy) {
             metrics.mem_cache_hit += 1;
             return Some(metadata);
         }
@@ -645,9 +816,12 @@ impl CacheManager {
     pub(crate) fn get_sst_meta_data_from_mem_cache(
         &self,
         file_id: RegionFileId,
+        page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
         self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
             let value = sst_meta_cache.get(&SstMetaKey(file_id.region_id(), file_id.file_id()));
+            let value =
+                value.filter(|metadata| metadata.satisfies_page_index_policy(page_index_policy));
             update_hit_miss(value, SST_META_TYPE)
         })
     }
@@ -658,7 +832,7 @@ impl CacheManager {
         &self,
         file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
-        self.get_sst_meta_data_from_mem_cache(file_id)
+        self.get_sst_meta_data_from_mem_cache(file_id, PageIndexPolicy::Skip)
             .map(|metadata| metadata.parquet_metadata())
     }
 
@@ -897,6 +1071,21 @@ impl CacheManager {
     pub(crate) fn index_result_cache(&self) -> Option<&IndexResultCache> {
         self.index_result_cache.as_ref()
     }
+
+    pub(crate) fn get_prefilter_result(&self, key: &PrefilterKey) -> Option<Arc<BooleanBuffer>> {
+        self.prefilter_result_cache
+            .as_ref()
+            .and_then(|cache| update_hit_miss(cache.get(key), PREFILTER_RESULT_TYPE))
+    }
+
+    pub(crate) fn put_prefilter_result(&self, key: PrefilterKey, result: Arc<BooleanBuffer>) {
+        if let Some(cache) = &self.prefilter_result_cache {
+            CACHE_BYTES
+                .with_label_values(&[PREFILTER_RESULT_TYPE])
+                .add(prefilter_result_cache_weight(&key, &result).into());
+            cache.insert(key, result);
+        }
+    }
 }
 
 /// Increases selector cache miss metrics.
@@ -919,6 +1108,7 @@ pub struct CacheManagerBuilder {
     index_content_size: u64,
     index_content_page_size: u64,
     index_result_cache_size: u64,
+    prefilter_result_cache_size: u64,
     puffin_metadata_size: u64,
     write_cache: Option<WriteCacheRef>,
     selector_result_cache_size: u64,
@@ -974,6 +1164,12 @@ impl CacheManagerBuilder {
         self
     }
 
+    /// Sets cache size for prefilter result.
+    pub fn prefilter_result_cache_size(mut self, bytes: u64) -> Self {
+        self.prefilter_result_cache_size = bytes;
+        self
+    }
+
     /// Sets cache size for puffin metadata.
     pub fn puffin_metadata_size(mut self, bytes: u64) -> Self {
         self.puffin_metadata_size = bytes;
@@ -1004,7 +1200,7 @@ impl CacheManagerBuilder {
                         .with_label_values(&[SST_META_TYPE])
                         .sub(size.into());
                     CACHE_EVICTION
-                        .with_label_values(&[SST_META_TYPE, removal_cause_to_str(cause)])
+                        .with_label_values(&[SST_META_TYPE, removal_cause_str(cause)])
                         .inc();
                 })
                 .build()
@@ -1019,7 +1215,7 @@ impl CacheManagerBuilder {
                         .with_label_values(&[VECTOR_TYPE])
                         .sub(size.into());
                     CACHE_EVICTION
-                        .with_label_values(&[VECTOR_TYPE, removal_cause_to_str(cause)])
+                        .with_label_values(&[VECTOR_TYPE, removal_cause_str(cause)])
                         .inc();
                 })
                 .build()
@@ -1042,6 +1238,8 @@ impl CacheManagerBuilder {
             .then(|| Arc::new(VectorIndexCache::new(self.index_content_size)));
         let index_result_cache = (self.index_result_cache_size != 0)
             .then(|| IndexResultCache::new(self.index_result_cache_size));
+        let prefilter_result_cache = (self.prefilter_result_cache_size != 0)
+            .then(|| new_prefilter_result_cache(self.prefilter_result_cache_size));
         let puffin_metadata_cache =
             PuffinMetadataCache::new(self.puffin_metadata_size, &CACHE_BYTES);
         let selector_result_cache = (self.selector_result_cache_size != 0).then(|| {
@@ -1054,7 +1252,7 @@ impl CacheManagerBuilder {
                         .with_label_values(&[SELECTOR_RESULT_TYPE])
                         .sub(size.into());
                     CACHE_EVICTION
-                        .with_label_values(&[SELECTOR_RESULT_TYPE, removal_cause_to_str(cause)])
+                        .with_label_values(&[SELECTOR_RESULT_TYPE, removal_cause_str(cause)])
                         .inc();
                 })
                 .build()
@@ -1069,7 +1267,7 @@ impl CacheManagerBuilder {
                         .with_label_values(&[RANGE_RESULT_TYPE])
                         .sub(size.into());
                     CACHE_EVICTION
-                        .with_label_values(&[RANGE_RESULT_TYPE, removal_cause_to_str(cause)])
+                        .with_label_values(&[RANGE_RESULT_TYPE, removal_cause_str(cause)])
                         .inc();
                 })
                 .build()
@@ -1092,6 +1290,7 @@ impl CacheManagerBuilder {
                 RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize,
             )),
             index_result_cache,
+            prefilter_result_cache,
         }
     }
 }
@@ -1116,15 +1315,6 @@ fn selector_result_cache_weight(k: &SelectorResultKey, v: &Arc<SelectorResultVal
 
 fn range_result_cache_weight(k: &RangeScanCacheKey, v: &Arc<RangeScanCacheValue>) -> u32 {
     (k.estimated_size() + v.estimated_size()) as u32
-}
-
-fn removal_cause_to_str(cause: RemovalCause) -> &'static str {
-    match cause {
-        RemovalCause::Expired => "expired",
-        RemovalCause::Explicit => "explicit",
-        RemovalCause::Replaced => "replaced",
-        RemovalCause::Size => "size",
-    }
 }
 
 /// Updates cache hit/miss metrics.
@@ -1238,7 +1428,7 @@ impl PageRangeCache {
                         let size = page_cache_weight(&k, &v);
                         CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
                         CACHE_EVICTION
-                            .with_label_values(&[PAGE_TYPE, removal_cause_to_str(cause)])
+                            .with_label_values(&[PAGE_TYPE, removal_cause_str(cause)])
                             .inc();
 
                         if let Some(cache) = weak_cache.upgrade()
@@ -1618,6 +1808,63 @@ mod tests {
         assert!(Arc::ptr_eq(&region_metadata, &cached.region_metadata()));
     }
 
+    #[tokio::test]
+    async fn test_parquet_meta_cache_respects_page_index_policy() {
+        let cache = CacheManager::builder().sst_meta_cache_size(2000).build();
+        let region_id = RegionId::new(1, 1);
+        let file_id = RegionFileId::new(region_id, FileId::random());
+        let (metadata, _) = sst_parquet_meta();
+
+        let skip_metadata = Arc::new(
+            CachedSstMeta::try_new_with_page_index_policy(
+                "test.parquet",
+                Arc::unwrap_or_clone(metadata.clone()),
+                None,
+                PageIndexPolicy::Skip,
+            )
+            .unwrap(),
+        );
+        cache.put_sst_meta_data(file_id, skip_metadata);
+
+        let mut metrics = MetadataCacheMetrics::default();
+        assert!(
+            cache
+                .get_sst_meta_data(file_id, &mut metrics, PageIndexPolicy::Optional)
+                .await
+                .is_none()
+        );
+        assert_eq!(1, metrics.cache_miss);
+
+        let optional_metadata = Arc::new(
+            CachedSstMeta::try_new_with_page_index_policy(
+                "test.parquet",
+                Arc::unwrap_or_clone(metadata),
+                None,
+                PageIndexPolicy::Optional,
+            )
+            .unwrap(),
+        );
+        cache.put_sst_meta_data(file_id, optional_metadata);
+
+        let mut metrics = MetadataCacheMetrics::default();
+        assert!(
+            cache
+                .get_sst_meta_data(file_id, &mut metrics, PageIndexPolicy::Optional)
+                .await
+                .is_some()
+        );
+        assert_eq!(1, metrics.mem_cache_hit);
+
+        let mut metrics = MetadataCacheMetrics::default();
+        assert!(
+            cache
+                .get_sst_meta_data(file_id, &mut metrics, PageIndexPolicy::Skip)
+                .await
+                .is_some()
+        );
+        assert_eq!(1, metrics.mem_cache_hit);
+    }
+
     #[test]
     fn test_meta_cache_weight_accounts_for_decoded_region_metadata() {
         let region_metadata = Arc::new(wide_region_metadata(128));
@@ -1840,6 +2087,127 @@ mod tests {
         ));
         cache.put_selector_result(key, result);
         assert!(cache.get_selector_result(&key).is_some());
+    }
+
+    #[test]
+    fn test_prefilter_result_cache() {
+        let disabled = CacheManager::builder().build();
+        let file_id = FileId::random();
+        let key = PrefilterKey::new(
+            file_id,
+            0,
+            None,
+            1,
+            SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()]),
+        );
+        let selection = Arc::new(BooleanBuffer::new_set(3));
+
+        disabled.put_prefilter_result(key.clone(), selection.clone());
+        assert!(disabled.get_prefilter_result(&key).is_none());
+
+        let cache = Arc::new(
+            CacheManager::builder()
+                .prefilter_result_cache_size(1000)
+                .build(),
+        );
+        assert!(cache.get_prefilter_result(&key).is_none());
+        cache.put_prefilter_result(key.clone(), selection.clone());
+        assert_eq!(
+            cache.get_prefilter_result(&key).unwrap().as_ref(),
+            selection.as_ref()
+        );
+
+        let enable_all = CacheStrategy::EnableAll(cache.clone());
+        assert!(enable_all.get_prefilter_result(&key).is_some());
+
+        let compaction = CacheStrategy::Compaction(cache.clone());
+        assert!(compaction.get_prefilter_result(&key).is_none());
+        compaction.put_prefilter_result(key.clone(), selection.clone());
+        assert!(cache.get_prefilter_result(&key).is_some());
+
+        let disabled_strategy = CacheStrategy::Disabled;
+        assert!(disabled_strategy.get_prefilter_result(&key).is_none());
+        disabled_strategy.put_prefilter_result(key.clone(), selection);
+        assert!(cache.get_prefilter_result(&key).is_some());
+    }
+
+    #[test]
+    fn test_prefilter_key_distinguishes_dimensions() {
+        let file_id = FileId::random();
+        let row_selection = RowSelection::from(vec![RowSelector::skip(1), RowSelector::select(3)]);
+        let other_row_selection =
+            RowSelection::from(vec![RowSelector::skip(2), RowSelector::select(2)]);
+        let row_selection = PrefilterKey::row_selection_snapshot(Some(&row_selection));
+        let other_row_selection = PrefilterKey::row_selection_snapshot(Some(&other_row_selection));
+        let base = PrefilterKey::new(
+            file_id,
+            0,
+            row_selection.clone(),
+            1,
+            SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()]),
+        );
+
+        assert_ne!(
+            base,
+            PrefilterKey::new(
+                FileId::random(),
+                0,
+                row_selection.clone(),
+                1,
+                SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()])
+            )
+        );
+        assert_ne!(
+            base,
+            PrefilterKey::new(
+                file_id,
+                1,
+                row_selection.clone(),
+                1,
+                SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()])
+            )
+        );
+        assert_ne!(
+            base,
+            PrefilterKey::new(
+                file_id,
+                0,
+                other_row_selection,
+                1,
+                SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()])
+            )
+        );
+        assert_ne!(
+            base,
+            PrefilterKey::new(
+                file_id,
+                0,
+                row_selection.clone(),
+                1,
+                SmallVec::from_vec(vec!["tag_0 IN ([b])".to_string()])
+            )
+        );
+        assert_ne!(
+            base,
+            PrefilterKey::new(
+                file_id,
+                0,
+                row_selection.clone(),
+                2,
+                SmallVec::from_vec(vec!["tag_0 IN ([a])".to_string()])
+            )
+        );
+        let pk_group = PrefilterKey::new(
+            file_id,
+            0,
+            row_selection,
+            1,
+            SmallVec::from_vec(vec![
+                "tag_0 IN ([a])".to_string(),
+                "tag_1 IN ([x])".to_string(),
+            ]),
+        );
+        assert_ne!(base, pk_group);
     }
 
     #[test]

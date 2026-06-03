@@ -26,17 +26,20 @@ use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::schema::types::SchemaDescriptor;
+use smallvec::{SmallVec, smallvec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use table::predicate::Predicate;
 
+use crate::cache::PrefilterKey;
 use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu,
     RecordBatchSnafu, Result, UnexpectedSnafu,
@@ -285,7 +288,6 @@ pub(crate) fn build_reader_filter_plan(
     expected_metadata: Option<&RegionMetadata>,
     pre_filter_mode: PreFilterMode,
     read_format: &FlatReadFormat,
-    parquet_schema: &SchemaDescriptor,
     codec: &Arc<dyn PrimaryKeyCodec>,
 ) -> ReaderFilterPlan {
     let Some(predicate) = predicate else {
@@ -372,15 +374,27 @@ pub(crate) fn build_reader_filter_plan(
         }
     }
 
+    let pk_filter_expr_strs = (!pk_filter_contexts.is_empty()).then(|| {
+        let mut expr_strs = pk_filter_contexts
+            .iter()
+            .map(|filter_ctx| filter_ctx.expr_str().to_string())
+            .collect::<Vec<_>>();
+        expr_strs.sort();
+        SmallVec::from_vec(expr_strs)
+    });
     let pk_filter_exprs =
         (!primary_key_filters.is_empty()).then_some(Arc::new(primary_key_filters));
+    let schema_version = expected_metadata
+        .map(|metadata| metadata.schema_version)
+        .unwrap_or_else(|| read_format.metadata().schema_version);
     let prefilter_builder = PrefilterContextBuilder::new(
         read_format,
         codec,
         pk_filter_exprs,
+        pk_filter_expr_strs,
         prefilter_simple_filters.clone(),
         prefilter_physical_filters,
-        parquet_schema,
+        schema_version,
     );
 
     if prefilter_builder.is_some() {
@@ -402,8 +416,6 @@ pub(crate) fn build_reader_filter_plan(
 
 /// Context for prefiltering a row group.
 pub(crate) struct PrefilterContext {
-    /// Projection mask for reading prefilter columns.
-    projection: ProjectionMask,
     /// Optional PK filter for legacy primary-key-format parquet.
     pk_filter: Option<Box<dyn PrimaryKeyFilter>>,
     /// Simple filters that can be evaluated directly from the prefilter batch.
@@ -411,6 +423,12 @@ pub(crate) struct PrefilterContext {
     /// Physical filters that can be evaluated directly from the prefilter batch.
     /// Physical expressions are only applied in the prefilter phase.
     physical_filters: Vec<PhysicalFilterContext>,
+    /// Region schema version used in per-filter cache keys.
+    schema_version: u64,
+    /// Sorted expression strings for the encoded-PK filter group.
+    pk_filter_expr_strs: Option<SmallVec<[String; 1]>>,
+    /// Arrow schema used to build narrowed prefilter projections.
+    arrow_schema: SchemaRef,
 }
 
 /// Pre-built state for constructing [PrefilterContext] per row group.
@@ -419,12 +437,14 @@ pub(crate) struct PrefilterContext {
 /// are computed once. A fresh [PrefilterContext] with its own mutable PK filter
 /// is created via [PrefilterContextBuilder::build()] for each row group.
 pub(crate) struct PrefilterContextBuilder {
-    projection: ProjectionMask,
     pk_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
+    pk_filter_expr_strs: Option<SmallVec<[String; 1]>>,
     filters: Vec<SimpleFilterContext>,
     physical_filters: Vec<PhysicalFilterContext>,
     codec: Arc<dyn PrimaryKeyCodec>,
     metadata: RegionMetadataRef,
+    schema_version: u64,
+    arrow_schema: SchemaRef,
 }
 
 impl PrefilterContextBuilder {
@@ -438,9 +458,10 @@ impl PrefilterContextBuilder {
         read_format: &FlatReadFormat,
         codec: &Arc<dyn PrimaryKeyCodec>,
         primary_key_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
+        primary_key_filter_expr_strs: Option<SmallVec<[String; 1]>>,
         filters: Vec<SimpleFilterContext>,
         physical_filters: Vec<PhysicalFilterContext>,
-        parquet_schema: &SchemaDescriptor,
+        schema_version: u64,
     ) -> Option<Self> {
         let metadata = read_format.metadata();
         let use_raw_tag_columns = read_format.batch_has_raw_pk_columns();
@@ -448,6 +469,10 @@ impl PrefilterContextBuilder {
             .then_some(primary_key_filters)
             .flatten()
             .filter(|filters| !filters.is_empty());
+        let pk_filter_expr_strs = pk_filters
+            .is_some()
+            .then_some(primary_key_filter_expr_strs)
+            .flatten();
 
         let mut prefilter_column_names = HashSet::new();
         for filter_ctx in &filters {
@@ -464,11 +489,8 @@ impl PrefilterContextBuilder {
             prefilter_column_names.insert(filter_ctx.column_name().to_string());
         }
 
-        let (projection, prefilter_count) = compute_projection_mask(
-            &prefilter_column_names,
-            read_format.arrow_schema(),
-            parquet_schema,
-        );
+        let prefilter_count =
+            compute_projection_count(&prefilter_column_names, read_format.arrow_schema());
 
         if prefilter_count == 0 {
             return None;
@@ -487,12 +509,14 @@ impl PrefilterContextBuilder {
         }
 
         Some(Self {
-            projection,
             pk_filters,
+            pk_filter_expr_strs,
             filters,
             physical_filters,
             codec: Arc::clone(codec),
             metadata: metadata.clone(),
+            schema_version,
+            arrow_schema: read_format.arrow_schema().clone(),
         })
     }
 
@@ -505,10 +529,12 @@ impl PrefilterContextBuilder {
             Box::new(CachedPrimaryKeyFilter::new(pk_filter)) as Box<dyn PrimaryKeyFilter>
         });
         PrefilterContext {
-            projection: self.projection.clone(),
             pk_filter,
             filters: self.filters.clone(),
             physical_filters: self.physical_filters.clone(),
+            schema_version: self.schema_version,
+            pk_filter_expr_strs: self.pk_filter_expr_strs.clone(),
+            arrow_schema: self.arrow_schema.clone(),
         }
     }
 }
@@ -532,18 +558,31 @@ fn compute_projection_mask(
     column_names: &HashSet<String>,
     arrow_schema: &datatypes::arrow::datatypes::SchemaRef,
     parquet_schema: &SchemaDescriptor,
-) -> (ProjectionMask, usize) {
+) -> ProjectionMask {
+    ProjectionMask::roots(
+        parquet_schema,
+        projection_indices(column_names, arrow_schema),
+    )
+}
+
+fn compute_projection_count(
+    column_names: &HashSet<String>,
+    arrow_schema: &datatypes::arrow::datatypes::SchemaRef,
+) -> usize {
+    projection_indices(column_names, arrow_schema).len()
+}
+
+fn projection_indices(
+    column_names: &HashSet<String>,
+    arrow_schema: &datatypes::arrow::datatypes::SchemaRef,
+) -> Vec<usize> {
     let mut projection_indices: Vec<usize> = column_names
         .iter()
         .filter_map(|name| arrow_schema.column_with_name(name).map(|(index, _)| index))
         .collect();
     projection_indices.sort_unstable();
     projection_indices.dedup();
-    let count = projection_indices.len();
-    (
-        ProjectionMask::roots(parquet_schema, projection_indices.iter().copied()),
-        count,
-    )
+    projection_indices
 }
 
 fn should_use_prefilter(
@@ -568,18 +607,121 @@ pub(crate) async fn execute_prefilter(
     reader_builder: &RowGroupReaderBuilder,
     build_ctx: &RowGroupBuildContext<'_>,
 ) -> Result<PrefilterResult> {
+    let entries = build_prefilter_cache_entries(prefilter_ctx, reader_builder, build_ctx);
+
+    if entries.is_empty() {
+        return execute_prefilter_by_reading_columns(prefilter_ctx, reader_builder, build_ctx)
+            .await;
+    }
+
+    execute_prefilter_with_result_cache(prefilter_ctx, reader_builder, build_ctx, entries).await
+}
+
+async fn execute_prefilter_with_result_cache(
+    prefilter_ctx: &mut PrefilterContext,
+    reader_builder: &RowGroupReaderBuilder,
+    build_ctx: &RowGroupBuildContext<'_>,
+    entries: Vec<PrefilterEntry>,
+) -> Result<PrefilterResult> {
+    let non_cacheable_physical = non_cacheable_physical_filters(prefilter_ctx);
+    let mut hit_mask: Option<BooleanBuffer> = None;
+    let mut misses = Vec::new();
+    for entry in entries {
+        let Some(key) = &entry.key else {
+            misses.push(entry);
+            continue;
+        };
+
+        if let Some(mask) = reader_builder.cache_strategy().get_prefilter_result(key) {
+            hit_mask = Some(match hit_mask {
+                Some(hit_mask) => hit_mask.bitand(mask.as_ref()),
+                None => mask.as_ref().clone(),
+            });
+        } else {
+            misses.push(entry);
+        }
+    }
+
+    if misses.is_empty() && non_cacheable_physical.is_empty() {
+        let combined_mask = hit_mask.unwrap_or_else(|| BooleanBuffer::new_set(0));
+        let refined_selection =
+            refined_selection_from_mask(&combined_mask, &build_ctx.row_selection);
+        let rows_before_filter = rows_before_filter(reader_builder, build_ctx);
+        let filtered_rows = rows_before_filter.saturating_sub(refined_selection.row_count());
+        return Ok(PrefilterResult {
+            refined_selection,
+            filtered_rows,
+        });
+    }
+
+    let mut uncached_entries = misses;
+    uncached_entries.extend(
+        non_cacheable_physical
+            .iter()
+            .copied()
+            .map(|idx| PrefilterEntry::without_cache(PrefilterEntryKind::Physical(idx))),
+    );
+    let (uncached_mask, read_rows) =
+        build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &uncached_entries).await?;
+
+    let final_mask = match (hit_mask, uncached_mask) {
+        (Some(hit_mask), Some(uncached_mask)) => hit_mask.bitand(&uncached_mask),
+        (Some(hit_mask), None) => hit_mask,
+        (None, Some(uncached_mask)) => uncached_mask,
+        (None, None) => BooleanBuffer::new_set(read_rows),
+    };
+    debug_assert_eq!(final_mask.len(), read_rows);
+    let rows_selected = final_mask.count_set_bits();
+    let filtered_rows = read_rows.saturating_sub(rows_selected);
+    let refined_selection = refined_selection_from_mask(&final_mask, &build_ctx.row_selection);
+
+    Ok(PrefilterResult {
+        refined_selection,
+        filtered_rows,
+    })
+}
+
+fn non_cacheable_physical_filters(prefilter_ctx: &PrefilterContext) -> Vec<usize> {
+    prefilter_ctx
+        .physical_filters
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, filter)| (!filter.is_immutable()).then_some(idx))
+        .collect()
+}
+
+async fn build_prefilter_masks(
+    prefilter_ctx: &mut PrefilterContext,
+    reader_builder: &RowGroupReaderBuilder,
+    build_ctx: &RowGroupBuildContext<'_>,
+    entries: &[PrefilterEntry],
+) -> Result<(Option<BooleanBuffer>, usize)> {
+    let prefilter_column_names = prefilter_column_names_for_entries(prefilter_ctx, entries);
+    let parquet_schema = reader_builder
+        .parquet_metadata()
+        .file_metadata()
+        .schema_descr();
+    let projection = compute_projection_mask(
+        &prefilter_column_names,
+        &prefilter_ctx.arrow_schema,
+        parquet_schema,
+    );
+
     let mut stream = reader_builder
         .build_with_projection(
             build_ctx.row_group_idx,
             build_ctx.row_selection.clone(),
-            prefilter_ctx.projection.clone(),
+            projection,
             build_ctx.fetch_metrics,
         )
         .await?;
 
-    let mut filter_arrays = Vec::new();
+    let mut cache_builders = entries
+        .iter()
+        .map(|entry| entry.key.is_some().then(|| BooleanBufferBuilder::new(0)))
+        .collect::<Vec<_>>();
+    let mut combined_builder = (!entries.is_empty()).then(|| BooleanBufferBuilder::new(0));
     let mut rows_before_filter = 0usize;
-    let mut rows_selected = 0usize;
 
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;
@@ -589,30 +731,78 @@ pub(crate) async fn execute_prefilter(
         }
         rows_before_filter += num_rows;
 
-        let batch_mask = match apply_filters_to_batch(
-            &batch,
-            &mut prefilter_ctx.pk_filter,
-            &prefilter_ctx.filters,
-            &prefilter_ctx.physical_filters,
-            reader_builder.file_path(),
-        )? {
-            Some(mask) => mask,
-            None => BooleanBuffer::new_unset(num_rows),
-        };
-        rows_selected += batch_mask.count_set_bits();
-        filter_arrays.push(BooleanArray::from(batch_mask));
+        let mut batch_mask = BooleanBuffer::new_set(num_rows);
+        for (idx, entry) in entries.iter().enumerate() {
+            let mask = eval_entry_mask(
+                &batch,
+                prefilter_ctx,
+                entry.kind,
+                reader_builder.file_path(),
+            )?;
+            batch_mask = batch_mask.bitand(&mask);
+            if let Some(Some(builder)) = cache_builders.get_mut(idx) {
+                builder.append_buffer(&mask);
+            }
+        }
+        if let Some(builder) = &mut combined_builder {
+            builder.append_buffer(&batch_mask);
+        }
     }
 
-    let filtered_rows = rows_before_filter.saturating_sub(rows_selected);
-    let refined_selection = if filter_arrays.is_empty() || rows_selected == 0 {
-        RowSelection::from(vec![])
-    } else {
-        let prefilter_selection = RowSelection::from_filters(&filter_arrays);
-        match &build_ctx.row_selection {
-            Some(original) => original.and_then(&prefilter_selection),
-            None => prefilter_selection,
+    for (entry, builder) in entries.iter().zip(cache_builders) {
+        if let (Some(key), Some(mut builder)) = (&entry.key, builder) {
+            reader_builder
+                .cache_strategy()
+                .put_prefilter_result(key.clone(), Arc::new(builder.finish()));
         }
-    };
+    }
+
+    Ok((
+        combined_builder.map(|mut builder| builder.finish()),
+        rows_before_filter,
+    ))
+}
+
+fn prefilter_column_names_for_entries(
+    prefilter_ctx: &PrefilterContext,
+    entries: &[PrefilterEntry],
+) -> HashSet<String> {
+    let mut prefilter_column_names = HashSet::new();
+    for entry in entries {
+        match entry.kind {
+            PrefilterEntryKind::Simple(idx) => {
+                if let MaybeFilter::Filter(filter) = prefilter_ctx.filters[idx].filter() {
+                    prefilter_column_names.insert(filter.column_name().to_string());
+                }
+            }
+            PrefilterEntryKind::Physical(idx) => {
+                prefilter_column_names.insert(
+                    prefilter_ctx.physical_filters[idx]
+                        .column_name()
+                        .to_string(),
+                );
+            }
+            PrefilterEntryKind::PkGroup => {
+                prefilter_column_names.insert(PRIMARY_KEY_COLUMN_NAME.to_string());
+            }
+        }
+    }
+    prefilter_column_names
+}
+
+async fn execute_prefilter_by_reading_columns(
+    prefilter_ctx: &mut PrefilterContext,
+    reader_builder: &RowGroupReaderBuilder,
+    build_ctx: &RowGroupBuildContext<'_>,
+) -> Result<PrefilterResult> {
+    let entries = all_prefilter_entries(prefilter_ctx);
+    let (mask, rows_before_filter) =
+        build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &entries).await?;
+
+    let final_mask = mask.unwrap_or_else(|| BooleanBuffer::new_set(rows_before_filter));
+    let rows_selected = final_mask.count_set_bits();
+    let filtered_rows = rows_before_filter.saturating_sub(rows_selected);
+    let refined_selection = refined_selection_from_mask(&final_mask, &build_ctx.row_selection);
 
     Ok(PrefilterResult {
         refined_selection,
@@ -620,100 +810,243 @@ pub(crate) async fn execute_prefilter(
     })
 }
 
-fn apply_filters_to_batch(
+fn all_prefilter_entries(prefilter_ctx: &PrefilterContext) -> Vec<PrefilterEntry> {
+    let mut entries = Vec::new();
+    if prefilter_ctx.pk_filter.is_some() {
+        entries.push(PrefilterEntry::without_cache(PrefilterEntryKind::PkGroup));
+    }
+    entries.extend(
+        prefilter_ctx
+            .filters
+            .iter()
+            .enumerate()
+            .map(|(idx, _)| PrefilterEntry::without_cache(PrefilterEntryKind::Simple(idx))),
+    );
+    entries.extend(
+        prefilter_ctx
+            .physical_filters
+            .iter()
+            .enumerate()
+            .map(|(idx, _)| PrefilterEntry::without_cache(PrefilterEntryKind::Physical(idx))),
+    );
+    entries
+}
+
+#[derive(Clone, Copy)]
+enum PrefilterEntryKind {
+    Simple(usize),
+    Physical(usize),
+    PkGroup,
+}
+
+struct PrefilterEntry {
+    kind: PrefilterEntryKind,
+    key: Option<PrefilterKey>,
+}
+
+impl PrefilterEntry {
+    fn without_cache(kind: PrefilterEntryKind) -> Self {
+        Self { kind, key: None }
+    }
+}
+
+fn build_prefilter_cache_entries(
+    prefilter_ctx: &PrefilterContext,
+    reader_builder: &RowGroupReaderBuilder,
+    build_ctx: &RowGroupBuildContext<'_>,
+) -> Vec<PrefilterEntry> {
+    let row_selection = PrefilterKey::row_selection_snapshot(build_ctx.row_selection.as_ref());
+    let file_id = reader_builder.file_handle().file_id().file_id();
+    let row_group_idx = build_ctx.row_group_idx as u32;
+    let mut entries = Vec::new();
+
+    for (idx, filter_ctx) in prefilter_ctx.filters.iter().enumerate() {
+        entries.push(PrefilterEntry {
+            kind: PrefilterEntryKind::Simple(idx),
+            key: Some(PrefilterKey::new(
+                file_id,
+                row_group_idx,
+                row_selection.clone(),
+                prefilter_ctx.schema_version,
+                smallvec![filter_ctx.expr_str().to_string()],
+            )),
+        });
+    }
+
+    for (idx, filter_ctx) in prefilter_ctx.physical_filters.iter().enumerate() {
+        if !filter_ctx.is_immutable() {
+            continue;
+        }
+        entries.push(PrefilterEntry {
+            kind: PrefilterEntryKind::Physical(idx),
+            key: Some(PrefilterKey::new(
+                file_id,
+                row_group_idx,
+                row_selection.clone(),
+                prefilter_ctx.schema_version,
+                smallvec![filter_ctx.expr_str().to_string()],
+            )),
+        });
+    }
+
+    if prefilter_ctx.pk_filter.is_some()
+        && let Some(exprs) = &prefilter_ctx.pk_filter_expr_strs
+    {
+        entries.push(PrefilterEntry {
+            kind: PrefilterEntryKind::PkGroup,
+            key: Some(PrefilterKey::new(
+                file_id,
+                row_group_idx,
+                row_selection,
+                prefilter_ctx.schema_version,
+                exprs.clone(),
+            )),
+        });
+    }
+
+    entries
+}
+
+fn rows_before_filter(
+    reader_builder: &RowGroupReaderBuilder,
+    build_ctx: &RowGroupBuildContext<'_>,
+) -> usize {
+    build_ctx.row_selection.as_ref().map_or_else(
+        || {
+            reader_builder
+                .parquet_metadata()
+                .row_group(build_ctx.row_group_idx)
+                .num_rows() as usize
+        },
+        RowSelection::row_count,
+    )
+}
+
+fn refined_selection_from_mask(
+    mask: &BooleanBuffer,
+    original_selection: &Option<RowSelection>,
+) -> RowSelection {
+    if mask.is_empty() || mask.count_set_bits() == 0 {
+        return RowSelection::from(vec![]);
+    }
+
+    let prefilter_selection = RowSelection::from_filters(&[BooleanArray::from(mask.clone())]);
+    match original_selection {
+        Some(original) => original.and_then(&prefilter_selection),
+        None => prefilter_selection,
+    }
+}
+
+fn eval_entry_mask(
     batch: &RecordBatch,
-    pk_filter: &mut Option<Box<dyn PrimaryKeyFilter>>,
-    filters: &[SimpleFilterContext],
-    physical_filters: &[PhysicalFilterContext],
+    prefilter_ctx: &mut PrefilterContext,
+    kind: PrefilterEntryKind,
     file_path: &str,
-) -> Result<Option<BooleanBuffer>> {
-    let mut mask = BooleanBuffer::new_set(batch.num_rows());
-
-    if let Some(pk_filter) = pk_filter.as_mut() {
-        // Prefilter reads a reduced projection. For PK prefilter, the encoded
-        // primary key column is always appended as the last projected column,
-        // while `__sequence` and `__op_type` are not read.
-        let pk_column_index = batch.num_columns() - 1;
-        let matched_row_ranges =
-            matching_row_ranges_by_primary_key(batch, pk_column_index, pk_filter.as_mut())?;
-        let mut builder = BooleanBufferBuilder::new(batch.num_rows());
-        builder.append_n(batch.num_rows(), false);
-        for range in matched_row_ranges {
-            for row in range {
-                builder.set_bit(row, true);
-            }
+) -> Result<BooleanBuffer> {
+    match kind {
+        PrefilterEntryKind::Simple(idx) => {
+            eval_simple_filter_mask(batch, &prefilter_ctx.filters[idx], file_path)
         }
-        mask = mask.bitand(&builder.finish());
-    }
-
-    for filter_ctx in filters {
-        let filter = match filter_ctx.filter() {
-            MaybeFilter::Filter(filter) => filter,
-            MaybeFilter::Matched => continue,
-            MaybeFilter::Pruned => return Ok(None),
-        };
-
-        let (idx, _) = batch
-            .schema()
-            .column_with_name(filter.column_name())
-            .with_context(|| UnexpectedSnafu {
-                reason: format!(
-                    "Prefilter column '{}' (id {}) not found in batch for file {}",
-                    filter.column_name(),
-                    filter_ctx.column_id(),
-                    file_path
-                ),
-            })?;
-        let column = batch.column(idx).clone();
-        let result = filter.evaluate_array(&column).context(RecordBatchSnafu)?;
-        mask = mask.bitand(&result);
-    }
-
-    for filter_ctx in physical_filters {
-        let filter = filter_ctx.filter();
-
-        let (idx, _) = batch
-            .schema()
-            .column_with_name(filter_ctx.column_name())
-            .with_context(|| UnexpectedSnafu {
-                reason: format!(
-                    "Prefilter physical column '{}' (id {}) not found in batch for file {}",
-                    filter_ctx.column_name(),
-                    filter_ctx.column_id(),
-                    file_path
-                ),
-            })?;
-        let column = batch.column(idx).clone();
-
-        let record_batch = RecordBatch::try_new(filter_ctx.schema().clone(), vec![column])
-            .context(NewRecordBatchSnafu)?;
-        let evaluated = filter
-            .evaluate(&record_batch)
-            .context(EvalPartitionFilterSnafu)?;
-        let array = evaluated
-            .into_array(record_batch.num_rows())
-            .context(EvalPartitionFilterSnafu)?;
-        let boolean_array =
-            array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .context(UnexpectedSnafu {
-                    reason: "Failed to downcast physical filter result to BooleanArray",
-                })?;
-        // Treat null results as false (filtered out); value bits are not guaranteed
-        // to be false for invalid entries.
-        let mut result = boolean_array.values().clone();
-        if let Some(nulls) = boolean_array.nulls() {
-            result = result.bitand(nulls.inner());
+        PrefilterEntryKind::Physical(idx) => {
+            eval_physical_filter_mask(batch, &prefilter_ctx.physical_filters[idx], file_path)
         }
-        mask = mask.bitand(&result);
+        PrefilterEntryKind::PkGroup => {
+            let pk_filter = prefilter_ctx.pk_filter.as_mut().context(UnexpectedSnafu {
+                reason: "Missing primary key filter for prefilter cache entry",
+            })?;
+            eval_pk_group_mask(batch, pk_filter.as_mut())
+        }
     }
+}
 
-    if mask.count_set_bits() == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(mask))
+fn eval_pk_group_mask(
+    batch: &RecordBatch,
+    pk_filter: &mut dyn PrimaryKeyFilter,
+) -> Result<BooleanBuffer> {
+    let (pk_column_index, _) = batch
+        .schema()
+        .column_with_name(PRIMARY_KEY_COLUMN_NAME)
+        .context(UnexpectedSnafu {
+            reason: "Primary key column not found in prefilter batch",
+        })?;
+    let matched_row_ranges = matching_row_ranges_by_primary_key(batch, pk_column_index, pk_filter)?;
+    let mut builder = BooleanBufferBuilder::new(batch.num_rows());
+    builder.append_n(batch.num_rows(), false);
+    for range in matched_row_ranges {
+        for row in range {
+            builder.set_bit(row, true);
+        }
     }
+    Ok(builder.finish())
+}
+
+fn eval_simple_filter_mask(
+    batch: &RecordBatch,
+    filter_ctx: &SimpleFilterContext,
+    file_path: &str,
+) -> Result<BooleanBuffer> {
+    let filter = match filter_ctx.filter() {
+        MaybeFilter::Filter(filter) => filter,
+        MaybeFilter::Matched => return Ok(BooleanBuffer::new_set(batch.num_rows())),
+        MaybeFilter::Pruned => return Ok(BooleanBuffer::new_unset(batch.num_rows())),
+    };
+
+    let (idx, _) = batch
+        .schema()
+        .column_with_name(filter.column_name())
+        .with_context(|| UnexpectedSnafu {
+            reason: format!(
+                "Prefilter column '{}' (id {}) not found in batch for file {}",
+                filter.column_name(),
+                filter_ctx.column_id(),
+                file_path
+            ),
+        })?;
+    let column = batch.column(idx).clone();
+    filter.evaluate_array(&column).context(RecordBatchSnafu)
+}
+
+fn eval_physical_filter_mask(
+    batch: &RecordBatch,
+    filter_ctx: &PhysicalFilterContext,
+    file_path: &str,
+) -> Result<BooleanBuffer> {
+    let filter = filter_ctx.filter();
+
+    let (idx, _) = batch
+        .schema()
+        .column_with_name(filter_ctx.column_name())
+        .with_context(|| UnexpectedSnafu {
+            reason: format!(
+                "Prefilter physical column '{}' (id {}) not found in batch for file {}",
+                filter_ctx.column_name(),
+                filter_ctx.column_id(),
+                file_path
+            ),
+        })?;
+    let column = batch.column(idx).clone();
+
+    let record_batch = RecordBatch::try_new(filter_ctx.schema().clone(), vec![column])
+        .context(NewRecordBatchSnafu)?;
+    let evaluated = filter
+        .evaluate(&record_batch)
+        .context(EvalPartitionFilterSnafu)?;
+    let array = evaluated
+        .into_array(record_batch.num_rows())
+        .context(EvalPartitionFilterSnafu)?;
+    let boolean_array = array
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .context(UnexpectedSnafu {
+            reason: "Failed to downcast physical filter result to BooleanArray",
+        })?;
+    // Treat null results as false (filtered out); value bits are not guaranteed
+    // to be false for invalid entries.
+    let mut result = boolean_array.values().clone();
+    if let Some(nulls) = boolean_array.nulls() {
+        result = result.bitand(nulls.inner());
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -728,7 +1061,6 @@ mod tests {
     };
     use datatypes::arrow::datatypes::{Schema, UInt32Type};
     use mito_codec::row_converter::{PrimaryKeyFilter, build_primary_key_codec};
-    use parquet::arrow::ArrowSchemaConverter;
     use store_api::codec::PrimaryKeyEncoding;
 
     use super::*;
@@ -798,12 +1130,6 @@ mod tests {
             .iter()
             .filter_map(|expr| PhysicalFilterContext::new_opt(metadata, None, read_format, expr))
             .collect()
-    }
-
-    fn parquet_schema(read_format: &FlatReadFormat) -> SchemaDescriptor {
-        ArrowSchemaConverter::new()
-            .convert(read_format.arrow_schema())
-            .unwrap()
     }
 
     fn new_raw_batch(primary_keys: &[&[u8]], field_values: &[u64]) -> RecordBatch {
@@ -989,15 +1315,15 @@ mod tests {
         )
         .unwrap();
         let codec = build_primary_key_codec(metadata.as_ref());
-        let parquet_schema = parquet_schema(&read_format);
 
         let builder = PrefilterContextBuilder::new(
             &read_format,
             &codec,
             None,
+            None,
             Vec::new(),
             Vec::new(),
-            &parquet_schema,
+            metadata.schema_version,
         );
         assert!(builder.is_none());
     }
@@ -1091,7 +1417,6 @@ mod tests {
             true,
         )
         .unwrap();
-        let full_parquet_schema = parquet_schema(&full_read_format);
         let codec = build_primary_key_codec(metadata.as_ref());
 
         let skip_fields_plan = build_reader_filter_plan(
@@ -1102,7 +1427,6 @@ mod tests {
             None,
             PreFilterMode::SkipFields,
             &full_read_format,
-            &full_parquet_schema,
             &codec,
         );
         assert!(skip_fields_plan.prefilter_builder.is_some());
@@ -1121,13 +1445,11 @@ mod tests {
             true,
         )
         .unwrap();
-        let projected_parquet_schema = parquet_schema(&projected_read_format);
         let pk_prefilter_plan = build_reader_filter_plan(
             Some(&Predicate::new(vec![col("tag_0").eq(lit("a"))])),
             None,
             PreFilterMode::All,
             &projected_read_format,
-            &projected_parquet_schema,
             &codec,
         );
         assert!(pk_prefilter_plan.prefilter_builder.is_some());
@@ -1135,35 +1457,94 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_filters_to_batch_uses_flat_tag_columns_directly() {
+    fn test_pk_filter_expr_strings_are_stable_under_expr_order() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        let codec = build_primary_key_codec(metadata.as_ref());
+
+        let expr_a = col("tag_0").eq(lit("a"));
+        let expr_b = col("tag_1").eq(lit("x"));
+        let plan_ab = build_reader_filter_plan(
+            Some(&Predicate::new(vec![expr_a.clone(), expr_b.clone()])),
+            None,
+            PreFilterMode::All,
+            &read_format,
+            &codec,
+        );
+        let plan_b_a = build_reader_filter_plan(
+            Some(&Predicate::new(vec![expr_b, expr_a])),
+            None,
+            PreFilterMode::All,
+            &read_format,
+            &codec,
+        );
+
+        let exprs_ab = plan_ab.prefilter_builder.unwrap().pk_filter_expr_strs;
+        let exprs_b_a = plan_b_a.prefilter_builder.unwrap().pk_filter_expr_strs;
+        assert!(exprs_ab.is_some());
+        assert_eq!(exprs_ab, exprs_b_a);
+    }
+
+    #[test]
+    fn test_simple_and_physical_contexts_preserve_expr_strings() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids(
+                metadata.column_metadatas.iter().map(|c| c.column_id),
+            ),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        let simple_expr = col("tag_0").eq(lit("a"));
+        let simple = SimpleFilterContext::new_opt(&metadata, None, &simple_expr).unwrap();
+        assert_eq!(simple.expr_str(), format!("{simple_expr:?}"));
+
+        let physical_expr = col("field_0").in_list(vec![lit(1_u64), lit(2_u64)], false);
+        let physical =
+            PhysicalFilterContext::new_opt(&metadata, None, &read_format, &physical_expr).unwrap();
+        assert_eq!(physical.expr_str(), format!("{physical_expr:?}"));
+    }
+
+    #[test]
+    fn test_eval_simple_filter_mask_uses_flat_tag_columns_directly() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let filters = new_simple_filter_contexts(&metadata, &[col("tag_0").eq(lit("a"))]);
         let batch = new_record_batch_with_custom_sequence(&["a", "x"], 0, 4, 1);
 
-        let mut no_pk_filter = None;
-        let mask = apply_filters_to_batch(&batch, &mut no_pk_filter, &filters, &[], "test")
-            .unwrap()
-            .unwrap();
+        let mask = eval_simple_filter_mask(&batch, &filters[0], "test").unwrap();
         assert_eq!(mask.count_set_bits(), 4);
     }
 
     #[test]
-    fn test_apply_filters_to_batch_errors_on_missing_selected_column() {
+    fn test_eval_simple_filter_mask_errors_on_missing_selected_column() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let filters = new_simple_filter_contexts(&metadata, &[col("tag_0").eq(lit("a"))]);
         let pk = new_primary_key(&["a", "x"]);
         let batch = new_raw_batch(&[pk.as_slice()], &[10]);
 
-        let mut no_pk_filter = None;
-        let err =
-            apply_filters_to_batch(&batch, &mut no_pk_filter, &filters, &[], "test").unwrap_err();
+        let err = eval_simple_filter_mask(&batch, &filters[0], "test").unwrap_err();
         let err = err.to_string();
         assert!(err.contains("Prefilter column"));
         assert!(err.contains("tag_0"));
     }
 
     #[test]
-    fn test_apply_filters_to_batch_evaluates_physical_filters() {
+    fn test_eval_physical_filter_mask_evaluates_physical_filters() {
         let metadata: RegionMetadataRef =
             Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         let read_format = FlatReadFormat::new(
@@ -1181,16 +1562,12 @@ mod tests {
         let pk = new_primary_key(&["a", "x"]);
         let batch = new_raw_batch(&[pk.as_slice(), pk.as_slice(), pk.as_slice()], &[9, 10, 11]);
 
-        let mut no_pk_filter = None;
-        let mask =
-            apply_filters_to_batch(&batch, &mut no_pk_filter, &[], &physical_filters, "test")
-                .unwrap()
-                .unwrap();
+        let mask = eval_physical_filter_mask(&batch, &physical_filters[0], "test").unwrap();
         assert_eq!(mask.count_set_bits(), 1);
     }
 
     #[test]
-    fn test_apply_filters_to_batch_uses_last_projected_column_for_pk_prefilter() {
+    fn test_eval_pk_group_mask_finds_pk_column_by_name() {
         let metadata = Arc::new(sst_region_metadata());
         let filters = Arc::new(new_test_filters(&[col("tag_0").eq(lit("a"))]));
         let mut pk_filter = Some(Box::new(CachedPrimaryKeyFilter::new(
@@ -1208,9 +1585,7 @@ mod tests {
             &[10, 11, 12, 13],
         );
 
-        let mask = apply_filters_to_batch(&batch, &mut pk_filter, &[], &[], "test")
-            .unwrap()
-            .unwrap();
+        let mask = eval_pk_group_mask(&batch, pk_filter.as_mut().unwrap().as_mut()).unwrap();
 
         assert_eq!(mask.count_set_bits(), 2);
     }

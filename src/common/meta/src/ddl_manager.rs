@@ -15,8 +15,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::Repartition;
 use api::v1::alter_table_expr::Kind;
+use api::v1::repartition::Source as PbRepartitionSource;
+use api::v1::{PartitionExprs, Repartition};
 use common_error::ext::BoxedError;
 use common_procedure::{
     BoxedProcedure, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef,
@@ -151,13 +152,18 @@ macro_rules! procedure_loader {
 
 pub type RepartitionProcedureFactoryRef = Arc<dyn RepartitionProcedureFactory>;
 
+pub enum RepartitionSource {
+    Partitioned { exprs: Vec<String> },
+    Unpartitioned { partition_columns: Vec<String> },
+}
+
 pub trait RepartitionProcedureFactory: Send + Sync {
     fn create(
         &self,
         ddl_ctx: &DdlContext,
         table_name: TableName,
         table_id: TableId,
-        from_exprs: Vec<String>,
+        source: RepartitionSource,
         to_exprs: Vec<String>,
         timeout: Option<Duration>,
     ) -> std::result::Result<BoxedProcedure, BoxedError>;
@@ -280,14 +286,30 @@ impl DdlManager {
         &self,
         table_id: TableId,
         table_name: TableName,
-        Repartition {
-            from_partition_exprs,
-            into_partition_exprs,
-        }: Repartition,
+        repartition: Repartition,
         wait: bool,
         timeout: Duration,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
+
+        let into_partition_exprs = repartition.into_partition_exprs;
+        let source = repartition.source;
+
+        let source = match source {
+            Some(PbRepartitionSource::PartitionExprs(PartitionExprs { exprs })) => {
+                RepartitionSource::Partitioned { exprs }
+            }
+            Some(PbRepartitionSource::Unpartitioned(source)) => RepartitionSource::Unpartitioned {
+                partition_columns: source.partition_columns,
+            },
+            None => {
+                // Reads the deprecated field for backward compatibility with old persisted DDL tasks.
+                #[allow(deprecated)]
+                RepartitionSource::Partitioned {
+                    exprs: repartition.from_partition_exprs,
+                }
+            }
+        };
 
         let procedure = self
             .repartition_procedure_factory
@@ -295,7 +317,7 @@ impl DdlManager {
                 &context,
                 table_name,
                 table_id,
-                from_partition_exprs,
+                source,
                 into_partition_exprs,
                 Some(timeout),
             )
@@ -1108,7 +1130,7 @@ mod tests {
     use crate::ddl::table_meta::TableMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
-    use crate::ddl_manager::RepartitionProcedureFactory;
+    use crate::ddl_manager::{RepartitionProcedureFactory, RepartitionSource};
     use crate::key::TableMetadataManager;
     use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
@@ -1146,7 +1168,7 @@ mod tests {
             _ddl_ctx: &DdlContext,
             _table_name: TableName,
             _table_id: TableId,
-            _from_exprs: Vec<String>,
+            _source: RepartitionSource,
             _to_exprs: Vec<String>,
             _timeout: Option<Duration>,
         ) -> std::result::Result<BoxedProcedure, BoxedError> {

@@ -31,7 +31,7 @@ use store_api::storage::{RegionId, TableId};
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    ColumnNotFoundSnafu, CreateDefaultSnafu, ForbiddenPhysicalAlterSnafu, InvalidRequestSnafu,
+    ColumnNotFoundSnafu, CreateDefaultSnafu, ForbiddenPhysicalWriteSnafu, InvalidRequestSnafu,
     LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, UnexpectedRequestSnafu,
     UnsupportedRegionRequestSnafu,
 };
@@ -55,7 +55,7 @@ impl MetricEngineInner {
             );
             FORBIDDEN_OPERATION_COUNT.inc();
 
-            ForbiddenPhysicalAlterSnafu.fail()
+            ForbiddenPhysicalWriteSnafu.fail()
         } else {
             self.put_logical_region(region_id, request).await
         }
@@ -86,18 +86,31 @@ impl MetricEngineInner {
 
         // Fast path: single request, no batching overhead
         if len == 1 {
-            let (logical_id, req) = requests.into_iter().next().unwrap();
-            return self.put_logical_region(logical_id, req).await;
+            let (region_id, req) = requests.into_iter().next().unwrap();
+            let is_putting_physical_region =
+                self.state.read().unwrap().exist_physical_region(region_id);
+            if is_putting_physical_region {
+                FORBIDDEN_OPERATION_COUNT.inc();
+                return ForbiddenPhysicalWriteSnafu.fail();
+            }
+
+            return self.put_logical_region(region_id, req).await;
         }
 
         let mut requests_per_physical: HashMap<RegionId, Vec<(RegionId, RegionPutRequest)>> =
             HashMap::new();
-        for (logical_region_id, request) in requests {
-            let physical_region_id = self.find_physical_region_id(logical_region_id)?;
+        for (region_id, request) in requests {
+            let is_putting_physical_region =
+                self.state.read().unwrap().exist_physical_region(region_id);
+            if is_putting_physical_region {
+                FORBIDDEN_OPERATION_COUNT.inc();
+                return ForbiddenPhysicalWriteSnafu.fail();
+            }
+            let physical_region_id = self.find_physical_region_id(region_id)?;
             requests_per_physical
                 .entry(physical_region_id)
                 .or_default()
-                .push((logical_region_id, request));
+                .push((region_id, request));
         }
 
         let mut total_affected_rows: AffectedRows = 0;
@@ -1224,6 +1237,84 @@ mod tests {
         let batches = RecordBatches::try_collect(stream).await.unwrap();
 
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_batch_write_single_physical_region_forbidden() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
+
+        let physical_region_id = env.default_physical_region_id();
+        let schema = test_util::row_schema_with_tags(&["job"]);
+        let requests = vec![(
+            physical_region_id,
+            RegionPutRequest {
+                rows: Rows {
+                    schema,
+                    rows: test_util::build_rows(1, 1),
+                },
+                hint: None,
+                partition_expr_version: None,
+            },
+        )];
+
+        let err = engine
+            .inner
+            .put_regions_batch(requests.into_iter())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::error::Error::ForbiddenPhysicalWrite { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_batch_write_physical_region_forbidden() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
+
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        let schema = test_util::row_schema_with_tags(&["job"]);
+        let requests = vec![
+            (
+                logical_region_id,
+                RegionPutRequest {
+                    rows: Rows {
+                        schema: schema.clone(),
+                        rows: test_util::build_rows(1, 1),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                },
+            ),
+            (
+                physical_region_id,
+                RegionPutRequest {
+                    rows: Rows {
+                        schema,
+                        rows: test_util::build_rows(1, 1),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                },
+            ),
+        ];
+
+        let err = engine
+            .inner
+            .put_regions_batch(requests.into_iter())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::error::Error::ForbiddenPhysicalWrite { .. }
+        ));
     }
 
     #[tokio::test]

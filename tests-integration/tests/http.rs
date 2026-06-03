@@ -144,6 +144,7 @@ macro_rules! http_tests {
                 test_pipeline_index_options,
 
                 test_otlp_metrics_new,
+                test_otlp_metric_translation_strategies,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
                 test_otlp_logs,
@@ -1553,6 +1554,7 @@ enable = true
 
 [influxdb]
 enable = true
+default_merge_mode = "last_non_null"
 
 [jaeger]
 enable = true
@@ -1717,10 +1719,11 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "vector_cache_size =",
         "page_cache_size =",
         "selector_result_cache_size =",
+        "range_result_cache_size =",
+        "prefilter_result_cache_size =",
         "metadata_cache_size =",
         "content_cache_size =",
         "result_cache_size =",
-        "range_result_cache_size =",
         "name =",
         "recovery_parallelism =",
         "max_background_index_builds =",
@@ -5213,6 +5216,87 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_metric_translation_strategies")
+            .await;
+
+    let content = r#"
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"strategy-service"}},{"key":"resource.attr","value":{"stringValue":"resource-a"}}]},"scopeMetrics":[{"scope":{"name":"test.scope","version":"1.0.0","attributes":[{"key":"scope.attr","value":{"stringValue":"scope-a"}}]},"schemaUrl":"https://example.com/schema","metrics":[{"name":"otel.strategy.duration","description":"strategy test metric","unit":"ms","sum":{"dataPoints":[{"attributes":[{"key":"data.point.label","value":{"stringValue":"duration-a"}}],"startTimeUnixNano":"1000000","timeUnixNano":"2000000","asDouble":42.0}],"aggregationTemporality":2,"isMonotonic":true}}]}]}]}
+    "#;
+
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let body = req.encode_to_vec();
+    let client = TestClient::new(app).await;
+
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-translation-strategy"),
+                HeaderValue::from_static("NoTranslation"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-promote-scope-attrs"),
+                HeaderValue::from_static("true"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-promote-all-resource-attrs"),
+                HeaderValue::from_static("true"),
+            ),
+        ],
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = "[[\"otel.strategy.duration\"]]";
+    validate_data(
+        "otlp_metric_translation_strategy_tables",
+        &client,
+        "select table_name from information_schema.tables where table_schema = 'public' and table_name = 'otel.strategy.duration';",
+        expected,
+    )
+    .await;
+
+    let expected = "[[42.0,\"duration-a\",\"scope-a\",\"resource-a\",\"strategy-service\"]]";
+    validate_data(
+        "otlp_metric_translation_strategy_ingestion",
+        &client,
+        "select greptime_value, \"data.point.label\", \"otel_scope_scope.attr\", \"resource.attr\", job from \"otel.strategy.duration\";",
+        expected,
+    )
+    .await;
+
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-translation-strategy"),
+                HeaderValue::from_static("no_translation"),
+            ),
+        ],
+        "/v1/otlp/v1/metrics",
+        body,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
 
     guard.remove_all().await;
 }

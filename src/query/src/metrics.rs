@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -35,9 +35,6 @@ use crate::options::FlowQueryExtensions;
 /// Intermediate merge state for one participating region while collecting
 /// terminal correctness watermarks across merge-scan sub-stages.
 enum MergeState {
-    /// The region participated, but no explicit watermark result has been seen
-    /// yet for this merge.
-    Participated,
     /// At least one branch reported that this region cannot prove a safe
     /// checkpoint watermark for the current query round.
     Unproved,
@@ -256,7 +253,9 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
     let mut stack = vec![plan];
 
     while let Some(plan) = stack.pop() {
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
+        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>()
+            && !merge_scan.is_flow_sink_scan()
+        {
             merge_merge_scan_region_watermarks(
                 &mut merged,
                 merge_scan
@@ -281,8 +280,6 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
 ///
 /// | Current state  | New entry       | Result            | Rationale |
 /// |---------------|-----------------|-------------------|-----------|
-/// | Participated  | Proved(seq)     | Proved(seq)       | First proof for the region |
-/// | Participated  | Unproved         | Unproved          | One branch cannot prove → region is unsafe |
 /// | Proved(old)   | Proved(same)    | Proved(old)       | Convergent proof, keep |
 /// | Proved(old)   | Proved(diff)    | Conflict([old,diff]) | Ambiguous → degrade to unproved |
 /// | Unproved      | _anything_      | Unproved          | Already unsafe, stays unsafe |
@@ -300,15 +297,12 @@ fn merge_region_watermark_entries(
             .entry(entry.region_id)
             .and_modify(|existing| match entry.watermark {
                 None => match existing {
-                    MergeState::Participated | MergeState::Proved(_) => {
+                    MergeState::Proved(_) => {
                         *existing = MergeState::Unproved;
                     }
                     MergeState::Unproved | MergeState::Conflict { .. } => {}
                 },
                 Some(seq) => match existing {
-                    MergeState::Participated => {
-                        *existing = MergeState::Proved(seq);
-                    }
                     MergeState::Unproved => {}
                     MergeState::Proved(existing_seq) if *existing_seq == seq => {}
                     MergeState::Proved(existing_seq) => {
@@ -336,16 +330,32 @@ fn merge_merge_scan_region_watermarks(
     regions: impl IntoIterator<Item = u64>,
     sub_stage_metrics: impl IntoIterator<Item = RecordBatchMetrics>,
 ) {
-    // Regions listed by MergeScanExec participated even when no sub-stage can
-    // prove a watermark. Keep them as explicit `None` entries so callers can
-    // distinguish unproved participation from non-participation.
-    for region_id in regions {
-        merged.entry(region_id).or_insert(MergeState::Participated);
-    }
-
+    let regions = regions.into_iter().collect::<Vec<_>>();
+    let mut proved_or_unproved_regions = BTreeSet::new();
     for metrics in sub_stage_metrics {
+        proved_or_unproved_regions.extend(
+            metrics
+                .region_watermarks
+                .iter()
+                .map(|entry| entry.region_id),
+        );
         merge_region_watermark_entries(merged, metrics.region_watermarks);
     }
+
+    // Regions listed by a MergeScanExec participated even when no sub-stage can
+    // prove a watermark. Merge missing per-scan region entries as explicit
+    // `None` entries so an unproved participating branch vetoes any proof from
+    // another branch for the same region.
+    merge_region_watermark_entries(
+        merged,
+        regions
+            .into_iter()
+            .filter(|region_id| !proved_or_unproved_regions.contains(region_id))
+            .map(|region_id| RegionWatermarkEntry {
+                region_id,
+                watermark: None,
+            }),
+    );
 }
 
 fn finalize_region_watermarks(merged: BTreeMap<u64, MergeState>) -> Vec<RegionWatermarkEntry> {
@@ -354,7 +364,6 @@ fn finalize_region_watermarks(merged: BTreeMap<u64, MergeState>) -> Vec<RegionWa
         .map(|(region_id, state)| RegionWatermarkEntry {
             region_id,
             watermark: match state {
-                MergeState::Participated => None,
                 MergeState::Unproved => None,
                 MergeState::Proved(seq) => Some(seq),
                 MergeState::Conflict { watermarks } => {
@@ -371,10 +380,35 @@ fn finalize_region_watermarks(merged: BTreeMap<u64, MergeState>) -> Vec<RegionWa
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
     use datafusion::arrow::datatypes::Schema as ArrowSchema;
+    use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion_expr::LogicalPlanBuilder;
+    use session::ReadPreference;
+    use session::context::QueryContextBuilder;
+    use store_api::storage::RegionId;
+    use table::table_name::TableName;
 
     use super::*;
+    use crate::options::{FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID};
+    use crate::region_query::RegionQueryHandler;
+
+    struct NoopRegionQueryHandler;
+
+    #[async_trait]
+    impl RegionQueryHandler for NoopRegionQueryHandler {
+        async fn do_get(
+            &self,
+            _read_preference: ReadPreference,
+            _request: common_query::request::QueryRequest,
+        ) -> Result<SendableRecordBatchStream> {
+            unreachable!("metrics tests should not execute remote queries")
+        }
+    }
 
     fn metrics_with_region_watermarks(entries: &[(u64, Option<u64>)]) -> RecordBatchMetrics {
         RecordBatchMetrics {
@@ -389,10 +423,64 @@ mod tests {
         }
     }
 
+    fn test_merge_scan_exec(table_id: u32, query_ctx: QueryContextRef) -> Arc<dyn ExecutionPlan> {
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let plan = LogicalPlanBuilder::empty(false).build().unwrap();
+        let schema = ArrowSchema::empty();
+
+        Arc::new(
+            MergeScanExec::new(
+                &session_state,
+                TableName::new("greptime", "public", "test"),
+                vec![RegionId::new(table_id, 0)],
+                plan,
+                &schema,
+                Arc::new(NoopRegionQueryHandler),
+                query_ctx,
+                1,
+                BTreeMap::<String, BTreeSet<datafusion_common::Column>>::new(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn flow_query_ctx_with_sink_table_id(sink_table_id: u32) -> QueryContextRef {
+        Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(FLOW_RETURN_REGION_SEQ.to_string(), "true".to_string())
+                .set_extension(FLOW_SINK_TABLE_ID.to_string(), sink_table_id.to_string())
+                .build(),
+        )
+    }
+
     #[test]
     fn terminal_metrics_returns_none_without_merge_scan() {
         let plan: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(ArrowSchema::empty())));
         assert!(terminal_recordbatch_metrics_from_plan(plan).is_none());
+    }
+
+    #[test]
+    fn terminal_metrics_skip_flow_sink_merge_scan_regions() {
+        let query_ctx = flow_query_ctx_with_sink_table_id(42);
+        let plan = test_merge_scan_exec(42, query_ctx);
+
+        assert!(terminal_recordbatch_metrics_from_plan(plan).is_none());
+    }
+
+    #[test]
+    fn terminal_metrics_keep_source_merge_scan_regions_with_sink_extension() {
+        let query_ctx = flow_query_ctx_with_sink_table_id(42);
+        let plan = test_merge_scan_exec(43, query_ctx);
+
+        assert_eq!(
+            terminal_recordbatch_metrics_from_plan(plan)
+                .unwrap()
+                .region_watermarks,
+            vec![RegionWatermarkEntry {
+                region_id: RegionId::new(43, 0).as_u64(),
+                watermark: None,
+            }]
+        );
     }
 
     #[test]
@@ -493,6 +581,46 @@ mod tests {
                 metrics_with_region_watermarks(&[(9, None)]),
                 metrics_with_region_watermarks(&[(9, Some(21))]),
             ],
+        );
+
+        assert_eq!(
+            finalize_region_watermarks(merged),
+            vec![RegionWatermarkEntry {
+                region_id: 9,
+                watermark: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn merge_merge_scan_region_watermarks_missing_branch_vetoes_proved_value() {
+        let mut merged = BTreeMap::new();
+
+        merge_merge_scan_region_watermarks(
+            &mut merged,
+            [9],
+            [metrics_with_region_watermarks(&[(9, Some(21))])],
+        );
+        merge_merge_scan_region_watermarks(&mut merged, [9], std::iter::empty());
+
+        assert_eq!(
+            finalize_region_watermarks(merged),
+            vec![RegionWatermarkEntry {
+                region_id: 9,
+                watermark: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn merge_merge_scan_region_watermarks_missing_branch_vetoes_proved_value_regardless_of_order() {
+        let mut merged = BTreeMap::new();
+
+        merge_merge_scan_region_watermarks(&mut merged, [9], std::iter::empty());
+        merge_merge_scan_region_watermarks(
+            &mut merged,
+            [9],
+            [metrics_with_region_watermarks(&[(9, Some(21))])],
         );
 
         assert_eq!(

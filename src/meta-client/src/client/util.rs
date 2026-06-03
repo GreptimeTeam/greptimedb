@@ -142,7 +142,7 @@ mod tests {
 
     fn node_info(role: Role, id: u64, addr: &str, last_activity_ts: i64) -> NodeInfo {
         let status = match role {
-            Role::Frontend => NodeStatus::Frontend(FrontendStatus {}),
+            Role::Frontend => NodeStatus::Frontend(FrontendStatus::default()),
             Role::Datanode => NodeStatus::Datanode(DatanodeStatus {
                 rcus: 0,
                 wcus: 0,

@@ -482,6 +482,28 @@ pub struct SelectorContext {
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
+
+/// Context passed to a selector factory during metasrv bootstrap.
+///
+/// The factory runs after bootstrap has constructed the selector configured by
+/// [`MetasrvOptions::selector`], so plugins can either decorate `base_selector` or
+/// build a completely different selector using bootstrap-only dependencies like
+/// [`MetaPeerClientRef`].
+pub struct SelectorFactoryContext {
+    pub metasrv_options: MetasrvOptions,
+    pub meta_peer_client: MetaPeerClientRef,
+    pub in_memory: ResettableKvBackendRef,
+    pub election: Option<ElectionRef>,
+    pub base_selector: SelectorRef,
+}
+
+/// Builds the final datanode selector metasrv should use.
+pub trait SelectorFactory: Send + Sync {
+    fn build(&self, ctx: SelectorFactoryContext) -> SelectorRef;
+}
+
+/// Shared selector factory plugin registered through [`common_base::Plugins`].
+pub type SelectorFactoryRef = Arc<dyn SelectorFactory>;
 pub type RegionStatAwareSelectorRef =
     Arc<dyn RegionStatAwareSelector<Context = SelectorContext, Output = Vec<(RegionId, Peer)>>>;
 
@@ -490,7 +512,6 @@ pub struct MetaStateHandler {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
     leadership_change_notifier: LeadershipChangeNotifier,
-    mailbox: MailboxRef,
     state: StateRef,
 }
 
@@ -514,9 +535,6 @@ impl MetaStateHandler {
     pub async fn on_leader_stop(&self) {
         self.state.write().unwrap().next_state(become_follower());
 
-        // Enforces the mailbox to clear all pushers.
-        // The remaining heartbeat connections will be closed by the remote peer or keep-alive detection.
-        self.mailbox.reset().await;
         self.leadership_change_notifier
             .notify_on_leader_stop()
             .await;
@@ -645,7 +663,6 @@ impl Metasrv {
                 state: self.state.clone(),
                 leader_cached_kv_backend: leader_cached_kv_backend.clone(),
                 leadership_change_notifier,
-                mailbox: self.mailbox.clone(),
             };
             let _handle = common_runtime::spawn_global(async move {
                 loop {

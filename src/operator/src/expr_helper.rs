@@ -689,9 +689,15 @@ pub struct RepartitionRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
-    pub from_exprs: Vec<Expr>,
+    pub source: RepartitionSource,
     pub into_exprs: Vec<Expr>,
     pub options: OptionMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepartitionSource {
+    Partitions { from_exprs: Vec<Expr> },
+    Unpartitioned { partition_columns: Vec<String> },
 }
 
 pub(crate) fn to_repartition_request(
@@ -708,19 +714,37 @@ pub(crate) fn to_repartition_request(
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
-    let AlterTableOperation::Repartition { operation } = alter_operation else {
-        return InvalidSqlSnafu {
-            err_msg: "expected REPARTITION operation",
+    let (source, into_exprs) = match alter_operation {
+        AlterTableOperation::Repartition { operation } => (
+            RepartitionSource::Partitions {
+                from_exprs: operation.from_exprs,
+            },
+            operation.into_exprs,
+        ),
+        AlterTableOperation::Partition { partitions } => (
+            RepartitionSource::Unpartitioned {
+                partition_columns: partitions
+                    .column_list
+                    .into_iter()
+                    .map(|ident| ident.value)
+                    .collect(),
+            },
+            partitions.exprs,
+        ),
+        _ => {
+            return InvalidSqlSnafu {
+                err_msg: "expected REPARTITION or PARTITION operation",
+            }
+            .fail();
         }
-        .fail();
     };
 
     Ok(RepartitionRequest {
         catalog_name,
         schema_name,
         table_name,
-        from_exprs: operation.from_exprs,
-        into_exprs: operation.into_exprs,
+        source,
+        into_exprs,
         options,
     })
 }
@@ -811,6 +835,12 @@ pub(crate) fn to_alter_table_expr(
         AlterTableOperation::Repartition { .. } => {
             return NotSupportedSnafu {
                 feat: "ALTER TABLE ... REPARTITION",
+            }
+            .fail();
+        }
+        AlterTableOperation::Partition { .. } => {
+            return NotSupportedSnafu {
+                feat: "ALTER TABLE ... PARTITION ON COLUMNS",
             }
             .fail();
         }
@@ -1687,14 +1717,54 @@ ALTER TABLE metrics REPARTITION (
         assert_eq!("greptime", request.catalog_name);
         assert_eq!("public", request.schema_name);
         assert_eq!("metrics", request.table_name);
+        let RepartitionSource::Partitions { from_exprs } = request.source else {
+            unreachable!()
+        };
         assert_eq!(
-            request
-                .from_exprs
+            from_exprs
                 .into_iter()
                 .map(|x| x.to_string())
                 .collect::<Vec<_>>(),
             vec!["device_id < 100".to_string()]
         );
+        assert_eq!(
+            request
+                .into_exprs
+                .into_iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "device_id < 100 AND area < 'South'".to_string(),
+                "device_id < 100 AND area >= 'South'".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_to_repartition_request_with_unpartitioned_source() {
+        let sql = r#"
+ALTER TABLE metrics PARTITION ON COLUMNS (device_id, area) (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterTable(alter_table) = stmt else {
+            unreachable!()
+        };
+
+        let request = to_repartition_request(alter_table, &QueryContext::arc()).unwrap();
+        assert_eq!("greptime", request.catalog_name);
+        assert_eq!("public", request.schema_name);
+        assert_eq!("metrics", request.table_name);
+        let RepartitionSource::Unpartitioned { partition_columns } = request.source else {
+            unreachable!()
+        };
+        assert_eq!(partition_columns, vec!["device_id", "area"]);
         assert_eq!(
             request
                 .into_exprs

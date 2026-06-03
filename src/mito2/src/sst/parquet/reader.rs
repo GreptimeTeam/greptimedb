@@ -26,8 +26,9 @@ use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
-use datafusion_expr::Expr;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::utils::expr_to_columns;
+use datafusion_expr::{Expr, Volatility};
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -37,8 +38,8 @@ use datatypes::schema::ext::ArrowSchemaExt;
 use futures::StreamExt;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
-use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, RowSelection};
+use parquet::arrow::{ProjectionMask, parquet_to_arrow_schema};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use partition::expr::PartitionExpr;
 use snafu::ResultExt;
@@ -53,7 +54,9 @@ use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
-use crate::error::{ReadDataPartSnafu, Result, SerializePartitionExprSnafu};
+use crate::error::{
+    ParquetToArrowSchemaSnafu, ReadDataPartSnafu, Result, SerializePartitionExprSnafu,
+};
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
@@ -156,6 +159,7 @@ pub struct ParquetReaderBuilder {
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
     page_index_policy: PageIndexPolicy,
+    defer_optional_page_index: bool,
 }
 
 impl ParquetReaderBuilder {
@@ -186,6 +190,7 @@ impl ParquetReaderBuilder {
             pre_filter_mode: PreFilterMode::All,
             decode_primary_key_values: false,
             page_index_policy: Default::default(),
+            defer_optional_page_index: false,
         }
     }
 
@@ -289,6 +294,14 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Defers loading optional page indexes until row-level selections can use them.
+    #[must_use]
+    pub(crate) fn deferred_optional_page_index(mut self) -> Self {
+        self.page_index_policy = PageIndexPolicy::Optional;
+        self.defer_optional_page_index = true;
+        self
+    }
+
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
@@ -337,15 +350,22 @@ impl ParquetReaderBuilder {
         let file_size = self.file_handle.meta_ref().file_size;
 
         // Loads parquet metadata of the file.
-        let (sst_meta, cache_miss) = self
+        let initial_page_index_policy = if self.defer_optional_page_index
+            && self.page_index_policy == PageIndexPolicy::Optional
+        {
+            PageIndexPolicy::Skip
+        } else {
+            self.page_index_policy
+        };
+        let (sst_meta, mut cache_miss) = self
             .read_parquet_metadata(
                 &file_path,
                 file_size,
                 &mut metrics.metadata_cache_metrics,
-                self.page_index_policy,
+                initial_page_index_policy,
             )
             .await?;
-        let parquet_meta = sst_meta.parquet_metadata();
+        let mut parquet_meta = sst_meta.parquet_metadata();
         let region_meta = sst_meta.region_metadata();
         let region_partition_expr_str = self
             .expected_metadata
@@ -390,10 +410,16 @@ impl ParquetReaderBuilder {
                     .map(|col| col.column_id),
             )
         };
+
+        let file_metadata = parquet_meta.file_metadata();
+        let parquet_schema_desc = file_metadata.schema_descr();
+        let file_schema =
+            parquet_to_arrow_schema(parquet_schema_desc, file_metadata.key_value_metadata())
+                .context(ParquetToArrowSchemaSnafu { file: &file_path })?;
         let mut read_format = FlatReadFormat::new(
             region_meta.clone(),
             read_cols,
-            Some(parquet_meta.file_metadata().schema_descr().num_columns()),
+            Some(Arc::new(file_schema)),
             &file_path,
             skip_auto_convert,
         )?;
@@ -403,7 +429,6 @@ impl ParquetReaderBuilder {
         }
 
         // Computes the projection mask.
-        let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
         let parquet_read_cols = read_format.parquet_read_columns();
         let projection_plan = build_projection_plan(parquet_read_cols, parquet_schema_desc);
         let selection = self
@@ -413,6 +438,45 @@ impl ParquetReaderBuilder {
         if selection.is_empty() {
             metrics.build_cost += start.elapsed();
             return Ok(None);
+        }
+
+        let prune_schema = self
+            .expected_metadata
+            .as_ref()
+            .map(|meta| meta.schema.clone())
+            .unwrap_or_else(|| region_meta.schema.clone());
+
+        let dyn_filters = if let Some(predicate) = &self.predicate {
+            predicate.dyn_filters().as_ref().clone()
+        } else {
+            vec![]
+        };
+
+        let codec = build_primary_key_codec(read_format.metadata());
+
+        let filter_plan = build_reader_filter_plan(
+            self.predicate.as_ref(),
+            self.expected_metadata.as_deref(),
+            self.pre_filter_mode,
+            &read_format,
+            &codec,
+        );
+
+        if self.defer_optional_page_index
+            && self.page_index_policy == PageIndexPolicy::Optional
+            && (filter_plan.prefilter_builder.is_some()
+                || has_row_level_selection(&selection, &parquet_meta))
+        {
+            let (sst_meta, page_index_cache_miss) = self
+                .read_parquet_metadata(
+                    &file_path,
+                    file_size,
+                    &mut metrics.metadata_cache_metrics,
+                    PageIndexPolicy::Optional,
+                )
+                .await?;
+            parquet_meta = sst_meta.parquet_metadata();
+            cache_miss |= page_index_cache_miss;
         }
 
         // Trigger background download if metadata had a cache miss and selection is not empty
@@ -431,12 +495,6 @@ impl ParquetReaderBuilder {
             );
         }
 
-        let prune_schema = self
-            .expected_metadata
-            .as_ref()
-            .map(|meta| meta.schema.clone())
-            .unwrap_or_else(|| region_meta.schema.clone());
-
         // Create ArrowReaderMetadata for async stream building.
         let mut arrow_reader_options = ArrowReaderOptions::new();
         if !read_format.arrow_schema().has_json_extension_field() {
@@ -446,23 +504,6 @@ impl ParquetReaderBuilder {
         let arrow_metadata =
             ArrowReaderMetadata::try_new(parquet_meta.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;
-
-        let dyn_filters = if let Some(predicate) = &self.predicate {
-            predicate.dyn_filters().as_ref().clone()
-        } else {
-            vec![]
-        };
-
-        let codec = build_primary_key_codec(read_format.metadata());
-
-        let filter_plan = build_reader_filter_plan(
-            self.predicate.as_ref(),
-            self.expected_metadata.as_deref(),
-            self.pre_filter_mode,
-            &read_format,
-            parquet_meta.file_metadata().schema_descr(),
-            &codec,
-        );
 
         let output_schema = read_format.output_arrow_schema()?;
 
@@ -585,7 +626,7 @@ impl ParquetReaderBuilder {
 
     /// Reads parquet metadata of specific file.
     /// Returns (fused metadata, cache_miss_flag).
-    async fn read_parquet_metadata(
+    pub(crate) async fn read_parquet_metadata(
         &self,
         file_path: &str,
         file_size: u64,
@@ -614,7 +655,12 @@ impl ParquetReaderBuilder {
         metadata_loader.with_page_index_policy(page_index_policy);
         let metadata = metadata_loader.load(cache_metrics).await?;
 
-        let metadata = Arc::new(CachedSstMeta::try_new(file_path, metadata)?);
+        let metadata = Arc::new(CachedSstMeta::try_new_with_page_index_policy(
+            file_path,
+            metadata,
+            None,
+            page_index_policy,
+        )?);
         // Cache the metadata.
         self.cache_strategy
             .put_sst_meta_data(file_id, metadata.clone());
@@ -695,6 +741,7 @@ impl ParquetReaderBuilder {
         }
 
         self.prune_row_groups_by_bloom_filter(
+            read_format.metadata(),
             row_group_size,
             parquet_meta,
             &mut output,
@@ -889,6 +936,7 @@ impl ParquetReaderBuilder {
 
     async fn prune_row_groups_by_bloom_filter(
         &self,
+        sst_metadata: &RegionMetadataRef,
         row_group_size: usize,
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
@@ -907,12 +955,17 @@ impl ParquetReaderBuilder {
             &self.bloom_filter_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
-            let predicate_key = index_applier.predicate_key();
+            let Some(compatible_predicates) =
+                index_applier.compatible_predicate_for_sst(sst_metadata)
+            else {
+                continue;
+            };
+            let predicate_key = PredicateKey::new_bloom(compatible_predicates.clone());
             // Fast path: return early if the result is in the cache.
-            let cached = self
-                .cache_strategy
-                .index_result_cache()
-                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+            let cached = self.cache_strategy.index_result_cache().and_then(|cache| {
+                let file_id = self.file_handle.file_id().file_id();
+                cache.get(&predicate_key, file_id)
+            });
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
             {
@@ -940,6 +993,7 @@ impl ParquetReaderBuilder {
                 .apply(
                     self.file_handle.index_id(),
                     Some(file_size_hint),
+                    &compatible_predicates,
                     rgs,
                     metrics.bloom_filter_apply_metrics.as_mut(),
                 )
@@ -960,7 +1014,7 @@ impl ParquetReaderBuilder {
             }
 
             self.apply_index_result_and_update_cache(
-                predicate_key,
+                &predicate_key,
                 self.file_handle.file_id().file_id(),
                 selection,
                 output,
@@ -1210,6 +1264,18 @@ impl ParquetReaderBuilder {
         }
     }
 }
+
+fn has_row_level_selection(selection: &RowGroupSelection, parquet_meta: &ParquetMetaData) -> bool {
+    selection.iter().any(|(row_group_idx, row_selection)| {
+        let Some(row_group) = parquet_meta.row_groups().get(*row_group_idx) else {
+            return false;
+        };
+
+        row_selection.row_count() != row_group.num_rows() as usize
+            || row_selection.iter().any(|selector| selector.skip)
+    })
+}
+
 fn apply_selection_and_update_metrics(
     output: &mut RowGroupSelection,
     result: &RowGroupSelection,
@@ -1804,6 +1870,8 @@ impl MaybeFilter {
 pub(crate) struct SimpleFilterContext {
     /// Filter to evaluate.
     filter: MaybeFilter,
+    /// Debug string of the original logical expression.
+    expr_str: String,
     /// Id of the column to evaluate.
     column_id: ColumnId,
     /// Semantic type of the column.
@@ -1821,6 +1889,7 @@ impl SimpleFilterContext {
         expr: &Expr,
     ) -> Option<Self> {
         let filter = SimpleFilterEvaluator::try_new(expr)?;
+        let expr_str = format!("{expr:?}");
         let (column_metadata, maybe_filter) = match expected_meta {
             Some(meta) => {
                 // Gets the column metadata from the expected metadata.
@@ -1866,6 +1935,7 @@ impl SimpleFilterContext {
 
         Some(Self {
             filter: maybe_filter,
+            expr_str,
             column_id: column_metadata.column_id,
             semantic_type: column_metadata.semantic_type,
         })
@@ -1874,6 +1944,11 @@ impl SimpleFilterContext {
     /// Returns the filter to evaluate.
     pub(crate) fn filter(&self) -> &MaybeFilter {
         &self.filter
+    }
+
+    /// Returns the original logical expression string.
+    pub(crate) fn expr_str(&self) -> &str {
+        &self.expr_str
     }
 
     /// Returns the column id.
@@ -1892,6 +1967,8 @@ impl SimpleFilterContext {
 pub(crate) struct PhysicalFilterContext {
     /// Filter to evaluate.
     filter: Arc<dyn PhysicalExpr>,
+    /// Debug string of the original logical expression.
+    expr_str: String,
     /// Id of the column to evaluate.
     column_id: ColumnId,
     /// Name of the column to evaluate.
@@ -1900,6 +1977,8 @@ pub(crate) struct PhysicalFilterContext {
     semantic_type: SemanticType,
     /// Schema containing only the referenced column.
     schema: SchemaRef,
+    /// Whether the original logical expression is immutable across queries.
+    immutable: bool,
 }
 
 impl PhysicalFilterContext {
@@ -1916,6 +1995,7 @@ impl PhysicalFilterContext {
         if !Self::is_prefilter_candidate(expr) {
             return None;
         }
+        let expr_str = format!("{expr:?}");
         let column_name = Self::single_column_name(expr)?;
         let column_metadata = match expected_meta {
             Some(meta) => {
@@ -1940,13 +2020,16 @@ impl PhysicalFilterContext {
                 error!(e; "Unable to build physical filter for {expr}, schema: {schema:?}");
             })
             .ok()?;
+        let immutable = expr_is_immutable(expr);
 
         Some(Self {
             filter: physical_expr,
+            expr_str,
             column_id: column_metadata.column_id,
             column_name,
             semantic_type: column_metadata.semantic_type,
             schema,
+            immutable,
         })
     }
 
@@ -1977,6 +2060,11 @@ impl PhysicalFilterContext {
         &self.filter
     }
 
+    /// Returns the original logical expression string.
+    pub(crate) fn expr_str(&self) -> &str {
+        &self.expr_str
+    }
+
     /// Returns the column id.
     pub(crate) fn column_id(&self) -> ColumnId {
         self.column_id
@@ -1996,6 +2084,29 @@ impl PhysicalFilterContext {
     pub(crate) fn schema(&self) -> &SchemaRef {
         &self.schema
     }
+
+    /// Returns true if the original logical expression is immutable across queries.
+    pub(crate) fn is_immutable(&self) -> bool {
+        self.immutable
+    }
+}
+
+fn expr_is_immutable(expr: &Expr) -> bool {
+    let mut is_immutable = true;
+    let _ = expr.apply(|expr| match expr {
+        Expr::ScalarFunction(function)
+            if function.func.signature().volatility != Volatility::Immutable =>
+        {
+            is_immutable = false;
+            Ok(TreeNodeRecursion::Stop)
+        }
+        Expr::ScalarVariable(_, _) => {
+            is_immutable = false;
+            Ok(TreeNodeRecursion::Stop)
+        }
+        _ => Ok(TreeNodeRecursion::Continue),
+    });
+    is_immutable
 }
 
 /// Prune a column by its default value.
@@ -2171,6 +2282,7 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use object_store::services::Memory;
     use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_request::PathType;
     use store_api::storage::RegionId;
@@ -2274,6 +2386,107 @@ mod tests {
         );
 
         assert!(!selection.is_empty());
+    }
+
+    #[test]
+    fn test_expr_is_immutable_checks_scalar_function_volatility() {
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        struct TestVolatilityUdf {
+            name: String,
+            signature: Signature,
+        }
+
+        impl TestVolatilityUdf {
+            fn new(name: &str, volatility: Volatility) -> Self {
+                Self {
+                    name: name.to_string(),
+                    signature: Signature::variadic_any(volatility),
+                }
+            }
+        }
+
+        impl ScalarUDFImpl for TestVolatilityUdf {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                &self.name
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+                Ok(DataType::Int64)
+            }
+
+            fn invoke_with_args(
+                &self,
+                _args: ScalarFunctionArgs,
+            ) -> datafusion_common::Result<ColumnarValue> {
+                Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(1))))
+            }
+        }
+
+        let expr = |name: &str, volatility| {
+            Expr::ScalarFunction(ScalarFunction::new_udf(
+                Arc::new(ScalarUDF::new_from_impl(TestVolatilityUdf::new(
+                    name, volatility,
+                ))),
+                vec![],
+            ))
+        };
+
+        assert!(expr_is_immutable(&expr(
+            "immutable_udf",
+            Volatility::Immutable
+        )));
+        assert!(!expr_is_immutable(&expr("stable_udf", Volatility::Stable)));
+        assert!(!expr_is_immutable(&expr(
+            "volatile_udf",
+            Volatility::Volatile
+        )));
+
+        let scalar_variable = Expr::ScalarVariable(
+            Arc::new(Field::new("@@version", DataType::Utf8, false)),
+            vec!["@@version".to_string()],
+        );
+        assert!(!expr_is_immutable(&scalar_variable));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_has_row_level_selection() {
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let file_path = "row_level_selection.parquet";
+
+        let col = Arc::new(Int64Array::from_iter_values([1, 2, 3, 4, 5])) as ArrayRef;
+        let batch = RecordBatch::try_from_iter([("col", col)]).unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(3))
+            .build();
+        let mut parquet_bytes = Vec::new();
+        let mut writer =
+            ArrowWriter::try_new(&mut parquet_bytes, batch.schema(), Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let file_size = parquet_bytes.len() as u64;
+        object_store.write(file_path, parquet_bytes).await.unwrap();
+
+        let mut cache_metrics = MetadataCacheMetrics::default();
+        let loader = MetadataLoader::new(object_store, file_path, file_size);
+        let parquet_meta = loader.load(&mut cache_metrics).await.unwrap();
+        assert_eq!(2, parquet_meta.num_row_groups());
+
+        let full_row_groups = RowGroupSelection::from_full_row_group_ids([0, 1], 3, 5);
+        assert!(!has_row_level_selection(&full_row_groups, &parquet_meta));
+
+        let prefix_selection = RowGroupSelection::from_row_ranges(vec![(0, vec![0..1, 1..2])], 3);
+        assert!(has_row_level_selection(&prefix_selection, &parquet_meta));
+
+        let interior_selection = RowGroupSelection::from_row_ranges(vec![(0, vec![1..2, 2..3])], 3);
+        assert!(has_row_level_selection(&interior_selection, &parquet_meta));
     }
 
     fn expected_metadata_with_reused_tag_name(

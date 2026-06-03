@@ -38,7 +38,7 @@ use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
 use crate::procedure::repartition::group::{Context, GroupId, GroupPrepareResult, State};
-use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::repartition::plan::TargetRegionDescriptor;
 use crate::procedure::utils::{self, ErrorStrategy};
 use crate::service::mailbox::{Channel, MailboxRef};
 
@@ -77,7 +77,7 @@ impl EnterStagingRegion {
     fn build_enter_staging_instructions(
         group_id: GroupId,
         prepare_result: &GroupPrepareResult,
-        targets: &[RegionDescriptor],
+        targets: &[TargetRegionDescriptor],
         pending_deallocate_region_ids: &[RegionId],
     ) -> Result<HashMap<Peer, Vec<common_meta::instruction::EnterStagingRegion>>> {
         let target_partition_expr_by_region = targets
@@ -454,7 +454,7 @@ mod tests {
     use crate::error::{self, Error};
     use crate::procedure::repartition::group::GroupPrepareResult;
     use crate::procedure::repartition::group::enter_staging_region::EnterStagingRegion;
-    use crate::procedure::repartition::plan::RegionDescriptor;
+    use crate::procedure::repartition::plan::TargetRegionDescriptor;
     use crate::procedure::repartition::test_util::{
         TestingEnv, new_persistent_context, range_expr,
     };
@@ -720,13 +720,13 @@ mod tests {
         }
     }
 
-    fn test_targets() -> Vec<RegionDescriptor> {
+    fn test_targets() -> Vec<TargetRegionDescriptor> {
         vec![
-            RegionDescriptor {
+            TargetRegionDescriptor {
                 region_id: RegionId::new(1024, 1),
                 partition_expr: range_expr("x", 0, 10),
             },
-            RegionDescriptor {
+            TargetRegionDescriptor {
                 region_id: RegionId::new(1024, 2),
                 partition_expr: range_expr("x", 10, 20),
             },

@@ -26,7 +26,7 @@ fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
 itertools.workspace = true
-jieba-rs = "0.8"
+jieba-rs = "0.10"
 lazy_static.workspace = true
 mockall.workspace = true
 nalgebra.workspace = true
@@ -40,8 +40,8 @@ serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 store-api.workspace = true
-tantivy = { version = "0.24", features = ["zstd-compression"] }
-tantivy-jieba = "0.16"
+tantivy = { version = "0.26", features = ["zstd-compression"] }
+tantivy-jieba = "0.20"
 tokio.workspace = true
 tokio-util.workspace = true
 usearch = { version = "2.21", default-features = false, features = ["fp16lib"], optional = true }

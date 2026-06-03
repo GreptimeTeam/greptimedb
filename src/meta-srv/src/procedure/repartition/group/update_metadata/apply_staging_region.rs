@@ -22,7 +22,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{self, Result};
 use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::{Context, GroupId, region_routes};
-use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
 
 impl UpdateMetadata {
     /// Applies the new partition expressions for staging regions.
@@ -32,8 +32,8 @@ impl UpdateMetadata {
     /// - Source region not found.
     pub(crate) fn apply_staging_region_routes(
         group_id: GroupId,
-        sources: &[RegionDescriptor],
-        targets: &[RegionDescriptor],
+        sources: &[SourceRegionDescriptor],
+        targets: &[TargetRegionDescriptor],
         pending_deallocate_region_ids: &[store_api::storage::RegionId],
         current_region_routes: &[RegionRoute],
     ) -> Result<Vec<RegionRoute>> {
@@ -61,15 +61,16 @@ impl UpdateMetadata {
         }
 
         for source in sources {
-            let region_route = region_routes_map.get_mut(&source.region_id).context(
+            let region_id = source.region_id();
+            let region_route = region_routes_map.get_mut(&region_id).context(
                 error::RepartitionSourceRegionMissingSnafu {
                     group_id,
-                    region_id: source.region_id,
+                    region_id,
                 },
             )?;
             // Set leader staging state for the source region route.
             region_route.set_leader_staging();
-            if pending_deallocate_region_ids.contains(&source.region_id) {
+            if pending_deallocate_region_ids.contains(&region_id) {
                 // When a region is pending deallocation, it should ignore all writes.
                 region_route.set_ignore_all_writes();
             }
@@ -130,7 +131,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
-    use crate::procedure::repartition::plan::RegionDescriptor;
+    use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
     use crate::procedure::repartition::test_util::range_expr;
 
     #[test]
@@ -166,11 +167,11 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let source_region = RegionDescriptor {
-            region_id: RegionId::new(table_id, 1),
-            partition_expr: range_expr("x", 0, 100),
-        };
-        let target_region = RegionDescriptor {
+        let source_region = SourceRegionDescriptor::partitioned(
+            RegionId::new(table_id, 1),
+            range_expr("x", 0, 100),
+        );
+        let target_region = TargetRegionDescriptor {
             region_id: RegionId::new(table_id, 2),
             partition_expr: range_expr("x", 0, 10),
         };
@@ -194,6 +195,68 @@ mod tests {
         );
         assert!(new_region_routes[1].is_leader_staging());
         assert!(!new_region_routes[2].is_leader_staging());
+    }
+
+    #[test]
+    fn test_generate_region_routes_with_reused_default_source_region() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let default_region_id = RegionId::new(table_id, 1);
+        let region_routes = vec![
+            RegionRoute {
+                region: Region {
+                    id: default_region_id,
+                    partition_expr: String::new(),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, 2),
+                    partition_expr: String::new(),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+        ];
+        let source_region = SourceRegionDescriptor::Default {
+            region_id: default_region_id,
+        };
+        let reused_target_expr = range_expr("x", 0, 10);
+        let target_regions = vec![
+            TargetRegionDescriptor {
+                region_id: default_region_id,
+                partition_expr: reused_target_expr.clone(),
+            },
+            TargetRegionDescriptor {
+                region_id: RegionId::new(table_id, 2),
+                partition_expr: range_expr("x", 10, 20),
+            },
+        ];
+
+        let new_region_routes = UpdateMetadata::apply_staging_region_routes(
+            group_id,
+            &[source_region],
+            &target_regions,
+            &[],
+            &region_routes,
+        )
+        .unwrap();
+
+        assert_eq!(
+            new_region_routes[0].region.partition_expr,
+            reused_target_expr.as_json_str().unwrap()
+        );
+        assert!(new_region_routes[0].is_leader_staging());
+        assert!(!new_region_routes[0].is_ignore_all_writes());
+        assert_eq!(
+            new_region_routes[1].region.partition_expr,
+            range_expr("x", 10, 20).as_json_str().unwrap()
+        );
+        assert!(new_region_routes[1].is_leader_staging());
     }
 
     #[test]
@@ -221,11 +284,11 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let source_region = RegionDescriptor {
-            region_id: pending_deallocate_region_id,
-            partition_expr: range_expr("x", 0, 100),
-        };
-        let target_region = RegionDescriptor {
+        let source_region = SourceRegionDescriptor::partitioned(
+            pending_deallocate_region_id,
+            range_expr("x", 0, 100),
+        );
+        let target_region = TargetRegionDescriptor {
             region_id: RegionId::new(table_id, 2),
             partition_expr: range_expr("x", 0, 10),
         };

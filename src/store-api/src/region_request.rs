@@ -1414,6 +1414,10 @@ pub enum RegionFlushReason {
     Repartition,
     /// Flush triggered by remote WAL pruning.
     RemoteWalPrune,
+    /// Flush region before closing region.
+    Closing,
+    /// Flush region before downgrading region.
+    Downgrading,
 }
 
 #[derive(Debug, Clone, Default)]

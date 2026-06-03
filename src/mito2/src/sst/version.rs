@@ -18,7 +18,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_time::{TimeToLive, Timestamp};
-use store_api::storage::FileId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::sst::file::{FileHandle, FileMeta, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
@@ -106,15 +106,19 @@ impl SstVersion {
         }
     }
 
-    /// Returns the number of rows in SST files.
+    /// Returns the number of rows in SST files owned by `region_id`.
+    ///
+    /// Rows from SST files referenced from other regions, for example after
+    /// repartition, are not counted.
     /// For historical reasons, the result is not precise for old SST files.
-    pub(crate) fn num_rows(&self) -> u64 {
+    pub(crate) fn owned_num_rows(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()
             .map(|level_meta| {
                 level_meta
                     .files
                     .values()
+                    .filter(|file_handle| file_handle.region_id() == region_id)
                     .map(|file_handle| {
                         let meta = file_handle.meta_ref();
                         meta.num_rows
@@ -124,22 +128,29 @@ impl SstVersion {
             .sum()
     }
 
-    /// Returns the number of SST files.
-    pub(crate) fn num_files(&self) -> u64 {
-        self.levels
-            .iter()
-            .map(|level_meta| level_meta.files.len() as u64)
-            .sum()
-    }
-
-    /// Returns SST data files'space occupied in current version.
-    pub(crate) fn sst_usage(&self) -> u64 {
+    /// Returns the number of SST files owned by `region_id`.
+    pub(crate) fn owned_num_files(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()
             .map(|level_meta| {
                 level_meta
                     .files
                     .values()
+                    .filter(|file_handle| file_handle.region_id() == region_id)
+                    .count() as u64
+            })
+            .sum()
+    }
+
+    /// Returns the space occupied by SST data files owned by `region_id`.
+    pub(crate) fn owned_sst_usage(&self, region_id: RegionId) -> u64 {
+        self.levels
+            .iter()
+            .map(|level_meta| {
+                level_meta
+                    .files
+                    .values()
+                    .filter(|file_handle| file_handle.region_id() == region_id)
                     .map(|file_handle| {
                         let meta = file_handle.meta_ref();
                         meta.file_size
@@ -149,14 +160,15 @@ impl SstVersion {
             .sum()
     }
 
-    /// Returns SST index files'space occupied in current version.
-    pub(crate) fn index_usage(&self) -> u64 {
+    /// Returns the space occupied by SST index files owned by `region_id`.
+    pub(crate) fn owned_index_usage(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()
             .map(|level_meta| {
                 level_meta
                     .files
                     .values()
+                    .filter(|file_handle| file_handle.region_id() == region_id)
                     .map(|file_handle| {
                         let meta = file_handle.meta_ref();
                         meta.index_file_size
@@ -256,5 +268,51 @@ mod tests {
         files.iter().for_each(|f| {
             assert!(added_files.contains_key(&f.file_id));
         });
+    }
+
+    #[test]
+    fn test_usage_only_counts_owned_files() {
+        let purger = new_noop_file_purger();
+        let region_id = RegionId::new(1, 1);
+        let other_region_id = RegionId::new(1, 2);
+
+        let files = [
+            FileMeta {
+                region_id,
+                file_id: FileId::random(),
+                file_size: 100,
+                index_file_size: 10,
+                num_rows: 1,
+                ..Default::default()
+            },
+            FileMeta {
+                region_id,
+                file_id: FileId::random(),
+                file_size: 200,
+                index_file_size: 20,
+                num_rows: 2,
+                ..Default::default()
+            },
+            FileMeta {
+                region_id: other_region_id,
+                file_id: FileId::random(),
+                file_size: 300,
+                index_file_size: 30,
+                num_rows: 3,
+                ..Default::default()
+            },
+        ];
+
+        let mut version = SstVersion::new();
+        version.add_files(purger, files.iter().cloned());
+
+        assert_eq!(3, version.owned_num_rows(region_id));
+        assert_eq!(2, version.owned_num_files(region_id));
+        assert_eq!(300, version.owned_sst_usage(region_id));
+        assert_eq!(30, version.owned_index_usage(region_id));
+        assert_eq!(3, version.owned_num_rows(other_region_id));
+        assert_eq!(1, version.owned_num_files(other_region_id));
+        assert_eq!(300, version.owned_sst_usage(other_region_id));
+        assert_eq!(30, version.owned_index_usage(other_region_id));
     }
 }

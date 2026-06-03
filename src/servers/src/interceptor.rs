@@ -23,6 +23,7 @@ use common_error::ext::ErrorExt;
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use log_query::LogQuery;
+use promql_parser::parser::Expr;
 use query::parser::PromQuery;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
@@ -58,7 +59,7 @@ pub trait SqlQueryInterceptor {
     /// Called before sql is actually executed. This hook is not called at the moment.
     fn pre_execute(
         &self,
-        _statement: &Statement,
+        _statement: Option<&Statement>,
         _plan: Option<&LogicalPlan>,
         _query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
@@ -111,7 +112,7 @@ where
 
     fn pre_execute(
         &self,
-        statement: &Statement,
+        statement: Option<&Statement>,
         plan: Option<&LogicalPlan>,
         query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
@@ -224,6 +225,7 @@ pub trait PromQueryInterceptor {
     fn pre_execute(
         &self,
         _query: &PromQuery,
+        _expr: &Expr,
         _plan: Option<&LogicalPlan>,
         _query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
@@ -253,11 +255,45 @@ where
     fn pre_execute(
         &self,
         query: &PromQuery,
+        expr: &Expr,
         plan: Option<&LogicalPlan>,
         query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
         if let Some(this) = self {
-            this.pre_execute(query, plan, query_ctx)
+            this.pre_execute(query, expr, plan, query_ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn post_execute(
+        &self,
+        output: Output,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output, Self::Error> {
+        if let Some(this) = self {
+            this.post_execute(output, query_ctx)
+        } else {
+            Ok(output)
+        }
+    }
+}
+
+impl<E> PromQueryInterceptor for Option<&PromQueryInterceptorRef<E>>
+where
+    E: ErrorExt,
+{
+    type Error = E;
+
+    fn pre_execute(
+        &self,
+        query: &PromQuery,
+        expr: &Expr,
+        plan: Option<&LogicalPlan>,
+        query_ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_execute(query, expr, plan, query_ctx)
         } else {
             Ok(())
         }

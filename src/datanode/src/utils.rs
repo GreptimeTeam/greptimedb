@@ -29,10 +29,28 @@ use tracing::info;
 use crate::error::{GetMetadataSnafu, Result};
 
 /// The requests to open regions.
-pub(crate) struct RegionOpenRequests {
-    pub leader_regions: Vec<(RegionId, RegionOpenRequest)>,
+pub struct RegionOpenRequests {
+    pub(crate) leader_regions: Vec<(RegionId, RegionOpenRequest)>,
     #[cfg(feature = "enterprise")]
-    pub follower_regions: Vec<(RegionId, RegionOpenRequest)>,
+    pub(crate) follower_regions: Vec<(RegionId, RegionOpenRequest)>,
+}
+
+impl RegionOpenRequests {
+    /// Splits the request set into leader and follower regions.
+    #[allow(clippy::type_complexity)]
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<(RegionId, RegionOpenRequest)>,
+        Vec<(RegionId, RegionOpenRequest)>,
+    ) {
+        let leader_regions = self.leader_regions;
+        #[cfg(feature = "enterprise")]
+        let follower_regions = self.follower_regions;
+        #[cfg(not(feature = "enterprise"))]
+        let follower_regions = Vec::new();
+        (leader_regions, follower_regions)
+    }
 }
 
 fn group_region_by_topic(
@@ -58,7 +76,8 @@ fn get_replay_checkpoint(
     })
 }
 
-pub(crate) async fn build_region_open_requests(
+/// Builds region-open requests from persisted metadata.
+pub async fn build_region_open_requests(
     node_id: DatanodeId,
     kv_backend: KvBackendRef,
 ) -> Result<RegionOpenRequests> {
