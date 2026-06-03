@@ -39,6 +39,7 @@ use common_meta::ddl::RegionFailureDetectorControllerRef;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::topic_name::TopicNameKey;
 use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey};
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
@@ -661,11 +662,15 @@ impl Context {
             .await;
     }
 
-    /// Fetches the replay checkpoints for the given topic region keys.
-    pub async fn get_replay_checkpoints(
+    /// Fetches replay checkpoints and merges them with topic pruned entry ids.
+    pub async fn get_replay_checkpoints_with_topic_pruned_entry_ids(
         &self,
-        topic_region_keys: Vec<TopicRegionKey<'_>>,
+        region_topics: &[(RegionId, String, bool)],
     ) -> Result<HashMap<RegionId, ReplayCheckpoint>> {
+        let topic_region_keys = region_topics
+            .iter()
+            .map(|(region_id, topic, _)| TopicRegionKey::new(*region_id, topic))
+            .collect::<Vec<_>>();
         let topic_region_values = self
             .table_metadata_manager
             .topic_region_manager()
@@ -673,9 +678,37 @@ impl Context {
             .await
             .context(error::TableMetadataManagerSnafu)?;
 
-        let replay_checkpoints = topic_region_values
+        let topic_name_keys = region_topics
+            .iter()
+            .map(|(_, topic, _)| topic.as_str())
+            .collect::<HashSet<_>>()
             .into_iter()
-            .flat_map(|(key, value)| value.checkpoint.map(|value| (key, value)))
+            .map(TopicNameKey::new)
+            .collect::<Vec<_>>();
+        let topic_name_values = self
+            .table_metadata_manager
+            .topic_name_manager()
+            .batch_get(topic_name_keys)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+
+        let replay_checkpoints = region_topics
+            .iter()
+            .filter_map(|(region_id, topic, is_metric_engine)| {
+                let checkpoint = topic_region_values
+                    .get(region_id)
+                    .and_then(|value| value.checkpoint);
+                let pruned_entry_id = topic_name_values
+                    .get(topic)
+                    .map(|value| value.pruned_entry_id);
+
+                ReplayCheckpoint::merge_with_topic_pruned_entry_id(
+                    checkpoint,
+                    pruned_entry_id,
+                    *is_metric_engine,
+                )
+                .map(|checkpoint| (*region_id, checkpoint))
+            })
             .collect::<HashMap<_, _>>();
 
         Ok(replay_checkpoints)

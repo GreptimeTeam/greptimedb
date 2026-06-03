@@ -17,7 +17,10 @@ use std::collections::HashMap;
 use common_meta::DatanodeId;
 use common_meta::key::datanode_table::DatanodeTableManager;
 use common_meta::key::topic_name::{TopicNameKey, TopicNameManager, TopicNameValue};
-use common_meta::key::topic_region::{TopicRegionKey, TopicRegionManager, TopicRegionValue};
+use common_meta::key::topic_region::{
+    ReplayCheckpoint as MetadataReplayCheckpoint, TopicRegionKey, TopicRegionManager,
+    TopicRegionValue,
+};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::wal_provider::{extract_topic_from_wal_options, prepare_wal_options};
 use futures::TryStreamExt;
@@ -84,33 +87,6 @@ fn region_pruned_entry_ids(
         .collect()
 }
 
-fn merge_checkpoint_with_pruned_entry_id(
-    checkpoint: Option<ReplayCheckpoint>,
-    pruned_entry_id: Option<u64>,
-    is_metric_engine: bool,
-) -> Option<ReplayCheckpoint> {
-    match (checkpoint, pruned_entry_id) {
-        (Some(checkpoint), Some(pruned_entry_id)) => Some(ReplayCheckpoint {
-            entry_id: checkpoint.entry_id.max(pruned_entry_id),
-            metadata_entry_id: if is_metric_engine {
-                Some(
-                    checkpoint
-                        .metadata_entry_id
-                        .unwrap_or_default()
-                        .max(pruned_entry_id),
-                )
-            } else {
-                checkpoint.metadata_entry_id
-            },
-        }),
-        (None, Some(pruned_entry_id)) => Some(ReplayCheckpoint {
-            entry_id: pruned_entry_id,
-            metadata_entry_id: is_metric_engine.then_some(pruned_entry_id),
-        }),
-        (checkpoint, None) => checkpoint,
-    }
-}
-
 fn get_replay_checkpoint(
     region_id: RegionId,
     topic_region_values: &Option<HashMap<RegionId, TopicRegionValue>>,
@@ -121,12 +97,19 @@ fn get_replay_checkpoint(
         .as_ref()
         .and_then(|values| values.get(&region_id))
         .and_then(|value| value.checkpoint)
-        .map(|checkpoint| ReplayCheckpoint {
-            entry_id: checkpoint.entry_id,
-            metadata_entry_id: checkpoint.metadata_entry_id,
+        .map(|checkpoint| {
+            MetadataReplayCheckpoint::new(checkpoint.entry_id, checkpoint.metadata_entry_id)
         });
 
-    merge_checkpoint_with_pruned_entry_id(checkpoint, pruned_entry_id, is_metric_engine)
+    MetadataReplayCheckpoint::merge_with_topic_pruned_entry_id(
+        checkpoint,
+        pruned_entry_id,
+        is_metric_engine,
+    )
+    .map(|checkpoint| ReplayCheckpoint {
+        entry_id: checkpoint.entry_id,
+        metadata_entry_id: checkpoint.metadata_entry_id,
+    })
 }
 
 /// Builds region-open requests from persisted metadata.
@@ -286,85 +269,4 @@ pub async fn build_region_open_requests(
         #[cfg(feature = "enterprise")]
         follower_regions: follower_region_requests,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_merge_checkpoint_with_pruned_entry_id_missing_pruned() {
-        let checkpoint = Some(ReplayCheckpoint {
-            entry_id: 10,
-            metadata_entry_id: None,
-        });
-
-        assert_eq!(
-            merge_checkpoint_with_pruned_entry_id(checkpoint, None, true),
-            checkpoint
-        );
-    }
-
-    #[test]
-    fn test_merge_checkpoint_with_pruned_entry_id_creates_checkpoint() {
-        assert_eq!(
-            merge_checkpoint_with_pruned_entry_id(None, Some(10), true),
-            Some(ReplayCheckpoint {
-                entry_id: 10,
-                metadata_entry_id: Some(10),
-            })
-        );
-    }
-
-    #[test]
-    fn test_merge_checkpoint_with_pruned_entry_id_updates_both_ids() {
-        let checkpoint = ReplayCheckpoint {
-            entry_id: 10,
-            metadata_entry_id: Some(5),
-        };
-
-        assert_eq!(
-            merge_checkpoint_with_pruned_entry_id(Some(checkpoint), Some(20), true),
-            Some(ReplayCheckpoint {
-                entry_id: 20,
-                metadata_entry_id: Some(20),
-            })
-        );
-    }
-
-    #[test]
-    fn test_merge_checkpoint_with_pruned_entry_id_preserves_larger_ids() {
-        let checkpoint = ReplayCheckpoint {
-            entry_id: 30,
-            metadata_entry_id: Some(40),
-        };
-
-        assert_eq!(
-            merge_checkpoint_with_pruned_entry_id(Some(checkpoint), Some(20), true),
-            Some(checkpoint)
-        );
-    }
-
-    #[test]
-    fn test_merge_checkpoint_with_pruned_entry_id_for_mito() {
-        assert_eq!(
-            merge_checkpoint_with_pruned_entry_id(None, Some(10), false),
-            Some(ReplayCheckpoint {
-                entry_id: 10,
-                metadata_entry_id: None,
-            })
-        );
-
-        let checkpoint = ReplayCheckpoint {
-            entry_id: 5,
-            metadata_entry_id: None,
-        };
-        assert_eq!(
-            merge_checkpoint_with_pruned_entry_id(Some(checkpoint), Some(10), false),
-            Some(ReplayCheckpoint {
-                entry_id: 10,
-                metadata_entry_id: None,
-            })
-        );
-    }
 }
