@@ -149,7 +149,7 @@ pub struct MitoConfig {
     pub allow_stale_entries: bool,
     /// Memory limit for table scans across all queries.
     /// Setting it to 0 or "unlimited" disables the limit.
-    /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
+    /// Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "50%").
     pub scan_memory_limit: MemoryLimit,
     /// Behavior when scan memory tracking cannot acquire memory from the budget.
     /// `wait` means `wait(10s)`, not unlimited waiting.
