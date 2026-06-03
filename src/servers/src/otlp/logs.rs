@@ -636,6 +636,11 @@ fn align_rows_with_existing_schema(
     for (column_idx, schema) in schemas.iter_mut().enumerate() {
         let request_type = schema.datatype();
         let Some(existing_column) = existing_schema.get(&schema.column_name) else {
+            // Existing tables own their primary key definition; request-only
+            // columns must not expand it.
+            if schema.semantic_type() == SemanticType::Tag {
+                schema.semantic_type = SemanticType::Field as i32;
+            }
             continue;
         };
 
@@ -1215,6 +1220,37 @@ mod tests {
                 .schema
                 .iter()
                 .any(|schema| schema.column_name == "host")
+        );
+    }
+
+    #[test]
+    fn test_existing_table_keeps_new_generated_columns_as_fields() {
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("trace_id", ConcreteDataType::string_datatype()),
+            ],
+            &[1],
+        );
+        let rows = parse_with_select(
+            request_with_log_attrs(vec![kv(
+                "host",
+                OtlpValue::StringValue("node-a".to_string()),
+            )]),
+            "host",
+            Some(&existing),
+        )
+        .unwrap();
+        let host_idx = column_index(&rows, "host");
+        let scope_name_idx = column_index(&rows, "scope_name");
+
+        assert_eq!(
+            rows.schema[host_idx].semantic_type,
+            SemanticType::Field as i32
+        );
+        assert_eq!(
+            rows.schema[scope_name_idx].semantic_type,
+            SemanticType::Field as i32
         );
     }
 }

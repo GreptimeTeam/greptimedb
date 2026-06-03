@@ -54,7 +54,8 @@ use serde_json::{Value, json};
 use servers::http::GreptimeQueryOutput;
 use servers::http::handler::HealthResponse;
 use servers::http::header::constants::{
-    GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
+    GREPTIME_PIPELINE_NAME_HEADER_NAME,
 };
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::otlp::GoogleRpcStatus;
@@ -6466,6 +6467,110 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         .await;
     }
 
+    {
+        let existing_table_name = "otlp_logs_existing_schema";
+        let res = execute_sql(
+            &client,
+            &format!(
+                "create table {existing_table_name} (\"timestamp\" timestamp(3) time index, trace_id string, host string, body string, primary key(trace_id, host))"
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        let req = make_log_request(vec![make_log_record(
+            "00000000000000000000000000000001",
+            "0000000000000001",
+            1_736_413_568_497_632_000,
+            "existing schema",
+            vec![make_int_attr("host", 42)],
+        )]);
+        let res = send_log_req(&client, existing_table_name, Some("host"), req, false).await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        validate_data(
+            "otlp_logs_existing_schema_rows",
+            &client,
+            &format!(
+                "select trace_id, host, body, \"timestamp\" from {existing_table_name} order by trace_id;"
+            ),
+            r#"[["00000000000000000000000000000001","42","existing schema",1736413568497]]"#,
+        )
+        .await;
+        validate_data(
+            "otlp_logs_existing_schema_semantic_types",
+            &client,
+            "select column_name, semantic_type from information_schema.columns where table_name = 'otlp_logs_existing_schema' and column_name in ('timestamp', 'trace_id', 'host', 'scope_name') order by column_name;",
+            r#"[["host","TAG"],["scope_name","FIELD"],["timestamp","TIMESTAMP"],["trace_id","TAG"]]"#,
+        )
+        .await;
+    }
+
+    {
+        let missing_pk_table_name = "otlp_logs_missing_pk";
+        let res = execute_sql(
+            &client,
+            &format!(
+                "create table {missing_pk_table_name} (\"timestamp\" timestamp(9) time index, host string, body string, primary key(host))"
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        let req = make_log_request(vec![make_log_record(
+            "00000000000000000000000000000002",
+            "0000000000000002",
+            1_736_413_568_498_000_000,
+            "missing host",
+            vec![make_string_attr("not_host", "node-a")],
+        )]);
+        let res = send_log_req(&client, missing_pk_table_name, None, req, false).await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        validate_data(
+            "otlp_logs_missing_pk_rows",
+            &client,
+            &format!("select host, body from {missing_pk_table_name};"),
+            r#"[[null,"missing host"]]"#,
+        )
+        .await;
+    }
+
+    {
+        let incompatible_table_name = "otlp_logs_incompatible_schema";
+        let res = execute_sql(
+            &client,
+            &format!(
+                "create table {incompatible_table_name} (\"timestamp\" timestamp(9) time index, host bigint, primary key(host))"
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        let req = make_log_request(vec![make_log_record(
+            "00000000000000000000000000000003",
+            "0000000000000003",
+            1_736_413_568_499_000_000,
+            "bad host",
+            vec![make_string_attr("host", "node-a")],
+        )]);
+        let res = send_log_req(&client, incompatible_table_name, Some("host"), req, false).await;
+        let status = res.status();
+        let body = res.text().await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("failed to align log column 'host'"),
+            "unexpected error body: {body}"
+        );
+        validate_data(
+            "otlp_logs_incompatible_schema_rows",
+            &client,
+            &format!("select count(*) from {incompatible_table_name};"),
+            "[[0]]",
+        )
+        .await;
+    }
+
     guard.remove_all().await;
 }
 
@@ -8558,6 +8663,14 @@ async fn wait_for_data(client: &TestClient, sql: &str, expected: &str) {
     .unwrap();
 }
 
+async fn execute_sql(client: &TestClient, sql: &str) -> TestResponse {
+    let encoded_sql = encode(sql);
+    client
+        .get(format!("/v1/sql?sql={encoded_sql}").as_str())
+        .send()
+        .await
+}
+
 async fn send_req(
     client: &TestClient,
     headers: Vec<(HeaderName, HeaderValue)>,
@@ -8582,6 +8695,40 @@ async fn send_req(
     }
 
     req.header("content-length", len).send().await
+}
+
+async fn send_log_req(
+    client: &TestClient,
+    table_name: &str,
+    extract_keys: Option<&str>,
+    req: ExportLogsServiceRequest,
+    with_gzip: bool,
+) -> TestResponse {
+    let mut headers = vec![
+        (
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        ),
+        (
+            HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
+            HeaderValue::from_str(table_name).unwrap(),
+        ),
+    ];
+    if let Some(extract_keys) = extract_keys {
+        headers.push((
+            HeaderName::from_static(GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME),
+            HeaderValue::from_str(extract_keys).unwrap(),
+        ));
+    }
+
+    send_req(
+        client,
+        headers,
+        "/v1/otlp/v1/logs?db=public",
+        req.encode_to_vec(),
+        with_gzip,
+    )
+    .await
 }
 
 async fn send_trace_v1_req(
@@ -8625,6 +8772,50 @@ async fn send_trace_v1_req_with_db(
         with_gzip,
     )
     .await
+}
+
+fn make_log_request(records: Vec<Value>) -> ExportLogsServiceRequest {
+    serde_json::from_value(json!({
+        "resourceLogs": [{
+            "resource": {
+                "attributes": []
+            },
+            "scopeLogs": [{
+                "scope": {
+                    "name": "",
+                    "version": "",
+                    "attributes": []
+                },
+                "logRecords": records,
+                "schemaUrl": ""
+            }],
+            "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
+        }]
+    }))
+    .unwrap()
+}
+
+fn make_log_record(
+    trace_id: &str,
+    span_id: &str,
+    time_unix_nano: i64,
+    body: &str,
+    attributes: Vec<Value>,
+) -> Value {
+    json!({
+        "timeUnixNano": time_unix_nano.to_string(),
+        "observedTimeUnixNano": "0",
+        "severityNumber": 9,
+        "severityText": "Info",
+        "body": {
+            "stringValue": body
+        },
+        "attributes": attributes,
+        "droppedAttributesCount": 0,
+        "flags": 0,
+        "traceId": trace_id,
+        "spanId": span_id
+    })
 }
 
 fn make_trace_v1_request(service_name: &str, spans: Vec<Value>) -> ExportTraceServiceRequest {
