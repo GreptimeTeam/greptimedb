@@ -466,6 +466,7 @@ impl MetasrvBuilder {
             };
             let wal_prune_manager = WalPruneManager::new(
                 remote_wal_options.auto_prune_parallelism,
+                remote_wal_options.auto_prune_logical_delete,
                 rx,
                 procedure_manager.clone(),
                 wal_prune_context,

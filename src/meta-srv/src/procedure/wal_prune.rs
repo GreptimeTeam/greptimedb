@@ -60,6 +60,9 @@ pub struct WalPruneData {
     pub topic: String,
     /// The minimum flush entry id for topic, which is used to prune the WAL.
     pub prunable_entry_id: EntryId,
+    /// Whether pruning only updates metadata and skips Kafka DeleteRecords.
+    #[serde(default)]
+    pub logical_delete: bool,
 }
 
 /// The procedure to prune WAL.
@@ -77,11 +80,13 @@ impl WalPruneProcedure {
         guard: Option<WalPruneProcedureGuard>,
         topic: String,
         prunable_entry_id: u64,
+        logical_delete: bool,
     ) -> Self {
         Self {
             data: WalPruneData {
                 topic,
                 prunable_entry_id,
+                logical_delete,
             },
             context,
             _guard: guard,
@@ -119,13 +124,20 @@ impl WalPruneProcedure {
             return Ok(Status::done());
         }
 
-        // Delete records.
-        delete_records(
-            &partition_client,
-            &self.data.topic,
-            self.data.prunable_entry_id,
-        )
-        .await?;
+        if self.data.logical_delete {
+            info!(
+                "Skipping physical deletion of records for logical WAL pruning, topic: {}, prunable entry id: {}",
+                self.data.topic, self.data.prunable_entry_id
+            );
+        } else {
+            // Delete records.
+            delete_records(
+                &partition_client,
+                &self.data.topic,
+                self.data.prunable_entry_id,
+            )
+            .await?;
+        }
 
         // Update the pruned entry id for the topic.
         update_pruned_entry_id(
@@ -218,7 +230,7 @@ mod tests {
             context.leader_region_registry.clone(),
             n_region,
             n_table,
-            &offsets,
+            &offsets[1..],
             topic.to_string(),
         )
         .await
@@ -296,6 +308,16 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn test_wal_prune_data_backward_compatibility() {
+        let data: WalPruneData =
+            serde_json::from_str(r#"{"topic":"test_topic","prunable_entry_id":42}"#).unwrap();
+
+        assert_eq!(data.topic, "test_topic");
+        assert_eq!(data.prunable_entry_id, 42);
+        assert!(!data.logical_delete);
+    }
+
     #[tokio::test]
     async fn test_procedure_execution() {
         maybe_skip_kafka_integration_test!();
@@ -312,8 +334,13 @@ mod tests {
 
         // Mock the test data.
         let prunable_entry_id = mock_test_data(context.clone(), &topic_name).await;
-        let mut procedure =
-            WalPruneProcedure::new(context.clone(), None, topic_name.clone(), prunable_entry_id);
+        let mut procedure = WalPruneProcedure::new(
+            context.clone(),
+            None,
+            topic_name.clone(),
+            prunable_entry_id,
+            false,
+        );
         let status = procedure.on_prune().await.unwrap();
         assert_matches!(status, Status::Done { output: None });
         // Check if the entry ids after(include) `prunable_entry_id` still exist.
@@ -330,6 +357,52 @@ mod tests {
             &topic_name,
             procedure.data.prunable_entry_id as i64 - 1,
             false,
+        )
+        .await;
+
+        let value = env
+            .table_metadata_manager
+            .topic_name_manager()
+            .get(&topic_name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.pruned_entry_id, procedure.data.prunable_entry_id);
+        // Clean up the topic.
+        delete_topic(procedure.context.client, &topic_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_procedure_execution_with_logical_delete() {
+        maybe_skip_kafka_integration_test!();
+        let broker_endpoints = get_kafka_endpoints();
+
+        common_telemetry::init_default_ut_logging();
+        let mut topic_name = uuid::Uuid::new_v4().to_string();
+        // Topic should start with a letter.
+        topic_name = format!("test_procedure_execution_with_logical_delete-{topic_name}");
+        let env = TestEnv::new();
+        let context = env.build_wal_prune_context(broker_endpoints).await;
+        // Prepare the topic.
+        TestEnv::prepare_topic(&context.client, &topic_name).await;
+
+        // Mock the test data.
+        let prunable_entry_id = mock_test_data(context.clone(), &topic_name).await;
+        let mut procedure = WalPruneProcedure::new(
+            context.clone(),
+            None,
+            topic_name.clone(),
+            prunable_entry_id,
+            true,
+        );
+        let status = procedure.on_prune().await.unwrap();
+        assert_matches!(status, Status::Done { output: None });
+        // Logical delete should keep the entry ids before `prunable_entry_id`.
+        check_entry_id_existence(
+            procedure.context.client.clone(),
+            &topic_name,
+            procedure.data.prunable_entry_id as i64 - 1,
+            true,
         )
         .await;
 
