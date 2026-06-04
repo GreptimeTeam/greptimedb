@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use catalog::RegisterTableRequest;
 use common_recordbatch::RecordBatch;
 use common_time::Timestamp;
 use datafusion_common::tree_node::TreeNode as _;
@@ -29,7 +30,9 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::test_util::MemTable;
 
 use super::*;
+use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::state::FilterExprInfo;
+use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::test_utils::create_test_query_engine;
 
 fn u32_table(table_name: &str, columns: Vec<&str>, rows: usize) -> TableRef {
@@ -432,9 +435,7 @@ async fn test_add_auto_column_rewriter() {
         // error datatype mismatch
         (
             "SELECT number, ts FROM numbers_with_ts",
-            Err(
-                "Expect the last column in table to be timestamp column, found column atat with type Int8",
-            ),
+            Err("missing sink columns from flow output: [\"atat\"]"),
             vec![
                 ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                 ColumnSchema::new(
@@ -496,6 +497,383 @@ async fn test_add_auto_column_rewriter() {
             _ => panic!("expected: {:?}, real: {:?}", after, new_sql),
         }
     }
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_reports_extra_flow_columns_before_positional_alias() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            "max(numbers_with_ts.number)",
+            ConcreteDataType::uint32_datatype(),
+            true,
+        ),
+    ]));
+
+    let err = gen_plan_with_matching_schema(
+        "SELECT number, number AS extra, ts, max(number) FROM numbers_with_ts GROUP BY number, ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(
+        err.contains("Flow output schema does not match sink table schema"),
+        "{err}"
+    );
+    assert!(err.contains("flow output columns"), "{err}");
+    assert!(err.contains("sink table columns"), "{err}");
+    assert!(err.contains("extra flow columns not in sink"), "{err}");
+    assert!(err.contains("extra"), "{err}");
+    assert!(
+        !err.contains("extra AS ts"),
+        "schema error should not primarily expose positional alias: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_rejects_positional_alias_type_mismatch() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "event_time",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            "max(numbers_with_ts.number)",
+            ConcreteDataType::uint32_datatype(),
+            true,
+        ),
+    ]));
+
+    let err = gen_plan_with_matching_schema(
+        "SELECT number, number AS not_time, max(number) FROM numbers_with_ts GROUP BY number",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(
+        err.contains(
+            "Cannot match flow output column 'not_time' to sink column 'event_time' by position"
+        ),
+        "{err}"
+    );
+    assert!(err.contains("incompatible data types"), "{err}");
+    assert!(
+        !err.contains("not_time AS event_time"),
+        "schema error should not expose an incompatible positional alias: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_rejects_cross_position_extra_column_match() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "time_window",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        ),
+    ]));
+
+    let err = gen_plan_with_matching_schema(
+        "SELECT number, ts, date_bin('5 minutes', ts) AS time_window2 FROM numbers_with_ts GROUP BY number, ts, time_window2",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(
+        err.contains("Flow output schema does not match sink table schema"),
+        "{err}"
+    );
+    assert!(err.contains("time_window2"), "{err}");
+    assert!(err.contains("time_window"), "{err}");
+    assert!(!err.contains("DuplicateUnqualifiedField"), "{err}");
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_accepts_out_of_order_matching_names() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "time_window",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        ),
+    ]));
+
+    let plan = gen_plan_with_matching_schema(
+        "SELECT number, ts, date_bin('5 minutes', ts) AS time_window FROM numbers_with_ts GROUP BY number, ts, time_window",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    let output_names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        output_names,
+        vec![
+            "number".to_string(),
+            "ts".to_string(),
+            "time_window".to_string()
+        ]
+    );
+    assert!(duplicate_names(&output_names).is_empty());
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_allows_numeric_positional_alias() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("renamed_number", ConcreteDataType::int64_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+
+    let plan = gen_plan_with_matching_schema(
+        "SELECT number, ts FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    let sql = df_plan_to_sql(&plan).unwrap();
+
+    assert_eq!(
+        "SELECT numbers_with_ts.number AS renamed_number, numbers_with_ts.ts FROM numbers_with_ts",
+        sql
+    );
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_allows_null_positional_alias() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("label", ConcreteDataType::string_datatype(), true),
+    ]));
+
+    let plan = gen_plan_with_matching_schema(
+        "SELECT number, NULL AS label_placeholder FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    let output_names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    let sql = df_plan_to_sql(&plan).unwrap();
+
+    assert_eq!(
+        output_names,
+        vec!["number".to_string(), "label".to_string()]
+    );
+    assert!(sql.contains("NULL AS label"), "{sql}");
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_accepts_matching_flow_schema() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("extra", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            "max(numbers_with_ts.number)",
+            ConcreteDataType::uint32_datatype(),
+            true,
+        ),
+    ]));
+
+    let plan = gen_plan_with_matching_schema(
+        "SELECT number, number AS extra, ts, max(number) FROM numbers_with_ts GROUP BY number, ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    let sql = df_plan_to_sql(&plan).unwrap();
+
+    assert_eq!(
+        "SELECT numbers_with_ts.number, numbers_with_ts.number AS extra, numbers_with_ts.ts, max(numbers_with_ts.number) FROM numbers_with_ts GROUP BY numbers_with_ts.number, numbers_with_ts.ts",
+        sql
+    );
+}
+
+#[tokio::test]
+async fn test_validate_sink_table_schema_rejects_existing_sink_missing_flow_column() {
+    let query_engine = create_test_query_engine();
+    let query_ctx = QueryContext::arc();
+    let sql = "SELECT number, number AS extra, max(number) FROM numbers_with_ts GROUP BY number";
+    let plan = sql_to_df_plan(query_ctx.clone(), query_engine.clone(), sql, true)
+        .await
+        .unwrap();
+
+    let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
+    let sink_table_name = [
+        "greptime".to_string(),
+        "public".to_string(),
+        "existing_sink".to_string(),
+    ];
+    let sink_table = u32_table(
+        "existing_sink",
+        vec!["number", "max(numbers_with_ts.number)"],
+        0,
+    );
+    catalog_manager
+        .register_table_sync(RegisterTableRequest {
+            catalog: sink_table_name[0].clone(),
+            schema: sink_table_name[1].clone(),
+            table_name: sink_table_name[2].clone(),
+            table_id: 4096,
+            table: sink_table,
+        })
+        .unwrap();
+
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query: sql,
+        plan,
+        time_window_expr: None,
+        expire_after: None,
+        sink_table_name,
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx,
+        catalog_manager,
+        shutdown_rx,
+        batch_opts: Arc::new(BatchingModeOptions::default()),
+        flow_eval_interval: None,
+    })
+    .unwrap();
+
+    let err = task
+        .validate_sink_table_schema(&query_engine)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        err.contains("Flow output schema does not match sink table schema"),
+        "{err}"
+    );
+    assert!(err.contains("extra"), "{err}");
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_allow_partial_fills_nullable_columns() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("optional_value", ConcreteDataType::uint32_datatype(), true),
+    ]));
+
+    let plan = gen_plan_with_matching_schema(
+        "SELECT number, ts FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[0],
+        true,
+    )
+    .await
+    .unwrap();
+    let sql = df_plan_to_sql(&plan).unwrap();
+
+    assert_eq!(
+        "SELECT numbers_with_ts.number, numbers_with_ts.ts, NULL AS optional_value FROM numbers_with_ts",
+        sql
+    );
 }
 
 #[tokio::test]
@@ -1490,4 +1868,119 @@ async fn test_analyze_incremental_aggregate_plan_rejects_cast_wrapped_alias() {
             "CAST/TryCast-wrapped aggregate output should be unsupported for SQL: {sql}"
         );
     }
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_last_non_null_rejects_missing_primary_key_column() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    // Sink table with primary_key_indices=[0] ("number"), time_index="ts", and merge_mode=last_non_null.
+    // The flow query omits "number", which is a required primary-key column.
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("optional_value", ConcreteDataType::uint32_datatype(), true),
+    ]));
+
+    let err = gen_plan_with_matching_schema(
+        "SELECT ts FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[0],
+        true,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(
+        err.contains(
+            "required by sink table are missing from flow output when merge_mode=last_non_null"
+        ),
+        "{err}"
+    );
+    assert!(err.contains("number"), "{err}");
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_last_non_null_rejects_missing_time_index_column() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    // Sink table with primary_key_indices=[0] ("number"), time_index="ts", and merge_mode=last_non_null.
+    // The flow query omits "ts", which is a required time-index column.
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("optional_value", ConcreteDataType::uint32_datatype(), true),
+    ]));
+
+    let err = gen_plan_with_matching_schema(
+        "SELECT number FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[0],
+        true,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(
+        err.contains(
+            "required by sink table are missing from flow output when merge_mode=last_non_null"
+        ),
+        "{err}"
+    );
+    assert!(err.contains("ts"), "{err}");
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_last_non_null_rejects_extra_flow_column() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    // Sink table with merge_mode=last_non_null.
+    // Sink has 3 columns: number (pk), ts (time_index), optional_value (nullable).
+    // Flow outputs: number, number AS extra, ts → "extra" is not in sink schema.
+    // query_col_cnt(3) <= table_col_cnt(3), so the extra branch is reached.
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("optional_value", ConcreteDataType::uint32_datatype(), true),
+    ]));
+
+    let err = gen_plan_with_matching_schema(
+        "SELECT number, number AS extra, ts FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[0],
+        true,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("extra column(s)"), "{err}");
+    assert!(err.contains("extra"), "{err}");
+    assert!(
+        err.contains("Flow output schema does not match sink table schema"),
+        "{err}"
+    );
 }

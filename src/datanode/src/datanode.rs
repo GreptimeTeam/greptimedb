@@ -445,8 +445,7 @@ impl DatanodeBuilder {
             event_listener,
             table_provider_factory,
             opts.max_concurrent_queries,
-            //TODO: revaluate the hardcoded timeout on the next version of datanode concurrency limiter.
-            Duration::from_millis(100),
+            opts.concurrent_query_limiter_timeout,
             opts.grpc.flight_compression,
         );
 

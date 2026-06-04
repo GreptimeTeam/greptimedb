@@ -27,8 +27,9 @@ use futures::future::BoxFuture;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
+use object_store::ObjectStore;
 use object_store::manager::ObjectStoreManagerRef;
-use object_store::util::normalize_dir;
+use object_store::util::{is_object_storage, normalize_dir};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
@@ -36,7 +37,7 @@ use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
 use store_api::region_engine::RegionRole;
-use store_api::region_request::PathType;
+use store_api::region_request::{PathType, RegionRequirements};
 use store_api::storage::{ColumnId, RegionId};
 use tokio::sync::Semaphore;
 
@@ -46,8 +47,8 @@ use crate::cache::file_cache::{FileCache, FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::error;
 use crate::error::{
-    EmptyRegionDirSnafu, InvalidMetadataSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu,
-    Result, StaleLogEntrySnafu,
+    EmptyRegionDirSnafu, InvalidMetadataSnafu, InvalidRegionOptionsSnafu, ObjectStoreNotFoundSnafu,
+    RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
 };
 use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
@@ -204,6 +205,29 @@ impl RegionOpener {
         options.validate()?;
         self.options = Some(options);
         Ok(self)
+    }
+
+    /// Ensures the current region open request satisfies its requirements.
+    pub(crate) fn ensure_open_requirements(&self, requirements: RegionRequirements) -> Result<()> {
+        if !requirements.object_storage {
+            return Ok(());
+        }
+
+        let options = self.options.as_ref().context(InvalidRegionOptionsSnafu {
+            reason: "missing region options before requirement check".to_string(),
+        })?;
+        let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
+
+        ensure!(
+            supports_open_region_object_storage_requirement(&object_store),
+            error::OpenRegionRequirementSnafu {
+                region_id: self.region_id,
+                requirement: "object storage",
+                reason: "region data must be accessible from another datanode",
+            }
+        );
+
+        Ok(())
     }
 
     /// Sets the cache manager for the region.
@@ -595,6 +619,21 @@ impl RegionOpener {
 
         Ok(Some(region))
     }
+}
+
+#[cfg(not(feature = "test-shared-fs-region-migration"))]
+fn supports_open_region_object_storage_requirement(object_store: &ObjectStore) -> bool {
+    is_object_storage(object_store)
+}
+
+#[cfg(feature = "test-shared-fs-region-migration")]
+fn supports_open_region_object_storage_requirement(object_store: &ObjectStore) -> bool {
+    // Integration tests can configure multiple datanodes to share the same
+    // temporary home dir. That makes file storage accessible to all test
+    // datanodes, but production file storage still does not satisfy this
+    // requirement.
+    is_object_storage(object_store)
+        || object_store.info().scheme() == object_store::services::FS_SCHEME
 }
 
 /// Creates a version builder from a region manifest.
@@ -1172,14 +1211,17 @@ mod tests {
     use datatypes::arrow::array::{ArrayRef, BinaryArray, Int64Array};
     use datatypes::arrow::record_batch::RecordBatch;
     use object_store::ObjectStore;
-    use object_store::services::{Fs, Memory};
+    use object_store::services::{Fs, Memory, S3};
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
     use store_api::region_request::PathType;
     use store_api::storage::{FileId, RegionId};
 
-    use super::{preload_parquet_meta_cache_for_files, sanitize_region_options};
+    use super::{
+        preload_parquet_meta_cache_for_files, sanitize_region_options,
+        supports_open_region_object_storage_requirement,
+    };
     use crate::cache::CacheManager;
     use crate::cache::file_cache::{FileType, IndexKey};
     use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
@@ -1205,6 +1247,48 @@ mod tests {
             sst_format,
             append_mode: None,
         }
+    }
+
+    fn build_fs_object_store() -> ObjectStore {
+        ObjectStore::new(Fs::default().root("/tmp"))
+            .unwrap()
+            .finish()
+    }
+
+    #[test]
+    #[cfg(not(feature = "test-shared-fs-region-migration"))]
+    fn test_open_requirement_rejects_fs_object_store() {
+        let object_store = build_fs_object_store();
+
+        assert!(!supports_open_region_object_storage_requirement(
+            &object_store
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "test-shared-fs-region-migration")]
+    fn test_open_requirement_accepts_shared_fs_object_store_for_tests() {
+        let object_store = build_fs_object_store();
+
+        assert!(supports_open_region_object_storage_requirement(
+            &object_store
+        ));
+    }
+
+    #[test]
+    fn test_open_requirement_accepts_s3_object_store() {
+        let object_store = ObjectStore::new(
+            S3::default()
+                .bucket("test-bucket")
+                .region("us-east-1")
+                .disable_ec2_metadata(),
+        )
+        .unwrap()
+        .finish();
+
+        assert!(supports_open_region_object_storage_requirement(
+            &object_store
+        ));
     }
 
     #[test]

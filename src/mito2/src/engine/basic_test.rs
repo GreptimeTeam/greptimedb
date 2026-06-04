@@ -196,6 +196,7 @@ async fn test_region_replay_with_format(factory: Option<LogStoreFactory>, flat_f
                 options,
                 skip_wal_replay: false,
                 checkpoint: None,
+                requirements: Default::default(),
             }),
         )
         .await

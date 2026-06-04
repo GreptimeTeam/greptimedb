@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use chrono_tz::Tz;
+use once_cell::sync::Lazy;
 use snafu::{OptionExt, ensure};
 use vrl::compiler::runtime::Runtime;
 use vrl::compiler::{Program, TargetValue, compile};
@@ -30,6 +32,12 @@ use crate::etl::processor::yaml_string;
 
 pub(crate) const PROCESSOR_VRL: &str = "vrl";
 const SOURCE: &str = "source";
+
+static UTC_TIMEZONE: Lazy<TimeZone> = Lazy::new(|| TimeZone::Named(Tz::UTC));
+
+thread_local! {
+    static VRL_RUNTIME: RefCell<Runtime> = RefCell::new(Runtime::default());
+}
 
 #[derive(Debug)]
 pub struct VrlProcessor {
@@ -74,10 +82,14 @@ impl VrlProcessor {
             secrets: Secrets::default(),
         };
 
-        let timezone = TimeZone::Named(Tz::UTC);
-        let mut runtime = Runtime::default();
-        let re = runtime
-            .resolve(&mut target, &self.program, &timezone)
+        let re = VRL_RUNTIME
+            .with(|runtime| {
+                let mut runtime = runtime.borrow_mut();
+                runtime.clear();
+                let result = runtime.resolve(&mut target, &self.program, &UTC_TIMEZONE);
+                runtime.clear();
+                result
+            })
             .map_err(|e| {
                 ExecuteVrlSnafu {
                     msg: e.get_expression_error().to_string(),

@@ -84,6 +84,8 @@ CREATE TABLE approx_rate (
     TIME INDEX(time_window)
 );
 
+-- Without merge_mode=last_non_null, this partial output is rejected at CREATE FLOW time.
+-- SQLNESS REPLACE (in\scontext:\sFailed\sto\srewrite\splan:\sError\sduring\splanning:.*) in context: Failed to rewrite plan
 CREATE FLOW find_approx_rate SINK TO approx_rate AS
 SELECT
     (max(byte) - min(byte)) / 30.0 as rate,
@@ -93,16 +95,5 @@ from
     bytes_log
 GROUP BY
     time_window;
-
-INSERT INTO
-    bytes_log
-VALUES
-    (NULL, '2023-01-01 00:00:01'),
-    (300, '2023-01-01 00:00:31');
-
--- should return error
-ADMIN FLUSH_FLOW('find_approx_rate');
-
-DROP FLOW find_approx_rate;
 DROP TABLE bytes_log;
 DROP TABLE approx_rate;

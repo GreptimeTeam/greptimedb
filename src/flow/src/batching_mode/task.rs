@@ -265,6 +265,36 @@ impl BatchingTask {
         Ok(None)
     }
 
+    /// Validates that the sink table schema can accept this flow's output.
+    ///
+    /// This is a dry-run of the same schema matching logic used by runtime insert-plan
+    /// generation, but without adding dirty-window filters or executing the query. It is used
+    /// during CREATE FLOW to catch existing sink table mismatches early.
+    pub async fn validate_sink_table_schema(&self, engine: &QueryEngineRef) -> Result<(), Error> {
+        let (table, _) = get_table_info_df_schema(
+            self.config.catalog_manager.clone(),
+            self.config.sink_table_name.clone(),
+        )
+        .await?;
+
+        let table_meta = &table.table_info().meta;
+        let merge_mode_last_non_null =
+            is_merge_mode_last_non_null(&table_meta.options.extra_options);
+        let primary_key_indices = table_meta.primary_key_indices.clone();
+        let query_ctx = self.state.read().unwrap().query_ctx.clone();
+
+        gen_plan_with_matching_schema(
+            &self.config.query,
+            query_ctx,
+            engine.clone(),
+            table_meta.schema.clone(),
+            &primary_key_indices,
+            merge_mode_last_non_null,
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn is_table_exist(&self, table_name: &[String; 3]) -> Result<bool, Error> {
         self.config
             .catalog_manager
@@ -929,7 +959,7 @@ impl BatchingTask {
         let (expire_lower_bound, expire_upper_bound) =
             match (expire_time_window_bound, &self.config.query_type) {
                 (Some((Some(l), Some(u))), QueryType::Sql) => (l, u),
-                (None, QueryType::Sql) => {
+                (None, QueryType::Sql) if self.config.flow_eval_interval.is_none() => {
                     // if it's sql query and no time window lower/upper bound is found, just return the original query(with auto columns)
                     // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
                     debug!(
@@ -950,7 +980,8 @@ impl BatchingTask {
                 }
                 _ => {
                     // Clean dirty windows for full-query/non-scoped paths,
-                    // such as TQL, that cannot use a time-window filter.
+                    // such as TQL or evaluation-interval SQL without a recognized
+                    // time-window expression, that cannot use a time-window filter.
                     let (_, dirty_windows_to_restore) = self.drain_dirty_windows_signal();
 
                     let plan_info = self

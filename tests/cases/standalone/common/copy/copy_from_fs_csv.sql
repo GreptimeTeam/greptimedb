@@ -73,6 +73,13 @@ Copy csv_null_prefix_import FROM '${SQLNESS_HOME}/demo/export/csv_null_prefix.cs
 
 select * from csv_null_prefix_import;
 
+CREATE TABLE csv_skip_bad_records(host_id int, host_name string, reading_value double, ts timestamp time index);
+
+-- SQLNESS ENV PWD
+Copy csv_skip_bad_records FROM '$PWD/tests/data/csv/skip_bad_records.csv' WITH (format='csv', skip_bad_records='true');
+
+select * from csv_skip_bad_records order by ts;
+
 drop table demo;
 
 drop table with_filename;
@@ -90,3 +97,5 @@ drop table demo_with_less_columns;
 drop table csv_null_prefix;
 
 drop table csv_null_prefix_import;
+
+drop table csv_skip_bad_records;

@@ -14,24 +14,10 @@
 
 use std::sync::Arc;
 
-use axum::Router as HttpRouter;
 use common_error::ext::BoxedError;
 use tonic::transport::server::Router as GrpcRouter;
 
 use crate::grpc::builder::GrpcServerBuilder;
-
-/// A configurator that customizes or enhances an HTTP router.
-#[async_trait::async_trait]
-pub trait HttpConfigurator<C>: Send + Sync {
-    /// Configures the given HTTP router using the provided context.
-    async fn configure_http(
-        &self,
-        route: HttpRouter,
-        ctx: C,
-    ) -> std::result::Result<HttpRouter, BoxedError>;
-}
-
-pub type HttpConfiguratorRef<C> = Arc<dyn HttpConfigurator<C>>;
 
 /// A configurator that customizes or enhances a gRPC router.
 #[async_trait::async_trait]

@@ -87,14 +87,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         else {
             return;
         };
-        if let Err(err) = self.check_and_cleanup_region(region_id, &request).await {
-            sender.send(Err(err));
-            return;
-        }
         info!("Try to open region {}, worker: {}", region_id, self.id);
         sanitize_open_request_options(&mut request.options);
 
         // Open region from specific region dir.
+        let requirements = request.requirements;
         let opener = match RegionOpener::new(
             region_id,
             &request.table_dir,
@@ -112,7 +109,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .cache(Some(self.cache_manager.clone()))
         .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))
         .replay_checkpoint(request.checkpoint.map(|checkpoint| checkpoint.entry_id))
-        .parse_options(request.options)
+        .parse_options(request.options.clone())
         {
             Ok(opener) => opener,
             Err(err) => {
@@ -120,6 +117,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         };
+
+        if let Err(err) = opener.ensure_open_requirements(requirements) {
+            sender.send(Err(err));
+            return;
+        }
+
+        if let Err(err) = self.check_and_cleanup_region(region_id, &request).await {
+            sender.send(Err(err));
+            return;
+        }
 
         let now = Instant::now();
         let regions = self.regions.clone();
