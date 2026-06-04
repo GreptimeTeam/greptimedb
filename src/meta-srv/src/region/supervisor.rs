@@ -83,6 +83,7 @@ impl From<&Stat> for DatanodeHeartbeat {
 /// - `Tick`: This event is used to trigger region failure detection periodically.
 /// - `InitializeAllRegions`: This event is used to initialize all region failure detectors.
 /// - `RegisterFailureDetectors`: This event is used to register failure detectors for regions.
+/// - `ResetFailureDetectors`: This event is used to reset failure detectors for regions.
 /// - `DeregisterFailureDetectors`: This event is used to deregister failure detectors for regions.
 /// - `HeartbeatArrived`: This event presents the metasrv received [`DatanodeHeartbeat`] from the datanodes.
 /// - `Clear`: This event is used to reset the state of the supervisor, typically used
@@ -95,6 +96,7 @@ pub(crate) enum Event {
     InitializeAllRegions(tokio::sync::oneshot::Sender<()>),
     RegisterFailureDetectors(Vec<DetectingRegion>),
     DeregisterFailureDetectors(Vec<DetectingRegion>),
+    ResetFailureDetectors(Vec<DetectingRegion>),
     HeartbeatArrived(DatanodeHeartbeat),
     Clear,
     #[cfg(test)]
@@ -112,6 +114,9 @@ impl Debug for Event {
                 .debug_tuple("RegisterFailureDetectors")
                 .field(arg0)
                 .finish(),
+            Self::ResetFailureDetectors(arg0) => {
+                f.debug_tuple("ResetFailureDetectors").field(arg0).finish()
+            }
             Self::DeregisterFailureDetectors(arg0) => f
                 .debug_tuple("DeregisterFailureDetectors")
                 .field(arg0)
@@ -319,6 +324,16 @@ impl RegionFailureDetectorController for RegionFailureDetectorControl {
         }
     }
 
+    async fn reset_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        if let Err(err) = self
+            .sender
+            .send(Event::ResetFailureDetectors(detecting_regions))
+            .await
+        {
+            error!(err; "RegionSupervisor has stop receiving heartbeat.");
+        }
+    }
+
     async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
         if let Err(err) = self
             .sender
@@ -429,6 +444,9 @@ impl RegionSupervisor {
                 Event::RegisterFailureDetectors(detecting_regions) => {
                     self.register_failure_detectors(detecting_regions).await
                 }
+                Event::ResetFailureDetectors(detecting_regions) => {
+                    self.reset_failure_detectors(detecting_regions).await
+                }
                 Event::DeregisterFailureDetectors(detecting_regions) => {
                     self.deregister_failure_detectors(detecting_regions).await
                 }
@@ -505,6 +523,14 @@ impl RegionSupervisor {
             // The corresponding region has `acceptable_heartbeat_pause_millis` to send heartbeat from datanode.
             self.failure_detector
                 .maybe_init_region_failure_detector(region, ts_millis);
+        }
+    }
+
+    async fn reset_failure_detectors(&mut self, detecting_regions: Vec<DetectingRegion>) {
+        let ts_millis = current_time_millis();
+        for region in detecting_regions {
+            self.failure_detector
+                .reset_region_failure_detector(region, ts_millis);
         }
     }
 
