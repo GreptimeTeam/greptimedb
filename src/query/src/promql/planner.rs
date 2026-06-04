@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -127,6 +127,9 @@ const FIELD_COLUMN_MATCHER: &str = "__field__";
 const SCHEMA_COLUMN_MATCHER: &str = "__schema__";
 const DB_COLUMN_MATCHER: &str = "__database__";
 
+/// Prefix for generated binary island leaf aliases.
+const BINARY_ISLAND_LEAF_ALIAS_PREFIX: &str = "__prom_v";
+
 /// Threshold for scatter scan mode
 const MAX_SCATTER_POINTS: i64 = 400;
 
@@ -159,6 +162,176 @@ struct PromPlannerContext {
     schema_name: Option<String>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VectorLeafKey {
+    metric_name: String,
+    matchers: Vec<(String, String, String)>,
+    or_matchers: Vec<Vec<(String, String, String)>>,
+    offset_ms: i128,
+    at: String,
+}
+
+#[derive(Debug, Clone)]
+struct IslandLeaf {
+    selector: VectorSelector,
+    display_table: String,
+}
+
+#[derive(Debug, Clone)]
+enum IslandExpr {
+    VectorLeaf(usize),
+    Scalar(DfExpr),
+    Unary {
+        input: Box<IslandExpr>,
+    },
+    Binary {
+        op: TokenType,
+        lhs: Box<IslandExpr>,
+        rhs: Box<IslandExpr>,
+    },
+}
+
+impl IslandExpr {
+    fn try_new(expr: &PromExpr, env: &mut IslandCollectEnv) -> Option<Self> {
+        if let Some(expr) = PromPlanner::try_build_literal_expr(expr) {
+            return Some(Self::Scalar(expr));
+        }
+
+        match expr {
+            PromExpr::Paren(ParenExpr { expr }) => Self::try_new(expr, env),
+            PromExpr::VectorSelector(selector) => {
+                let leaf = env.intern_leaf(selector)?;
+                Some(Self::VectorLeaf(leaf))
+            }
+            PromExpr::Unary(UnaryExpr { expr }) => {
+                let input = Self::try_new(expr, env)?;
+                Some(Self::Unary {
+                    input: Box::new(input),
+                })
+            }
+            PromExpr::Binary(PromBinaryExpr {
+                lhs,
+                rhs,
+                op,
+                modifier,
+            }) if matches!(
+                op.id(),
+                token::T_ADD
+                    | token::T_SUB
+                    | token::T_MUL
+                    | token::T_DIV
+                    | token::T_MOD
+                    | token::T_POW
+                    | token::T_ATAN2
+            ) && modifier.as_ref().is_none_or(|modifier| {
+                !modifier.return_bool
+                    && modifier.matching.is_none()
+                    && matches!(modifier.card, VectorMatchCardinality::OneToOne)
+            }) =>
+            {
+                let lhs = Self::try_new(lhs, env)?;
+                let rhs = Self::try_new(rhs, env)?;
+                Some(Self::Binary {
+                    op: *op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct IslandCollectEnv {
+    leaf_by_key: HashMap<VectorLeafKey, usize>,
+    leaves: Vec<IslandLeaf>,
+    vector_occurrences: usize,
+}
+
+#[derive(Debug)]
+struct PlannedIslandLeaf {
+    plan: LogicalPlan,
+    ctx: PromPlannerContext,
+    alias: TableReference,
+    display_table: String,
+}
+
+#[derive(Debug)]
+struct IslandFieldExprs {
+    exprs: Vec<DfExpr>,
+    names: Vec<String>,
+    scalar: bool,
+}
+
+impl VectorLeafKey {
+    fn from_selector(selector: &VectorSelector) -> Option<Self> {
+        let mut metric_name = selector.name.clone();
+        let mut matchers = Vec::with_capacity(selector.matchers.matchers.len());
+        let matcher_key = |matcher: &Matcher| {
+            (
+                matcher.name.clone(),
+                matcher.op.to_string(),
+                matcher.value.clone(),
+            )
+        };
+
+        for matcher in &selector.matchers.matchers {
+            if matcher.name == METRIC_NAME {
+                if matcher.op != MatchOp::Equal || metric_name.is_some() {
+                    return None;
+                }
+                metric_name = Some(matcher.value.clone());
+            } else {
+                matchers.push(matcher_key(matcher));
+            }
+        }
+        matchers.sort();
+
+        let mut or_matchers = selector
+            .matchers
+            .or_matchers
+            .iter()
+            .map(|group| {
+                let mut group = group.iter().map(matcher_key).collect::<Vec<_>>();
+                group.sort();
+                group
+            })
+            .collect::<Vec<_>>();
+        or_matchers.sort();
+
+        Some(Self {
+            metric_name: metric_name?,
+            matchers,
+            or_matchers,
+            offset_ms: match &selector.offset {
+                Some(Offset::Pos(duration)) => duration.as_millis() as i128,
+                Some(Offset::Neg(duration)) => -(duration.as_millis() as i128),
+                None => 0,
+            },
+            at: format!("{:?}", selector.at),
+        })
+    }
+}
+
+impl IslandCollectEnv {
+    fn intern_leaf(&mut self, selector: &VectorSelector) -> Option<usize> {
+        self.vector_occurrences += 1;
+        let key = VectorLeafKey::from_selector(selector)?;
+        if let Some(id) = self.leaf_by_key.get(&key) {
+            return Some(*id);
+        }
+
+        let id = self.leaves.len();
+        self.leaves.push(IslandLeaf {
+            selector: selector.clone(),
+            display_table: key.metric_name.clone(),
+        });
+        self.leaf_by_key.insert(key, id);
+        Some(id)
+    }
 }
 
 impl PromPlannerContext {
@@ -607,11 +780,323 @@ impl PromPlanner {
         })
     }
 
+    async fn try_plan_binary_island(
+        &mut self,
+        binary_expr: &PromBinaryExpr,
+    ) -> Result<Option<LogicalPlan>> {
+        let original_ctx = self.ctx.clone();
+        let mut collect_env = IslandCollectEnv::default();
+        let Some(island_expr) =
+            IslandExpr::try_new(&PromExpr::Binary(binary_expr.clone()), &mut collect_env)
+        else {
+            return Ok(None);
+        };
+
+        if collect_env.leaves.is_empty()
+            || collect_env.vector_occurrences <= collect_env.leaves.len()
+        {
+            return Ok(None);
+        }
+
+        let mut planned_leaves = Vec::with_capacity(collect_env.leaves.len());
+        for (idx, leaf) in collect_env.leaves.iter().enumerate() {
+            let plan = self
+                .prom_vector_selector_to_plan(&leaf.selector, false)
+                .await?;
+            let ctx = self.ctx.clone();
+            let alias = TableReference::bare(format!("{BINARY_ISLAND_LEAF_ALIAS_PREFIX}{idx}"));
+            let plan = LogicalPlanBuilder::from(plan)
+                .alias(alias.clone())
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+            planned_leaves.push(PlannedIslandLeaf {
+                plan,
+                ctx,
+                alias,
+                display_table: leaf.display_table.clone(),
+            });
+        }
+
+        if !Self::binary_island_join_contexts_supported(&planned_leaves) {
+            self.ctx = original_ctx;
+            return Ok(None);
+        }
+
+        let mut input = planned_leaves[0].plan.clone();
+        for right_idx in 1..planned_leaves.len() {
+            input = self.join_binary_island_leaf(
+                input,
+                &planned_leaves[0],
+                &planned_leaves[right_idx],
+            )?;
+        }
+
+        let field_exprs =
+            Self::build_binary_island_field_exprs(&island_expr, &planned_leaves, input.schema())?;
+        if field_exprs.scalar || field_exprs.exprs.is_empty() {
+            self.ctx = original_ctx;
+            return Ok(None);
+        }
+
+        let plan = self.project_binary_island(
+            input,
+            &planned_leaves[0].alias,
+            &planned_leaves[0].ctx,
+            field_exprs,
+        )?;
+        Ok(Some(plan))
+    }
+
+    fn binary_island_join_contexts_supported(leaves: &[PlannedIslandLeaf]) -> bool {
+        if leaves
+            .iter()
+            .any(|leaf| leaf.ctx.time_index_column.is_none())
+        {
+            return false;
+        }
+
+        if leaves.len() <= 1 {
+            return true;
+        }
+
+        let first_tags = leaves[0].ctx.tag_columns.iter().collect::<BTreeSet<_>>();
+
+        leaves.iter().skip(1).all(|leaf| {
+            (Self::plan_has_tsid_column(&leaves[0].plan) && Self::plan_has_tsid_column(&leaf.plan))
+                || leaf.ctx.tag_columns.iter().collect::<BTreeSet<_>>() == first_tags
+        })
+    }
+
+    fn join_binary_island_leaf(
+        &self,
+        left: LogicalPlan,
+        first_leaf: &PlannedIslandLeaf,
+        right_leaf: &PlannedIslandLeaf,
+    ) -> Result<LogicalPlan> {
+        let only_join_time_index =
+            first_leaf.ctx.tag_columns.is_empty() || right_leaf.ctx.tag_columns.is_empty();
+        let (mut left_keys, mut right_keys) = Self::binary_join_key_columns(
+            &left,
+            &right_leaf.plan,
+            &first_leaf.ctx,
+            &right_leaf.ctx,
+            only_join_time_index,
+            &None,
+        );
+
+        if let (Some(left_time_index_column), Some(right_time_index_column)) = (
+            first_leaf.ctx.time_index_column.clone(),
+            right_leaf.ctx.time_index_column.clone(),
+        ) {
+            left_keys.insert(left_time_index_column);
+            right_keys.insert(right_time_index_column);
+        }
+
+        LogicalPlanBuilder::from(left)
+            .join_detailed(
+                right_leaf.plan.clone(),
+                JoinType::Inner,
+                (
+                    left_keys
+                        .into_iter()
+                        .map(|name| Column::new(Some(first_leaf.alias.clone()), name))
+                        .collect::<Vec<_>>(),
+                    right_keys
+                        .into_iter()
+                        .map(|name| Column::new(Some(right_leaf.alias.clone()), name))
+                        .collect::<Vec<_>>(),
+                ),
+                None,
+                NullEquality::NullEqualsNull,
+            )
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
+    }
+
+    fn build_binary_island_field_exprs(
+        expr: &IslandExpr,
+        leaves: &[PlannedIslandLeaf],
+        schema: &DFSchemaRef,
+    ) -> Result<IslandFieldExprs> {
+        match expr {
+            IslandExpr::VectorLeaf(id) => {
+                let leaf = &leaves[*id];
+                let exprs = leaf
+                    .ctx
+                    .field_columns
+                    .iter()
+                    .map(|field| {
+                        schema
+                            .qualified_field_with_name(Some(&leaf.alias), field)
+                            .context(DataFusionPlanningSnafu)
+                            .map(|field| DfExpr::Column(field.into()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let names = leaf
+                    .ctx
+                    .field_columns
+                    .iter()
+                    .map(|field| format!("{}.{}", leaf.display_table, field))
+                    .collect();
+                Ok(IslandFieldExprs {
+                    exprs,
+                    names,
+                    scalar: false,
+                })
+            }
+            IslandExpr::Scalar(expr) => Ok(IslandFieldExprs {
+                exprs: vec![expr.clone()],
+                names: vec![expr.schema_name().to_string()],
+                scalar: true,
+            }),
+            IslandExpr::Unary { input } => {
+                let input = Self::build_binary_island_field_exprs(input, leaves, schema)?;
+                let mut exprs = Vec::with_capacity(input.exprs.len());
+                let mut names = Vec::with_capacity(input.names.len());
+                for (expr, name) in input.exprs.into_iter().zip(input.names) {
+                    exprs.push(DfExpr::Negative(Box::new(expr)));
+                    names.push(format!("-{name}"));
+                }
+                Ok(IslandFieldExprs {
+                    exprs,
+                    names,
+                    scalar: input.scalar,
+                })
+            }
+            IslandExpr::Binary { op, lhs, rhs } => {
+                let same_leaf = match (&**lhs, &**rhs) {
+                    (IslandExpr::VectorLeaf(left), IslandExpr::VectorLeaf(right))
+                        if left == right =>
+                    {
+                        Some(*left)
+                    }
+                    _ => None,
+                };
+                let lhs = Self::build_binary_island_field_exprs(lhs, leaves, schema)?;
+                let rhs = Self::build_binary_island_field_exprs(rhs, leaves, schema)?;
+                let expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
+                let scalar = lhs.scalar && rhs.scalar;
+                let op = op.to_string();
+
+                let (exprs, names) = match (lhs.scalar, rhs.scalar) {
+                    (true, true) => {
+                        let expr = expr_builder(lhs.exprs[0].clone(), rhs.exprs[0].clone())?;
+                        let name = format!("{} {op} {}", lhs.names[0], rhs.names[0]);
+                        (vec![expr], vec![name])
+                    }
+                    (true, false) => {
+                        let mut exprs = Vec::with_capacity(rhs.exprs.len());
+                        let mut names = Vec::with_capacity(rhs.names.len());
+                        for (rhs_expr, rhs_name) in rhs.exprs.into_iter().zip(rhs.names) {
+                            exprs.push(expr_builder(lhs.exprs[0].clone(), rhs_expr)?);
+                            names.push(format!("{} {op} {rhs_name}", lhs.names[0]));
+                        }
+                        (exprs, names)
+                    }
+                    (false, true) => {
+                        let mut exprs = Vec::with_capacity(lhs.exprs.len());
+                        let mut names = Vec::with_capacity(lhs.names.len());
+                        for (lhs_expr, lhs_name) in lhs.exprs.into_iter().zip(lhs.names) {
+                            exprs.push(expr_builder(lhs_expr, rhs.exprs[0].clone())?);
+                            names.push(format!("{lhs_name} {op} {}", rhs.names[0]));
+                        }
+                        (exprs, names)
+                    }
+                    (false, false) => {
+                        let mut exprs = Vec::new();
+                        let mut names = Vec::new();
+                        for (idx, ((lhs_expr, rhs_expr), (mut lhs_name, mut rhs_name))) in lhs
+                            .exprs
+                            .into_iter()
+                            .zip(rhs.exprs)
+                            .zip(lhs.names.into_iter().zip(rhs.names))
+                            .enumerate()
+                        {
+                            if let Some(leaf) = same_leaf {
+                                let field = leaves[leaf]
+                                    .ctx
+                                    .field_columns
+                                    .get(idx)
+                                    .cloned()
+                                    .unwrap_or_else(|| lhs_name.clone());
+                                lhs_name = format!("lhs.{field}");
+                                rhs_name = format!("rhs.{field}");
+                            }
+                            exprs.push(expr_builder(lhs_expr, rhs_expr)?);
+                            names.push(format!("{lhs_name} {op} {rhs_name}"));
+                        }
+                        (exprs, names)
+                    }
+                };
+
+                Ok(IslandFieldExprs {
+                    exprs,
+                    names,
+                    scalar,
+                })
+            }
+        }
+    }
+
+    fn project_binary_island(
+        &mut self,
+        input: LogicalPlan,
+        base_alias: &TableReference,
+        base_ctx: &PromPlannerContext,
+        field_exprs: IslandFieldExprs,
+    ) -> Result<LogicalPlan> {
+        self.ctx = base_ctx.clone();
+
+        let schema = input.schema();
+        let non_field_exprs = base_ctx
+            .tag_columns
+            .iter()
+            .chain(base_ctx.time_index_column.iter())
+            .map(|column| {
+                schema
+                    .qualified_field_with_name(Some(base_alias), column)
+                    .context(DataFusionPlanningSnafu)
+                    .map(|field| DfExpr::Column(field.into()))
+            });
+        let tsid_expr = Self::optional_tsid_projection(schema, Some(base_alias), base_ctx.use_tsid)
+            .into_iter()
+            .map(Ok);
+
+        self.ctx.field_columns = field_exprs.names;
+        let field_exprs = field_exprs
+            .exprs
+            .into_iter()
+            .zip(self.ctx.field_columns.iter())
+            .map(|(expr, name)| Ok(DfExpr::Alias(Alias::new(expr, None::<String>, name))));
+
+        let project_exprs = non_field_exprs
+            .chain(tsid_expr)
+            .chain(field_exprs)
+            .collect::<Result<Vec<_>>>()?;
+
+        let plan = LogicalPlanBuilder::from(input)
+            .project(project_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        self.ctx.table_name = None;
+        self.ctx.schema_name = None;
+
+        Ok(plan)
+    }
+
     async fn prom_binary_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
         binary_expr: &PromBinaryExpr,
     ) -> Result<LogicalPlan> {
+        if let Some(plan) = self.try_plan_binary_island(binary_expr).await? {
+            return Ok(plan);
+        }
+
         let PromBinaryExpr {
             lhs,
             rhs,
@@ -3493,9 +3978,10 @@ impl PromPlanner {
     }
 
     fn binary_join_key_columns(
-        &self,
         left: &LogicalPlan,
         right: &LogicalPlan,
+        left_ctx: &PromPlannerContext,
+        right_ctx: &PromPlannerContext,
         only_join_time_index: bool,
         modifier: &Option<BinModifier>,
     ) -> (BTreeSet<String>, BTreeSet<String>) {
@@ -3516,13 +4002,21 @@ impl PromPlanner {
             let left_tag_columns = if only_join_time_index {
                 BTreeSet::new()
             } else {
-                self.ctx
+                left_ctx
                     .tag_columns
                     .iter()
                     .cloned()
                     .collect::<BTreeSet<_>>()
             };
-            let right_tag_columns = left_tag_columns.clone();
+            let right_tag_columns = if only_join_time_index {
+                BTreeSet::new()
+            } else {
+                right_ctx
+                    .tag_columns
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            };
             (left_tag_columns, right_tag_columns)
         };
 
@@ -3562,8 +4056,14 @@ impl PromPlanner {
         only_join_time_index: bool,
         modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
-        let (mut left_tag_columns, mut right_tag_columns) =
-            self.binary_join_key_columns(&left, &right, only_join_time_index, modifier);
+        let (mut left_tag_columns, mut right_tag_columns) = Self::binary_join_key_columns(
+            &left,
+            &right,
+            &self.ctx,
+            &self.ctx,
+            only_join_time_index,
+            modifier,
+        );
 
         // push time index column if it exists
         if let (Some(left_time_index_column), Some(right_time_index_column)) =
@@ -4974,7 +5474,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn repeated_tsid_binary_operand_keeps_tsid_join_keys() {
+    async fn repeated_tsid_binary_operand_reuses_leaf_plan() {
         let eval_stmt = build_eval_stmt("((some_metric - some_alt_metric) / some_metric) * 100");
 
         let table_provider = build_test_table_provider_with_tsid(
@@ -4995,12 +5495,24 @@ mod test {
                 .unwrap();
 
         let plan_str = plan.display_indent_schema().to_string();
-        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert_eq!(plan_str.matches("__tsid =").count(), 1, "{plan_str}");
+        assert_eq!(
+            plan_str
+                .matches("Filter: phy.__table_id = UInt32(1024)")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            2,
+            "{plan_str}"
+        );
         assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
     }
 
     #[tokio::test]
-    async fn repeated_tsid_binary_operand_keeps_shorter_field_side() {
+    async fn repeated_tsid_binary_operand_reuses_shorter_field_side() {
         let eval_stmt =
             build_eval_stmt("((two_field_metric - one_field_metric) / one_field_metric) * 100");
 
@@ -5043,8 +5555,271 @@ mod test {
             .count();
         assert_eq!(value_columns, 1, "{field_names:?}");
         let plan_str = plan.display_indent_schema().to_string();
-        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert_eq!(plan_str.matches("__tsid =").count(), 1, "{plan_str}");
+        assert_eq!(
+            plan_str
+                .matches("Filter: phy.__table_id = UInt32(1025)")
+                .count(),
+            1,
+            "{plan_str}"
+        );
         assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn binary_island_reuses_self_operand_without_join() {
+        let eval_stmt = build_eval_stmt("some_metric / some_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 0, "{plan_str}");
+        assert_eq!(
+            plan_str
+                .matches("Filter: phy.__table_id = UInt32(1024)")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            1,
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_island_reuses_leaf_across_two_branches() {
+        let eval_stmt =
+            build_eval_stmt("(some_metric + some_alt_metric) / (some_metric + third_metric)");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+                (DEFAULT_SCHEMA_NAME.to_string(), "third_metric".to_string()),
+            ],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert_eq!(
+            plan_str
+                .matches("Filter: phy.__table_id = UInt32(1024)")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            3,
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_island_generated_alias_avoids_user_column_names() {
+        let eval_stmt = build_eval_stmt("(some_metric + some_alt_metric) / some_metric");
+
+        let table_provider = build_test_table_provider_with_fields(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            &["prom_v0", "__prom_v0"],
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let field_names = plan.schema().field_names();
+        assert!(field_names.iter().any(|name| name.ends_with(".prom_v0")));
+        assert!(field_names.iter().any(|name| name.ends_with(".__prom_v0")));
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("SubqueryAlias: __prom_v0"), "{plan_str}");
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            2,
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_island_clears_qualifier_for_nested_unary_projection() {
+        let eval_stmt = build_eval_stmt("-((some_metric + some_alt_metric) / some_metric)");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 1, "{plan_str}");
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            2,
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_island_keeps_distinct_matcher_leaves() {
+        let eval_stmt = build_eval_stmt(
+            "(some_metric{tag_0=\"foo\"} + some_alt_metric) / some_metric{tag_0=\"bar\"}",
+        );
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            3,
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_island_keeps_offset_leaves_distinct() {
+        let eval_stmt = build_eval_stmt("(some_metric offset 5m + some_alt_metric) / some_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            3,
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_island_falls_back_for_group_modifier() {
+        let eval_stmt = build_eval_stmt(
+            "(some_metric + ignoring(tag_0) group_left some_alt_metric) / some_metric",
+        );
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            3,
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_island_falls_back_for_comparison_filter() {
+        let eval_stmt = build_eval_stmt("(some_metric > some_alt_metric) / some_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            3,
+            "{plan_str}"
+        );
     }
 
     #[tokio::test]
