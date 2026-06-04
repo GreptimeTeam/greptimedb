@@ -61,9 +61,9 @@ use store_api::storage::{RegionId, TableId};
 use table::TableRef;
 use table::metadata::TableInfo;
 use table::requests::{
-    AUTO_CREATE_TABLE_KEY, InsertRequest as TableInsertRequest, TABLE_DATA_MODEL,
-    TABLE_DATA_MODEL_TRACE_V1, TRACE_TABLE_PARTITIONS_HINT_KEY, VALID_TABLE_OPTION_KEYS,
-    is_semantic_option_key,
+    AUTO_CREATE_TABLE_KEY, InsertRequest as TableInsertRequest, SEMANTIC_PER_TABLE_INDEX_KEY,
+    TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1, TRACE_TABLE_PARTITIONS_HINT_KEY,
+    VALID_TABLE_OPTION_KEYS, is_semantic_option_key, validate_semantic_option,
 };
 use table::table_reference::TableReference;
 
@@ -861,6 +861,7 @@ impl Inserter {
     ) -> Result<CreateTableExpr> {
         let mut table_options = std::collections::HashMap::with_capacity(4);
         fill_table_options_for_create(&mut table_options, create_type, ctx);
+        apply_per_table_semantic_options(&mut table_options, ctx, &req.table_name);
 
         let engine_name = if let AutoCreateTableType::Logical(_) = create_type {
             // engine should be metric engine when creating logical tables.
@@ -1090,9 +1091,9 @@ pub fn fill_table_options_for_create(
         }
     }
 
-    // Semantic keys are prefix-matched, not in the fixed allowlist above.
+    // Semantic keys use their own vocabulary instead of the fixed option list.
     for (key, value) in ctx.extensions() {
-        if is_semantic_option_key(&key) {
+        if is_semantic_option_key(&key) && validate_semantic_option(&key, &value) {
             table_options.insert(key, value);
         }
     }
@@ -1140,6 +1141,41 @@ pub fn fill_table_options_for_create(
         }
         AutoCreateTableType::Trace => {
             table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+        }
+    }
+}
+
+/// Folds the semantic keys for `table_name` carried on the internal per-table
+/// index extension into `table_options`.
+///
+/// The index is a `{table_name -> {semantic_key: value}}` JSON blob produced by
+/// the OTLP metrics encode path (where one metric can fan out into several
+/// tables with distinct keys). Common keys shared by every table in a request
+/// travel as plain semantic extensions and are handled by
+/// [`fill_table_options_for_create`]; this carries only the per-table tail.
+/// Keys are re-checked against the vocabulary defensively. Ingestion paths
+/// without a per-table index (logs, traces, Prom RW) carry no extension, so this
+/// is a no-op for them.
+fn apply_per_table_semantic_options(
+    table_options: &mut std::collections::HashMap<String, String>,
+    ctx: &QueryContextRef,
+    table_name: &str,
+) {
+    let Some(raw) = ctx.extension(SEMANTIC_PER_TABLE_INDEX_KEY) else {
+        return;
+    };
+    let Ok(index) = serde_json::from_str::<
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    >(raw) else {
+        warn!("failed to parse semantic per-table index, skipping per-table options");
+        return;
+    };
+    let Some(entry) = index.get(table_name) else {
+        return;
+    };
+    for (key, value) in entry {
+        if is_semantic_option_key(key) && validate_semantic_option(key, value) {
+            table_options.insert(key.clone(), value.clone());
         }
     }
 }
@@ -1402,13 +1438,14 @@ mod tests {
     #[test]
     fn test_fill_table_options_copies_semantic_extensions() {
         use table::requests::{
-            SEMANTIC_PER_TABLE_INDEX_KEY, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE,
-            SIGNAL_TYPE_METRIC, SOURCE_OPENTELEMETRY,
+            SEMANTIC_METRIC_TYPE, SEMANTIC_PER_TABLE_INDEX_KEY, SEMANTIC_SIGNAL_TYPE,
+            SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_OPENTELEMETRY,
         };
 
         let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
         ctx.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+        ctx.set_extension(SEMANTIC_METRIC_TYPE, "bogus");
         // The internal transport key must NOT be copied into table options.
         ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, "{}");
         let ctx = Arc::new(ctx);
@@ -1424,7 +1461,57 @@ mod tests {
             Some(SOURCE_OPENTELEMETRY),
             table_options.get(SEMANTIC_SOURCE).map(String::as_str)
         );
+        assert!(!table_options.contains_key(SEMANTIC_METRIC_TYPE));
         assert!(!table_options.contains_key(SEMANTIC_PER_TABLE_INDEX_KEY));
+    }
+
+    #[test]
+    fn test_apply_per_table_semantic_options() {
+        use table::requests::{
+            SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT, SEMANTIC_PER_TABLE_INDEX_KEY,
+        };
+
+        let index = r#"{
+            "http_requests_total": {
+                "greptime.semantic.metric.type": "counter",
+                "greptime.semantic.metric.unit": "By",
+                "greptime.semantic.metric.type_BOGUS": "x"
+            },
+            "other_table": {
+                "greptime.semantic.metric.type": "gauge"
+            }
+        }"#;
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
+        let ctx = Arc::new(ctx);
+
+        let mut table_options = std::collections::HashMap::new();
+        apply_per_table_semantic_options(&mut table_options, &ctx, "http_requests_total");
+        assert_eq!(
+            table_options.get(SEMANTIC_METRIC_TYPE).map(String::as_str),
+            Some("counter")
+        );
+        assert_eq!(
+            table_options.get(SEMANTIC_METRIC_UNIT).map(String::as_str),
+            Some("By")
+        );
+        // The unknown key is rejected by the vocabulary check; other tables' keys
+        // never appear.
+        assert!(!table_options.contains_key("greptime.semantic.metric.type_BOGUS"));
+        assert_eq!(table_options.len(), 2);
+
+        let mut empty = std::collections::HashMap::new();
+        apply_per_table_semantic_options(&mut empty, &ctx, "not_in_index");
+        assert!(empty.is_empty());
+
+        // No extension at all is a no-op (e.g. logs / Prom RW).
+        let bare = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+        let mut opts = std::collections::HashMap::new();
+        apply_per_table_semantic_options(&mut opts, &bare, "http_requests_total");
+        assert!(opts.is_empty());
     }
 
     #[test]

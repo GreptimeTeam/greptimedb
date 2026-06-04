@@ -30,6 +30,7 @@ use servers::query_handler::InfluxdbLineProtocolHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::mito_engine_options::MERGE_MODE_KEY;
+use table::requests::{SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_INFLUXDB};
 
 use crate::instance::Instance;
 use crate::service_config::influxdb::InfluxdbMergeMode;
@@ -77,6 +78,12 @@ impl InfluxdbLineProtocolHandler for Instance {
             .await?;
 
         let ctx = ctx_with_default_merge_mode(ctx, self.influxdb_default_merge_mode);
+        let ctx = {
+            let mut c = (*ctx).clone();
+            c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
+            c.set_extension(SEMANTIC_SOURCE, SOURCE_INFLUXDB);
+            Arc::new(c)
+        };
 
         self.handle_influx_row_inserts(requests, ctx)
             .await
