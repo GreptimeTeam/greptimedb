@@ -35,8 +35,8 @@ use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
+use servers::otlp::coerce::{coerce_value_data, trace_value_datatype};
 use servers::otlp::trace::TraceAuxData;
-use servers::otlp::trace::coerce::{coerce_value_data, trace_value_datatype};
 use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::query_handler::{
     OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,

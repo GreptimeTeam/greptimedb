@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap as StdHashMap};
+use std::collections::BTreeMap;
 
+use ahash::{HashMap, HashMapExt};
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_data_type_extension::TypeExt;
+use api::v1::column_def::options_from_column_schema;
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnOptions, ColumnSchema, JsonTypeExtension, Row,
     RowInsertRequest, Rows, SemanticType, Value as GreptimeValue,
 };
 use bytes::Bytes;
+use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
@@ -34,9 +39,11 @@ use vrl::prelude::NotNan;
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    IncompatibleSchemaSnafu, NotSupportedSnafu, Result, UnsupportedJsonDataTypeForTagSnafu,
+    Error, IncompatibleSchemaSnafu, InvalidParameterSnafu, NotSupportedSnafu, Result,
+    UnsupportedJsonDataTypeForTagSnafu,
 };
 use crate::http::event::PipelineIngestRequest;
+use crate::otlp::coerce::coerce_value_data;
 use crate::otlp::trace::attributes::OtlpAnyValue;
 use crate::otlp::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::pipeline::run_pipeline;
@@ -61,7 +68,20 @@ pub async fn to_grpc_insert_requests(
 ) -> Result<ContextReq> {
     match pipeline {
         PipelineWay::OtlpLogDirect(select_info) => {
-            let rows = parse_export_logs_service_request_to_rows(request, select_info)?;
+            let table = pipeline_handler
+                .get_table(&table_name, query_ctx)
+                .await
+                .map_err(Error::from)?;
+            let existing_schema = table
+                .as_deref()
+                .map(ExistingLogSchema::try_from_table)
+                .transpose()?;
+            let rows = parse_export_logs_service_request_to_rows(
+                request,
+                select_info,
+                existing_schema.as_ref(),
+                &table_name,
+            )?;
             let insert_request = RowInsertRequest {
                 rows: Some(rows),
                 table_name,
@@ -219,7 +239,7 @@ fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
             SemanticType::Field,
             None,
             Some(ColumnOptions {
-                options: StdHashMap::from([(
+                options: std::collections::HashMap::from([(
                     "fulltext".to_string(),
                     r#"{"enable":true}"#.to_string(),
                 )]),
@@ -301,6 +321,65 @@ fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
     .collect::<Vec<ColumnSchema>>()
 }
 
+#[derive(Clone)]
+struct ExistingLogColumn {
+    schema: ColumnSchema,
+    datatype: ColumnDataType,
+}
+
+#[derive(Default)]
+struct ExistingLogSchema {
+    columns: HashMap<String, ExistingLogColumn>,
+}
+
+impl ExistingLogSchema {
+    fn try_from_table(table: &table::Table) -> Result<Self> {
+        let table_info = table.table_info();
+        Self::try_from_schema_parts(
+            table.schema_ref().column_schemas(),
+            &table_info.meta.primary_key_indices,
+        )
+    }
+
+    fn try_from_schema_parts(
+        column_schemas: &[datatypes::schema::ColumnSchema],
+        primary_key_indices: &[usize],
+    ) -> Result<Self> {
+        let mut columns = HashMap::with_capacity(column_schemas.len());
+
+        for (index, column_schema) in column_schemas.iter().enumerate() {
+            let (datatype, datatype_extension) =
+                ColumnDataTypeWrapper::try_from(column_schema.data_type.clone())
+                    .map(|wrapper| wrapper.into_parts())
+                    .map_err(Error::from)?;
+            let semantic_type = if column_schema.is_time_index() {
+                SemanticType::Timestamp
+            } else if primary_key_indices.contains(&index) {
+                SemanticType::Tag
+            } else {
+                SemanticType::Field
+            };
+            let schema = ColumnSchema {
+                column_name: column_schema.name.clone(),
+                datatype: datatype as i32,
+                semantic_type: semantic_type as i32,
+                datatype_extension,
+                options: options_from_column_schema(column_schema),
+            };
+            columns.insert(
+                schema.column_name.clone(),
+                ExistingLogColumn { schema, datatype },
+            );
+        }
+
+        Ok(Self { columns })
+    }
+
+    fn get(&self, column_name: &str) -> Option<&ExistingLogColumn> {
+        self.columns.get(column_name)
+    }
+}
+
 fn build_otlp_build_in_row(
     log: LogRecord,
     parse_ctx: &mut ParseContext,
@@ -366,6 +445,8 @@ fn extract_field_from_attr_and_combine_schema(
     select_info: &SelectInfo,
     select_schema: &mut SchemaInfo,
     attrs: &jsonb::Value,
+    existing_schema: Option<&ExistingLogSchema>,
+    table_name: &str,
 ) -> Result<Vec<GreptimeValue>> {
     // note we use schema.len instead of select_keys.len
     // because the len of the row value should always matches the len of the schema
@@ -375,7 +456,9 @@ fn extract_field_from_attr_and_combine_schema(
         let Some(value) = attrs.get_by_name_ignore_case(key).cloned() else {
             continue;
         };
-        let Some((schema, value)) = decide_column_schema_and_convert_value(key, value)? else {
+        let Some((schema, value)) =
+            decide_column_schema_and_convert_value(key, value, existing_schema, table_name)?
+        else {
             continue;
         };
 
@@ -408,7 +491,18 @@ fn extract_field_from_attr_and_combine_schema(
 fn decide_column_schema_and_convert_value(
     column_name: &str,
     value: JsonbValue,
+    existing_schema: Option<&ExistingLogSchema>,
+    table_name: &str,
 ) -> Result<Option<(ColumnSchema, GreptimeValue)>> {
+    if let Some(existing_column) = existing_schema.and_then(|schema| schema.get(column_name)) {
+        return decide_existing_column_schema_and_convert_value(
+            column_name,
+            value,
+            existing_column,
+            table_name,
+        );
+    }
+
     let column_info = match value {
         JsonbValue::String(s) => Ok(Some((
             GreptimeValue {
@@ -472,16 +566,232 @@ fn decide_column_schema_and_convert_value(
     })
 }
 
+fn decide_existing_column_schema_and_convert_value(
+    column_name: &str,
+    value: JsonbValue,
+    existing_column: &ExistingLogColumn,
+    table_name: &str,
+) -> Result<Option<(ColumnSchema, GreptimeValue)>> {
+    let Some((value_data, request_type)) = jsonb_value_to_log_value_data(column_name, value, true)?
+    else {
+        return Ok(None);
+    };
+    let value_data = coerce_log_value_data(
+        Some(value_data),
+        existing_column.datatype,
+        existing_column.schema.semantic_type(),
+        request_type,
+        column_name,
+        table_name,
+    )?;
+
+    Ok(Some((
+        existing_column.schema.clone(),
+        GreptimeValue { value_data },
+    )))
+}
+
+fn jsonb_value_to_log_value_data(
+    column_name: &str,
+    value: JsonbValue,
+    allow_float: bool,
+) -> Result<Option<(ValueData, ColumnDataType)>> {
+    match value {
+        JsonbValue::String(s) => Ok(Some((
+            ValueData::StringValue(s.into()),
+            ColumnDataType::String,
+        ))),
+        JsonbValue::Number(n) => match n {
+            JsonbNumber::Int64(i) => Ok(Some((ValueData::I64Value(i), ColumnDataType::Int64))),
+            JsonbNumber::Float64(f) if allow_float => {
+                Ok(Some((ValueData::F64Value(f), ColumnDataType::Float64)))
+            }
+            JsonbNumber::Float64(_) => UnsupportedJsonDataTypeForTagSnafu {
+                ty: "FLOAT".to_string(),
+                key: column_name,
+            }
+            .fail(),
+            JsonbNumber::UInt64(u) => Ok(Some((ValueData::U64Value(u), ColumnDataType::Uint64))),
+        },
+        JsonbValue::Bool(b) => Ok(Some((ValueData::BoolValue(b), ColumnDataType::Boolean))),
+        JsonbValue::Array(_) | JsonbValue::Object(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "Json".to_string(),
+            key: column_name,
+        }
+        .fail(),
+        JsonbValue::Null => Ok(None),
+    }
+}
+
+fn align_rows_with_existing_schema(
+    schemas: &mut [ColumnSchema],
+    rows: &mut [Row],
+    existing_schema: Option<&ExistingLogSchema>,
+    table_name: &str,
+) -> Result<()> {
+    let Some(existing_schema) = existing_schema else {
+        return Ok(());
+    };
+
+    for (column_idx, schema) in schemas.iter_mut().enumerate() {
+        let request_type = schema.datatype();
+        let Some(existing_column) = existing_schema.get(&schema.column_name) else {
+            // Existing tables own their primary key definition; request-only
+            // columns must not expand it.
+            if schema.semantic_type() == SemanticType::Tag {
+                schema.semantic_type = SemanticType::Field as i32;
+            }
+            continue;
+        };
+
+        let target_type = existing_column.datatype;
+        let semantic_type = existing_column.schema.semantic_type();
+        for row in rows.iter_mut() {
+            let Some(value) = row.values.get_mut(column_idx) else {
+                continue;
+            };
+            value.value_data = coerce_log_value_data(
+                value.value_data.take(),
+                target_type,
+                semantic_type,
+                request_type,
+                &schema.column_name,
+                table_name,
+            )?;
+        }
+        *schema = existing_column.schema.clone();
+    }
+
+    Ok(())
+}
+
+fn coerce_log_value_data(
+    value_data: Option<ValueData>,
+    target_type: ColumnDataType,
+    _semantic_type: SemanticType,
+    request_type: ColumnDataType,
+    column_name: &str,
+    table_name: &str,
+) -> Result<Option<ValueData>> {
+    let Some(value_data) = value_data else {
+        return Ok(None);
+    };
+
+    if request_type == target_type {
+        return Ok(Some(value_data));
+    }
+
+    if is_timestamp_type(request_type)
+        && let Some(target_unit) = timestamp_unit(target_type)
+    {
+        return align_timestamp_value(value_data, target_unit, column_name, table_name).map(Some);
+    }
+
+    if target_type == ColumnDataType::String {
+        if let Ok(value_data) =
+            coerce_value_data(&Some(value_data.clone()), target_type, request_type)
+        {
+            return Ok(value_data);
+        }
+        if let Some(value_data) = stringify_scalar_value(value_data) {
+            return Ok(Some(value_data));
+        }
+    }
+
+    InvalidParameterSnafu {
+        reason: format!(
+            "failed to align log column '{}' in table '{}' from {:?} to {:?}",
+            column_name, table_name, request_type, target_type
+        ),
+    }
+    .fail()
+}
+
+fn stringify_scalar_value(value_data: ValueData) -> Option<ValueData> {
+    let value = match value_data {
+        ValueData::StringValue(value) => value,
+        ValueData::BoolValue(value) => value.to_string(),
+        ValueData::I8Value(value) => value.to_string(),
+        ValueData::I16Value(value) => value.to_string(),
+        ValueData::I32Value(value) => value.to_string(),
+        ValueData::I64Value(value) => value.to_string(),
+        ValueData::U8Value(value) => value.to_string(),
+        ValueData::U16Value(value) => value.to_string(),
+        ValueData::U32Value(value) => value.to_string(),
+        ValueData::U64Value(value) => value.to_string(),
+        ValueData::F32Value(value) => value.to_string(),
+        ValueData::F64Value(value) => value.to_string(),
+        _ => return None,
+    };
+    Some(ValueData::StringValue(value))
+}
+
+fn align_timestamp_value(
+    value_data: ValueData,
+    target_unit: TimeUnit,
+    column_name: &str,
+    table_name: &str,
+) -> Result<ValueData> {
+    let timestamp = match value_data {
+        ValueData::TimestampSecondValue(value) => Timestamp::new_second(value),
+        ValueData::TimestampMillisecondValue(value) => Timestamp::new_millisecond(value),
+        ValueData::TimestampMicrosecondValue(value) => Timestamp::new_microsecond(value),
+        ValueData::TimestampNanosecondValue(value) => Timestamp::new_nanosecond(value),
+        value_data => {
+            return InvalidParameterSnafu {
+                reason: format!(
+                    "failed to align log column '{}' in table '{}' from non-timestamp value {:?}",
+                    column_name, table_name, value_data
+                ),
+            }
+            .fail();
+        }
+    };
+    let timestamp = timestamp.convert_to(target_unit).ok_or_else(|| {
+        InvalidParameterSnafu {
+            reason: format!(
+                "failed to align log column '{}' in table '{}' to timestamp unit {}",
+                column_name, table_name, target_unit
+            ),
+        }
+        .build()
+    })?;
+
+    Ok(match target_unit {
+        TimeUnit::Second => ValueData::TimestampSecondValue(timestamp.value()),
+        TimeUnit::Millisecond => ValueData::TimestampMillisecondValue(timestamp.value()),
+        TimeUnit::Microsecond => ValueData::TimestampMicrosecondValue(timestamp.value()),
+        TimeUnit::Nanosecond => ValueData::TimestampNanosecondValue(timestamp.value()),
+    })
+}
+
+fn is_timestamp_type(datatype: ColumnDataType) -> bool {
+    timestamp_unit(datatype).is_some()
+}
+
+fn timestamp_unit(datatype: ColumnDataType) -> Option<TimeUnit> {
+    match datatype {
+        ColumnDataType::TimestampSecond => Some(TimeUnit::Second),
+        ColumnDataType::TimestampMillisecond => Some(TimeUnit::Millisecond),
+        ColumnDataType::TimestampMicrosecond => Some(TimeUnit::Microsecond),
+        ColumnDataType::TimestampNanosecond => Some(TimeUnit::Nanosecond),
+        _ => None,
+    }
+}
+
 fn parse_export_logs_service_request_to_rows(
     request: ExportLogsServiceRequest,
     select_info: Box<SelectInfo>,
+    existing_schema: Option<&ExistingLogSchema>,
+    table_name: &str,
 ) -> Result<Rows> {
     let mut schemas = build_otlp_logs_identity_schema();
 
-    let mut parse_ctx = ParseContext::new(select_info);
+    let mut parse_ctx = ParseContext::new(select_info, existing_schema, table_name);
     let mut rows = parse_resource(&mut parse_ctx, request.resource_logs)?;
 
     schemas.extend(parse_ctx.select_schema.column_schemas()?);
+    align_rows_with_existing_schema(&mut schemas, &mut rows, existing_schema, table_name)?;
 
     rows.iter_mut().for_each(|row| {
         row.values.resize(schemas.len(), GreptimeValue::default());
@@ -517,6 +827,8 @@ fn parse_resource(
             &parse_ctx.select_info,
             &mut parse_ctx.select_schema,
             &parse_ctx.resource_attr,
+            parse_ctx.existing_schema,
+            parse_ctx.table_name,
         )?;
 
         let rows = parse_scope(r.scope_logs, parse_ctx)?;
@@ -528,6 +840,8 @@ fn parse_resource(
 struct ParseContext<'a> {
     // input selected keys
     select_info: Box<SelectInfo>,
+    existing_schema: Option<&'a ExistingLogSchema>,
+    table_name: &'a str,
     // schema infos for selected keys from resource/scope/log for current request
     // since the value override from bottom to top, the max capacity is the length of the keys
     select_schema: SchemaInfo,
@@ -546,10 +860,16 @@ struct ParseContext<'a> {
 }
 
 impl<'a> ParseContext<'a> {
-    pub fn new(select_info: Box<SelectInfo>) -> ParseContext<'a> {
+    pub fn new(
+        select_info: Box<SelectInfo>,
+        existing_schema: Option<&'a ExistingLogSchema>,
+        table_name: &'a str,
+    ) -> ParseContext<'a> {
         let len = select_info.keys.len();
         ParseContext {
             select_info,
+            existing_schema,
+            table_name,
             select_schema: SchemaInfo::with_capacity(len),
             resource_uplift_values: vec![],
             scope_uplift_values: vec![],
@@ -578,6 +898,8 @@ fn parse_scope(scopes_log_vec: Vec<ScopeLogs>, parse_ctx: &mut ParseContext) -> 
             &parse_ctx.select_info,
             &mut parse_ctx.select_schema,
             &parse_ctx.scope_attrs,
+            parse_ctx.existing_schema,
+            parse_ctx.table_name,
         )?;
 
         let rows = parse_log(scope_logs.log_records, parse_ctx)?;
@@ -596,6 +918,8 @@ fn parse_log(log_records: Vec<LogRecord>, parse_ctx: &mut ParseContext) -> Resul
             &parse_ctx.select_info,
             &mut parse_ctx.select_schema,
             &log_attr,
+            parse_ctx.existing_schema,
+            parse_ctx.table_name,
         )?;
 
         let extracted_values = merge_values(
@@ -699,4 +1023,265 @@ fn key_value_to_map(key_values: Vec<KeyValue>) -> BTreeMap<KeyString, VrlValue> 
 fn log_body_to_string(body: &AnyValue) -> String {
     let otlp_value = OtlpAnyValue::from(body);
     otlp_value.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema as DatatypesColumnSchema;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
+
+    use super::*;
+
+    fn time_column(datatype: ConcreteDataType) -> DatatypesColumnSchema {
+        DatatypesColumnSchema::new("timestamp", datatype, false).with_time_index(true)
+    }
+
+    fn column(name: &str, datatype: ConcreteDataType) -> DatatypesColumnSchema {
+        DatatypesColumnSchema::new(name, datatype, true)
+    }
+
+    fn existing_schema(
+        columns: Vec<DatatypesColumnSchema>,
+        primary_key_indices: &[usize],
+    ) -> ExistingLogSchema {
+        ExistingLogSchema::try_from_schema_parts(&columns, primary_key_indices).unwrap()
+    }
+
+    fn kv(key: &str, value: OtlpValue) -> KeyValue {
+        KeyValue {
+            key: key.to_string(),
+            value: Some(AnyValue { value: Some(value) }),
+        }
+    }
+
+    fn request_with_log_attrs(attrs: Vec<KeyValue>) -> ExportLogsServiceRequest {
+        ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 1_234_000_000,
+                        trace_id: vec![1; 16],
+                        attributes: attrs,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn parse_with_select(
+        request: ExportLogsServiceRequest,
+        select: &str,
+        existing_schema: Option<&ExistingLogSchema>,
+    ) -> Result<Rows> {
+        parse_export_logs_service_request_to_rows(
+            request,
+            Box::new(SelectInfo::from(select.to_string())),
+            existing_schema,
+            "test_logs",
+        )
+    }
+
+    fn column_index(rows: &Rows, name: &str) -> usize {
+        rows.schema
+            .iter()
+            .position(|schema| schema.column_name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn test_no_existing_table_preserves_direct_schema() {
+        let rows = parse_with_select(request_with_log_attrs(vec![]), "", None).unwrap();
+
+        assert_eq!(rows.schema[0].column_name, "timestamp");
+        assert_eq!(
+            rows.schema[0].datatype,
+            ColumnDataType::TimestampNanosecond as i32
+        );
+        assert_eq!(rows.schema[0].semantic_type, SemanticType::Timestamp as i32);
+        let scope_name_idx = column_index(&rows, "scope_name");
+        assert_eq!(
+            rows.schema[scope_name_idx].semantic_type,
+            SemanticType::Tag as i32
+        );
+    }
+
+    #[test]
+    fn test_existing_primary_key_updates_builtin_column_semantic_type() {
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("trace_id", ConcreteDataType::string_datatype()),
+            ],
+            &[1],
+        );
+
+        let rows = parse_with_select(request_with_log_attrs(vec![]), "", Some(&existing)).unwrap();
+        let trace_id_idx = column_index(&rows, "trace_id");
+
+        assert_eq!(
+            rows.schema[trace_id_idx].semantic_type,
+            SemanticType::Tag as i32
+        );
+    }
+
+    #[test]
+    fn test_existing_string_primary_key_stringifies_selected_scalar_values() {
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("host", ConcreteDataType::string_datatype()),
+            ],
+            &[1],
+        );
+        let rows = parse_with_select(
+            request_with_log_attrs(vec![kv("host", OtlpValue::IntValue(42))]),
+            "host",
+            Some(&existing),
+        )
+        .unwrap();
+        let host_idx = column_index(&rows, "host");
+
+        assert_eq!(
+            rows.schema[host_idx].datatype,
+            ColumnDataType::String as i32
+        );
+        assert_eq!(
+            rows.schema[host_idx].semantic_type,
+            SemanticType::Tag as i32
+        );
+        assert_eq!(
+            rows.rows[0].values[host_idx].value_data,
+            Some(ValueData::StringValue("42".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_existing_string_field_stringifies_selected_scalar_values() {
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("host", ConcreteDataType::string_datatype()),
+            ],
+            &[],
+        );
+        let rows = parse_with_select(
+            request_with_log_attrs(vec![kv("host", OtlpValue::IntValue(42))]),
+            "host",
+            Some(&existing),
+        )
+        .unwrap();
+        let host_idx = column_index(&rows, "host");
+
+        assert_eq!(
+            rows.schema[host_idx].datatype,
+            ColumnDataType::String as i32
+        );
+        assert_eq!(
+            rows.schema[host_idx].semantic_type,
+            SemanticType::Field as i32
+        );
+        assert_eq!(
+            rows.rows[0].values[host_idx].value_data,
+            Some(ValueData::StringValue("42".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_existing_non_string_primary_key_rejects_incompatible_selected_value() {
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("host", ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        );
+        let err = parse_with_select(
+            request_with_log_attrs(vec![kv(
+                "host",
+                OtlpValue::StringValue("node-a".to_string()),
+            )]),
+            "host",
+            Some(&existing),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("failed to align log column 'host'")
+        );
+    }
+
+    #[test]
+    fn test_existing_timestamp_unit_is_respected() {
+        let existing = existing_schema(
+            vec![time_column(
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            )],
+            &[],
+        );
+        let rows = parse_with_select(request_with_log_attrs(vec![]), "", Some(&existing)).unwrap();
+
+        assert_eq!(
+            rows.schema[0].datatype,
+            ColumnDataType::TimestampMillisecond as i32
+        );
+        assert_eq!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::TimestampMillisecondValue(1234))
+        );
+    }
+
+    #[test]
+    fn test_missing_existing_primary_key_is_not_generated() {
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("host", ConcreteDataType::string_datatype()),
+            ],
+            &[1],
+        );
+        let rows = parse_with_select(request_with_log_attrs(vec![]), "", Some(&existing)).unwrap();
+
+        assert!(
+            !rows
+                .schema
+                .iter()
+                .any(|schema| schema.column_name == "host")
+        );
+    }
+
+    #[test]
+    fn test_existing_table_keeps_new_generated_columns_as_fields() {
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("trace_id", ConcreteDataType::string_datatype()),
+            ],
+            &[1],
+        );
+        let rows = parse_with_select(
+            request_with_log_attrs(vec![kv(
+                "host",
+                OtlpValue::StringValue("node-a".to_string()),
+            )]),
+            "host",
+            Some(&existing),
+        )
+        .unwrap();
+        let host_idx = column_index(&rows, "host");
+        let scope_name_idx = column_index(&rows, "scope_name");
+
+        assert_eq!(
+            rows.schema[host_idx].semantic_type,
+            SemanticType::Field as i32
+        );
+        assert_eq!(
+            rows.schema[scope_name_idx].semantic_type,
+            SemanticType::Field as i32
+        );
+    }
 }

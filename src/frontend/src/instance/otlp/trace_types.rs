@@ -14,7 +14,7 @@
 
 use api::v1::{ColumnDataType, Row};
 use servers::error::{self, Result as ServerResult};
-use servers::otlp::trace::coerce::{
+use servers::otlp::coerce::{
     coerce_value_data, is_supported_trace_coercion, resolve_new_trace_column_type,
     trace_value_datatype,
 };
