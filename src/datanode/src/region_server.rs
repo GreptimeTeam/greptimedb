@@ -52,7 +52,7 @@ use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::schema::SchemaRef;
 use either::Either;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 use futures_util::future::try_join_all;
 use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
@@ -84,7 +84,7 @@ use store_api::region_request::{
     RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit, mpsc, oneshot};
 use tokio::time::timeout;
 use tonic::{Request, Response, Result as TonicResult};
 
@@ -98,8 +98,11 @@ use crate::error::{
     UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
+use crate::query_stream::QueryRuntimeStream;
 use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
 use crate::runtime::DatanodeRuntimes;
+
+const QUERY_RUNTIME_STREAM_BUFFER_SIZE: usize = 8;
 
 #[derive(Clone)]
 pub struct RegionServer {
@@ -276,6 +279,23 @@ impl RegionServer {
         request: api::v1::region::QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
+        let server = self.clone();
+        return self
+            .inner
+            .runtimes
+            .query_runtime()
+            .spawn(async move { server.handle_remote_read_inner(request, query_ctx).await })
+            .await
+            .context(RuntimeJoinSnafu {
+                request_type: "remote_read",
+            })?;
+    }
+
+    async fn handle_remote_read_inner(
+        &self,
+        request: api::v1::region::QueryRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<SendableRecordBatchStream> {
         let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
@@ -322,6 +342,19 @@ impl RegionServer {
 
     #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+        let server = self.clone();
+        return self
+            .inner
+            .runtimes
+            .query_runtime()
+            .spawn(async move { server.handle_read_inner(request).await })
+            .await
+            .context(RuntimeJoinSnafu {
+                request_type: "read",
+            })?;
+    }
+
+    async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
@@ -1809,6 +1842,48 @@ impl RegionServerInner {
     }
 
     pub async fn handle_read(
+        self: &Arc<Self>,
+        request: QueryRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<SendableRecordBatchStream> {
+        let inner = self.clone();
+        let (sender, receiver) = mpsc::channel(QUERY_RUNTIME_STREAM_BUFFER_SIZE);
+        let (init_sender, init_receiver) = oneshot::channel();
+
+        let _handle = self.runtimes.query_runtime().spawn(async move {
+            match inner.handle_read_inner(request, query_ctx).await {
+                Ok(mut stream) => {
+                    let schema = stream.schema();
+                    let output_ordering = stream.output_ordering().map(|ordering| ordering.to_vec());
+                    if init_sender.send(Ok((schema, output_ordering))).is_err() {
+                        return;
+                    }
+
+                    while let Some(batch) = stream.next().await {
+                        if sender.send(batch).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = init_sender.send(Err(error));
+                }
+            }
+        });
+
+        let (schema, output_ordering) = init_receiver.await.map_err(|_| {
+            UnexpectedSnafu {
+                violated: "query runtime stream producer dropped before initialization",
+            }
+            .build()
+        })??;
+
+        Ok(Box::pin(
+            QueryRuntimeStream::new(schema, receiver).with_output_ordering(output_ordering),
+        ))
+    }
+
+    async fn handle_read_inner(
         &self,
         request: QueryRequest,
         query_ctx: QueryContextRef,

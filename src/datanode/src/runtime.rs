@@ -55,6 +55,33 @@ mod tests {
     use crate::config::DatanodeRuntimeOptions;
 
     #[test]
+    fn test_query_runtime_spawn_uses_query_thread_name() {
+        let runtimes = DatanodeRuntimes::new(&DatanodeRuntimeOptions {
+            query_rt_size: 1,
+            ingest_rt_size: 1,
+        });
+        let runtime = runtimes.query_runtime();
+
+        let runtime_to_spawn = runtime.clone();
+        let thread_name = runtime.block_on(async move {
+            runtime_to_spawn
+                .spawn(async move {
+                    std::thread::current()
+                        .name()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .await
+                .unwrap()
+        });
+
+        assert!(
+            thread_name.starts_with("datanode-query-worker"),
+            "unexpected query runtime thread name: {thread_name}"
+        );
+    }
+
+    #[test]
     fn test_datanode_runtimes_use_named_runtimes() {
         let runtimes = DatanodeRuntimes::new(&DatanodeRuntimeOptions {
             query_rt_size: 1,
