@@ -18,9 +18,10 @@ use api::v1::{ArrowIpc, SemanticType};
 use bytes::Bytes;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use datatypes::arrow::record_batch::RecordBatch;
-use snafu::{OptionExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionBulkInsertsRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -71,8 +72,11 @@ impl MetricEngineInner {
     async fn bulk_insert_physical_region(
         &self,
         region_id: RegionId,
-        request: RegionBulkInsertsRequest,
+        mut request: RegionBulkInsertsRequest,
     ) -> Result<AffectedRows> {
+        // Simply set the aligned schema to the data region schema version to avoid filling missing columns
+        // because that schema should be constant and callers have ensured request has the same schema.
+        request.aligned_schema_version = Some(self.physical_schema_version(region_id).await?);
         self.data_region
             .write_data(region_id, RegionRequest::BulkInserts(request))
             .await
@@ -117,6 +121,8 @@ impl MetricEngineInner {
         let (schema, data_header, payload) = record_batch_to_ipc(&modified_batch)?;
 
         let partition_expr_version = request.partition_expr_version;
+        let aligned_schema_version = Some(self.physical_schema_version(data_region_id).await?);
+
         let request = RegionBulkInsertsRequest {
             region_id: data_region_id,
             payload: modified_batch,
@@ -126,10 +132,20 @@ impl MetricEngineInner {
                 payload,
             },
             partition_expr_version,
+            aligned_schema_version,
         };
         self.data_region
             .write_data(data_region_id, RegionRequest::BulkInserts(request))
             .await
+    }
+
+    async fn physical_schema_version(&self, region_id: RegionId) -> Result<u64> {
+        Ok(self
+            .mito
+            .get_metadata(region_id)
+            .await
+            .context(error::MitoReadOperationSnafu)?
+            .schema_version)
     }
 
     fn resolve_tag_columns_from_metadata(
@@ -282,6 +298,7 @@ mod tests {
                 payload,
             },
             partition_expr_version: None,
+            aligned_schema_version: None,
         })
     }
 
@@ -319,6 +336,7 @@ mod tests {
             payload: batch,
             raw_data: ArrowIpc::default(),
             partition_expr_version: None,
+            aligned_schema_version: None,
         });
         let response = env
             .metric()

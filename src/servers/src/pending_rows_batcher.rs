@@ -1380,6 +1380,7 @@ fn transform_logical_batches_to_physical(
 
             let modified = {
                 let start = Instant::now();
+                // The schema of modified batch is: __primary_key, timestamp, value, other partition columns...
                 let batch = modify_batch_sparse(
                     batch.clone(),
                     table_id,
@@ -1535,6 +1536,9 @@ fn encode_region_write_requests(
             body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                 region_id: region_id.as_u64(),
                 partition_expr_version: None,
+                // Set aligned_schema_version to None so that datanode will check the batch schema again to see if any
+                // column is missing.
+                aligned_schema_version: None,
                 body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                     schema: schema_bytes,
                     data_header,

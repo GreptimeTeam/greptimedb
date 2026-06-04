@@ -652,6 +652,7 @@ fn build_bulk_insert_request(
             payload: record_batch.data_body,
         },
         partition_expr_version: None,
+        aligned_schema_version: None,
     }
 }
 
