@@ -284,3 +284,4 @@ Affected Rows: 0
 drop table csv_headerless_skip_bad_records;
 
 Affected Rows: 0
+

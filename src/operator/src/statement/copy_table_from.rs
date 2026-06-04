@@ -706,11 +706,18 @@ fn generated_positional_schema_projection_and_compatible_file_schema(
     let len = file.fields.len().min(table.fields.len());
     let file_projection = (0..len).collect::<Vec<_>>();
     let table_projection = (0..len).collect::<Vec<_>>();
-    let mut compatible_fields = file.fields.iter().cloned().collect::<Vec<_>>();
-
-    for (idx, table_field) in table.fields.iter().take(len).enumerate() {
-        compatible_fields[idx] = table_field.clone();
-    }
+    let compatible_fields = file
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(idx, file_field)| {
+            if idx < len {
+                table.fields[idx].clone()
+            } else {
+                file_field.clone()
+            }
+        })
+        .collect::<Vec<_>>();
 
     CopyFromSchemaMapping {
         file_projection,
