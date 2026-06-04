@@ -98,6 +98,7 @@ use crate::error::{
 };
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
+use crate::runtime::DatanodeRuntimes;
 
 #[derive(Clone)]
 pub struct RegionServer {
@@ -116,12 +117,14 @@ impl RegionServer {
     pub fn new(
         query_engine: QueryEngineRef,
         runtime: Runtime,
+        runtimes: DatanodeRuntimes,
         event_listener: RegionServerEventListenerRef,
         flight_compression: FlightCompression,
     ) -> Self {
         Self::with_table_provider(
             query_engine,
             runtime,
+            runtimes,
             event_listener,
             Arc::new(DummyTableProviderFactory),
             0,
@@ -133,6 +136,7 @@ impl RegionServer {
     pub fn with_table_provider(
         query_engine: QueryEngineRef,
         runtime: Runtime,
+        runtimes: DatanodeRuntimes,
         event_listener: RegionServerEventListenerRef,
         table_provider_factory: TableProviderFactoryRef,
         max_concurrent_queries: usize,
@@ -143,6 +147,7 @@ impl RegionServer {
             inner: Arc::new(RegionServerInner::new(
                 query_engine,
                 runtime,
+                runtimes,
                 event_listener,
                 table_provider_factory,
                 RegionServerParallelism::from_opts(
@@ -1042,6 +1047,7 @@ struct RegionServerInner {
     region_map: DashMap<RegionId, RegionEngineWithStatus>,
     query_engine: QueryEngineRef,
     runtime: Runtime,
+    runtimes: DatanodeRuntimes,
     event_listener: RegionServerEventListenerRef,
     table_provider_factory: TableProviderFactoryRef,
     /// The number of queries allowed to be executed at the same time.
@@ -1155,6 +1161,7 @@ impl RegionServerInner {
     pub fn new(
         query_engine: QueryEngineRef,
         runtime: Runtime,
+        runtimes: DatanodeRuntimes,
         event_listener: RegionServerEventListenerRef,
         table_provider_factory: TableProviderFactoryRef,
         parallelism: Option<RegionServerParallelism>,
@@ -1164,6 +1171,7 @@ impl RegionServerInner {
             region_map: DashMap::new(),
             query_engine,
             runtime,
+            runtimes,
             event_listener,
             table_provider_factory,
             parallelism,

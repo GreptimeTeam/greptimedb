@@ -42,9 +42,11 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use table::TableRef;
 use tokio::sync::mpsc::{Receiver, Sender};
 
+use crate::config::DatanodeRuntimeOptions;
 use crate::error::{Error, NotYetImplementedSnafu};
 use crate::event_listener::NoopRegionServerEventListener;
 use crate::region_server::RegionServer;
+use crate::runtime::DatanodeRuntimes;
 
 pub struct MockQueryEngine;
 
@@ -103,6 +105,10 @@ pub fn mock_region_server() -> RegionServer {
     RegionServer::new(
         Arc::new(MockQueryEngine),
         Runtime::builder().build().unwrap(),
+        DatanodeRuntimes::new(&DatanodeRuntimeOptions {
+            query_rt_size: 1,
+            ingest_rt_size: 1,
+        }),
         Box::new(NoopRegionServerEventListener),
         FlightCompression::default(),
     )
