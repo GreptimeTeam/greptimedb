@@ -116,8 +116,11 @@ impl<'a> SemanticRow<'a> {
         }
 
         // `rest` is a `BTreeMap`, so the JSON keys come out sorted and the output
-        // is stable across runs.
-        let options_json = (!rest.is_empty()).then(|| serde_json::to_string(&rest).unwrap());
+        // is stable across runs. Serializing a string map can't realistically fail,
+        // but fold a failure into `None` rather than panicking the query path.
+        let options_json = (!rest.is_empty())
+            .then(|| serde_json::to_string(&rest).ok())
+            .flatten();
 
         Some(Self {
             signal_type,
@@ -271,19 +274,22 @@ impl InformationSchemaSemanticTablesBuilder {
         };
 
         let table_name = table_info.name.as_ref();
+        let catalog_v = Value::from(catalog_name);
+        let schema_v = Value::from(schema_name);
+        let name_v = Value::from(table_name);
+        let signal_v = optional_value(row.signal_type);
+        let source_v = optional_value(row.source);
+        let pipeline_v = optional_value(row.pipeline);
+        let quality_v = optional_value(row.metadata_quality);
         let predicate_row = [
-            (TABLE_CATALOG, Value::from(catalog_name)),
-            (TABLE_SCHEMA, Value::from(schema_name)),
-            (TABLE_NAME, Value::from(table_name)),
-            (SIGNAL_TYPE, optional_value(row.signal_type)),
-            (SOURCE, optional_value(row.source)),
-            (PIPELINE, optional_value(row.pipeline)),
-            (METADATA_QUALITY, optional_value(row.metadata_quality)),
+            (TABLE_CATALOG, &catalog_v),
+            (TABLE_SCHEMA, &schema_v),
+            (TABLE_NAME, &name_v),
+            (SIGNAL_TYPE, &signal_v),
+            (SOURCE, &source_v),
+            (PIPELINE, &pipeline_v),
+            (METADATA_QUALITY, &quality_v),
         ];
-        let predicate_row = predicate_row
-            .iter()
-            .map(|(c, v)| (*c, v))
-            .collect::<Vec<_>>();
         if !predicates.eval(&predicate_row) {
             return;
         }
