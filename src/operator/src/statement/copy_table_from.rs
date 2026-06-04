@@ -998,6 +998,12 @@ mod tests {
         }
     }
 
+    fn assert_field(schema: &Schema, idx: usize, name: &str, data_type: &DataType) {
+        let field = schema.field(idx);
+        assert_eq!(field.name(), name);
+        assert_eq!(field.data_type(), data_type);
+    }
+
     #[test]
     fn test_headerless_csv_schema_projection_is_positional() {
         let file_schema = make_test_schema(&[
@@ -1020,6 +1026,19 @@ mod tests {
 
         assert_eq!(mapping.file_projection, vec![0, 1, 2]);
         assert_eq!(mapping.table_projection, vec![0, 1, 2]);
+        assert_field(&mapping.compat_file_schema, 0, "host_id", &DataType::UInt32);
+        assert_field(
+            &mapping.compat_file_schema,
+            1,
+            "reading_value",
+            &DataType::Float64,
+        );
+        assert_field(
+            &mapping.compat_file_schema,
+            2,
+            "ts",
+            table_schema.field(2).data_type(),
+        );
         assert_eq!(
             mapping
                 .compat_file_schema
@@ -1049,6 +1068,15 @@ mod tests {
         assert_eq!(mapping.file_projection, vec![0, 1, 2]);
         assert_eq!(mapping.table_projection, vec![0, 1, 2]);
         assert_eq!(mapping.compat_file_schema.fields().len(), 4);
+        assert_field(&mapping.compat_file_schema, 0, "host_id", &DataType::UInt32);
+        assert_field(
+            &mapping.compat_file_schema,
+            1,
+            "reading_value",
+            &DataType::Float64,
+        );
+        assert_field(&mapping.compat_file_schema, 2, "ts", &DataType::Utf8);
+        assert_field(&mapping.compat_file_schema, 3, "column_4", &DataType::Utf8);
     }
 
     #[test]
@@ -1068,6 +1096,13 @@ mod tests {
 
         assert_eq!(mapping.file_projection, vec![0, 1]);
         assert_eq!(mapping.table_projection, vec![0, 1]);
+        assert_field(&mapping.compat_file_schema, 0, "host_id", &DataType::UInt32);
+        assert_field(
+            &mapping.compat_file_schema,
+            1,
+            "reading_value",
+            &DataType::Float64,
+        );
         assert_eq!(
             mapping
                 .compat_file_schema

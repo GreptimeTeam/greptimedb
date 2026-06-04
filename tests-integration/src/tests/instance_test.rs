@@ -966,6 +966,68 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
 }
 
 #[apply(both_instances_cases)]
+async fn test_execute_copy_from_headerless_csv(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let csv_path = find_testing_resource("/tests/data/csv/headerless.csv");
+    let skip_bad_records_csv_path =
+        find_testing_resource("/tests/data/csv/headerless_skip_bad_records.csv");
+
+    let output = execute_sql(
+        &instance,
+        "CREATE TABLE csv_headerless(host_id INT, host_name STRING, reading_value DOUBLE, ts TIMESTAMP TIME INDEX);",
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    let output = execute_sql(
+        &instance,
+        &format!("COPY csv_headerless FROM '{csv_path}' WITH (FORMAT='csv', HEADERS='false');"),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(2)));
+
+    let output = execute_sql(&instance, "SELECT * FROM csv_headerless ORDER BY ts;")
+        .await
+        .data;
+    let expect = "\
++---------+-----------+---------------+---------------------+
+| host_id | host_name | reading_value | ts                  |
++---------+-----------+---------------+---------------------+
+| 1       | Alice     | 10.5          | 2024-01-01T00:00:00 |
+| 2       | Bob       | 30.5          | 2024-01-01T00:00:02 |
++---------+-----------+---------------+---------------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(
+        &instance,
+        "CREATE TABLE csv_headerless_skip_bad_records(host_id INT, host_name STRING, reading_value DOUBLE, ts TIMESTAMP TIME INDEX);",
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "COPY csv_headerless_skip_bad_records FROM '{skip_bad_records_csv_path}' WITH (FORMAT='csv', HEADERS='false', SKIP_BAD_RECORDS='true');"
+        ),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(2)));
+
+    let output = execute_sql(
+        &instance,
+        "SELECT * FROM csv_headerless_skip_bad_records ORDER BY ts;",
+    )
+    .await
+    .data;
+    check_output_stream(output, expect).await;
+}
+
+#[apply(both_instances_cases)]
 async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");

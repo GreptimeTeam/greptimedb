@@ -80,20 +80,6 @@ Copy csv_skip_bad_records FROM '$PWD/tests/data/csv/skip_bad_records.csv' WITH (
 
 select * from csv_skip_bad_records order by ts;
 
-CREATE TABLE csv_headerless(host_id int, host_name string, reading_value double, ts timestamp time index);
-
--- SQLNESS ENV PWD
-Copy csv_headerless FROM '$PWD/tests/data/csv/headerless.csv' WITH (format='csv', headers='false');
-
-select * from csv_headerless order by ts;
-
-CREATE TABLE csv_headerless_skip_bad_records(host_id int, host_name string, reading_value double, ts timestamp time index);
-
--- SQLNESS ENV PWD
-Copy csv_headerless_skip_bad_records FROM '$PWD/tests/data/csv/headerless_skip_bad_records.csv' WITH (format='csv', headers='false', skip_bad_records='true');
-
-select * from csv_headerless_skip_bad_records order by ts;
-
 drop table demo;
 
 drop table with_filename;
@@ -113,7 +99,3 @@ drop table csv_null_prefix;
 drop table csv_null_prefix_import;
 
 drop table csv_skip_bad_records;
-
-drop table csv_headerless;
-
-drop table csv_headerless_skip_bad_records;
