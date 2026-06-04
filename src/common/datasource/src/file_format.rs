@@ -60,6 +60,7 @@ use crate::share_buffer::SharedBuffer;
 pub const FORMAT_COMPRESSION_TYPE: &str = "compression_type";
 pub const FORMAT_DELIMITER: &str = "delimiter";
 pub const FORMAT_SCHEMA_INFER_MAX_RECORD: &str = "schema_infer_max_record";
+pub const FORMAT_HEADERS: &str = "headers";
 pub const FORMAT_HAS_HEADER: &str = "has_header";
 pub const FORMAT_SKIP_BAD_RECORDS: &str = "skip_bad_records";
 pub const FORMAT_TYPE: &str = "format";
