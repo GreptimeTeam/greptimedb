@@ -62,6 +62,25 @@ impl Default for StorageConfig {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DatanodeRuntimeOptions {
+    /// The number of threads for datanode query execution.
+    pub query_rt_size: usize,
+    /// The number of threads for datanode ingestion execution.
+    pub ingest_rt_size: usize,
+}
+
+impl Default for DatanodeRuntimeOptions {
+    fn default() -> Self {
+        let cpus = num_cpus::get();
+        Self {
+            query_rt_size: usize::max(cpus.saturating_sub(1), 1),
+            ingest_rt_size: 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatanodeOptions {
@@ -88,6 +107,7 @@ pub struct DatanodeOptions {
     pub tracing: TracingOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
+    pub datanode_runtime: DatanodeRuntimeOptions,
 
     /// Environment variable keys to read and report in heartbeat messages.
     /// The values of these env vars at startup will be sent to metasrv.
@@ -147,6 +167,7 @@ impl Default for DatanodeOptions {
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
+            datanode_runtime: DatanodeRuntimeOptions::default(),
             heartbeat_env_vars: vec![],
 
             // Deprecated options
@@ -185,6 +206,16 @@ mod tests {
     use common_base::secrets::ExposeSecret;
 
     use super::*;
+
+
+    #[test]
+    fn test_datanode_runtime_options_default() {
+        let opts = DatanodeRuntimeOptions::default();
+        let cpus = num_cpus::get();
+
+        assert_eq!(usize::max(cpus.saturating_sub(1), 1), opts.query_rt_size);
+        assert_eq!(1, opts.ingest_rt_size);
+    }
 
     #[test]
     fn test_toml() {
