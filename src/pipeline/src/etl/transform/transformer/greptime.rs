@@ -772,6 +772,7 @@ fn vrl_value_to_jsonb_value<'a>(value: &'a VrlValue) -> jsonb::Value<'a> {
 fn identity_pipeline_inner(
     pipeline_maps: Vec<VrlValue>,
     pipeline_ctx: &PipelineContext<'_>,
+    max_nested_levels: usize,
 ) -> Result<(SchemaInfo, HashMap<ContextOpt, Vec<Row>>)> {
     let skip_error = pipeline_ctx.pipeline_param.skip_error();
     let mut schema_info = SchemaInfo::default();
@@ -801,7 +802,9 @@ fn identity_pipeline_inner(
     let mut opt_map = HashMap::new();
     let len = pipeline_maps.len();
 
-    for mut pipeline_map in pipeline_maps {
+    for pipeline_map in pipeline_maps {
+        let mut pipeline_map =
+            unwrap_or_continue_if_err!(flatten_object(pipeline_map, max_nested_levels), skip_error);
         let opt = unwrap_or_continue_if_err!(
             ContextOpt::from_pipeline_map_to_opt(&mut pipeline_map),
             skip_error
@@ -826,10 +829,8 @@ fn identity_pipeline_inner(
                 column_count,
                 row.values.len()
             );
-            let diff = column_count - row.values.len();
-            for _ in 0..diff {
-                row.values.push(GreptimeValue { value_data: None });
-            }
+            row.values
+                .resize(column_count, GreptimeValue { value_data: None });
         }
     }
 
@@ -849,40 +850,31 @@ pub fn identity_pipeline(
     table: Option<Arc<table::Table>>,
     pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<HashMap<ContextOpt, Rows>> {
-    let skip_error = pipeline_ctx.pipeline_param.skip_error();
     let max_nested_levels = pipeline_ctx.pipeline_param.max_nested_levels();
-    // Always flatten JSON objects and stringify arrays
-    let mut input = Vec::with_capacity(array.len());
-    for item in array.into_iter() {
-        let result =
-            unwrap_or_continue_if_err!(flatten_object(item, max_nested_levels), skip_error);
-        input.push(result);
-    }
 
-    identity_pipeline_inner(input, pipeline_ctx).and_then(|(mut schema, opt_map)| {
-        if let Some(table) = table {
-            let table_info = table.table_info();
-            for tag_name in table_info.meta.row_key_column_names() {
-                if let Some(index) = schema.index.get(tag_name) {
-                    schema.schema[*index].semantic_type = SemanticType::Tag;
-                }
+    let (mut schema, opt_map) = identity_pipeline_inner(array, pipeline_ctx, max_nested_levels)?;
+    if let Some(table) = table {
+        let table_info = table.table_info();
+        for tag_name in table_info.meta.row_key_column_names() {
+            if let Some(index) = schema.index.get(tag_name) {
+                schema.schema[*index].semantic_type = SemanticType::Tag;
             }
         }
+    }
 
-        let column_schemas = schema.column_schemas()?;
-        Ok(opt_map
-            .into_iter()
-            .map(|(opt, rows)| {
-                (
-                    opt,
-                    Rows {
-                        schema: column_schemas.clone(),
-                        rows,
-                    },
-                )
-            })
-            .collect::<HashMap<ContextOpt, Rows>>())
-    })
+    let column_schemas = schema.column_schemas()?;
+    Ok(opt_map
+        .into_iter()
+        .map(|(opt, rows)| {
+            (
+                opt,
+                Rows {
+                    schema: column_schemas.clone(),
+                    rows,
+                },
+            )
+        })
+        .collect::<HashMap<ContextOpt, Rows>>())
 }
 
 /// Consumes the JSON object and consumes it into a single-level object.
@@ -1100,23 +1092,26 @@ mod tests {
             ];
             let tag_column_names = ["name".to_string(), "address".to_string()];
 
-            let rows =
-                identity_pipeline_inner(array.iter().map(|v| v.into()).collect(), &pipeline_ctx)
-                    .map(|(mut schema, mut rows)| {
-                        for name in tag_column_names {
-                            if let Some(index) = schema.index.get(&name) {
-                                schema.schema[*index].semantic_type = SemanticType::Tag;
-                            }
-                        }
+            let rows = identity_pipeline_inner(
+                array.iter().map(|v| v.into()).collect(),
+                &pipeline_ctx,
+                pipeline_ctx.pipeline_param.max_nested_levels(),
+            )
+            .map(|(mut schema, mut rows)| {
+                for name in tag_column_names {
+                    if let Some(index) = schema.index.get(&name) {
+                        schema.schema[*index].semantic_type = SemanticType::Tag;
+                    }
+                }
 
-                        assert!(rows.len() == 1);
-                        let rows = rows.remove(&ContextOpt::default()).unwrap();
+                assert!(rows.len() == 1);
+                let rows = rows.remove(&ContextOpt::default()).unwrap();
 
-                        Rows {
-                            schema: schema.column_schemas().unwrap(),
-                            rows,
-                        }
-                    });
+                Rows {
+                    schema: schema.column_schemas().unwrap(),
+                    rows,
+                }
+            });
 
             assert!(rows.is_ok());
             let rows = rows.unwrap();
@@ -1224,6 +1219,46 @@ mod tests {
             let flattened_object = flatten_object(input, max_depth).ok();
             assert_eq!(flattened_object, expected);
         }
+    }
+
+    #[test]
+    fn test_identity_pipeline_skip_error_flattens_valid_rows() {
+        let params = GreptimePipelineParams::from_map(ahash::HashMap::from_iter([(
+            "skip_error".to_string(),
+            "true".to_string(),
+        )]));
+        let pipeline_def = PipelineDefinition::GreptimeIdentityPipeline(None);
+        let pipeline_ctx = PipelineContext::new(&pipeline_def, &params, Channel::Unknown);
+        let array = vec![
+            serde_json::json!({
+                "service": "frontend",
+                "nested": {
+                    "status": 200,
+                    "path": "/v1/ingest"
+                },
+                "labels": ["pipeline", "identity"]
+            })
+            .into(),
+            VrlValue::Bytes("invalid_string".into()),
+            serde_json::json!({
+                "service": "frontend",
+                "nested": {
+                    "status": 201,
+                    "path": "/v1/ingest"
+                },
+                "labels": ["pipeline", "identity"]
+            })
+            .into(),
+        ];
+
+        let mut rows_by_opt = identity_pipeline(array, None, &pipeline_ctx).unwrap();
+        let rows = rows_by_opt.remove(&ContextOpt::default()).unwrap();
+
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(rows.schema.len(), rows.rows[0].values.len());
+        assert!(rows.schema.iter().any(|s| s.column_name == "nested.status"));
+        assert!(rows.schema.iter().any(|s| s.column_name == "nested.path"));
+        assert!(rows.schema.iter().any(|s| s.column_name == "labels"));
     }
 
     use ahash::HashMap as AHashMap;
