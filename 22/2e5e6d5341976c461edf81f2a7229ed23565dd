@@ -1,0 +1,16 @@
+src/common/meta/src/cache/table/table_info.rs
+  h_623774b620da8e 23,44,49-50
+src/partition/src/cache.rs
+  h_623774b620da8e 20,123,138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "222e5e6d5341976c461edf81f2a7229ed23565dd",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
