@@ -140,7 +140,7 @@ mod tests {
     use crate::access_layer::{FilePathProvider, Metrics, RegionFilePathFactory, WriteType};
     use crate::cache::index::result_cache::PredicateKey;
     use crate::cache::test_util::assert_parquet_metadata_equal;
-    use crate::cache::{CacheManager, CacheStrategy, PageKey};
+    use crate::cache::{CacheManager, CacheStrategy};
     use crate::config::IndexConfig;
     use crate::read::FlatSource;
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
@@ -340,11 +340,20 @@ mod tests {
 
         // Cache 4 row groups.
         for i in 0..4 {
-            let page_key = PageKey::new(handle.file_id().file_id(), i, get_ranges(i));
-            assert!(cache.get_pages(&page_key).is_some());
+            let lookup = cache
+                .get_page_ranges(handle.file_id().file_id(), i, &get_ranges(i))
+                .unwrap();
+            assert!(lookup.is_fully_cached());
         }
-        let page_key = PageKey::new(handle.file_id().file_id(), 5, vec![]);
-        assert!(cache.get_pages(&page_key).is_none());
+        let missing_range = 0..10;
+        let lookup = cache
+            .get_page_ranges(
+                handle.file_id().file_id(),
+                5,
+                std::slice::from_ref(&missing_range),
+            )
+            .unwrap();
+        assert_eq!(vec![0..10], lookup.missing_ranges);
     }
 
     #[tokio::test]
