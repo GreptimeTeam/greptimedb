@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
 use api::v1::helper::time_index_column_schema;
-use api::v1::{ColumnDataType, RowInsertRequest, Rows, Value};
+use api::v1::{ColumnDataType, Row, RowInsertRequest, Rows, Value};
 use common_time::timestamp::TimeUnit;
 use pipeline::{
-    ContextReq, DispatchedTo, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, Pipeline, PipelineContext,
-    PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput, TransformerMode,
-    identity_pipeline, unwrap_or_continue_if_err,
+    ContextOpt, ContextReq, DispatchedTo, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, Pipeline,
+    PipelineContext, PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput,
+    TransformerMode, identity_pipeline, unwrap_or_continue_if_err,
 };
 use session::context::{Channel, QueryContextRef};
 use snafu::ResultExt;
@@ -114,7 +114,7 @@ async fn run_custom_pipeline(
         values: pipeline_maps,
     } = pipeline_req;
     let arr_len = pipeline_maps.len();
-    let mut transformed_map = HashMap::new();
+    let mut transformed_map: HashMap<ContextOpt, HashMap<String, Vec<Row>>> = HashMap::new();
     let mut dispatched: BTreeMap<DispatchedTo, Vec<VrlValue>> = BTreeMap::new();
 
     let mut schema_info = match pipeline.transformer() {
@@ -156,11 +156,12 @@ async fn run_custom_pipeline(
             PipelineExecOutput::Transformed(TransformedOutput { rows_by_context }) => {
                 // Process each ContextOpt group separately
                 for (opt, rows_with_suffix) in rows_by_context {
+                    let rows_by_table = transformed_map.entry(opt).or_default();
                     // Group rows by table name within each context
                     for (row, table_suffix) in rows_with_suffix {
                         let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
-                        transformed_map
-                            .entry((opt.clone(), act_table_name))
+                        rows_by_table
+                            .entry(act_table_name)
                             .or_insert_with(|| Vec::with_capacity(arr_len))
                             .push(row);
                     }
@@ -177,28 +178,26 @@ async fn run_custom_pipeline(
 
     let mut results = ContextReq::default();
 
-    // Process transformed outputs. Each entry in transformed_map contains
-    // Vec<Row> grouped by (opt, table_name).
+    // Process transformed outputs. Rows are grouped by context first, then table.
     let column_count = schema_info.schema.len();
-    for ((opt, table_name), mut rows) in transformed_map {
-        // Pad rows to match final schema size (schema may have evolved during processing)
-        for row in &mut rows {
-            let diff = column_count.saturating_sub(row.values.len());
-            for _ in 0..diff {
-                row.values.push(Value { value_data: None });
+    let column_schemas = schema_info.column_schemas()?;
+    for (opt, rows_by_table) in transformed_map {
+        let row_requests = rows_by_table.into_iter().map(|(table_name, mut rows)| {
+            // Pad rows to match final schema size (schema may have evolved during processing)
+            for row in &mut rows {
+                row.values.resize(column_count, Value { value_data: None });
             }
-        }
 
-        results.add_row(
-            &opt,
             RowInsertRequest {
                 rows: Some(Rows {
                     rows,
-                    schema: schema_info.column_schemas()?,
+                    schema: column_schemas.clone(),
                 }),
-                table_name: table_name.clone(),
-            },
-        );
+                table_name,
+            }
+        });
+
+        results.add_rows(opt, row_requests);
     }
 
     // if current pipeline contains dispatcher and has several rules, we may
