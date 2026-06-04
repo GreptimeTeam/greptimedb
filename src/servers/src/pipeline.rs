@@ -156,12 +156,11 @@ async fn run_custom_pipeline(
             PipelineExecOutput::Transformed(TransformedOutput { rows_by_context }) => {
                 // Process each ContextOpt group separately
                 for (opt, rows_with_suffix) in rows_by_context {
-                    let rows_by_table = transformed_map.entry(opt).or_default();
-                    // Group rows by table name within each context
+                    let rows_by_suffix = transformed_map.entry(opt).or_default();
+                    // Group rows by table suffix within each context.
                     for (row, table_suffix) in rows_with_suffix {
-                        let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
-                        rows_by_table
-                            .entry(act_table_name)
+                        rows_by_suffix
+                            .entry(table_suffix.unwrap_or_default())
                             .or_insert_with(|| Vec::with_capacity(arr_len))
                             .push(row);
                     }
@@ -178,11 +177,13 @@ async fn run_custom_pipeline(
 
     let mut results = ContextReq::default();
 
-    // Process transformed outputs. Rows are grouped by context first, then table.
+    // Process transformed outputs. Rows are grouped by context first, then table suffix.
     let column_count = schema_info.schema.len();
     let column_schemas = schema_info.column_schemas()?;
-    for (opt, rows_by_table) in transformed_map {
-        let row_requests = rows_by_table.into_iter().map(|(table_name, mut rows)| {
+    for (opt, rows_by_suffix) in transformed_map {
+        let row_requests = rows_by_suffix.into_iter().map(|(table_suffix, mut rows)| {
+            let table_name = table_suffix_to_table_name(&table_name, &table_suffix);
+
             // Pad rows to match final schema size (schema may have evolved during processing)
             for row in &mut rows {
                 row.values.resize(column_count, Value { value_data: None });
@@ -244,9 +245,10 @@ async fn run_custom_pipeline(
 }
 
 #[inline]
-fn table_suffix_to_table_name(table_name: &String, table_suffix: Option<String>) -> String {
-    match table_suffix {
-        Some(suffix) => format!("{}{}", table_name, suffix),
-        None => table_name.clone(),
+fn table_suffix_to_table_name(table_name: &str, table_suffix: &str) -> String {
+    if table_suffix.is_empty() {
+        table_name.to_string()
+    } else {
+        format!("{}{}", table_name, table_suffix)
     }
 }
