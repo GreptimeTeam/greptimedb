@@ -101,7 +101,10 @@ impl InitialDynFilterRegs {
     }
 
     pub fn from_extension_value(value: &str) -> serde_json::Result<Self> {
-        serde_json::from_str(value)
+        let regs = serde_json::from_str::<Self>(value)?;
+        regs.validate_default_bounds()
+            .map_err(serde::de::Error::custom)?;
+        Ok(regs)
     }
 }
 
@@ -307,6 +310,15 @@ mod tests {
         let err = regs.validate_bounds(8, 1024).unwrap_err();
 
         assert!(err.contains("duplicate filter_id 'filter-a'"));
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_from_extension_value_validates_default_bounds() {
+        let value = r#"{"registrations":[{"filter_id":"filter-a","child_exprs_datafusion_proto":["AQ=="]},{"filter_id":"filter-a","child_exprs_datafusion_proto":["Ag=="]}]}"#;
+
+        let err = InitialDynFilterRegs::from_extension_value(value).unwrap_err();
+
+        assert!(err.to_string().contains("duplicate filter_id 'filter-a'"));
     }
 
     #[test]
