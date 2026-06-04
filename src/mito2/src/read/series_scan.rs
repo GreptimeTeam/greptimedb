@@ -238,7 +238,7 @@ impl SeriesScan {
         };
         let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
         let span = tracing::info_span!("SeriesScan::distributor", region_id = %region_id);
-        common_runtime::spawn_global(
+        common_runtime::spawn_datanode_query(
             async move {
                 distributor.execute().await;
             }
@@ -504,7 +504,7 @@ impl SeriesDistributor {
                 let partition_pruner = partition_pruner.clone();
                 let file_scan_semaphore = self.range_semaphore.clone();
                 let merge_semaphore = self.range_semaphore.clone();
-                tasks.push(common_runtime::spawn_global(async move {
+                tasks.push(common_runtime::spawn_datanode_query(async move {
                     SeqScan::build_flat_partition_range_read(
                         &stream_ctx,
                         &part_range,

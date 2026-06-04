@@ -1190,7 +1190,7 @@ impl ScanInput {
             region_id = %region_id,
             stream_kind = "flat"
         );
-        common_runtime::spawn_global(
+        common_runtime::spawn_datanode_query(
             async move {
                 loop {
                     // We release the permit before sending result to avoid the task waiting on
