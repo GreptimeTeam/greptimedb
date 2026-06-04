@@ -31,6 +31,7 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::dist_plan::RemoteDynFilterProducerId;
 use crate::dist_plan::analyzer::utils::{
     PatchOptimizerContext, PlanTreeExpressionSimplifier, aliased_columns_for,
     rewrite_merge_sort_exprs,
@@ -146,14 +147,14 @@ impl DistPlannerAnalyzer {
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::default();
         let result = plan.data.rewrite(&mut rewriter)?.data;
-        Ok(result)
+        Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
 
     /// Use fallback plan rewriter to rewrite the plan and only push down table scan nodes
     fn use_fallback(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
         let mut rewriter = fallback::FallbackPlanRewriter;
         let result = plan.rewrite(&mut rewriter)?.data;
-        Ok(result)
+        Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
 
     fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
@@ -223,6 +224,57 @@ impl DistPlannerAnalyzer {
             outer_ref_columns: subquery.outer_ref_columns,
             spans: Default::default(),
         })
+    }
+
+    fn assign_merge_scan_remote_dyn_filter_producer_ids(
+        plan: LogicalPlan,
+    ) -> DfResult<LogicalPlan> {
+        let mut assigner = MergeScanRemoteDynFilterProducerIdAssigner::default();
+        Ok(plan.rewrite_with_subqueries(&mut assigner)?.data)
+    }
+}
+
+#[derive(Debug, Default)]
+struct RemoteDynFilterProducerIdAllocator {
+    next_remote_dyn_filter_producer_id: u64,
+}
+
+impl RemoteDynFilterProducerIdAllocator {
+    fn allocate(&mut self) -> RemoteDynFilterProducerId {
+        self.next_remote_dyn_filter_producer_id += 1;
+        RemoteDynFilterProducerId::new(self.next_remote_dyn_filter_producer_id)
+    }
+}
+
+/// Assigns query-local RDF producer ids to visible `MergeScan` nodes after plan rewriting.
+#[derive(Debug, Default)]
+struct MergeScanRemoteDynFilterProducerIdAssigner {
+    remote_dyn_filter_producer_id_allocator: RemoteDynFilterProducerIdAllocator,
+}
+
+impl TreeNodeRewriter for MergeScanRemoteDynFilterProducerIdAssigner {
+    type Node = LogicalPlan;
+
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        let LogicalPlan::Extension(extension) = &node else {
+            return Ok(Transformed::no(node));
+        };
+        let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+        else {
+            return Ok(Transformed::no(node));
+        };
+
+        Ok(Transformed::yes(
+            merge_scan
+                .clone()
+                .with_remote_dyn_filter_producer_id(
+                    self.remote_dyn_filter_producer_id_allocator.allocate(),
+                )
+                .into_logical_plan(),
+        ))
     }
 }
 

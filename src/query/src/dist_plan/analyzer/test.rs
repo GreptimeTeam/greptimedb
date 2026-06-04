@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -29,9 +30,10 @@ use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion::prelude::SessionContext;
 use datafusion_common::{JoinType, ScalarValue};
-use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::expr::{Exists, ScalarFunction};
 use datafusion_expr::{
-    AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, binary_expr, col, lit,
+    AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, Subquery, binary_expr,
+    col, lit,
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
@@ -52,6 +54,50 @@ use table::table::numbers::NumbersTable;
 use table::{Table, TableRef};
 
 use super::*;
+
+fn collect_merge_scan_remote_dyn_filter_producer_ids(
+    plan: &LogicalPlan,
+    producer_ids: &mut BTreeSet<RemoteDynFilterProducerId>,
+) {
+    let mut producer_id_list = Vec::new();
+    collect_merge_scan_remote_dyn_filter_producer_id_list(plan, &mut producer_id_list);
+    producer_ids.extend(producer_id_list);
+}
+
+struct MergeScanRemoteDynFilterProducerIdCollector<'a> {
+    producer_ids: &'a mut Vec<RemoteDynFilterProducerId>,
+}
+
+impl TreeNodeRewriter for MergeScanRemoteDynFilterProducerIdCollector<'_> {
+    type Node = LogicalPlan;
+
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        if let LogicalPlan::Extension(extension) = &node
+            && let Some(merge_scan) = extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
+        {
+            self.producer_ids.push(
+                merge_scan
+                    .remote_dyn_filter_producer_id()
+                    .expect("MergeScan remote dynamic filter producer id must be assigned"),
+            );
+        }
+
+        Ok(Transformed::no(node))
+    }
+}
+
+fn collect_merge_scan_remote_dyn_filter_producer_id_list(
+    plan: &LogicalPlan,
+    producer_ids: &mut Vec<RemoteDynFilterProducerId>,
+) {
+    let _ = plan
+        .clone()
+        .rewrite_with_subqueries(&mut MergeScanRemoteDynFilterProducerIdCollector { producer_ids })
+        .unwrap();
+}
 
 pub(crate) struct TestTable;
 
@@ -1361,6 +1407,60 @@ fn test_simplify_select_now_expression() {
 }
 
 #[test]
+fn sibling_merge_scans_have_unique_remote_dyn_filter_producer_ids() {
+    init_default_ut_logging();
+    let left_table = TestTable::table_with_name(0, "left_table".to_string());
+    let right_table = TestTable::table_with_name(1, "right_table".to_string());
+
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let left_sorted =
+        LogicalPlanBuilder::scan_with_filters("left_table", left_source, None, vec![])
+            .unwrap()
+            .sort(vec![col("pk1").sort(true, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+
+    let right_sorted =
+        LogicalPlanBuilder::scan_with_filters("right_table", right_source, None, vec![])
+            .unwrap()
+            .sort(vec![col("pk1").sort(true, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+
+    let plan = LogicalPlanBuilder::from(left_sorted)
+        .cross_join(right_sorted)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let mut producer_ids = Vec::new();
+    collect_merge_scan_remote_dyn_filter_producer_id_list(&result, &mut producer_ids);
+    let unique_producer_ids = producer_ids.iter().copied().collect::<BTreeSet<_>>();
+
+    assert!(
+        producer_ids.len() >= 2,
+        "Expected at least 2 RemoteDynFilterProducerIds, got {}: {producer_ids:?}",
+        producer_ids.len()
+    );
+    assert_eq!(
+        producer_ids.len(),
+        unique_producer_ids.len(),
+        "Expected all sibling RemoteDynFilterProducerIds to be unique, got ids: {producer_ids:?}"
+    );
+}
+
+#[test]
 fn test_simplify_now_expression() {
     init_default_ut_logging();
     let test_table = TestTable::table_with_name(0, "t".to_string());
@@ -1821,6 +1921,39 @@ fn transform_sort_subquery_alias() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn remote_dyn_filter_producer_ids_do_not_collide_between_subquery_and_outer_plan() {
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let subquery_plan =
+        LogicalPlanBuilder::scan_with_filters("inner", table_source.clone(), None, vec![])
+            .unwrap()
+            .build()
+            .unwrap();
+    let subquery = Subquery {
+        subquery: Arc::new(subquery_plan),
+        outer_ref_columns: Default::default(),
+        spans: Default::default(),
+    };
+    let outer_plan = LogicalPlanBuilder::scan_with_filters("outer", table_source, None, vec![])
+        .unwrap()
+        .filter(Expr::Exists(Exists {
+            subquery,
+            negated: false,
+        }))
+        .unwrap()
+        .build()
+        .unwrap();
+    let rewritten = DistPlannerAnalyzer {}.try_push_down(outer_plan).unwrap();
+
+    let mut producer_ids = BTreeSet::new();
+    collect_merge_scan_remote_dyn_filter_producer_ids(&rewritten, &mut producer_ids);
+
+    assert_eq!(producer_ids.len(), 2);
 }
 
 #[test]

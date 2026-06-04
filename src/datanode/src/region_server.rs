@@ -298,7 +298,6 @@ impl RegionServer {
                 query_ctx.clone(),
             )
             .await?;
-
         let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
         Ok(maybe_guard_stream(stream, permit))
     }

@@ -14,14 +14,22 @@
 
 mod analyzer;
 mod commutativity;
+mod dyn_filter_bridge;
+mod filter_id;
 mod merge_scan;
 mod merge_sort;
 mod planner;
 mod predicate_extractor;
 mod region_pruner;
+mod remote_dyn_filter_registry;
 
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
+pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
 pub use predicate_extractor::PredicateExtractor;
 pub use region_pruner::ConstraintPruner;
+pub use remote_dyn_filter_registry::{
+    DynFilterEntry, DynFilterRegistryManager, EntryRegistration, QueryDynFilterRegistry,
+    RemoteDynFilterRegistryLease, Subscriber, SubscriberRegistration,
+};

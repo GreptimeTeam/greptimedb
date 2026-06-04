@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod base64_serde;
+mod initial_remote_dyn_filter_reg;
+
 use std::sync::Arc;
 
 use api::v1::region::RegionRequestHeader;
-use datafusion::arrow::datatypes::Schema;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_plan::PhysicalExpr;
@@ -32,6 +34,12 @@ use serde::{Deserialize, Serialize};
 use store_api::storage::RegionId;
 
 /// Current wire-format version for remote dynamic filter payload updates.
+pub use self::initial_remote_dyn_filter_reg::{
+    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+    INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES, InitialDynFilterReg,
+    InitialDynFilterRegs, InitialDynFilterSnapshot,
+};
+
 pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;
 
 /// Serialized predicate payload for remote dynamic filter updates.
@@ -49,31 +57,7 @@ pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;
 pub enum DynFilterPayload {
     /// A serialized DataFusion [`PhysicalExpr`] encoded as a protobuf
     /// [`PhysicalExprNode`].
-    Datafusion(#[serde(with = "base64_bytes")] Vec<u8>),
-}
-
-mod base64_bytes {
-    use base64::Engine;
-    use base64::prelude::BASE64_STANDARD;
-    use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&BASE64_STANDARD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let encoded = String::deserialize(deserializer)?;
-        BASE64_STANDARD.decode(encoded).map_err(|err| {
-            D::Error::custom(format!("invalid base64 dynamic filter payload: {err}"))
-        })
-    }
+    Datafusion(#[serde(with = "base64_serde::bytes")] Vec<u8>),
 }
 
 impl DynFilterPayload {
@@ -107,7 +91,7 @@ impl DynFilterPayload {
     pub fn decode_datafusion_expr(
         &self,
         task_ctx: &TaskContext,
-        input_schema: &Schema,
+        input_schema: &datafusion::arrow::datatypes::Schema,
         max_payload_bytes: usize,
     ) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
         let Self::Datafusion(bytes) = self;
@@ -122,6 +106,34 @@ impl DynFilterPayload {
         validate_decoded_payload_expr(&expr, input_schema)?;
         Ok(expr)
     }
+}
+
+fn encode_physical_expr_to_bytes(expr: &Arc<dyn PhysicalExpr>) -> DataFusionResult<Vec<u8>> {
+    let codec = DefaultPhysicalExtensionCodec {};
+    let proto = serialize_physical_expr(expr, &codec)?;
+    let mut bytes = Vec::new();
+    proto.encode(&mut bytes).map_err(|e| {
+        DataFusionError::Internal(format!("Failed to encode PhysicalExprNode: {e}"))
+    })?;
+    Ok(bytes)
+}
+
+pub(crate) fn decode_physical_expr_from_bytes(
+    bytes: &[u8],
+    task_ctx: &TaskContext,
+    input_schema: &datafusion::arrow::datatypes::Schema,
+    max_payload_bytes: usize,
+) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
+    validate_payload_size(bytes.len(), max_payload_bytes)?;
+    let codec = DefaultPhysicalExtensionCodec {};
+    let proto = PhysicalExprNode::decode(bytes).map_err(|e| {
+        DataFusionError::Internal(format!("Failed to decode PhysicalExprNode: {e}"))
+    })?;
+
+    let expr = parse_physical_expr(&proto, task_ctx, input_schema, &codec)?;
+    validate_supported_payload_expr(&expr)?;
+    validate_decoded_payload_expr(&expr, input_schema)?;
+    Ok(expr)
 }
 
 fn validate_payload_size(
@@ -161,7 +173,7 @@ fn validate_supported_payload_expr(expr: &Arc<dyn PhysicalExpr>) -> DataFusionRe
 /// schema inconsistency that should be surfaced loudly.
 fn validate_decoded_payload_expr(
     expr: &Arc<dyn PhysicalExpr>,
-    input_schema: &Schema,
+    input_schema: &datafusion::arrow::datatypes::Schema,
 ) -> DataFusionResult<()> {
     expr.apply(|node| {
         if let Some(column) = node.as_any().downcast_ref::<Column>() {
