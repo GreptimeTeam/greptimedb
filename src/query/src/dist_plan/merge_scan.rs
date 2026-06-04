@@ -193,11 +193,7 @@ pub struct MergeScanExec {
     /// Metrics for each partition
     partition_metrics: Arc<Mutex<HashMap<usize, PartitionMetrics>>>,
     query_ctx: QueryContextRef,
-    /// Optional because remote dynamic filters must fail open.
-    ///
-    /// If producer id assignment is missing, `MergeScanExec` still executes the query normally and
-    /// only skips RDF pushdown/registration while keeping parent-side filters as the correctness
-    /// fallback.
+    /// Optional because RDF must fail open: missing ids skip RDF but keep normal query execution.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
     captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
     target_partition: usize,
@@ -728,8 +724,7 @@ impl ExecutionPlan for MergeScanExec {
             .map(|filter| filter.filter)
             .collect::<Vec<_>>();
         let Some(remote_dyn_filter_producer_id) = self.remote_dyn_filter_producer_id else {
-            // RDF is an optimization: missing producer identity must only disable RDF, never block
-            // normal query execution or remove the parent-side filter fallback.
+            // Missing RDF identity disables only RDF, not normal execution.
             common_telemetry::warn!(
                 "MergeScan remote dynamic filter producer id is not assigned; skipping remote dynamic filter pushdown"
             );
@@ -752,11 +747,8 @@ impl ExecutionPlan for MergeScanExec {
                 .pushed_down
                 .into_iter()
                 .map(|_pushdown_ready| {
-                    // TODO(remote-dyn-filter): Return `PushedDown::Yes` for `_pushdown_ready`
-                    // filters after datanode-side initial registration consumption and runtime
-                    // pending-update application are implemented. Until then, keep the parent-side
-                    // filter as a correctness fallback because the remote side may ignore the
-                    // registration carried in QueryContext.
+                    // TODO(discord9): Return `PushedDown::Yes` after datanodes consume RDF
+                    // registrations and pending updates. Until then, keep the parent-side filter.
                     PushedDown::No
                 })
                 .collect(),

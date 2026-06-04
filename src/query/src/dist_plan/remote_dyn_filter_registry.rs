@@ -55,7 +55,8 @@ pub enum SubscriberRegistration {
 
 /// A registered query-local remote dynamic filter entry.
 ///
-/// This stores the alive DataFusion filter handle together with minimal subscriber state.
+/// The frontend query owns the strong DataFusion filter handle until the query finishes; the
+/// registry only keeps a weak reference for later updates.
 #[derive(Debug)]
 pub struct DynFilterEntry {
     filter_id: FilterId,
@@ -168,17 +169,13 @@ impl QueryDynFilterRegistry {
 
 /// Stream-scoped lease that keeps a query registry alive.
 ///
-/// The manager only stores a weak index. Holding this lease is the production path for owning a
-/// strong registry reference; this keeps cleanup tied to stream lifetime instead of a hand-rolled
-/// active-stream counter.
+/// Production code owns registries through this lease; the manager only keeps a weak index.
 #[derive(Debug)]
 pub struct RemoteDynFilterRegistryLease {
     registry_manager: Arc<DynFilterRegistryManager>,
     /// Always `Some` while the lease is alive.
     ///
-    /// This is wrapped in `Option` only so `Drop` can `take()` and release the strong `Arc` before
-    /// checking whether the manager's weak index became dead. Without this explicit drop order,
-    /// the field would remain alive until after `Drop::drop` returns.
+    /// `Option` lets `Drop` release the strong `Arc` before pruning the weak index.
     registry: Option<Arc<QueryDynFilterRegistry>>,
 }
 
@@ -216,9 +213,7 @@ impl Drop for RemoteDynFilterRegistryLease {
         let query_id = registry.query_id();
         let registry_weak = Arc::downgrade(&registry);
 
-        // Release this lease's strong reference before checking whether the manager's weak entry is
-        // dead. If two leases drop concurrently, checking `Arc::strong_count` before the fields are
-        // dropped can make both drops observe each other and both skip cleanup.
+        // Release this lease before pruning; concurrent drops must not observe each other's strong refs.
         drop(registry);
 
         let _ = self
@@ -229,9 +224,7 @@ impl Drop for RemoteDynFilterRegistryLease {
 
 /// Query-engine manager for query-scoped remote dynamic filter registries.
 ///
-/// This is an index, not an owner: the map stores `Weak` pointers and active streams own the
-/// registry through [`RemoteDynFilterRegistryLease`]. Keep production access lease-based so
-/// dropping a lease releases one strong owner before the manager prunes a dead weak entry.
+/// Weak index only; active streams own registries through [`RemoteDynFilterRegistryLease`].
 #[derive(Debug, Default)]
 pub struct DynFilterRegistryManager {
     registries: RwLock<HashMap<QueryId, Weak<QueryDynFilterRegistry>>>,
@@ -270,10 +263,7 @@ impl DynFilterRegistryManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let current = registries.get(query_id)?;
 
-        // Compare `Weak` handles rather than raw pointers. The weak control block stays alive while
-        // either this drop's local weak handle or the manager's weak entry exists. `ptr_eq` prevents
-        // an old lease drop from removing a different registry installed for the same query id, and
-        // `upgrade().is_none()` ensures we only prune dead entries.
+        // `ptr_eq` protects a newer registry for the same query id; `upgrade` ensures it is dead.
         if current.ptr_eq(dropped_registry) && current.upgrade().is_none() {
             registries.remove(query_id)
         } else {
@@ -299,10 +289,7 @@ impl DynFilterRegistryManager {
 
     /// Acquires the stream-owned registry lease for `query_id`.
     ///
-    /// This is the only production API that returns a live registry handle. A concurrent final
-    /// lease drop cannot remove the map entry between lookup and ownership transfer because the
-    /// upgraded `Arc` returned by `get_or_init` is already a strong owner before the manager lock is
-    /// released.
+    /// Returns a lease holding a strong registry reference.
     pub fn acquire_lease(self: &Arc<Self>, query_id: QueryId) -> RemoteDynFilterRegistryLease {
         let registry = self.get_or_init(query_id);
         RemoteDynFilterRegistryLease::new(self.clone(), registry)
@@ -322,8 +309,7 @@ impl DynFilterRegistryManager {
 
     #[cfg(test)]
     pub fn registry_count(&self) -> usize {
-        // Snapshot helper for tests. Lifecycle decisions must not depend on this count; cleanup uses
-        // the lease-owned `Arc` and weak-entry pruning instead.
+        // Test snapshot helper; lifecycle decisions use lease-owned Arcs and weak pruning.
         self.registries
             .read()
             .unwrap()

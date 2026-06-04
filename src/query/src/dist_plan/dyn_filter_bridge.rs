@@ -39,9 +39,7 @@ pub(crate) struct CapturedDynFilter {
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteDynFilterPushdown {
     pub(crate) captured_dyn_filters: Vec<CapturedDynFilter>,
-    /// Per-parent-filter preflight readiness. `true` means the initial registration can be
-    /// constructed and serialized; the caller may still choose to return `PushedDown::No` until
-    /// datanode-side consumption is available.
+    /// Preflight result per parent filter.
     pub(crate) pushed_down: Vec<bool>,
 }
 
@@ -72,17 +70,6 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
                 pushed_down.push(false);
             }
         }
-    }
-
-    // Initial snapshots are an optional warm-start optimization. If validation fails while any
-    // snapshot is attached, retry once without snapshots before rejecting base registrations. This
-    // broad fallback is intentional: snapshot bytes are the only optional part here, and the second
-    // validation below still rejects non-snapshot errors such as duplicate ids or count limits.
-    if has_initial_snapshots(&captured_dyn_filters)
-        && let Err(error) = validate_initial_registrations_for_pushdown(&captured_dyn_filters)
-    {
-        common_telemetry::warn!(error; "Initial remote dyn filter registrations failed validation with optional snapshots; retrying without snapshots");
-        drop_initial_snapshots(&mut captured_dyn_filters);
     }
 
     if let Err(error) = validate_initial_registrations_for_pushdown(&captured_dyn_filters) {
@@ -142,10 +129,7 @@ fn build_captured_dyn_filter(
 
     Ok(CapturedDynFilter {
         filter_id,
-        initial_registration: attach_stable_initial_snapshot(
-            initial_registration,
-            &alive_dyn_filter,
-        ),
+        initial_registration: attach_initial_snapshot(initial_registration, &alive_dyn_filter),
         alive_dyn_filter,
     })
 }
@@ -160,43 +144,21 @@ fn validate_initial_registrations_for_pushdown(
     Ok(())
 }
 
-fn drop_initial_snapshots(captured_dyn_filters: &mut [CapturedDynFilter]) {
-    for captured in captured_dyn_filters {
-        captured.initial_registration.initial_snapshot = None;
-    }
-}
-
-fn has_initial_snapshots(captured_dyn_filters: &[CapturedDynFilter]) -> bool {
-    captured_dyn_filters
-        .iter()
-        .any(|captured| captured.initial_registration.initial_snapshot.is_some())
-}
-
-fn attach_stable_initial_snapshot(
+fn attach_initial_snapshot(
     initial_registration: InitialDynFilterReg,
     alive_dyn_filter: &DynamicFilterPhysicalExpr,
 ) -> InitialDynFilterReg {
-    let Some(initial_snapshot) = stable_initial_snapshot(alive_dyn_filter) else {
+    let Some(initial_snapshot) = initial_snapshot(alive_dyn_filter) else {
         return initial_registration;
     };
 
     initial_registration.with_initial_snapshot(initial_snapshot)
 }
 
-fn stable_initial_snapshot(
+fn initial_snapshot(
     alive_dyn_filter: &DynamicFilterPhysicalExpr,
 ) -> Option<InitialDynFilterSnapshot> {
-    // DataFusion dynamic filters start at generation 1 with a neutral predicate such as `true`.
-    // Sending that initial value does not improve remote filtering, so only send snapshots after
-    // a real producer update has advanced the generation.
-    let generation_before = alive_dyn_filter.snapshot_generation();
-    if generation_before <= 1 {
-        return None;
-    }
-
-    // Read a stable snapshot by checking the generation before and after `current()`. This relies
-    // on DataFusion's generation being monotonic for each update; if it changes while reading,
-    // omit the optional snapshot and let later async updates carry the new predicate.
+    let generation = alive_dyn_filter.snapshot_generation();
     let current = match alive_dyn_filter.current() {
         Ok(current) => current,
         Err(error) => {
@@ -204,10 +166,6 @@ fn stable_initial_snapshot(
             return None;
         }
     };
-    let generation_after = alive_dyn_filter.snapshot_generation();
-    if generation_before != generation_after {
-        return None;
-    }
 
     let payload = match DynFilterPayload::from_datafusion_expr(
         &current,
@@ -220,12 +178,12 @@ fn stable_initial_snapshot(
         }
     };
 
+    // Current DataFusion exposes `wait_complete()`, but no non-blocking completion getter.
+    let is_complete = false;
     Some(InitialDynFilterSnapshot::new(
         payload,
-        generation_after,
-        // DataFusion does not expose a synchronous public completion getter. Treat the initial
-        // snapshot as a non-terminal pending update; later runtime/update handling owns completion.
-        false,
+        generation,
+        is_complete,
     ))
 }
 
@@ -252,7 +210,7 @@ pub(crate) fn query_context_with_initial_dyn_filter_regs(
     }
 
     if let Err(error) = regs.validate_default_bounds() {
-        common_telemetry::warn!(error; "Dropping initial remote dyn filter registrations for region {} that exceed Task 03 bounds", region_id);
+        common_telemetry::warn!(error; "Dropping initial remote dyn filter registrations for region {} that exceed configured bounds", region_id);
         return region_query_ctx;
     }
 
@@ -454,7 +412,7 @@ mod tests {
             pushdown.captured_dyn_filters[0]
                 .initial_registration
                 .initial_snapshot
-                .is_none()
+                .is_some()
         );
     }
 
@@ -476,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_remote_dyn_filters_for_pushdown_omits_neutral_initial_snapshot() {
+    fn capture_remote_dyn_filters_for_pushdown_attaches_initial_snapshot() {
         let parent_filters = vec![Arc::new(DynamicFilterPhysicalExpr::new(
             vec![Arc::new(Column::new("host", 1)) as Arc<_>],
             lit(true) as _,
@@ -493,12 +451,12 @@ mod tests {
             pushdown.captured_dyn_filters[0]
                 .initial_registration
                 .initial_snapshot
-                .is_none()
+                .is_some()
         );
     }
 
     #[test]
-    fn capture_remote_dyn_filters_for_pushdown_attaches_stable_initial_snapshot() {
+    fn capture_remote_dyn_filters_for_pushdown_attaches_initial_snapshot_after_update() {
         let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
             vec![Arc::new(Column::new("host", 1)) as Arc<_>],
             lit(true) as _,
@@ -526,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_remote_dyn_filters_for_pushdown_drops_oversized_snapshots_and_keeps_regs() {
+    fn capture_remote_dyn_filters_for_pushdown_rejects_oversized_snapshots() {
         let parent_filters = vec![
             test_dyn_filter_with_snapshot_payload("host", 0, 40 * 1024)
                 as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
@@ -539,18 +497,12 @@ mod tests {
             parent_filters,
         );
 
-        assert_eq!(pushdown.pushed_down, vec![true, true]);
-        assert_eq!(pushdown.captured_dyn_filters.len(), 2);
-        assert!(
-            pushdown
-                .captured_dyn_filters
-                .iter()
-                .all(|captured| { captured.initial_registration.initial_snapshot.is_none() })
-        );
+        assert_eq!(pushdown.pushed_down, vec![false, false]);
+        assert!(pushdown.captured_dyn_filters.is_empty());
     }
 
     #[test]
-    fn capture_remote_dyn_filters_for_pushdown_rejects_regs_still_invalid_after_snapshot_drop() {
+    fn capture_remote_dyn_filters_for_pushdown_rejects_too_many_regs_with_snapshots() {
         const TOO_MANY_INITIAL_REGS: usize = 65;
 
         let parent_filters = (0..TOO_MANY_INITIAL_REGS)

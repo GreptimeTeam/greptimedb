@@ -53,9 +53,7 @@ impl FromStr for FilterFingerprint {
 
 /// Query-local identity for one remote dynamic filter producer.
 ///
-/// The analyzer assigns a new id to each frontend-side `MergeScan` rewrite so filters from
-/// independent producers cannot collide even when their producer-local ordinals and child
-/// fingerprints match.
+/// Distinguishes independent producers(MergeScan node) that may share ordinals and child fingerprints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemoteDynFilterProducerId(u64);
 
@@ -90,9 +88,8 @@ pub struct FilterId {
     children_fingerprint: FilterFingerprint,
 }
 
-// NOTE(remote-dyn-filter): FilterId is generated once by the source-side planner/runtime and then
-// propagated through the query lifecycle. Consumers should treat it as the canonical propagated
-// identifier instead of independently recomputing it from local state.
+// NOTE(remote-dyn-filter): FilterId is source-generated and propagated; consumers should not
+// recompute it from local scan state.
 
 impl FilterId {
     pub fn new(
@@ -173,10 +170,7 @@ impl Display for ParseFilterIdError {
 
 /// Builds the query-local remote dynamic filter identity.
 ///
-/// The identity is `remote dynamic filter producer id + producer-local ordinal + canonicalized child fingerprint`.
-/// Subscriber routing details such as `region_id` and `partition` stay outside this key so they
-/// can remain in the later fanout/subscriber map instead of splitting one shared remote filter state.
-/// See [`FilterId`] for the propagation contract.
+/// Identity is producer id + local ordinal + child fingerprint; routing stays outside.
 pub(crate) fn build_remote_dyn_filter_id(
     remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
     producer_local_ordinal: usize,

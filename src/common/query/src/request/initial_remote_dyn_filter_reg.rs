@@ -30,9 +30,7 @@ pub const INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY: &str =
 pub const INITIAL_REMOTE_DYN_FILTER_REGS_MAX_COUNT: usize = 64;
 /// Raw encoded registration byte budget for initial remote dynamic filter registrations.
 ///
-/// This counts DataFusion physical expression proto bytes and optional initial snapshot payload
-/// bytes before serde JSON/base64 expansion. It is a payload budget, not an exact final
-/// QueryContext extension string-size limit.
+/// Counts proto payload bytes before JSON/base64 expansion, not the final extension size.
 pub const INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,9 +112,8 @@ pub struct InitialDynFilterReg {
     pub child_exprs_datafusion_proto: Vec<Vec<u8>>,
     /// Optional producer-side predicate snapshot captured at initial registration time.
     ///
-    /// It is skipped when absent so older/no-snapshot registrations remain wire-compatible.
-    /// Datanode runtime code should treat this as an update that arrived before the runtime
-    /// `DynamicFilterPhysicalExpr` was created, not as registration identity metadata.
+    /// This is only an initial pending update for the remote runtime filter. It is not part of
+    /// registration identity; identity is carried by `filter_id` and child expressions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_snapshot: Option<InitialDynFilterSnapshot>,
 }
@@ -124,13 +121,9 @@ pub struct InitialDynFilterReg {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialDynFilterSnapshot {
     pub payload: DynFilterPayload,
-    /// Producer-side snapshot generation. Receivers use this with normal update generation
-    /// ordering to ignore stale payloads and apply newer payloads.
+    /// Producer-side generation used to ignore stale snapshots.
     pub generation: u64,
     /// Whether this snapshot completes the dynamic filter stream.
-    ///
-    /// 3a currently sets this conservatively to false because DataFusion exposes synchronous
-    /// generation/current reads but not a synchronous public completion getter.
     pub is_complete: bool,
 }
 
