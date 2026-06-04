@@ -265,8 +265,8 @@ impl MysqlResultWriter {
                     }
                     DataType::Timestamp(_, _) => {
                         let v = datatypes::arrow_array::timestamp_array_value(column, i);
-                        let v = v.to_chrono_datetime_with_timezone(Some(&query_context.timezone()));
-                        row_writer.write_col(v)?;
+                        let s = v.to_timezone_aware_string(Some(&query_context.timezone()));
+                        row_writer.write_col(s)?;
                     }
                     DataType::Interval(interval_unit) => match interval_unit {
                         IntervalUnit::YearMonth => {
