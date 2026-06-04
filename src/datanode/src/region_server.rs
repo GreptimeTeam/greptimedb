@@ -43,6 +43,7 @@ use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_runtime::Runtime;
+use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
@@ -93,8 +94,8 @@ use crate::error::{
     ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, GetRegionMetadataSnafu,
     HandleBatchDdlRequestSnafu, HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu,
     NewPlanDecoderSnafu, NotYetImplementedSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu,
-    RegionNotReadySnafu, Result, SerializeJsonSnafu, StopRegionEngineSnafu, UnexpectedSnafu,
-    UnsupportedOutputSnafu,
+    RegionNotReadySnafu, Result, RuntimeJoinSnafu, SerializeJsonSnafu, StopRegionEngineSnafu,
+    UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
@@ -230,6 +231,18 @@ impl RegionServer {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<RegionResponse> {
+        if RegionServerInner::is_ingest_request(&request) {
+            let inner = self.inner.clone();
+            let request_type = request.request_type();
+            return self
+                .inner
+                .runtimes
+                .ingest_runtime()
+                .spawn(async move { inner.handle_request(region_id, request).await })
+                .await
+                .context(RuntimeJoinSnafu { request_type })?;
+        }
+
         self.inner.handle_request(region_id, request).await
     }
 
@@ -1200,6 +1213,13 @@ impl RegionServerInner {
         *self.topic_stats_reporter.write().unwrap() = Some(topic_stats_reporter);
     }
 
+    fn is_ingest_request(request: &RegionRequest) -> bool {
+        matches!(
+            request,
+            RegionRequest::Put(_) | RegionRequest::Delete(_) | RegionRequest::BulkInserts(_)
+        )
+    }
+
     fn get_engine(
         &self,
         region_id: RegionId,
@@ -1906,7 +1926,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use api::v1::SemanticType;
+    use api::v1::{Rows, SemanticType};
     use api::v1::region::{
         RemoteDynFilterRequest, RemoteDynFilterUnregister, RemoteDynFilterUpdate,
         remote_dyn_filter_request,
@@ -1923,13 +1943,41 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
-        PathType, RegionDropRequest, RegionOpenRequest, RegionTruncateRequest,
+        PathType, RegionCompactRequest, RegionDeleteRequest, RegionDropRequest, RegionOpenRequest,
+        RegionPutRequest, RegionTruncateRequest,
     };
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::error::Result;
     use crate::tests::{MockRegionEngine, mock_region_server};
+
+
+    #[test]
+    fn test_is_ingest_request() {
+        let rows = || Rows {
+            schema: Vec::new(),
+            rows: Vec::new(),
+        };
+
+        assert!(RegionServerInner::is_ingest_request(&RegionRequest::Put(
+            RegionPutRequest {
+                rows: rows(),
+                hint: None,
+                partition_expr_version: None,
+            },
+        )));
+        assert!(RegionServerInner::is_ingest_request(&RegionRequest::Delete(
+            RegionDeleteRequest {
+                rows: rows(),
+                hint: None,
+                partition_expr_version: None,
+            },
+        )));
+        assert!(!RegionServerInner::is_ingest_request(
+            &RegionRequest::Compact(RegionCompactRequest::default()),
+        ));
+    }
 
     fn single_value_stream() -> SendableRecordBatchStream {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
