@@ -23,7 +23,6 @@ pub mod metrics;
 mod partition_expr_fetcher;
 pub mod query_stream;
 pub mod region_server;
-pub mod runtime;
 pub mod service;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]

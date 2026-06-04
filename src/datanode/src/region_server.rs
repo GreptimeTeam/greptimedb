@@ -43,7 +43,6 @@ use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_runtime::Runtime;
-use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
@@ -100,8 +99,6 @@ use crate::error::{
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::query_stream::QueryRuntimeStream;
 use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
-use crate::runtime::DatanodeRuntimes;
-
 const QUERY_RUNTIME_STREAM_BUFFER_SIZE: usize = 8;
 
 #[derive(Clone)]
@@ -121,14 +118,12 @@ impl RegionServer {
     pub fn new(
         query_engine: QueryEngineRef,
         runtime: Runtime,
-        runtimes: DatanodeRuntimes,
         event_listener: RegionServerEventListenerRef,
         flight_compression: FlightCompression,
     ) -> Self {
         Self::with_table_provider(
             query_engine,
             runtime,
-            runtimes,
             event_listener,
             Arc::new(DummyTableProviderFactory),
             0,
@@ -140,7 +135,6 @@ impl RegionServer {
     pub fn with_table_provider(
         query_engine: QueryEngineRef,
         runtime: Runtime,
-        runtimes: DatanodeRuntimes,
         event_listener: RegionServerEventListenerRef,
         table_provider_factory: TableProviderFactoryRef,
         max_concurrent_queries: usize,
@@ -151,8 +145,7 @@ impl RegionServer {
             inner: Arc::new(RegionServerInner::new(
                 query_engine,
                 runtime,
-                runtimes,
-                event_listener,
+                    event_listener,
                 table_provider_factory,
                 RegionServerParallelism::from_opts(
                     max_concurrent_queries,
@@ -237,11 +230,9 @@ impl RegionServer {
         if RegionServerInner::is_ingest_request(&request) {
             let inner = self.inner.clone();
             let request_type = request.request_type();
-            return self
-                .inner
-                .runtimes
-                .ingest_runtime()
-                .spawn(async move { inner.handle_request(region_id, request).await })
+            return common_runtime::spawn_datanode_ingest(async move {
+                inner.handle_request(region_id, request).await
+            })
                 .await
                 .context(RuntimeJoinSnafu { request_type })?;
         }
@@ -280,11 +271,9 @@ impl RegionServer {
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
         let server = self.clone();
-        return self
-            .inner
-            .runtimes
-            .query_runtime()
-            .spawn(async move { server.handle_remote_read_inner(request, query_ctx).await })
+        return common_runtime::spawn_datanode_query(async move {
+            server.handle_remote_read_inner(request, query_ctx).await
+        })
             .await
             .context(RuntimeJoinSnafu {
                 request_type: "remote_read",
@@ -343,11 +332,9 @@ impl RegionServer {
     #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let server = self.clone();
-        return self
-            .inner
-            .runtimes
-            .query_runtime()
-            .spawn(async move { server.handle_read_inner(request).await })
+        return common_runtime::spawn_datanode_query(async move {
+            server.handle_read_inner(request).await
+        })
             .await
             .context(RuntimeJoinSnafu {
                 request_type: "read",
@@ -1093,7 +1080,6 @@ struct RegionServerInner {
     region_map: DashMap<RegionId, RegionEngineWithStatus>,
     query_engine: QueryEngineRef,
     runtime: Runtime,
-    runtimes: DatanodeRuntimes,
     event_listener: RegionServerEventListenerRef,
     table_provider_factory: TableProviderFactoryRef,
     /// The number of queries allowed to be executed at the same time.
@@ -1207,7 +1193,6 @@ impl RegionServerInner {
     pub fn new(
         query_engine: QueryEngineRef,
         runtime: Runtime,
-        runtimes: DatanodeRuntimes,
         event_listener: RegionServerEventListenerRef,
         table_provider_factory: TableProviderFactoryRef,
         parallelism: Option<RegionServerParallelism>,
@@ -1217,7 +1202,6 @@ impl RegionServerInner {
             region_map: DashMap::new(),
             query_engine,
             runtime,
-            runtimes,
             event_listener,
             table_provider_factory,
             parallelism,
@@ -1850,7 +1834,7 @@ impl RegionServerInner {
         let (sender, receiver) = mpsc::channel(QUERY_RUNTIME_STREAM_BUFFER_SIZE);
         let (init_sender, init_receiver) = oneshot::channel();
 
-        let _handle = self.runtimes.query_runtime().spawn(async move {
+        let _handle = common_runtime::spawn_datanode_query(async move {
             match inner.handle_read_inner(request, query_ctx).await {
                 Ok(mut stream) => {
                     let schema = stream.schema();

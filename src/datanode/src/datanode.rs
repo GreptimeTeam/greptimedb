@@ -72,7 +72,6 @@ use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
 use crate::partition_expr_fetcher::MetaPartitionExprFetcher;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
-use crate::runtime::DatanodeRuntimes;
 use crate::store::{self, new_object_store_without_cache};
 use crate::utils::{RegionOpenRequests, build_region_open_requests};
 
@@ -439,12 +438,9 @@ impl DatanodeBuilder {
             .table_provider_factory
             .clone()
             .unwrap_or_else(|| Arc::new(DummyTableProviderFactory));
-        let datanode_runtimes = DatanodeRuntimes::new(&opts.datanode_runtime);
-
         let mut region_server = RegionServer::with_table_provider(
             query_engine,
             common_runtime::global_runtime(),
-            datanode_runtimes,
             event_listener,
             table_provider_factory,
             opts.max_concurrent_queries,
