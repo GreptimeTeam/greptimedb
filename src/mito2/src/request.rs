@@ -552,7 +552,7 @@ pub(crate) struct SenderBulkRequest {
     pub(crate) sender: OptionOutputTx,
     pub(crate) region_id: RegionId,
     pub(crate) request: BulkPart,
-    pub(crate) region_metadata: RegionMetadataRef,
+    pub(crate) region_metadata: Option<RegionMetadataRef>,
     pub(crate) partition_expr_version: Option<u64>,
 }
 

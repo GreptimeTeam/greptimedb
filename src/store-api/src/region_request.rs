@@ -315,6 +315,7 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
             options: open.options,
             skip_wal_replay: false,
             checkpoint: None,
+            requirements: Default::default(),
         }),
     )])
 }
@@ -408,6 +409,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = request.region_id.into();
     let partition_expr_version = request.partition_expr_version.map(|v| v.value);
+    let aligned_schema_version = request.aligned_schema_version.map(|v| v.schema_version);
     let Some(Body::ArrowIpc(request)) = request.body else {
         return Ok(vec![]);
     };
@@ -428,6 +430,7 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             payload,
             raw_data: request,
             partition_expr_version,
+            aligned_schema_version,
         }),
     )])
 }
@@ -566,6 +569,28 @@ pub struct RegionDropRequest {
     pub partial_drop: bool,
 }
 
+/// Requirements for a region request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegionRequirements {
+    /// Whether the region data must be backed by object storage.
+    pub object_storage: bool,
+}
+
+impl RegionRequirements {
+    /// Returns empty requirements.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Returns requirements for object storage.
+    pub fn object_storage() -> Self {
+        Self {
+            object_storage: true,
+        }
+    }
+}
+
 /// Open region request.
 #[derive(Debug, Clone)]
 pub struct RegionOpenRequest {
@@ -581,6 +606,8 @@ pub struct RegionOpenRequest {
     pub skip_wal_replay: bool,
     /// Replay checkpoint.
     pub checkpoint: Option<ReplayCheckpoint>,
+    /// Requirements for opening the region.
+    pub requirements: RegionRequirements,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1485,6 +1512,7 @@ pub struct RegionBulkInsertsRequest {
     pub payload: DfRecordBatch,
     pub raw_data: ArrowIpc,
     pub partition_expr_version: Option<u64>,
+    pub aligned_schema_version: Option<u64>,
 }
 
 impl RegionBulkInsertsRequest {

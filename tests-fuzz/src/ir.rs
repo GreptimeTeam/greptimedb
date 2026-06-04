@@ -30,7 +30,7 @@ use std::time::Duration;
 pub use alter_expr::{AlterTableExpr, AlterTableOption};
 use common_time::timestamp::TimeUnit;
 use common_time::{Date, Timestamp};
-pub use create_expr::{CreateDatabaseExpr, CreateTableExpr};
+pub use create_expr::{CreateDatabaseExpr, CreateTableExpr, PartitionDef};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::TimestampType;
 use datatypes::value::Value;
@@ -40,7 +40,7 @@ use lazy_static::lazy_static;
 pub use partition_expr::SimplePartitions;
 use rand::Rng;
 use rand::seq::{IndexedRandom, SliceRandom};
-pub use repartition_expr::RepartitionExpr;
+pub use repartition_expr::{AlterTablePartitionsExpr, RepartitionExpr};
 use serde::{Deserialize, Serialize};
 
 use self::insert_expr::RowValues;

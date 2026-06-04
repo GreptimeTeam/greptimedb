@@ -20,6 +20,9 @@ init_regions_parallelism = 16
 ## The maximum concurrent queries allowed to be executed. Zero means unlimited.
 max_concurrent_queries = 0
 
+## Timeout to acquire a permit from the concurrent query limiter when `max_concurrent_queries` is reached.
+concurrent_query_limiter_timeout = "100ms"
+
 ## Enable telemetry to collect anonymous usage data. Enabled by default.
 #+ enable_telemetry = true
 

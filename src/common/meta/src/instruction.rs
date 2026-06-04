@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use store_api::region_engine::SyncRegionFromRequest;
-use store_api::region_request::RegionFlushReason;
+use store_api::region_request::{RegionFlushReason, RegionRequirements};
 use store_api::storage::{FileRefsManifest, GcReport, RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
@@ -179,10 +179,22 @@ impl Display for OpenRegion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OpenRegion(region_ident={}, region_storage_path={})",
-            self.region_ident, self.region_storage_path
+            "OpenRegion(region_ident={}, region_storage_path={}, reason={:?})",
+            self.region_ident, self.region_storage_path, self.reason
         )
     }
+}
+
+/// The reason why an open region instruction is triggered.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OpenRegionReason {
+    /// Open triggered before region migration.
+    RegionMigration,
+    /// Open triggered by region failover.
+    RegionFailover,
+    /// Open triggered when adding a follower region.
+    #[cfg(feature = "enterprise")]
+    RegionFollower,
 }
 
 #[serde_with::serde_as]
@@ -196,6 +208,10 @@ pub struct OpenRegion {
     pub region_wal_options: HashMap<RegionNumber, String>,
     #[serde(default)]
     pub skip_wal_replay: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<OpenRegionReason>,
+    #[serde(default)]
+    pub requirements: RegionRequirements,
 }
 
 impl OpenRegion {
@@ -205,6 +221,8 @@ impl OpenRegion {
         region_options: HashMap<String, String>,
         region_wal_options: HashMap<RegionNumber, String>,
         skip_wal_replay: bool,
+        reason: Option<OpenRegionReason>,
+        requirements: RegionRequirements,
     ) -> Self {
         Self {
             region_ident,
@@ -212,6 +230,8 @@ impl OpenRegion {
             region_options,
             region_wal_options,
             skip_wal_replay,
+            reason,
+            requirements,
         }
     }
 }
@@ -1126,11 +1146,13 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             false,
+            None,
+            RegionRequirements::empty(),
         )]);
 
         let serialized = serde_json::to_string(&open_region).unwrap();
         assert_eq!(
-            r#"{"OpenRegions":[{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}]}"#,
+            r#"{"OpenRegions":[{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false,"requirements":{"object_storage":false}}]}"#,
             serialized
         );
 
@@ -1213,6 +1235,8 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             false,
+            None,
+            RegionRequirements::empty(),
         )]);
         assert_eq!(open_region_instruction, open_region);
 
@@ -1368,8 +1392,39 @@ mod tests {
             region_options,
             region_wal_options: HashMap::new(),
             skip_wal_replay: false,
+            reason: None,
+            requirements: RegionRequirements::empty(),
         };
         assert_eq!(expected, deserialized);
+    }
+
+    #[test]
+    fn test_serialize_open_region_with_reason_and_requirements() {
+        let open_region = OpenRegion::new(
+            RegionIdent {
+                datanode_id: 2,
+                table_id: 1024,
+                region_number: 1,
+                engine: "mito2".to_string(),
+            },
+            "test/foo",
+            HashMap::new(),
+            HashMap::new(),
+            false,
+            Some(OpenRegionReason::RegionMigration),
+            RegionRequirements::object_storage(),
+        );
+
+        let serialized = serde_json::to_string(&open_region).unwrap();
+        assert!(serialized.contains(r#""reason":"RegionMigration""#));
+        assert!(serialized.contains(r#""object_storage":true"#));
+
+        let deserialized: OpenRegion = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(Some(OpenRegionReason::RegionMigration), deserialized.reason);
+        assert_eq!(
+            RegionRequirements::object_storage(),
+            deserialized.requirements
+        );
     }
 
     #[test]

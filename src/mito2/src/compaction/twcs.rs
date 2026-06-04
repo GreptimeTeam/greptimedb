@@ -22,14 +22,15 @@ use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
+use rayon::prelude::*;
 use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::run::{
-    FileGroup, Item, Ranged, find_sorted_runs, merge_primary_key_ranges, merge_seq_files,
-    primary_key_ranges_overlap, reduce_runs,
+    FileGroup, Item, Ranged, find_sorted_runs, find_sorted_runs_by_time_range,
+    merge_primary_key_ranges, merge_seq_files, primary_key_ranges_overlap, reduce_runs,
 };
 use crate::compaction::{CompactionOutput, get_expired_ssts};
 use crate::sst::file::{FileHandle, Level, overlaps};
@@ -64,11 +65,10 @@ impl TwcsPicker {
         time_windows: &mut BTreeMap<i64, Window>,
         active_window: Option<i64>,
     ) -> Vec<CompactionOutput> {
-        let mut output = vec![];
-        for (window, files) in time_windows {
-            if files.files.is_empty() {
-                continue;
-            }
+        let find_inputs = |files: &Window,
+                           windows: &BTreeMap<i64, Window>|
+         -> (Vec<FileGroup>, bool) {
+            let window = &files.time_window;
             let mut files_to_merge: Vec<_> = files.files().cloned().collect();
 
             // Filter out large files in append mode - they won't benefit from compaction
@@ -88,13 +88,18 @@ impl TwcsPicker {
                 );
             }
 
-            let sorted_runs = find_sorted_runs(&mut files_to_merge);
+            let sorted_runs = if files_to_merge.len() < 1024 {
+                find_sorted_runs(&mut files_to_merge)
+            } else {
+                find_sorted_runs_by_time_range(&mut files_to_merge)
+            };
             let found_runs = sorted_runs.len();
             // We only remove deletion markers if we found less than 2 runs and not in append mode.
             // because after compaction there will be no overlapping files.
-            let filter_deleted = !files.overlapping && found_runs <= 2 && !self.append_mode;
+            let filter_deleted =
+                found_runs <= 2 && !self.append_mode && !window_has_overlap(files, windows);
             if found_runs == 0 {
-                continue;
+                return (vec![], filter_deleted);
             }
 
             let mut inputs = if found_runs > 1 {
@@ -102,7 +107,7 @@ impl TwcsPicker {
             } else {
                 let run = sorted_runs.last().unwrap();
                 if run.items().len() < self.trigger_file_num {
-                    continue;
+                    return (vec![], filter_deleted);
                 }
                 // no overlapping files, try merge small files
                 merge_seq_files(run.items(), self.max_output_file_size)
@@ -144,6 +149,26 @@ impl TwcsPicker {
                     filter_deleted,
                     &inputs,
                 );
+            }
+            (inputs, filter_deleted)
+        };
+
+        let mut output = vec![];
+        let windows = time_windows
+            .values()
+            .filter(|w| !w.files.is_empty())
+            .collect::<Vec<_>>();
+        let chunk_size = self.max_background_tasks.unwrap_or(windows.len()).max(1);
+        'chunks: for chunk in windows.chunks(chunk_size) {
+            for (inputs, filter_deleted) in chunk
+                .par_iter() // parallelly calculate the inputs
+                .map(|window| find_inputs(window, time_windows))
+                .collect::<Vec<_>>()
+            {
+                if inputs.is_empty() {
+                    continue;
+                }
+
                 output.push(CompactionOutput {
                     output_level: LEVEL_COMPACTED, // always compact to l1
                     inputs: inputs.into_iter().flat_map(|fg| fg.into_files()).collect(),
@@ -158,7 +183,7 @@ impl TwcsPicker {
                         "Region ({:?}) compaction task size larger than max background tasks({}), remaining tasks discarded",
                         region_id, max_background_tasks
                     );
-                    break;
+                    break 'chunks;
                 }
             }
         }
@@ -268,7 +293,6 @@ struct Window {
     // created from the same compaction task.
     files: HashMap<Option<NonZeroU64>, FileGroup>,
     time_window: i64,
-    overlapping: bool,
     primary_key_range: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
@@ -283,7 +307,6 @@ impl Window {
             end,
             files,
             time_window: 0,
-            overlapping: false,
             primary_key_range,
         }
     }
@@ -346,37 +369,21 @@ fn assign_to_windows<'a>(
             }
         }
     }
-    if windows.is_empty() {
-        return BTreeMap::new();
-    }
+    windows.into_iter().collect()
+}
 
-    let mut windows = windows.into_values().collect::<Vec<_>>();
-    windows.sort_unstable_by(|l, r| l.start.cmp(&r.start).then(l.end.cmp(&r.end).reverse()));
-
-    for idx in 0..windows.len() {
-        let lhs_range = windows[idx].range();
-        for next_idx in idx + 1..windows.len() {
-            let rhs_range = windows[next_idx].range();
-            if rhs_range.0 > lhs_range.1 {
-                break;
-            }
-
-            let windows_overlap = overlaps(&lhs_range, &rhs_range)
-                && match (
-                    &windows[idx].primary_key_range,
-                    &windows[next_idx].primary_key_range,
-                ) {
-                    (Some(lhs), Some(rhs)) => primary_key_ranges_overlap(lhs, rhs),
+fn window_has_overlap(this: &Window, windows: &BTreeMap<i64, Window>) -> bool {
+    windows
+        .values()
+        .filter(|that| this.time_window != that.time_window)
+        .any(|that| {
+            overlaps(&this.range(), &that.range()) && {
+                match (&this.primary_key_range, &that.primary_key_range) {
+                    (Some(l), Some(r)) => primary_key_ranges_overlap(l, r),
                     _ => true,
-                };
-            if windows_overlap {
-                windows[idx].overlapping = true;
-                windows[next_idx].overlapping = true;
+                }
             }
-        }
-    }
-
-    windows.into_iter().map(|w| (w.time_window, w)).collect()
+        })
 }
 
 /// Finds the latest active writing window among all files.
@@ -606,7 +613,8 @@ mod tests {
 
         for (expected_window, overlapping, window_files) in expected_files {
             let actual_window = windows.get(expected_window).unwrap();
-            assert_eq!(*overlapping, actual_window.overlapping);
+            let actual_overlapping = window_has_overlap(actual_window, &windows);
+            assert_eq!(*overlapping, actual_overlapping);
             let mut file_ranges = actual_window
                 .files
                 .values()
@@ -744,7 +752,8 @@ mod tests {
 
         let windows = assign_to_windows(files.iter(), 2);
 
-        assert!(!windows.get(&2).unwrap().overlapping);
+        let overlapping = window_has_overlap(windows.get(&2).unwrap(), &windows);
+        assert!(!overlapping);
     }
 
     #[test]
@@ -773,7 +782,8 @@ mod tests {
 
         let windows = assign_to_windows(files.iter(), 2);
 
-        assert!(!windows.get(&4).unwrap().overlapping);
+        let overlapping = window_has_overlap(windows.get(&4).unwrap(), &windows);
+        assert!(!overlapping);
     }
 
     struct CompactionPickerTestCase {

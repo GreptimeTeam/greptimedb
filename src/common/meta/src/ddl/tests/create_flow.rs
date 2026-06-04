@@ -16,12 +16,18 @@ use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::flow::CreateRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_procedure::Status;
 use common_procedure_test::execute_procedure_until_done;
 use table::table_name::TableName;
 
 use crate::ddl::DdlContext;
-use crate::ddl::create_flow::{CreateFlowData, CreateFlowProcedure, CreateFlowState, FlowType};
+use crate::ddl::create_flow::{
+    CreateFlowData, CreateFlowProcedure, CreateFlowState, DEFER_ON_MISSING_SOURCE_KEY,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, defer_on_missing_source,
+    validate_flow_options,
+};
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
 use crate::error;
@@ -63,6 +69,11 @@ pub(crate) fn test_create_flow_task(
     }
 }
 
+fn enable_defer_on_missing_source(task: &mut CreateFlowTask) {
+    task.flow_options
+        .insert(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string());
+}
+
 #[tokio::test]
 async fn test_create_flow_source_table_not_found() {
     let source_table_names = vec![TableName::new(
@@ -78,7 +89,277 @@ async fn test_create_flow_source_table_not_found() {
     let query_ctx = test_query_context();
     let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
-    assert_matches!(err, error::Error::TableNotFound { .. });
+    assert_matches!(err, error::Error::Unsupported { .. });
+    assert!(
+        err.to_string()
+            .contains("requires WITH ('defer_on_missing_source'='true')")
+    );
+}
+
+#[tokio::test]
+async fn test_create_pending_flow_source_table_not_found_with_defer() {
+    let source_table_names = vec![TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "my_table",
+    )];
+    let sink_table_name =
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
+    let mut task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
+    enable_defer_on_missing_source(&mut task);
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context.clone());
+    let status = procedure.on_prepare().await.unwrap();
+    assert_matches!(status, Status::Executing { persist: true, .. });
+    assert_eq!(procedure.data.unresolved_source_table_names.len(), 1);
+    assert_eq!(procedure.data.source_table_ids, Vec::<u32>::new());
+
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let flow_id = *output.downcast_ref::<FlowId>().unwrap();
+    let flow_info = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(flow_info.source_table_ids(), Vec::<u32>::new());
+    assert_eq!(
+        flow_info
+            .options()
+            .get(DEFER_ON_MISSING_SOURCE_KEY)
+            .map(String::as_str),
+        Some("true")
+    );
+}
+
+#[tokio::test]
+async fn test_create_pending_flow_source_table_not_found_with_defer_false() {
+    let source_table_names = vec![TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "my_table",
+    )];
+    let sink_table_name =
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
+    let mut task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
+    task.flow_options
+        .insert(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "false".to_string());
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unsupported { .. });
+    assert!(
+        err.to_string()
+            .contains("requires WITH ('defer_on_missing_source'='true')")
+    );
+}
+
+#[tokio::test]
+async fn test_create_pending_flow_records_partial_source_resolution() {
+    let existing_source = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "partial_existing_source_table",
+    );
+    let missing_source = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "partial_missing_source_table",
+    );
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "partial_pending_sink_table",
+    );
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let existing_table_id = 3026;
+    let create_table_task =
+        test_create_table_task("partial_existing_source_table", existing_table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            create_table_task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut task = test_create_flow_task(
+        "partial_pending_flow",
+        vec![existing_source.clone(), missing_source.clone()],
+        sink_table_name,
+        false,
+    );
+    enable_defer_on_missing_source(&mut task);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context.clone());
+    let status = procedure.on_prepare().await.unwrap();
+    assert_matches!(status, Status::Executing { persist: true, .. });
+    assert_eq!(procedure.data.source_table_ids, vec![existing_table_id]);
+    assert_eq!(
+        procedure.data.unresolved_source_table_names,
+        vec![missing_source.clone()]
+    );
+
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let flow_id = *output.downcast_ref::<FlowId>().unwrap();
+    let flow_info = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(flow_info.is_pending());
+    assert_eq!(flow_info.source_table_ids(), &[existing_table_id]);
+    let expected_all_sources = vec![existing_source, missing_source.clone()];
+    assert_eq!(
+        flow_info.all_source_table_names(),
+        expected_all_sources.as_slice()
+    );
+    assert_eq!(flow_info.unresolved_source_table_names(), &[missing_source]);
+    assert!(flow_info.flownode_ids().is_empty());
+}
+
+#[test]
+fn test_defer_on_missing_source_defaults_false() {
+    let task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+
+    assert!(!defer_on_missing_source(&task).unwrap());
+}
+
+#[test]
+fn test_defer_on_missing_source_true() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options
+        .insert(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string());
+
+    assert!(defer_on_missing_source(&task).unwrap());
+}
+
+#[test]
+fn test_defer_on_missing_source_invalid_value() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options.insert(
+        DEFER_ON_MISSING_SOURCE_KEY.to_string(),
+        "invalid".to_string(),
+    );
+
+    let err = defer_on_missing_source(&task).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Invalid flow option 'defer_on_missing_source': invalid")
+    );
+}
+
+#[test]
+fn test_validate_flow_options_allows_incremental_read_option() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options.insert(
+        FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+        "true".to_string(),
+    );
+
+    validate_flow_options(&task).unwrap();
+}
+
+#[tokio::test]
+async fn test_create_flow_rejects_unknown_option_in_meta_task() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options
+        .insert("unknown_option".to_string(), "value".to_string());
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unexpected { .. });
+    assert!(
+        err.to_string()
+            .contains("Unknown flow option 'unknown_option'")
+    );
+}
+
+#[test]
+fn test_create_request_strips_defer_on_missing_source_runtime_option() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    enable_defer_on_missing_source(&mut task);
+
+    let data = CreateFlowData {
+        state: CreateFlowState::CreateFlows,
+        task,
+        flow_id: Some(1024),
+        peers: vec![],
+        source_table_ids: vec![],
+        unresolved_source_table_names: vec![],
+        flow_context: FlowQueryContext {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            timezone: "UTC".to_string(),
+            extensions: HashMap::new(),
+            channel: 0,
+            snapshot_seqs: HashMap::new(),
+            sst_min_sequences: HashMap::new(),
+        },
+        prev_flow_info_value: None,
+        did_replace: false,
+        flow_type: Some(FlowType::Batching),
+    };
+
+    let request: CreateRequest = (&data).into();
+
+    assert!(
+        !request
+            .flow_options
+            .contains_key(DEFER_ON_MISSING_SOURCE_KEY)
+    );
+    assert_eq!(
+        request
+            .flow_options
+            .get(FlowType::FLOW_TYPE_KEY)
+            .map(String::as_str),
+        Some(FlowType::BATCHING)
+    );
 }
 
 pub(crate) async fn create_test_flow(
@@ -95,6 +376,27 @@ pub(crate) async fn create_test_flow(
     );
     let query_ctx = test_query_context();
     let mut procedure = CreateFlowProcedure::new(task.clone(), query_ctx, ddl_context.clone());
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let flow_id = output.downcast_ref::<FlowId>().unwrap();
+
+    *flow_id
+}
+
+pub(crate) async fn create_test_pending_flow(
+    ddl_context: &DdlContext,
+    flow_name: &str,
+    source_table_names: Vec<TableName>,
+    sink_table_name: TableName,
+) -> FlowId {
+    let mut task = test_create_flow_task(
+        flow_name,
+        source_table_names.clone(),
+        sink_table_name.clone(),
+        false,
+    );
+    enable_defer_on_missing_source(&mut task);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context.clone());
     let output = execute_procedure_until_done(&mut procedure).await.unwrap();
     let flow_id = output.downcast_ref::<FlowId>().unwrap();
 
@@ -152,6 +454,201 @@ async fn test_create_flow() {
     let mut procedure = CreateFlowProcedure::new(task.clone(), query_ctx, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::FlowAlreadyExists { .. });
+}
+
+#[tokio::test]
+async fn test_replace_pending_flow_with_active_flow_is_unsupported() {
+    let source_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_pending_source_table",
+    );
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_pending_sink_table",
+    );
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let pending_flow_id = create_test_pending_flow(
+        &ddl_context,
+        "replace_pending_flow",
+        vec![source_table_name.clone()],
+        sink_table_name.clone(),
+    )
+    .await;
+
+    let pending_flow = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(pending_flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(pending_flow.is_pending());
+    assert!(pending_flow.flownode_ids().is_empty());
+
+    let create_table_task = test_create_table_task("replace_pending_source_table", 1026);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            create_table_task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut replace_task = test_create_flow_task(
+        "replace_pending_flow",
+        vec![source_table_name],
+        sink_table_name,
+        false,
+    );
+    replace_task.or_replace = true;
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(replace_task, query_ctx, ddl_context.clone());
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unsupported { .. });
+    assert!(
+        err.to_string()
+            .contains("Replacing between pending and active flow states")
+    );
+}
+
+#[tokio::test]
+async fn test_replace_active_flow_with_pending_flow_is_unsupported() {
+    let existing_source_table = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_active_source_table",
+    );
+    let missing_source_table = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_missing_source_table",
+    );
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_active_sink_table",
+    );
+
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let create_table_task = test_create_table_task("replace_active_source_table", 2026);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            create_table_task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let _flow_id = create_test_flow(
+        &ddl_context,
+        "replace_active_flow_to_pending",
+        vec![existing_source_table],
+        sink_table_name.clone(),
+    )
+    .await;
+
+    let mut replace_task = test_create_flow_task(
+        "replace_active_flow_to_pending",
+        vec![missing_source_table],
+        sink_table_name,
+        false,
+    );
+    enable_defer_on_missing_source(&mut replace_task);
+    replace_task.or_replace = true;
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(replace_task, query_ctx, ddl_context.clone());
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unsupported { .. });
+    assert!(
+        err.to_string()
+            .contains("Replacing between pending and active flow states")
+    );
+}
+
+#[tokio::test]
+async fn test_replace_pending_flow_with_pending_flow_updates_metadata() {
+    let first_missing_source = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_pending_first_missing_source",
+    );
+    let second_missing_source = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_pending_second_missing_source",
+    );
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_pending_to_pending_sink_table",
+    );
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let original_flow_id = create_test_pending_flow(
+        &ddl_context,
+        "replace_pending_to_pending_flow",
+        vec![first_missing_source.clone()],
+        sink_table_name.clone(),
+    )
+    .await;
+
+    let original_flow = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(original_flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(original_flow.is_pending());
+    assert_eq!(
+        original_flow.unresolved_source_table_names(),
+        &[first_missing_source]
+    );
+    assert!(original_flow.flownode_ids().is_empty());
+
+    let mut replace_task = test_create_flow_task(
+        "replace_pending_to_pending_flow",
+        vec![second_missing_source.clone()],
+        sink_table_name,
+        false,
+    );
+    enable_defer_on_missing_source(&mut replace_task);
+    replace_task.or_replace = true;
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(replace_task, query_ctx, ddl_context.clone());
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let replaced_flow_id = *output.downcast_ref::<FlowId>().unwrap();
+    assert_eq!(replaced_flow_id, original_flow_id);
+
+    let replaced_flow = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(replaced_flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(replaced_flow.is_pending());
+    assert_eq!(replaced_flow.source_table_ids(), Vec::<u32>::new());
+    assert_eq!(
+        replaced_flow.unresolved_source_table_names(),
+        std::slice::from_ref(&second_missing_source)
+    );
+    assert_eq!(
+        replaced_flow.all_source_table_names(),
+        &[second_missing_source]
+    );
+    assert!(replaced_flow.flownode_ids().is_empty());
 }
 
 #[tokio::test]
@@ -228,6 +725,7 @@ fn test_create_flow_data_serialization_backward_compatibility() {
         "flow_id": null,
         "peers": [],
         "source_table_ids": [],
+        "unresolved_source_table_names": [],
         "query_context": {
             "current_catalog": "old_catalog",
             "current_schema": "old_schema",
@@ -265,6 +763,7 @@ fn test_create_flow_data_new_format_serialization() {
         flow_id: None,
         peers: vec![],
         source_table_ids: vec![],
+        unresolved_source_table_names: vec![],
         flow_context,
         prev_flow_info_value: None,
         did_replace: false,
@@ -327,6 +826,7 @@ fn test_flow_info_conversion_with_flow_context() {
         flow_id: Some(123),
         peers: vec![],
         source_table_ids: vec![456, 789],
+        unresolved_source_table_names: vec![],
         flow_context,
         prev_flow_info_value: None,
         did_replace: false,

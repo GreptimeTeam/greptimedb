@@ -15,7 +15,9 @@ WITH (
     append_mode = 'true'
 );
 
-CREATE FLOW flow_incr_part SINK TO flow_incr_part_sink AS
+CREATE FLOW flow_incr_part SINK TO flow_incr_part_sink
+WITH (experimental_enable_incremental_read = 'true')
+AS
 SELECT
     sum(n) AS total,
     min(n) AS min_n,

@@ -78,6 +78,35 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_flight_do_put_missing_nullable_columns() {
+        common_telemetry::init_default_ut_logging();
+
+        let (db, server) = setup_grpc_server(
+            StorageType::File,
+            "test_standalone_flight_do_put_missing_nullable_columns",
+        )
+        .await;
+        let addr = server.bind_addr().unwrap().to_string();
+
+        let client = Client::with_urls(vec![addr]);
+        let client = Database::new_with_dbname("greptime-public", client);
+
+        create_table(&client).await;
+
+        let record_batches = create_record_batches_without_nullable_column(1);
+        test_put_record_batches(&client, record_batches).await;
+
+        let sql = "select count(*) from foo where `B` is null";
+        let expected = "\
++----------+
+| count(*) |
++----------+
+| 9        |
++----------+";
+        query_and_expect(db.frontend().as_ref(), sql, expected).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_flight_do_put() {
         common_telemetry::init_default_ut_logging();
 
@@ -279,6 +308,41 @@ mod test {
             }
         }
         assert_eq!(requests_count + 1, responses_count);
+    }
+
+    fn create_record_batches_without_nullable_column(start: i64) -> Vec<RecordBatch> {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+        ]));
+
+        let mut record_batches = Vec::with_capacity(3);
+        for chunk in &(start..start + 9).chunks(3) {
+            let vs = chunk.collect_vec();
+            let x1 = vs[0];
+            let x2 = vs[1];
+            let x3 = vs[2];
+
+            record_batches.push(
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![x1, x2, x3]))
+                            as VectorRef,
+                        Arc::new(Int32Vector::from_vec(vec![
+                            -x1 as i32, -x2 as i32, -x3 as i32,
+                        ])),
+                    ],
+                )
+                .unwrap(),
+            );
+        }
+        record_batches
     }
 
     fn create_record_batches(start: i64) -> Vec<RecordBatch> {

@@ -1344,7 +1344,7 @@ mod tests {
 
         // Generates rough 10MB data, which is larger than the default grpc message size limit.
         for i in 0..10 {
-            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.random()).collect();
+            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.random::<u8>()).collect();
             in_memory
                 .put(
                     PutRequest::new()

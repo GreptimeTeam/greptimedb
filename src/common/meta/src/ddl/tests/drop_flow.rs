@@ -23,7 +23,7 @@ use table::table_name::TableName;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
-use crate::ddl::tests::create_flow::create_test_flow;
+use crate::ddl::tests::create_flow::{create_test_flow, create_test_pending_flow};
 use crate::error;
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::DropFlowTask;
@@ -87,6 +87,48 @@ async fn test_drop_flow() {
 
     // Drops again
     let task = test_drop_flow_task("my_flow", flow_id, false);
+    let mut procedure = DropFlowProcedure::new(task, ddl_context);
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::FlowNotFound { .. });
+}
+
+#[tokio::test]
+async fn test_drop_pending_flow_without_routes() {
+    let source_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "drop_pending_missing_source_table",
+    );
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "drop_pending_sink_table",
+    );
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let flow_id = create_test_pending_flow(
+        &ddl_context,
+        "drop_pending_flow",
+        vec![source_table_name],
+        sink_table_name,
+    )
+    .await;
+    let flow_info = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(flow_info.is_pending());
+    assert!(flow_info.flownode_ids().is_empty());
+
+    let task = test_drop_flow_task("drop_pending_flow", flow_id, false);
+    let mut procedure = DropFlowProcedure::new(task, ddl_context.clone());
+    execute_procedure_until_done(&mut procedure).await;
+
+    let task = test_drop_flow_task("drop_pending_flow", flow_id, false);
     let mut procedure = DropFlowProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::FlowNotFound { .. });

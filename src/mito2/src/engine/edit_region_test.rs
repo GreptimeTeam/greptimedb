@@ -21,6 +21,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::DfRecordBatch;
 use common_test_util::flight::encode_to_flight_data;
+use common_time::Timestamp;
 use common_time::util::current_time_millis;
 use datatypes::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -67,7 +68,8 @@ async fn test_edit_region_schedule_compaction_with_format(flat_format: bool) {
         default_flat_format: flat_format,
         ..Default::default()
     };
-    let time_provider = Arc::new(MockTimeProvider::new(current_time_millis()));
+    let initial_time = current_time_millis();
+    let time_provider = Arc::new(MockTimeProvider::new(initial_time));
     let engine = env
         .create_engine_with_time(
             config.clone(),
@@ -99,14 +101,22 @@ async fn test_edit_region_schedule_compaction_with_format(flat_format: bool) {
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
+    let initial_schedule_time = region.last_schedule_compaction_millis();
+    assert_eq!(initial_time, initial_schedule_time);
 
-    let new_edit = || RegionEdit {
-        files_to_add: vec![FileMeta {
-            region_id: region.region_id,
-            file_id: FileId::random(),
-            level: 0,
-            ..Default::default()
-        }],
+    let new_edit = |file_starts: &[i64]| RegionEdit {
+        files_to_add: file_starts
+            .iter()
+            .map(|start| FileMeta {
+                region_id: region.region_id,
+                file_id: FileId::random(),
+                time_range: (
+                    Timestamp::new_millisecond(*start),
+                    Timestamp::new_millisecond(1000 * 1000),
+                ),
+                ..Default::default()
+            })
+            .collect(),
         files_to_remove: vec![],
         timestamp_ms: None,
         compaction_time_window: None,
@@ -115,19 +125,23 @@ async fn test_edit_region_schedule_compaction_with_format(flat_format: bool) {
         committed_sequence: None,
     };
     engine
-        .edit_region(region.region_id, new_edit())
+        .edit_region(region.region_id, new_edit(&[0, 10, 50, 80]))
         .await
         .unwrap();
     // Asserts that the compaction of the region is not scheduled,
     // because the minimum time interval between two compactions is not passed.
     assert_eq!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    assert_eq!(
+        initial_schedule_time,
+        region.last_schedule_compaction_millis()
+    );
 
     // Simulates the time has passed the min compaction interval,
-    time_provider
-        .set_now(current_time_millis() + config.min_compaction_interval.as_millis() as i64);
+    let next_schedule_time = initial_time + config.min_compaction_interval.as_millis() as i64;
+    time_provider.set_now(next_schedule_time);
     // ... then edits the region again,
     engine
-        .edit_region(region.region_id, new_edit())
+        .edit_region(region.region_id, new_edit(&[90]))
         .await
         .unwrap();
     // ... finally asserts that the compaction of the region is scheduled.
@@ -136,6 +150,9 @@ async fn test_edit_region_schedule_compaction_with_format(flat_format: bool) {
         .unwrap()
         .unwrap();
     assert_eq!(region_id, actual);
+    // Wait for the `last_schedule_compaction_millis` to update.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(next_schedule_time, region.last_schedule_compaction_millis());
 }
 
 #[tokio::test]
@@ -635,6 +652,7 @@ fn build_bulk_insert_request(
             payload: record_batch.data_body,
         },
         partition_expr_version: None,
+        aligned_schema_version: None,
     }
 }
 

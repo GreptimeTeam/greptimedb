@@ -27,7 +27,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::Route;
 use axum::serve::ListenerExt;
 use axum::{Router, middleware, routing};
-use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{error, info};
@@ -52,11 +51,9 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
-use crate::configurator::HttpConfiguratorRef;
 use crate::elasticsearch;
 use crate::error::{
-    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu,
-    OtherSnafu, Result,
+    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::otlp::OtlpState;
@@ -138,9 +135,6 @@ pub struct HttpServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
     memory_limiter: ServerMemoryLimiter,
-
-    // plugins
-    plugins: Plugins,
 
     // server configs
     options: HttpOptions,
@@ -516,7 +510,6 @@ pub struct DashboardState {
 
 pub struct HttpServerBuilder {
     options: HttpOptions,
-    plugins: Plugins,
     user_provider: Option<UserProviderRef>,
     router: Router,
     memory_limiter: ServerMemoryLimiter,
@@ -526,7 +519,6 @@ impl HttpServerBuilder {
     pub fn new(options: HttpOptions) -> Self {
         Self {
             options,
-            plugins: Plugins::default(),
             user_provider: None,
             router: Router::new(),
             memory_limiter: ServerMemoryLimiter::default(),
@@ -687,10 +679,6 @@ impl HttpServerBuilder {
         Self { router, ..self }
     }
 
-    pub fn with_plugins(self, plugins: Plugins) -> Self {
-        Self { plugins, ..self }
-    }
-
     pub fn with_greptime_config_options(self, opts: String) -> Self {
         let config_router = HttpServer::route_config(GreptimeOptionsConfigState {
             greptime_config_options: opts,
@@ -748,7 +736,6 @@ impl HttpServerBuilder {
             options: self.options,
             user_provider: self.user_provider,
             shutdown_tx: Mutex::new(None),
-            plugins: self.plugins,
             router: StdMutex::new(self.router),
             bind_addr: None,
             memory_limiter: self.memory_limiter,
@@ -1237,14 +1224,7 @@ impl Server for HttpServer {
                 AlreadyStartedSnafu { server: "HTTP" }
             );
 
-            let mut app = self.make_app();
-            if let Some(configurator) = self.plugins.get::<HttpConfiguratorRef<()>>() {
-                app = configurator
-                    .configure_http(app, ())
-                    .await
-                    .context(OtherSnafu)?;
-            }
-            let app = self.build(app)?;
+            let app = self.build(self.make_app())?;
             let listener = tokio::net::TcpListener::bind(listening)
                 .await
                 .context(AddressBindSnafu { addr: listening })?

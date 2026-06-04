@@ -868,7 +868,25 @@ ENGINE=mito
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert_matches!(result, Err(Error::InvalidTableOption { .. }))
+        assert_matches!(result, Err(Error::InvalidTableOption { .. }));
+
+        // A whitelisted semantic key with an in-domain value is accepted.
+        let semantic = |with: &str| {
+            let sql =
+                format!("create table demo(host string, ts timestamp time index) with({with});");
+            ParserContext::create_with_dialect(&sql, &GreptimeDbDialect {}, ParseOptions::default())
+        };
+        assert!(semantic("'greptime.semantic.signal_type'='metric'").is_ok());
+        // An out-of-domain value is rejected.
+        assert_matches!(
+            semantic("'greptime.semantic.signal_type'='spans'"),
+            Err(Error::InvalidTableOption { .. })
+        );
+        // An unknown key under the semantic prefix is rejected.
+        assert_matches!(
+            semantic("'greptime.semantic.bogus'='x'"),
+            Err(Error::InvalidTableOption { .. })
+        );
     }
 
     #[test]

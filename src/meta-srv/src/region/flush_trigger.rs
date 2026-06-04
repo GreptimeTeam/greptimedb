@@ -45,6 +45,9 @@ const TICKER_INTERVAL: Duration = Duration::from_secs(60);
 /// The duration of the recent period.
 const RECENT_DURATION: Duration = Duration::from_secs(300);
 
+/// The interval to periodically persist region checkpoints regardless of replay size.
+const PERIODIC_CHECKPOINT_PERSIST_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
 /// [`Event`] represents various types of events that can be processed by the region flush ticker.
 ///
 /// Variants:
@@ -84,6 +87,8 @@ pub struct RegionFlushTrigger {
     flush_trigger_size: ReadableSize,
     /// The checkpoint trigger size.
     checkpoint_trigger_size: ReadableSize,
+    /// The last timestamp in milliseconds when a region checkpoint was persisted.
+    last_checkpoint_persist_millis_by_region: HashMap<RegionId, i64>,
     /// The receiver of events.
     receiver: Receiver<Event>,
 }
@@ -123,6 +128,7 @@ impl RegionFlushTrigger {
             server_addr,
             flush_trigger_size,
             checkpoint_trigger_size,
+            last_checkpoint_persist_millis_by_region: HashMap::new(),
             receiver: rx,
         };
         (region_flush_trigger, region_flush_ticker)
@@ -147,14 +153,15 @@ impl RegionFlushTrigger {
         }
     }
 
-    async fn handle_tick(&self) {
+    async fn handle_tick(&mut self) {
         if let Err(e) = self.trigger_flush().await {
             error!(e; "Failed to trigger flush");
         }
     }
 
-    async fn trigger_flush(&self) -> Result<()> {
+    async fn trigger_flush(&mut self) -> Result<()> {
         let now = Instant::now();
+        let now_millis = current_time_millis();
         let topics = self
             .table_metadata_manager
             .topic_name_manager()
@@ -162,23 +169,98 @@ impl RegionFlushTrigger {
             .await
             .context(error::TableMetadataManagerSnafu)?;
 
+        let mut active_region_ids = HashSet::new();
         for topic in &topics {
-            let Some((latest_entry_id, avg_record_size)) = self.retrieve_topic_stat(topic) else {
-                continue;
-            };
             if let Err(e) = self
-                .flush_regions_in_topic(topic, latest_entry_id, avg_record_size)
+                .handle_topic(topic, now_millis, &mut active_region_ids)
                 .await
             {
-                error!(e; "Failed to flush regions in topic: {}", topic);
+                error!(e; "Failed to handle regions in topic: {}", topic);
             }
         }
+        retain_checkpoint_persist_records(
+            &mut self.last_checkpoint_persist_millis_by_region,
+            &active_region_ids,
+        );
 
         debug!(
             "Triggered flush for {} topics in {:?}",
             topics.len(),
             now.elapsed()
         );
+        Ok(())
+    }
+
+    async fn handle_topic(
+        &mut self,
+        topic: &str,
+        now_millis: i64,
+        active_region_ids: &mut HashSet<RegionId>,
+    ) -> Result<()> {
+        let topic_regions = self
+            .table_metadata_manager
+            .topic_region_manager()
+            .regions(topic)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+
+        if topic_regions.is_empty() {
+            debug!("No regions found for topic: {}", topic);
+            return Ok(());
+        }
+        active_region_ids.extend(topic_regions.keys().copied());
+
+        let topic_stat = self.retrieve_topic_stat(topic);
+        let size_based_regions = topic_stat
+            .map(|(latest_entry_id, avg_record_size)| {
+                filter_regions_by_replay_size(
+                    topic,
+                    topic_regions.iter().map(|(region_id, value)| {
+                        (*region_id, value.min_entry_id().unwrap_or_default())
+                    }),
+                    avg_record_size as u64,
+                    latest_entry_id,
+                    self.checkpoint_trigger_size,
+                )
+            })
+            .unwrap_or_default();
+        // Periodic checkpoint persistence is intentionally independent of topic stats freshness:
+        // Kafka retention can advance even when recent write stats are unavailable.
+        let periodic_regions = filter_regions_for_periodic_checkpoint(
+            topic_regions.keys().copied(),
+            &self.last_checkpoint_persist_millis_by_region,
+            now_millis,
+            PERIODIC_CHECKPOINT_PERSIST_INTERVAL,
+        );
+        let regions_to_persist = merge_region_ids(size_based_regions, periodic_regions);
+        let region_manifests = self
+            .leader_region_registry
+            .batch_get(topic_regions.keys().cloned());
+
+        match self
+            .persist_region_checkpoints(
+                topic,
+                &regions_to_persist,
+                &topic_regions,
+                &region_manifests,
+            )
+            .await
+        {
+            // Only mark regions that were actually written to KV. If the checkpoint is stale,
+            // already persisted, or the write fails, the next tick should retry.
+            Ok(region_ids) => mark_checkpoint_persisted(
+                &mut self.last_checkpoint_persist_millis_by_region,
+                &region_ids,
+                now_millis,
+            ),
+            Err(err) => error!(err; "Failed to persist region checkpoints for topic: {}", topic),
+        }
+
+        if let Some((latest_entry_id, avg_record_size)) = topic_stat {
+            self.flush_regions_in_topic(topic, latest_entry_id, avg_record_size, region_manifests)
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -226,7 +308,7 @@ impl RegionFlushTrigger {
         region_ids: &[RegionId],
         topic_regions: &HashMap<RegionId, TopicRegionValue>,
         leader_regions: &HashMap<RegionId, LeaderRegion>,
-    ) -> Result<()> {
+    ) -> Result<Vec<RegionId>> {
         let regions = region_ids
             .iter()
             .flat_map(|region_id| match leader_regions.get(region_id) {
@@ -237,27 +319,26 @@ impl RegionFlushTrigger {
                         .cloned()
                         .and_then(|value| value.checkpoint),
                 )
-                .map(|checkpoint| {
-                    (
-                        TopicRegionKey::new(*region_id, topic),
-                        Some(TopicRegionValue::new(Some(checkpoint))),
-                    )
-                }),
+                .map(|checkpoint| (*region_id, TopicRegionValue::new(Some(checkpoint)))),
                 None => None,
             })
             .collect::<Vec<_>>();
 
-        // The`chunks` will panic if chunks_size is zero, so we return early if there are no regions to persist.
+        // `chunks` will panic if chunk size is zero, so return early if there are no regions to persist.
         if regions.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let max_txn_ops = self.table_metadata_manager.kv_backend().max_txn_ops();
         let batch_size = max_txn_ops.min(regions.len());
         for batch in regions.chunks(batch_size) {
+            let batch = batch
+                .iter()
+                .map(|(region_id, value)| (TopicRegionKey::new(*region_id, topic), Some(*value)))
+                .collect::<Vec<_>>();
             self.table_metadata_manager
                 .topic_region_manager()
-                .batch_put(batch)
+                .batch_put(&batch)
                 .await
                 .context(error::TableMetadataManagerSnafu)?;
         }
@@ -266,7 +347,10 @@ impl RegionFlushTrigger {
             .with_label_values(&[topic])
             .inc_by(regions.len() as u64);
 
-        Ok(())
+        Ok(regions
+            .into_iter()
+            .map(|(region_id, _)| region_id)
+            .collect())
     }
 
     async fn flush_regions_in_topic(
@@ -274,45 +358,8 @@ impl RegionFlushTrigger {
         topic: &str,
         latest_entry_id: u64,
         avg_record_size: usize,
+        region_manifests: HashMap<RegionId, LeaderRegion>,
     ) -> Result<()> {
-        let topic_regions = self
-            .table_metadata_manager
-            .topic_region_manager()
-            .regions(topic)
-            .await
-            .context(error::TableMetadataManagerSnafu)?;
-
-        if topic_regions.is_empty() {
-            debug!("No regions found for topic: {}", topic);
-            return Ok(());
-        }
-
-        // Filters regions need to persist checkpoints.
-        let regions_to_persist = filter_regions_by_replay_size(
-            topic,
-            topic_regions
-                .iter()
-                .map(|(region_id, value)| (*region_id, value.min_entry_id().unwrap_or_default())),
-            avg_record_size as u64,
-            latest_entry_id,
-            self.checkpoint_trigger_size,
-        );
-        let region_manifests = self
-            .leader_region_registry
-            .batch_get(topic_regions.keys().cloned());
-
-        if let Err(err) = self
-            .persist_region_checkpoints(
-                topic,
-                &regions_to_persist,
-                &topic_regions,
-                &region_manifests,
-            )
-            .await
-        {
-            error!(err; "Failed to persist region checkpoints for topic: {}", topic);
-        }
-
         let regions = region_manifests
             .into_iter()
             .map(|(region_id, region)| (region_id, region.manifest.prunable_entry_id()))
@@ -447,6 +494,56 @@ fn filter_regions_by_replay_size<I: Iterator<Item = (RegionId, u64)>>(
     regions_to_flush
 }
 
+/// Filters regions that need periodic checkpoint persistence.
+fn filter_regions_for_periodic_checkpoint<I>(
+    regions: I,
+    last_persisted: &HashMap<RegionId, i64>,
+    now_millis: i64,
+    interval: Duration,
+) -> Vec<RegionId>
+where
+    I: Iterator<Item = RegionId>,
+{
+    let interval_millis = interval.as_millis() as i64;
+    regions
+        .filter(|region_id| {
+            last_persisted
+                .get(region_id)
+                .is_none_or(|last_persist_millis| {
+                    now_millis.saturating_sub(*last_persist_millis) >= interval_millis
+                })
+        })
+        .collect()
+}
+
+/// Merges two region id lists and removes duplicates.
+fn merge_region_ids(left: Vec<RegionId>, right: Vec<RegionId>) -> Vec<RegionId> {
+    left.into_iter()
+        .chain(right)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Marks checkpoint persistence timestamps for regions.
+fn mark_checkpoint_persisted(
+    last_persisted: &mut HashMap<RegionId, i64>,
+    region_ids: &[RegionId],
+    now_millis: i64,
+) {
+    for region_id in region_ids {
+        last_persisted.insert(*region_id, now_millis);
+    }
+}
+
+/// Retains checkpoint persistence records for active regions.
+fn retain_checkpoint_persist_records(
+    last_persisted: &mut HashMap<RegionId, i64>,
+    active_region_ids: &HashSet<RegionId>,
+) {
+    last_persisted.retain(|region_id, _| active_region_ids.contains(region_id));
+}
+
 /// Group regions by leader.
 ///
 /// The regions are grouped by the leader of the region.
@@ -525,6 +622,71 @@ mod tests {
         let now = current_time_millis();
         assert!(is_recent(now - 999, now, Duration::from_secs(1)));
         assert!(!is_recent(now - 1001, now, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_filter_regions_for_periodic_checkpoint() {
+        let now_millis = 10_000;
+        let interval = Duration::from_secs(5);
+        let regions = vec![region_id(1, 1), region_id(1, 2), region_id(1, 3)];
+        let last_persisted = HashMap::from([
+            (region_id(1, 1), now_millis - 4_000),
+            (region_id(1, 2), now_millis - 5_000),
+        ]);
+
+        let result = filter_regions_for_periodic_checkpoint(
+            regions.into_iter(),
+            &last_persisted,
+            now_millis,
+            interval,
+        );
+
+        assert_eq!(result, vec![region_id(1, 2), region_id(1, 3)]);
+    }
+
+    #[test]
+    fn test_merge_region_ids() {
+        let merged = merge_region_ids(
+            vec![region_id(1, 1), region_id(1, 2)],
+            vec![region_id(1, 2), region_id(1, 3)],
+        );
+        let merged = merged.into_iter().collect::<HashSet<_>>();
+
+        assert_eq!(
+            merged,
+            HashSet::from([region_id(1, 1), region_id(1, 2), region_id(1, 3)])
+        );
+    }
+
+    #[test]
+    fn test_mark_checkpoint_persisted() {
+        let now_millis = 10_000;
+        let mut last_persisted = HashMap::from([(region_id(1, 1), 1_000)]);
+
+        mark_checkpoint_persisted(
+            &mut last_persisted,
+            &[region_id(1, 1), region_id(1, 2)],
+            now_millis,
+        );
+
+        assert_eq!(last_persisted.get(&region_id(1, 1)), Some(&now_millis));
+        assert_eq!(last_persisted.get(&region_id(1, 2)), Some(&now_millis));
+    }
+
+    #[test]
+    fn test_retain_checkpoint_persist_records() {
+        let mut last_persisted = HashMap::from([
+            (region_id(1, 1), 1_000),
+            (region_id(1, 2), 2_000),
+            (region_id(1, 3), 3_000),
+        ]);
+        let active_regions = HashSet::from([region_id(1, 1), region_id(1, 3)]);
+
+        retain_checkpoint_persist_records(&mut last_persisted, &active_regions);
+
+        assert_eq!(last_persisted.len(), 2);
+        assert!(last_persisted.contains_key(&region_id(1, 1)));
+        assert!(last_persisted.contains_key(&region_id(1, 3)));
     }
 
     fn region_id(table: u32, region: u32) -> RegionId {
@@ -733,6 +895,76 @@ mod tests {
         let result =
             should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(90, Some(10))));
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_persist_region_checkpoints_returns_written_region_ids() {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let leader_region_registry = Arc::new(LeaderRegionRegistry::new());
+        let topic_stats_registry = Arc::new(TopicStatsRegistry::default());
+        let mailbox_sequence = SequenceBuilder::new(
+            "test_persist_region_checkpoints_returns_written_region_ids",
+            kv_backend,
+        )
+        .build();
+        let mailbox_ctx = MailboxContext::new(mailbox_sequence);
+
+        let (trigger, _ticker) = RegionFlushTrigger::new(
+            table_metadata_manager.clone(),
+            leader_region_registry,
+            topic_stats_registry,
+            mailbox_ctx.mailbox().clone(),
+            "127.0.0.1:3002".to_string(),
+            ReadableSize(1),
+            ReadableSize(1),
+        );
+
+        let topic = "test_topic";
+        let region_to_write = region_id(1, 1);
+        let region_already_persisted = region_id(1, 2);
+        let region_without_leader = region_id(1, 3);
+        let topic_regions = HashMap::from([
+            (region_to_write, TopicRegionValue::new(None)),
+            (
+                region_already_persisted,
+                TopicRegionValue::new(Some(ReplayCheckpoint::new(100, None))),
+            ),
+            (region_without_leader, TopicRegionValue::new(None)),
+        ]);
+        let leader_regions = HashMap::from([
+            (region_to_write, mito_leader_region(100)),
+            (region_already_persisted, mito_leader_region(100)),
+        ]);
+
+        let written_region_ids = trigger
+            .persist_region_checkpoints(
+                topic,
+                &[
+                    region_to_write,
+                    region_already_persisted,
+                    region_without_leader,
+                ],
+                &topic_regions,
+                &leader_regions,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(written_region_ids, vec![region_to_write]);
+        let persisted = table_metadata_manager
+            .topic_region_manager()
+            .get(TopicRegionKey::new(region_to_write, topic))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.checkpoint, Some(ReplayCheckpoint::new(100, None)));
+        let skipped = table_metadata_manager
+            .topic_region_manager()
+            .get(TopicRegionKey::new(region_already_persisted, topic))
+            .await
+            .unwrap();
+        assert!(skipped.is_none());
     }
 
     #[tokio::test]

@@ -136,6 +136,7 @@ async fn test_batch_open_with_format(factory: Option<LogStoreFactory>, flat_form
                     skip_wal_replay: false,
                     path_type: PathType::Bare,
                     checkpoint: None,
+                    requirements: Default::default(),
                 },
             )
         })
@@ -149,6 +150,7 @@ async fn test_batch_open_with_format(factory: Option<LogStoreFactory>, flat_form
             skip_wal_replay: false,
             path_type: PathType::Bare,
             checkpoint: None,
+            requirements: Default::default(),
         },
     ));
 
@@ -221,6 +223,7 @@ async fn test_batch_open_err_with_format(factory: Option<LogStoreFactory>, flat_
                     skip_wal_replay: false,
                     path_type: PathType::Bare,
                     checkpoint: None,
+                    requirements: Default::default(),
                 },
             )
         })

@@ -1,0 +1,223 @@
+name: Nightly JSONBench
+
+on:
+  workflow_run:
+    workflows: [ "GreptimeDB Nightly Build" ]
+    types: [ completed ]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: The nightly build workflow run id to download GreptimeDB artifacts from
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-artifact:
+    name: Resolve GreptimeDB nightly artifact
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.find-artifact.outputs.artifact-name }}
+      run-id: ${{ steps.resolve-run-id.outputs.run-id }}
+    steps:
+      - name: Resolve nightly build run id
+        id: resolve-run-id
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            run_id="${INPUT_RUN_ID}"
+          else
+            run_id="${WORKFLOW_RUN_ID}"
+          fi
+
+          if [[ ! "${run_id}" =~ ^[0-9]+$ ]]; then
+            echo "Invalid workflow run id: ${run_id}"
+            exit 1
+          fi
+
+          echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Find GreptimeDB nightly artifact
+        id: find-artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ steps.resolve-run-id.outputs.run-id }}
+        run: |
+          set -euo pipefail
+
+          artifact_name=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" --paginate \
+            --jq '.artifacts[] | select(.name | test("^greptime-linux-arm64-nightly-[0-9]{8}-[0-9a-f]+$")) | .name' \
+            | head -n 1)
+
+          if [[ -z "${artifact_name}" ]]; then
+            echo "Cannot find linux arm64 nightly artifact in workflow run ${RUN_ID}."
+            exit 1
+          fi
+
+          echo "Download GreptimeDB artifact: ${artifact_name}"
+          echo "artifact-name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+
+  allocate-runner:
+    name: Allocate runner
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    needs: [ resolve-artifact ]
+    runs-on: ubuntu-latest
+    outputs:
+      linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
+
+      # The following EC2 resource id will be used for resource releasing.
+      linux-arm64-ec2-runner-label: ${{ steps.start-linux-arm64-runner.outputs.label }}
+      linux-arm64-ec2-runner-instance-id: ${{ steps.start-linux-arm64-runner.outputs.ec2-instance-id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Allocate Linux ARM64 runner
+        uses: ./.github/actions/start-runner
+        id: start-linux-arm64-runner
+        with:
+          runner: ${{ vars.DEFAULT_ARM64_RUNNER }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          image-id: ${{ vars.EC2_RUNNER_LINUX_ARM64_IMAGE_ID }}
+          security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
+          subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
+
+  jsonbench:
+    name: Run JSONBench
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    needs: [ resolve-artifact, allocate-runner ]
+    runs-on: ${{ needs.allocate-runner.outputs.linux-arm64-runner }}
+    timeout-minutes: 120
+    env:
+      JSONBENCH_OUTPUT_PREFIX: _linux-arm64
+    steps:
+      - name: Download GreptimeDB nightly artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.resolve-artifact.outputs.artifact-name }}
+          path: greptimedb-artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ needs.resolve-artifact.outputs.run-id }}
+
+      - name: Prepare GreptimeDB binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tar -xzf "greptimedb-artifact/${{ needs.resolve-artifact.outputs.artifact-name }}.tar.gz"
+          cp "${{ needs.resolve-artifact.outputs.artifact-name }}/greptime" ./greptime
+          chmod +x ./greptime
+          rm -rf greptimedb-artifact "${{ needs.resolve-artifact.outputs.artifact-name }}"
+
+      - name: Run JSONBench
+        env:
+          # TODO(LFC): Change to "3" (100m) when JSON2 ingestion performance is optimized.
+          JSONBENCH_DATASET: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export JSONBENCH_DATA_DIR="/root/data/bluesky"
+          echo "Use JSONBench data directory ${JSONBENCH_DATA_DIR}"
+
+          echo "Cloning JSONBench"
+          git clone --branch greptimedb-new-json --depth 1 https://github.com/GreptimeTeam/JSONBench.git JSONBench
+
+          echo "Downloading JSONBench dataset choice ${JSONBENCH_DATASET} to ${JSONBENCH_DATA_DIR}"
+          mkdir -p "${JSONBENCH_DATA_DIR}"
+          printf "${JSONBENCH_DATASET}\n" | ./JSONBench/download_data.sh
+          downloaded_files=$(find "${JSONBENCH_DATA_DIR}" -type f | wc -l)
+          echo "Downloaded JSONBench dataset files: ${downloaded_files}"
+
+          export GREPTIMEDB_STANDALONE__WAL__DIR=greptimedb_data/wal
+          export GREPTIMEDB_STANDALONE__STORAGE__DATA_HOME=greptimedb_data
+          export GREPTIMEDB_STANDALONE__LOGGING__DIR=greptimedb_data/logs
+          export GREPTIMEDB_STANDALONE__LOGGING__APPEND_STDOUT=false
+          export GREPTIMEDB_STANDALONE__HTTP__BODY_LIMIT=1GB
+          export GREPTIMEDB_STANDALONE__HTTP__TIMEOUT=500s
+
+          echo "Starting GreptimeDB standalone"
+          ./greptime standalone start > greptimedb.log 2>&1 &
+          greptime_pid=$!
+          trap 'kill "${greptime_pid}" 2>/dev/null || true' EXIT
+
+          echo "Waiting for GreptimeDB health check"
+          until curl -s --fail -o /dev/null http://localhost:4000/health; do
+            if ! kill -0 "${greptime_pid}" 2>/dev/null; then
+              cat greptimedb.log
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "GreptimeDB is ready"
+
+          cp ./greptime JSONBench/greptimedb/greptime
+
+          cd JSONBench/greptimedb
+          echo "Running JSONBench main.sh with dataset choice ${JSONBENCH_DATASET} and install=false"
+          ./main.sh ${JSONBENCH_DATASET} "${JSONBENCH_DATA_DIR}" success.log error.log "${JSONBENCH_OUTPUT_PREFIX}" false
+          echo "JSONBench finished"
+
+      - name: Upload JSONBench results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jsonbench-results
+          path: |
+            ./greptimedb.log
+            ./JSONBench/greptimedb/*.log
+            ./JSONBench/greptimedb/*.total_size
+            ./JSONBench/greptimedb/*.data_size
+            ./JSONBench/greptimedb/*.index_size
+            ./JSONBench/greptimedb/*.count
+            ./JSONBench/greptimedb/*.results_runtime
+            ./JSONBench/greptimedb/*.query_results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  stop-linux-arm64-runner:
+    name: Stop Linux ARM64 runner
+    # It's always run as the last job in the workflow to make sure that the runner is released.
+    if: ${{ always() && needs.allocate-runner.outputs.linux-arm64-ec2-runner-instance-id != '' }}
+    runs-on: ubuntu-latest
+    needs: [
+      allocate-runner,
+      jsonbench,
+    ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Stop Linux ARM64 runner
+        uses: ./.github/actions/stop-runner
+        with:
+          label: ${{ needs.allocate-runner.outputs.linux-arm64-ec2-runner-label }}
+          ec2-instance-id: ${{ needs.allocate-runner.outputs.linux-arm64-ec2-runner-instance-id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}

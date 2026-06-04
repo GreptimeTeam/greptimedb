@@ -222,6 +222,7 @@ impl MetricEngineInner {
                 entry_id: checkpoint.metadata_entry_id.unwrap_or_default(),
                 metadata_entry_id: None,
             }),
+            requirements: request.requirements,
         };
 
         let mut data_region_options = request.options;
@@ -239,6 +240,7 @@ impl MetricEngineInner {
                 entry_id: checkpoint.entry_id,
                 metadata_entry_id: None,
             }),
+            requirements: request.requirements,
         };
 
         (open_metadata_region_request, open_data_region_request)

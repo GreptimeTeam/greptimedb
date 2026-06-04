@@ -525,8 +525,10 @@ impl<S> RegionWorkerLoop<S> {
             }
 
             // Double-check the request schema
-            let need_fill_missing_columns = region_ctx.version().metadata.schema_version
-                != bulk_req.region_metadata.schema_version;
+            let need_fill_missing_columns =
+                !bulk_req.region_metadata.is_some_and(|aligned_schema| {
+                    aligned_schema.schema_version == region_ctx.version().metadata.schema_version
+                });
 
             // Fill missing columns if needed
             if need_fill_missing_columns

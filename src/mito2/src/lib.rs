@@ -18,6 +18,7 @@
 
 #![feature(debug_closure_helpers)]
 #![feature(duration_constructors)]
+#![feature(binary_heap_pop_if)]
 
 #[cfg(any(test, feature = "test"))]
 #[cfg_attr(feature = "test", allow(unused))]

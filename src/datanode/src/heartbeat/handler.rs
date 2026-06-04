@@ -313,7 +313,7 @@ mod tests {
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionRole;
-    use store_api::region_request::{RegionCloseRequest, RegionRequest};
+    use store_api::region_request::{RegionCloseRequest, RegionRequest, RegionRequirements};
     use store_api::storage::RegionId;
     use tokio::sync::mpsc::{self, Receiver};
 
@@ -442,6 +442,8 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             false,
+            None,
+            RegionRequirements::empty(),
         )])
     }
 

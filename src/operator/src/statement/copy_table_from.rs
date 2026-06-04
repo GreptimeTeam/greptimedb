@@ -15,11 +15,15 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
-use common_datasource::file_format::csv::CsvFormat;
+use common_datasource::file_format::csv::{
+    CsvFormat, is_skippable_arrow_error, tolerant_csv_stream,
+};
 use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format, file_to_stream};
@@ -33,10 +37,13 @@ use common_telemetry::{debug, tracing};
 use datafusion::datasource::physical_plan::{CsvSource, FileSource, JsonSource};
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
+use datafusion_common::DataFusionError;
+use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::config::CsvOptions;
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
 use object_store::{Entry, EntryMode, ObjectStore};
@@ -221,23 +228,42 @@ impl StatementExecutor {
                 let csv_source = CsvSource::new(schema.clone())
                     .with_csv_options(options)
                     .with_batch_size(DEFAULT_BATCH_SIZE);
-                let stream = file_to_stream(
-                    object_store,
-                    path,
-                    csv_source,
-                    Some(projection),
-                    format.compression_type,
-                )
-                .await
-                .context(error::BuildFileStreamSnafu)?;
+                let stream = if format.skip_bad_records {
+                    let reader_schema =
+                        csv_reader_schema_for_skip_bad_records(schema, &compat_schema);
+                    tolerant_csv_stream(
+                        object_store,
+                        path,
+                        Arc::new(reader_schema),
+                        projection.clone(),
+                        format,
+                    )
+                    .await
+                    .context(error::BuildFileStreamSnafu)?
+                } else {
+                    file_to_stream(
+                        object_store,
+                        path,
+                        csv_source,
+                        Some(projection),
+                        format.compression_type,
+                    )
+                    .await
+                    .context(error::BuildFileStreamSnafu)?
+                };
 
-                Ok(Box::pin(
+                let stream = Box::pin(
                     // The projection is already applied in the CSV reader when we created the stream,
                     // so we pass None here to avoid double projection which would cause schema mismatch errors.
                     RecordBatchStreamTypeAdapter::new(output_schema, stream, None)
                         .with_filter(filters)
                         .context(error::PhysicalExprSnafu)?,
-                ))
+                );
+                if format.skip_bad_records {
+                    Ok(Box::pin(SkipBadRecordsStream::new(stream, path)))
+                } else {
+                    Ok(stream)
+                }
             }
             FileMetadata::Json {
                 path,
@@ -469,6 +495,58 @@ fn gen_insert_output(rows_inserted: usize, insert_cost: usize) -> Output {
     )
 }
 
+struct SkipBadRecordsStream {
+    inner: DfSendableRecordBatchStream,
+    path: String,
+}
+
+impl SkipBadRecordsStream {
+    fn new(inner: DfSendableRecordBatchStream, path: impl Into<String>) -> Self {
+        Self {
+            inner,
+            path: path.into(),
+        }
+    }
+}
+
+impl datafusion::physical_plan::RecordBatchStream for SkipBadRecordsStream {
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
+}
+
+impl futures::Stream for SkipBadRecordsStream {
+    type Item = datafusion_common::Result<RecordBatch>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Err(error))) if is_skippable_record_error(&error) => {
+                    common_telemetry::warn!(
+                        "Skipping bad record while copying from {}: {}",
+                        this.path,
+                        error
+                    );
+                    continue;
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
+fn is_skippable_record_error(error: &DataFusionError) -> bool {
+    match error {
+        DataFusionError::ArrowError(error, _) => is_skippable_arrow_error(error),
+        DataFusionError::External(error) => error
+            .downcast_ref::<ArrowError>()
+            .is_some_and(is_skippable_arrow_error),
+        DataFusionError::Context(_, error) => is_skippable_record_error(error),
+        _ => false,
+    }
+}
+
 /// Executes all pending inserts all at once, drain pending requests and reset pending bytes.
 async fn batch_insert(
     pending: &mut Vec<impl Future<Output = Result<Output>>>,
@@ -496,6 +574,59 @@ fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool
 
     // For all other cases, use Arrow's built-in can_cast_types
     can_cast_types(from, to)
+}
+
+fn csv_reader_schema_for_skip_bad_records(file: &SchemaRef, compat: &SchemaRef) -> Schema {
+    let fields = file
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(idx, file_field)| {
+            let compat_field = compat
+                .fields()
+                .find(file_field.name())
+                .map(|(_, field)| field);
+
+            match compat_field {
+                Some(compat_field) if can_csv_reader_parse_type(compat_field.data_type()) => {
+                    compat_field.clone()
+                }
+                _ => file.fields()[idx].clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Schema::new_with_metadata(fields, file.metadata().clone())
+}
+
+fn can_csv_reader_parse_type(data_type: &ArrowDataType) -> bool {
+    match data_type {
+        ArrowDataType::Boolean
+        | ArrowDataType::Decimal32(_, _)
+        | ArrowDataType::Decimal64(_, _)
+        | ArrowDataType::Decimal128(_, _)
+        | ArrowDataType::Decimal256(_, _)
+        | ArrowDataType::Int8
+        | ArrowDataType::Int16
+        | ArrowDataType::Int32
+        | ArrowDataType::Int64
+        | ArrowDataType::UInt8
+        | ArrowDataType::UInt16
+        | ArrowDataType::UInt32
+        | ArrowDataType::UInt64
+        | ArrowDataType::Float32
+        | ArrowDataType::Float64
+        | ArrowDataType::Date32
+        | ArrowDataType::Date64
+        | ArrowDataType::Time32(_)
+        | ArrowDataType::Time64(_)
+        | ArrowDataType::Timestamp(_, _)
+        | ArrowDataType::Null
+        | ArrowDataType::Utf8
+        | ArrowDataType::Utf8View => true,
+        ArrowDataType::Dictionary(_, value_type) => value_type.as_ref() == &ArrowDataType::Utf8,
+        _ => false,
+    }
 }
 
 fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
@@ -779,5 +910,32 @@ mod tests {
                 generated_schema_projection_and_compatible_file_schema(test.0, test.1);
             assert_eq!(test.0.project(&fp).unwrap(), test.1.project(&tp).unwrap());
         }
+    }
+
+    #[test]
+    fn test_csv_reader_schema_for_skip_bad_records() {
+        let file_schema = make_test_schema(&[
+            Field::new("id", DataType::Utf8, true),
+            Field::new("jsons", DataType::Utf8, true),
+            Field::new("ts", DataType::Utf8, true),
+        ]);
+        let compat_schema = make_test_schema(&[
+            Field::new("id", DataType::UInt32, true),
+            Field::new("jsons", DataType::Binary, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                true,
+            ),
+        ]);
+
+        let reader_schema = csv_reader_schema_for_skip_bad_records(&file_schema, &compat_schema);
+
+        assert_eq!(reader_schema.field(0).data_type(), &DataType::UInt32);
+        assert_eq!(reader_schema.field(1).data_type(), &DataType::Utf8);
+        assert_eq!(
+            reader_schema.field(2).data_type(),
+            compat_schema.field(2).data_type()
+        );
     }
 }

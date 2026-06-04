@@ -15,6 +15,9 @@
 //! This file contains code to find sorted runs in a set if ranged items and
 //! along with the best way to merge these items to satisfy the desired run count.
 
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+
 use bytes::{Buf, Bytes};
 use common_base::BitVec;
 use common_base::readable_size::ReadableSize;
@@ -423,6 +426,133 @@ where
     runs
 }
 
+pub(crate) fn find_sorted_runs_by_time_range<T>(items: &mut [T]) -> Vec<SortedRun<T>>
+where
+    T: Item,
+{
+    if items.is_empty() {
+        return vec![];
+    }
+    sort_ranged_items(items);
+
+    use derive_more::{Eq, PartialEq};
+
+    /// `SortedRun` with a creation sequence `i`.
+    #[derive(PartialEq, Eq)]
+    struct Run<T: Item> {
+        i: usize,
+        #[partial_eq(skip)]
+        run: SortedRun<T>,
+    }
+
+    impl<T: Item> Run<T> {
+        fn new(i: usize, item: &T) -> Run<T> {
+            let mut run = SortedRun::default();
+            run.push_item(item.clone());
+            Run { i, run }
+        }
+
+        fn push_item(&mut self, item: &T) {
+            self.run.push_item(item.clone());
+        }
+    }
+
+    impl<T: Item> PartialOrd for Run<T> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    /// Sort by run's `end` desc then `start` asc.
+    impl<T: Item> Ord for Run<T> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            let l_run = &self.run;
+            let r_run = &other.run;
+
+            // Safety: `start` and `end` must both exist because it's guaranteed that whenever a
+            // `Run` is created, an item is pushed into it immediately (see its `new` method above).
+            // And there are no other ways to create a `Run` beyond its `new` method in this
+            // function's scope.
+            let l_end = l_run.end.unwrap();
+            let r_end = r_run.end.unwrap();
+            r_end
+                .cmp(&l_end)
+                .then_with(|| {
+                    let l_start = l_run.start.unwrap();
+                    let r_start = r_run.start.unwrap();
+                    l_start.cmp(&r_start)
+                })
+                .then_with(|| self.i.cmp(&other.i))
+        }
+    }
+
+    /// Wrapper around the `Run` above, to support sorting them by their creation sequence `i`.
+    #[derive(PartialEq, Eq)]
+    struct Wrapper<T: Item>(Run<T>);
+
+    impl<T: Item> PartialOrd for Wrapper<T> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl<T: Item> Ord for Wrapper<T> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            other.0.i.cmp(&self.0.i)
+        }
+    }
+
+    // Two heaps for finding a run that is both:
+    // 1. not overlapping with item's range,
+    // 2. and is created earliest,
+    // when iterating the items.
+    //
+    // Heap 1 (`runs_sorted_by_end`) is for storing the runs of which top has the minimal "end"
+    // just about to overlap with the current selected item.
+    //
+    // Heap 2 (`runs_sort_by_index`) is for storing the runs that all have "end"s non-overlap with
+    // the current selected item, and of which top is the earliest created run.
+    //
+    // The finding of a suitable run basically works like this:
+    // 1. moves the runs in heap 1 to heap 2, until the top is overlapping with the current item;
+    // 2. now heap 2 has all the runs that can accept the current item, pop its top;
+    // 3. the top is the earliest created run, push the current item;
+    // 4. because the run has changed, push it back to heap 1;
+    // 5. check the next item. Important: we don't need to push the runs in heap 2 to 1, because
+    //    the items are sorted by "start". When checking the next item, heap 2's runs must all have
+    //    "end"s smaller than next item's "start".
+    //
+    // Actually the heap 2 is only for aligning with the runs selection outcomes in the original
+    // `find_sorted_runs` implementation. If we just need the invariant that each run has the
+    // non-overlapping items, we can get rid of heap 2 and make the codes simpler.
+
+    let mut runs_sort_by_end = BinaryHeap::<Run<T>>::new();
+    let mut runs_sort_by_index = BinaryHeap::<Wrapper<T>>::new();
+    let mut i = 0;
+
+    for item in items {
+        let (start, _) = item.range();
+
+        while let Some(run) = runs_sort_by_end.pop_if(|x| x.run.end.unwrap() <= start) {
+            runs_sort_by_index.push(Wrapper(run));
+        }
+
+        let Some(mut run) = runs_sort_by_index.pop() else {
+            i += 1;
+            runs_sort_by_end.push(Run::new(i, item));
+            continue;
+        };
+
+        run.0.push_item(item);
+        runs_sort_by_end.push(run.0);
+    }
+
+    let mut runs = runs_sort_by_end.into_vec();
+    runs.extend(runs_sort_by_index.into_vec().into_iter().map(|x| x.0));
+    runs.sort_unstable_by_key(|run| run.i);
+    runs.into_iter().map(|x| x.run).collect()
+}
+
 /// Finds a set of files with minimum penalty to merge that can reduce the total num of runs.
 /// The penalty of merging is defined as the size of all overlapping files between two runs.
 pub fn reduce_runs<T: Item>(mut runs: Vec<SortedRun<T>>) -> Vec<T> {
@@ -599,6 +729,8 @@ mod tests {
         expected_runs: &[Vec<(i64, i64)>],
     ) -> Vec<SortedRun<MockFile>> {
         let mut files = build_items(ranges);
+        let mut files_clone = files.clone();
+
         let runs = find_sorted_runs(&mut files);
 
         let result_file_ranges: Vec<Vec<_>> = runs
@@ -606,6 +738,13 @@ mod tests {
             .map(|r| r.items.iter().map(|f| f.range()).collect())
             .collect();
         assert_eq!(&expected_runs, &result_file_ranges);
+
+        let runs_by_time_range = find_sorted_runs_by_time_range(&mut files_clone);
+        let results: Vec<Vec<_>> = runs_by_time_range
+            .iter()
+            .map(|r| r.items.iter().map(|f| f.range()).collect())
+            .collect();
+        assert_eq!(&expected_runs, &results);
         runs
     }
 

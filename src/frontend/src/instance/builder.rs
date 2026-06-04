@@ -185,6 +185,7 @@ impl FrontendBuilder {
             partition_manager.clone(),
             node_manager.clone(),
             table_flownode_cache,
+            self.options.auto_create_table,
         ));
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),

@@ -106,6 +106,7 @@ impl Inserter {
                     region_id: region_id.as_u64(),
                     partition_expr_version: partition_expr_version
                         .map(|value| PartitionExprVersion { value }),
+                    aligned_schema_version: None,
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                         schema: schema_bytes.clone(),
                         data_header: raw_flight_data.data_header,
@@ -220,6 +221,7 @@ impl Inserter {
                                 region_id: region_id.as_u64(),
                                 partition_expr_version: partition_expr_version
                                     .map(|value| PartitionExprVersion { value }),
+                                aligned_schema_version: None,
                                 body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                                     schema: schema_bytes,
                                     data_header: header,

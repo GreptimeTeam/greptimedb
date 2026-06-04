@@ -15,7 +15,10 @@
 use partition::expr::PartitionExpr;
 
 use crate::error::Result;
-use crate::ir::repartition_expr::{MergePartitionExpr, RepartitionExpr, SplitPartitionExpr};
+use crate::ir::create_expr::PartitionDef;
+use crate::ir::repartition_expr::{
+    AlterTablePartitionsExpr, MergePartitionExpr, RepartitionExpr, SplitPartitionExpr,
+};
 use crate::translator::DslTranslator;
 
 pub struct RepartitionExprTranslator;
@@ -59,8 +62,36 @@ impl DslTranslator<RepartitionExpr, String> for RepartitionExprTranslator {
                     table_name, merge_exprs, wait_clause
                 ))
             }
+            RepartitionExpr::AlterPartitions(AlterTablePartitionsExpr {
+                table_name,
+                partition,
+                wait,
+            }) => {
+                let partition_clause = format_partition_clause(partition);
+                let wait_clause = format_wait_clause(*wait);
+                Ok(format!(
+                    "ALTER TABLE {} {}{};",
+                    table_name, partition_clause, wait_clause
+                ))
+            }
         }
     }
+}
+
+fn format_partition_clause(partition: &PartitionDef) -> String {
+    let columns = partition
+        .columns
+        .iter()
+        .map(|column| column.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let exprs = partition
+        .exprs
+        .iter()
+        .map(format_partition_expr_sql)
+        .collect::<Vec<_>>()
+        .join(",\n  ");
+    format!("PARTITION ON COLUMNS ({columns}) (\n  {exprs}\n)")
 }
 
 fn format_partition_expr_sql(expr: &PartitionExpr) -> String {
@@ -79,9 +110,15 @@ fn format_wait_clause(wait: bool) -> String {
 mod tests {
     use datatypes::value::Value;
     use partition::expr::col;
+    use sql::dialect::GreptimeDbDialect;
+    use sql::parser::{ParseOptions, ParserContext};
 
     use super::RepartitionExprTranslator;
-    use crate::ir::repartition_expr::{MergePartitionExpr, RepartitionExpr, SplitPartitionExpr};
+    use crate::ir::Ident;
+    use crate::ir::create_expr::PartitionDef;
+    use crate::ir::repartition_expr::{
+        AlterTablePartitionsExpr, MergePartitionExpr, RepartitionExpr, SplitPartitionExpr,
+    };
     use crate::translator::DslTranslator;
 
     #[test]
@@ -148,5 +185,62 @@ mod tests {
   WAIT = false
 );"#;
         assert_eq!(sql, expected);
+    }
+
+    #[test]
+    fn test_translate_alter_table_partitions_expr() {
+        let expr = RepartitionExpr::AlterPartitions(AlterTablePartitionsExpr {
+            table_name: "demo".into(),
+            partition: PartitionDef {
+                columns: vec![Ident::new("id")],
+                exprs: vec![
+                    col("id").lt(Value::Int32(10)),
+                    col("id")
+                        .gt_eq(Value::Int32(10))
+                        .and(col("id").lt(Value::Int32(20))),
+                    col("id").gt_eq(Value::Int32(20)),
+                ],
+            },
+            wait: true,
+        });
+        let sql = RepartitionExprTranslator.translate(&expr).unwrap();
+        let expected = r#"ALTER TABLE demo PARTITION ON COLUMNS (id) (
+  id < 10,
+  id >= 10 AND id < 20,
+  id >= 20
+);"#;
+        assert_eq!(sql, expected);
+        assert_repartition_sql_parseable(&sql);
+    }
+
+    #[test]
+    fn test_translate_alter_table_partitions_expr_wait_false() {
+        let expr = RepartitionExpr::AlterPartitions(AlterTablePartitionsExpr {
+            table_name: "demo".into(),
+            partition: PartitionDef {
+                columns: vec![Ident::new("host")],
+                exprs: vec![
+                    col("host").lt(Value::from("m")),
+                    col("host").gt_eq(Value::from("m")),
+                ],
+            },
+            wait: false,
+        });
+        let sql = RepartitionExprTranslator.translate(&expr).unwrap();
+        let expected = r#"ALTER TABLE demo PARTITION ON COLUMNS (host) (
+  host < 'm',
+  host >= 'm'
+) WITH (
+  WAIT = false
+);"#;
+        assert_eq!(sql, expected);
+        assert_repartition_sql_parseable(&sql);
+    }
+
+    fn assert_repartition_sql_parseable(sql: &str) {
+        let statements =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(statements.len(), 1);
     }
 }

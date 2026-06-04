@@ -8,6 +8,7 @@ license.workspace = true
 default = []
 test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 testing = ["test"]
+test-shared-fs-region-migration = []
 enterprise = []
 vector_index = ["dep:roaring", "index/vector_index"]
 
@@ -50,6 +51,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
 dashmap.workspace = true
+derive_more.workspace = true
 dotenv.workspace = true
 either.workspace = true
 futures.workspace = true

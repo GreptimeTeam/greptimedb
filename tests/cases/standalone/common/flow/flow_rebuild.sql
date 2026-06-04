@@ -151,6 +151,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 3s
 SELECT wildcard FROM out_basic;
 
 -- test again, this time with db restart

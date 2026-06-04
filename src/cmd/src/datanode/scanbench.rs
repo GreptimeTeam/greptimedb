@@ -524,6 +524,7 @@ impl ScanbenchCommand {
             options: HashMap::default(),
             skip_wal_replay: !self.enable_wal,
             checkpoint: None,
+            requirements: Default::default(),
         };
 
         engine

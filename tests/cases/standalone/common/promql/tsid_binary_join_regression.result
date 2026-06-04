@@ -52,6 +52,21 @@ WITH(
 
 Affected Rows: 0
 
+CREATE TABLE tsid_binary_join_third (
+  host STRING NULL,
+  job STRING NULL,
+  ts TIMESTAMP(3) NOT NULL,
+  greptime_value DOUBLE NULL,
+  TIME INDEX (ts),
+  PRIMARY KEY(host, job),
+)
+ENGINE = metric
+WITH(
+  on_physical_table = 'tsid_binary_join_physical'
+);
+
+Affected Rows: 0
+
 INSERT INTO tsid_binary_join_left (host, job, ts, greptime_value) VALUES
   ('host1', 'job1', 0, 12),
   ('host2', 'job2', 0, 18),
@@ -73,6 +88,14 @@ INSERT INTO tsid_binary_join_right_by_job (job, ts, greptime_value) VALUES
   ('job2', 0, 6),
   ('job1', 5000, 5),
   ('job2', 5000, 7);
+
+Affected Rows: 4
+
+INSERT INTO tsid_binary_join_third (host, job, ts, greptime_value) VALUES
+  ('host1', 'job1', 0, 2),
+  ('host2', 'job2', 0, 3),
+  ('host1', 'job1', 5000, 4),
+  ('host2', 'job2', 5000, 6);
 
 Affected Rows: 4
 
@@ -99,6 +122,95 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Repeated operands in a safe arithmetic island should be planned once and reused
+-- in the final projection.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@1,\sts@2\],.* Hash([__tsid@1, ts@2],REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@3,\sts@4\],.* Hash([__tsid@3, ts@4],REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid_binary_join_left;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[host@1 as host, job@2 as job, ts@4 as ts, __tsid@3 as __tsid, (greptime_value@0 + greptime_value@5) / greptime_value@0 as tsid_binary_join_left.greptime_value + tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], projection=[greptime_value@0, host@1, job@2, __tsid@3, ts@4, greptime_value@5], NullsEqual: true REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4],REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2],REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- A larger arithmetic island should still plan each distinct vector selector only once
+-- while reusing the repeated left operand in multiple branches.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (tsid_binary_join_left - tsid_binary_join_third)) / (tsid_binary_join_left + 2);
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[host@1 as host, job@2 as job, ts@4 as ts, __tsid@3 as __tsid, (greptime_value@0 + greptime_value@5) * (greptime_value@0 - greptime_value@6) / (greptime_value@0 + 2) as tsid_binary_join_left.greptime_value + tsid_binary_join_right.greptime_value * tsid_binary_join_left.greptime_value - tsid_binary_join_third.greptime_value / tsid_binary_join_left.greptime_value + Float64(2)] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], projection=[greptime_value@0, host@1, job@2, __tsid@3, ts@4, greptime_value@5, greptime_value@6], NullsEqual: true REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], projection=[greptime_value@0, host@1, job@2, __tsid@3, ts@4, greptime_value@5], NullsEqual: true REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
@@ -272,6 +384,219 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 |_|_| Total rows: 4_|
 +-+-+-+
 
+-- Comparison filters are a barrier for binary island coalescing because they filter the
+-- vector domain instead of producing only a value expression.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > tsid_binary_join_right) / tsid_binary_join_left) * 100;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 * 100 as .greptime_value / tsid_binary_join_left.greptime_value * Float64(100)] REDACTED
+|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@2, __tsid@3), (ts@0, ts@4)], projection=[greptime_value@1, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_ProjectionExec: expr=[ts@2 as ts, greptime_value@0 as greptime_value, __tsid@1 as __tsid] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@1), (ts@2, ts@2)], filter=greptime_value@1 < greptime_value@0, projection=[greptime_value@0, __tsid@1, ts@2], NullsEqual: true REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Bool comparisons are intentionally outside the first island optimization version.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) + tsid_binary_join_left) / tsid_binary_join_left;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value@0 / greptime_value@1 as lhs.tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value / rhs.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@0, ts@4)], projection=[tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value@2, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_ProjectionExec: expr=[ts@3 as ts, __tsid@2 as __tsid, tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value@0 + greptime_value@1 as tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@1), (ts@0, ts@2)], projection=[tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value@2, greptime_value@3, __tsid@4, ts@5], NullsEqual: true REDACTED
+|_|_|_ProjectionExec: expr=[ts@3 as ts, __tsid@2 as __tsid, CAST(greptime_value@1 < greptime_value@0 AS Float64) as tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@1), (ts@2, ts@2)], projection=[greptime_value@0, greptime_value@3, __tsid@4, ts@5], NullsEqual: true REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Set operators are a barrier because they have distinct matching and output-domain
+-- semantics.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsid_binary_join_left;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@0, ts@4)], projection=[greptime_value@2, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, __tsid@1 as __tsid, greptime_value@2 as greptime_value] REDACTED
+|_|_|_UnionDistinctOnExec: on col=[["host", "job"]], ts_col=[ts] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Group modifiers are many-to-one/one-to-many matching barriers and must stay on the
+-- legacy path.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left / ignoring(host) group_left tsid_binary_join_right) / tsid_binary_join_left;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value@0 / greptime_value@1 as tsid_binary_join_right.tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@0, ts@4)], projection=[tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value@2, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_ProjectionExec: expr=[ts@3 as ts, __tsid@2 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(job@1, job@1), (ts@2, ts@3)], projection=[greptime_value@0, greptime_value@3, __tsid@5, ts@6], NullsEqual: true REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, job@2 as job, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, job@2 as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 
@@ -295,6 +620,80 @@ TQL EVAL (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_by_
 | job2 | 1970-01-01T00:00:00 | 3.0                                                                                 |
 | job2 | 1970-01-01T00:00:05 | 3.0                                                                                 |
 +------+---------------------+-------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid_binary_join_left;
+
++-------+------+---------------------+---------------------------------------------------------------------------------------------------------------------+
+| host  | job  | ts                  | tsid_binary_join_left.greptime_value + tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value |
++-------+------+---------------------+---------------------------------------------------------------------------------------------------------------------+
+| host1 | job1 | 1970-01-01T00:00:00 | 1.25                                                                                                                |
+| host1 | job1 | 1970-01-01T00:00:05 | 1.3333333333333333                                                                                                  |
+| host2 | job2 | 1970-01-01T00:00:00 | 1.3333333333333333                                                                                                  |
+| host2 | job2 | 1970-01-01T00:00:05 | 1.3333333333333333                                                                                                  |
++-------+------+---------------------+---------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (tsid_binary_join_left - tsid_binary_join_third)) / (tsid_binary_join_left + 2);
+
++-------+------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| host  | job  | ts                  | tsid_binary_join_left.greptime_value + tsid_binary_join_right.greptime_value * tsid_binary_join_left.greptime_value - tsid_binary_join_third.greptime_value / tsid_binary_join_left.greptime_value + Float64(2) |
++-------+------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| host1 | job1 | 1970-01-01T00:00:00 | 10.714285714285714                                                                                                                                                                                              |
+| host1 | job1 | 1970-01-01T00:00:05 | 12.941176470588236                                                                                                                                                                                              |
+| host2 | job2 | 1970-01-01T00:00:00 | 18.0                                                                                                                                                                                                            |
+| host2 | job2 | 1970-01-01T00:00:05 | 18.26086956521739                                                                                                                                                                                               |
++-------+------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 5, '5s') ((tsid_binary_join_left > tsid_binary_join_right) / tsid_binary_join_left) * 100;
+
++-------+------+---------------------+-----------------------------------------------------------------------+
+| host  | job  | ts                  | .greptime_value / tsid_binary_join_left.greptime_value * Float64(100) |
++-------+------+---------------------+-----------------------------------------------------------------------+
+| host1 | job1 | 1970-01-01T00:00:00 | 100.0                                                                 |
+| host1 | job1 | 1970-01-01T00:00:05 | 100.0                                                                 |
+| host2 | job2 | 1970-01-01T00:00:00 | 100.0                                                                 |
+| host2 | job2 | 1970-01-01T00:00:05 | 100.0                                                                 |
++-------+------+---------------------+-----------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) + tsid_binary_join_left) / tsid_binary_join_left;
+
++-------+------+---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| host  | job  | ts                  | lhs.tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value / rhs.greptime_value |
++-------+------+---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| host1 | job1 | 1970-01-01T00:00:00 | 1.0833333333333333                                                                                                                                                  |
+| host1 | job1 | 1970-01-01T00:00:05 | 1.0666666666666667                                                                                                                                                  |
+| host2 | job2 | 1970-01-01T00:00:00 | 1.0555555555555556                                                                                                                                                  |
+| host2 | job2 | 1970-01-01T00:00:05 | 1.0476190476190477                                                                                                                                                  |
++-------+------+---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsid_binary_join_left;
+
++-------+------+---------------------+------------------------------------------------------------------------------+
+| host  | job  | ts                  | tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value |
++-------+------+---------------------+------------------------------------------------------------------------------+
+| host1 | job1 | 1970-01-01T00:00:00 | 1.0                                                                          |
+| host1 | job1 | 1970-01-01T00:00:05 | 1.0                                                                          |
+| host2 | job2 | 1970-01-01T00:00:00 | 1.0                                                                          |
+| host2 | job2 | 1970-01-01T00:00:05 | 1.0                                                                          |
++-------+------+---------------------+------------------------------------------------------------------------------+
+
+-- Range functions are outside the first island version; the range selector subtree must
+-- remain a barrier.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 5, '5s') rate(tsid_binary_join_left[5s]) / tsid_binary_join_left;
+
++------+-----+----+----------------------------------------------------------------------------+
+| host | job | ts | lhs.prom_rate(ts_range,greptime_value,ts,Int64(5000)) / rhs.greptime_value |
++------+-----+----+----------------------------------------------------------------------------+
++------+-----+----+----------------------------------------------------------------------------+
+
+DROP TABLE tsid_binary_join_third;
+
+Affected Rows: 0
 
 DROP TABLE tsid_binary_join_right_by_job;
 

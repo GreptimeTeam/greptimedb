@@ -16,6 +16,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
+use api::v1::query_request::Query;
 use common_telemetry::debug;
 use sql::statements::statement::Statement;
 
@@ -42,10 +43,12 @@ impl<'a> PermissionReq<'a> {
     /// Returns true if the permission request is for read operations.
     pub fn is_readonly(&self) -> bool {
         match self {
-            PermissionReq::GrpcRequest(Request::Query(_))
-            | PermissionReq::PromQuery
-            | PermissionReq::LogQuery
-            | PermissionReq::PromStoreRead => true,
+            PermissionReq::GrpcRequest(Request::Query(query_request)) => {
+                !matches!(query_request.query, Some(Query::InsertIntoPlan(_)))
+            }
+            PermissionReq::PromQuery | PermissionReq::LogQuery | PermissionReq::PromStoreRead => {
+                true
+            }
             PermissionReq::SqlStatement(stmt) => stmt.is_readonly(),
 
             PermissionReq::GrpcRequest(_)
@@ -195,5 +198,15 @@ mod tests {
 
         assert!(matches!(read_result, PermissionResp::Reject));
         assert!(matches!(write_result, PermissionResp::Allow));
+    }
+
+    #[test]
+    fn test_grpc_insert_into_plan_is_write_request() {
+        let request = Request::Query(api::v1::QueryRequest {
+            query: Some(Query::InsertIntoPlan(api::v1::InsertIntoPlan::default())),
+        });
+        let req = PermissionReq::GrpcRequest(&request);
+
+        assert!(req.is_write());
     }
 }

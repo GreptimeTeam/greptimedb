@@ -158,7 +158,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "7224c2ad6d11db612fbdb621c36135fc37ffce35" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "912f6c21017d5ab6c529568d36e7b8c30a94d84b" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -178,7 +178,7 @@ nalgebra = "0.33"
 nix = { version = "0.30.1", default-features = false, features = ["event", "fs", "process"] }
 notify = "8.0"
 num_cpus = "1.16"
-object_store_opendal = { git = "https://github.com/apache/opendal.git", rev = "4ad2d85296ffa6fdc2882f97d3c760ee243913f7" }
+object_store_opendal = "0.57"
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.31", features = [
     "gen-tonic",
@@ -259,7 +259,7 @@ tracing-opentelemetry = "0.31.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
 uuid = { version = "1.17", features = ["serde", "v4", "v7", "fast-rng"] }
-vrl = "0.25"
+vrl = "0.33"
 zstd = "0.13"
 # DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
 

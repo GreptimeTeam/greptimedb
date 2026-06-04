@@ -89,7 +89,9 @@ impl MutableVector for JsonVectorBuilder {
             .fail();
         };
         let json_type = value.json_type();
-        self.merged_type.merge(json_type)?;
+        if !self.merged_type.is_include(json_type) {
+            self.merged_type.merge(json_type)?;
+        }
 
         let value = JsonValue::new(JsonVariant::from(value.variant().clone()));
         self.values.push(value);
