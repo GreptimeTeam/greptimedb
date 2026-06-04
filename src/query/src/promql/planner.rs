@@ -127,6 +127,9 @@ const FIELD_COLUMN_MATCHER: &str = "__field__";
 const SCHEMA_COLUMN_MATCHER: &str = "__schema__";
 const DB_COLUMN_MATCHER: &str = "__database__";
 
+/// Prefix for generated binary island leaf aliases.
+const BINARY_ISLAND_LEAF_ALIAS_PREFIX: &str = "__prom_v";
+
 /// Threshold for scatter scan mode
 const MAX_SCATTER_POINTS: i64 = 400;
 
@@ -801,7 +804,7 @@ impl PromPlanner {
                 .prom_vector_selector_to_plan(&leaf.selector, false)
                 .await?;
             let ctx = self.ctx.clone();
-            let alias = TableReference::bare(format!("prom_v{idx}"));
+            let alias = TableReference::bare(format!("{BINARY_ISLAND_LEAF_ALIAS_PREFIX}{idx}"));
             let plan = LogicalPlanBuilder::from(plan)
                 .alias(alias.clone())
                 .context(DataFusionPlanningSnafu)?
@@ -5629,6 +5632,39 @@ mod test {
         assert_eq!(
             plan_str.matches("PromInstantManipulate").count(),
             3,
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_island_generated_alias_avoids_user_column_names() {
+        let eval_stmt = build_eval_stmt("(some_metric + some_alt_metric) / some_metric");
+
+        let table_provider = build_test_table_provider_with_fields(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            &["prom_v0", "__prom_v0"],
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let field_names = plan.schema().field_names();
+        assert!(field_names.iter().any(|name| name.ends_with(".prom_v0")));
+        assert!(field_names.iter().any(|name| name.ends_with(".__prom_v0")));
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("SubqueryAlias: __prom_v0"), "{plan_str}");
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            2,
             "{plan_str}"
         );
     }
