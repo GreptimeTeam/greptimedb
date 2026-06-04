@@ -2349,6 +2349,46 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
+async fn test_copy_from_csv_skip_bad_records(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    assert!(matches!(execute_sql(
+        &instance,
+        "create table csv_skip_bad_records(host_id INT, host_name STRING, reading_value DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host_id));",
+    )
+    .await.data, OutputData::AffectedRows(0)));
+
+    let filepath = find_testing_resource("/tests/data/csv/skip_bad_records.csv");
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "copy csv_skip_bad_records from '{}' WITH(FORMAT='csv', skip_bad_records='true');",
+            &filepath
+        ),
+    )
+    .await
+    .data;
+
+    assert!(matches!(output, OutputData::AffectedRows(2)));
+
+    let output = execute_sql(
+        &instance,
+        "select * from csv_skip_bad_records order by host_id;",
+    )
+    .await
+    .data;
+    let expected = "\
++---------+-----------+---------------+---------------------+
+| host_id | host_name | reading_value | ts                  |
++---------+-----------+---------------+---------------------+
+| 1       | Alice     | 10.5          | 2024-01-01T00:00:00 |
+| 2       | Bob       | 30.5          | 2024-01-01T00:00:02 |
++---------+-----------+---------------+---------------------+";
+    check_output_stream(output, expected).await;
+}
+
+#[apply(both_instances_cases)]
 async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 

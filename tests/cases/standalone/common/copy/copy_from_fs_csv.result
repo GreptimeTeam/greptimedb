@@ -183,24 +183,6 @@ select * from csv_null_prefix_import;
 | final | 2023-11-14T22:13:23 |
 +-------+---------------------+
 
-CREATE TABLE csv_skip_bad_records(host_id int, host_name string, reading_value double, ts timestamp time index);
-
-Affected Rows: 0
-
--- SQLNESS ENV PWD
-Copy csv_skip_bad_records FROM '$PWD/tests/data/csv/skip_bad_records.csv' WITH (format='csv', skip_bad_records='true');
-
-Affected Rows: 2
-
-select * from csv_skip_bad_records order by ts;
-
-+---------+-----------+---------------+---------------------+
-| host_id | host_name | reading_value | ts                  |
-+---------+-----------+---------------+---------------------+
-| 1       | Alice     | 10.5          | 2024-01-01T00:00:00 |
-| 2       | Bob       | 30.5          | 2024-01-01T00:00:02 |
-+---------+-----------+---------------+---------------------+
-
 drop table demo;
 
 Affected Rows: 0
@@ -234,10 +216,6 @@ drop table csv_null_prefix;
 Affected Rows: 0
 
 drop table csv_null_prefix_import;
-
-Affected Rows: 0
-
-drop table csv_skip_bad_records;
 
 Affected Rows: 0
 
