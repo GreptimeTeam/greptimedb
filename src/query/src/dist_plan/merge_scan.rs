@@ -85,6 +85,23 @@ fn acquire_remote_dyn_filter_registry_lease(
     )
 }
 
+fn query_context_for_remote_dyn_filter_region(
+    query_ctx: &QueryContextRef,
+    region_id: RegionId,
+    remote_dyn_filter_registry_lease: Option<&RemoteDynFilterRegistryLease>,
+    captured_dyn_filters: &[CapturedDynFilter],
+) -> session::context::QueryContext {
+    if let Some(remote_dyn_filter_registry_lease) = remote_dyn_filter_registry_lease {
+        register_dyn_filters_for_region(
+            remote_dyn_filter_registry_lease.registry(),
+            region_id,
+            captured_dyn_filters,
+        );
+    }
+
+    query_context_with_initial_dyn_filter_regs(query_ctx, region_id, captured_dyn_filters)
+}
+
 #[derive(Debug, Hash, PartialOrd, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
     /// In logical plan phase it only contains one input
@@ -346,25 +363,16 @@ impl MergeScanExec {
                 .step_by(target_partition)
                 .copied()
             {
-                if let Some(remote_dyn_filter_registry_lease) =
-                    remote_dyn_filter_registry_lease.as_ref()
-                {
-                    register_dyn_filters_for_region(
-                        remote_dyn_filter_registry_lease.registry(),
-                        region_id,
-                        &captured_remote_dyn_filters,
-                    );
-                }
-
                 let region_span = tracing_context.attach(tracing::info_span!(
                     parent: &Span::current(),
                     "merge_scan_region",
                     region_id = %region_id,
                     partition = partition
                 ));
-                let region_query_ctx = query_context_with_initial_dyn_filter_regs(
+                let region_query_ctx = query_context_for_remote_dyn_filter_region(
                     &query_ctx,
                     region_id,
+                    remote_dyn_filter_registry_lease.as_ref(),
                     &captured_remote_dyn_filters,
                 );
                 let request = QueryRequest {
@@ -876,6 +884,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use async_trait::async_trait;
+    use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
@@ -892,11 +901,52 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::dist_plan::DynFilterRegistryManager;
+    use crate::dist_plan::{DynFilterRegistryManager, Subscriber};
     use crate::region_query::RegionQueryHandler;
 
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn remote_dyn_filter_region_query_context_registers_before_do_get() {
+        let registry_manager = Arc::new(DynFilterRegistryManager::default());
+        let query_ctx = QueryContext::arc();
+        let query_id = query_ctx
+            .remote_query_id_value()
+            .expect("query context must have remote query id");
+        let lease = registry_manager.acquire_lease(query_id);
+        let region_id = RegionId::new(1024, 7);
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 0)) as Arc<_>],
+            physical_lit(true) as _,
+        )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>;
+        let captured = capture_remote_dyn_filters_for_pushdown(
+            RemoteDynFilterProducerId::new(42),
+            vec![dyn_filter],
+        );
+        assert_eq!(captured.captured_dyn_filters.len(), 1);
+
+        let region_query_ctx = query_context_for_remote_dyn_filter_region(
+            &query_ctx,
+            region_id,
+            Some(&lease),
+            &captured.captured_dyn_filters,
+        );
+
+        let entries = lease.registry().entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].subscribers(), vec![Subscriber::new(region_id)]);
+        assert!(
+            !entries[0].fanout_started_for_test(),
+            "fanout must start only after do_get succeeds"
+        );
+        assert!(
+            region_query_ctx
+                .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+                .is_some(),
+            "initial RDF registrations must be present in the do_get query context"
+        );
     }
 
     #[test]

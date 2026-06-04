@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
@@ -32,8 +33,9 @@ use crate::region_query::RegionQueryHandlerRef;
 
 const REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 const REMOTE_DYN_FILTER_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
+const REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Routing metadata for a remote dynamic filter subscriber.
+/// Region subscribed to a remote dynamic filter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Subscriber {
     region_id: RegionId,
@@ -65,14 +67,11 @@ pub enum SubscriberRegistration {
     MissingFilter,
 }
 
-/// A registered query-local remote dynamic filter entry.
-///
-/// The frontend query owns the strong DataFusion filter handle until the query finishes; the
-/// registry only keeps a weak reference for later updates.
+/// A registered query-local producer filter and its region subscribers.
 #[derive(Debug)]
 pub struct DynFilterEntry {
     filter_id: FilterId,
-    alive_dyn_filter: Weak<DynamicFilterPhysicalExpr>,
+    producer_filter: Weak<DynamicFilterPhysicalExpr>,
     subscribers: RwLock<HashSet<Subscriber>>,
     last_sent_generation: AtomicU64,
     unregistered: AtomicBool,
@@ -86,10 +85,10 @@ struct QueryDynFilterRegistryInner {
 }
 
 impl DynFilterEntry {
-    pub fn new(filter_id: FilterId, alive_dyn_filter: Arc<DynamicFilterPhysicalExpr>) -> Self {
+    pub fn new(filter_id: FilterId, producer_filter: Arc<DynamicFilterPhysicalExpr>) -> Self {
         Self {
             filter_id,
-            alive_dyn_filter: Arc::downgrade(&alive_dyn_filter),
+            producer_filter: Arc::downgrade(&producer_filter),
             subscribers: RwLock::new(HashSet::new()),
             last_sent_generation: AtomicU64::new(0),
             unregistered: AtomicBool::new(false),
@@ -102,8 +101,8 @@ impl DynFilterEntry {
         &self.filter_id
     }
 
-    pub fn upgrade_alive_dyn_filter(&self) -> Option<Arc<DynamicFilterPhysicalExpr>> {
-        self.alive_dyn_filter.upgrade()
+    pub fn upgrade_producer_filter(&self) -> Option<Arc<DynamicFilterPhysicalExpr>> {
+        self.producer_filter.upgrade()
     }
 
     pub fn subscribers(&self) -> Vec<Subscriber> {
@@ -149,27 +148,26 @@ impl DynFilterEntry {
     fn mark_fanout_started(&self) -> bool {
         !self.fanout_started.swap(true, Ordering::SeqCst)
     }
+
+    #[cfg(test)]
+    pub(crate) fn fanout_started_for_test(&self) -> bool {
+        self.fanout_started.load(Ordering::SeqCst)
+    }
 }
 
 /// Query-scoped registry that owns all remote dynamic filters for one query.
 #[derive(Debug)]
 pub struct QueryDynFilterRegistry {
     query_id: QueryId,
-    active_streams: AtomicUsize,
-    fanout_started: AtomicBool,
-    registry_changed: Notify,
-    lifecycle_tx: watch::Sender<bool>,
+    lifecycle_tx: watch::Sender<()>,
     inner: RwLock<QueryDynFilterRegistryInner>,
 }
 
 impl QueryDynFilterRegistry {
     pub fn new(query_id: QueryId) -> Self {
-        let (lifecycle_tx, _) = watch::channel(false);
+        let (lifecycle_tx, _) = watch::channel(());
         Self {
             query_id,
-            active_streams: AtomicUsize::new(0),
-            fanout_started: AtomicBool::new(false),
-            registry_changed: Notify::new(),
             lifecycle_tx,
             inner: RwLock::new(QueryDynFilterRegistryInner {
                 entries: HashMap::new(),
@@ -179,23 +177,6 @@ impl QueryDynFilterRegistry {
 
     pub fn query_id(&self) -> QueryId {
         self.query_id
-    }
-
-    fn acquire_stream(&self) {
-        if self.active_streams.fetch_add(1, Ordering::SeqCst) == 0 {
-            let _ = self.lifecycle_tx.send(false);
-        }
-    }
-
-    fn release_stream(&self) {
-        if self.active_streams.fetch_sub(1, Ordering::SeqCst) == 1 {
-            let _ = self.lifecycle_tx.send(true);
-            self.registry_changed.notify_one();
-        }
-    }
-
-    fn active_stream_count(&self) -> usize {
-        self.active_streams.load(Ordering::SeqCst)
     }
 
     pub fn entry_count(&self) -> usize {
@@ -219,16 +200,15 @@ impl QueryDynFilterRegistry {
     pub fn register_remote_dyn_filter(
         &self,
         filter_id: FilterId,
-        alive_dyn_filter: Arc<DynamicFilterPhysicalExpr>,
+        producer_filter: Arc<DynamicFilterPhysicalExpr>,
     ) -> EntryRegistration {
         let mut inner = self.inner.write().unwrap();
         if let Some(existing) = inner.entries.get(&filter_id) {
             return EntryRegistration::Existing(existing.clone());
         }
 
-        let entry = Arc::new(DynFilterEntry::new(filter_id.clone(), alive_dyn_filter));
+        let entry = Arc::new(DynFilterEntry::new(filter_id.clone(), producer_filter));
         inner.entries.insert(filter_id, entry.clone());
-        self.registry_changed.notify_one();
         EntryRegistration::Inserted(entry)
     }
 
@@ -242,9 +222,7 @@ impl QueryDynFilterRegistry {
         };
 
         if entry.register_subscriber(subscriber) {
-            // A newly added subscriber has not seen the latest snapshot yet. Reset the
-            // entry-level generation watermark so the next fanout tick resends the current
-            // snapshot to all subscribers; receivers treat duplicate generations idempotently.
+            // New subscribers need the current snapshot; existing subscribers may see a duplicate.
             entry.reactivate_for_new_subscriber();
             SubscriberRegistration::Added
         } else {
@@ -252,120 +230,21 @@ impl QueryDynFilterRegistry {
         }
     }
 
-    /// Starts one query-scoped producer fanout task if it has not already been started.
+    /// Starts missing producer fanout watchers for the registry's entries.
     ///
-    /// The supervisor starts one async watcher per registered source-side
-    /// [`DynamicFilterPhysicalExpr`]. Each watcher waits on DataFusion's
-    /// `wait_update()`/`wait_complete()` notifications and sends best-effort
-    /// update/unregister RPCs to subscribed datanodes. The supervisor exits once
-    /// all remote scan streams release their registry leases.
+    /// Watchers do not hold the registry alive; dropping the registry closes their lifecycle channel.
     pub fn ensure_fanout_task(self: &Arc<Self>, region_query_handler: RegionQueryHandlerRef) {
-        self.registry_changed.notify_one();
-        if self.fanout_started.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        let registry = self.clone();
-        let _handle = spawn_global(async move {
-            registry.run_fanout(region_query_handler).await;
-        });
-    }
-
-    async fn run_fanout(self: Arc<Self>, region_query_handler: RegionQueryHandlerRef) {
-        let mut lifecycle_rx = self.lifecycle_tx.subscribe();
-
-        loop {
-            for entry in self.entries() {
-                self.ensure_entry_fanout_task(entry, region_query_handler.clone());
-            }
-
-            if *lifecycle_rx.borrow() || self.active_stream_count() == 0 {
-                break;
-            }
-
-            tokio::select! {
-                _ = self.registry_changed.notified() => {}
-                result = lifecycle_rx.changed() => {
-                    if result.is_err() || *lifecycle_rx.borrow() {
-                        break;
-                    }
-                }
-            }
-        }
-
-        self.unregister_all_once(&region_query_handler).await;
-    }
-
-    fn ensure_entry_fanout_task(
-        self: &Arc<Self>,
-        entry: Arc<DynFilterEntry>,
-        region_query_handler: RegionQueryHandlerRef,
-    ) {
-        if !entry.mark_fanout_started() {
-            return;
-        }
-
-        let registry = self.clone();
-        let _handle = spawn_global(async move {
-            registry.run_entry_fanout(entry, region_query_handler).await;
-        });
-    }
-
-    async fn run_entry_fanout(
-        self: Arc<Self>,
-        entry: Arc<DynFilterEntry>,
-        region_query_handler: RegionQueryHandlerRef,
-    ) {
-        let mut lifecycle_rx = self.lifecycle_tx.subscribe();
-        let mut is_complete = false;
-        let mut reconcile_interval = tokio::time::interval(REMOTE_DYN_FILTER_RECONCILE_INTERVAL);
-
-        loop {
-            if *lifecycle_rx.borrow() || self.active_stream_count() == 0 {
-                break;
-            }
-
-            let Some(filter) = entry.upgrade_alive_dyn_filter() else {
-                self.unregister_entry_once(&region_query_handler, &entry)
-                    .await;
-                return;
-            };
-
-            self.fanout_snapshot(&region_query_handler, &entry, &filter, is_complete)
-                .await;
-
-            if is_complete {
-                tokio::select! {
-                    _ = entry.subscriber_changed.notified() => {}
-                    result = lifecycle_rx.changed() => {
-                        if result.is_err() || *lifecycle_rx.borrow() {
-                            break;
-                        }
-                    }
-                }
-                continue;
-            }
-
-            tokio::select! {
-                _ = filter.wait_update() => {}
-                _ = filter.wait_complete() => {
-                    is_complete = true;
-                }
-                // `wait_update()` subscribes when called, so an update that happens between
-                // the post-send generation check and the wait call can be missed. This
-                // low-frequency reconcile tick bounds that race by periodically re-reading
-                // `snapshot_generation()` and coalescing to the latest snapshot.
-                _ = reconcile_interval.tick() => {}
-                _ = entry.subscriber_changed.notified() => {}
-                result = lifecycle_rx.changed() => {
-                    if result.is_err() || *lifecycle_rx.borrow() {
-                        break;
-                    }
-                }
-            }
+        for entry in self.entries() {
+            ensure_entry_fanout_task(
+                self.query_id,
+                entry,
+                region_query_handler.clone(),
+                self.lifecycle_tx.subscribe(),
+            );
         }
     }
 
+    #[cfg(test)]
     async fn fanout_snapshot(
         &self,
         region_query_handler: &RegionQueryHandlerRef,
@@ -373,115 +252,302 @@ impl QueryDynFilterRegistry {
         filter: &DynamicFilterPhysicalExpr,
         is_complete: bool,
     ) {
-        let Some((generation, current)) = current_stable_snapshot(filter).await else {
-            return;
-        };
-
-        if !is_complete && !entry.mark_generation_sent(generation) {
-            return;
-        }
-
-        if is_complete {
-            let _ = entry.mark_generation_sent(generation);
-        }
-
-        let payload = match DynFilterPayload::from_datafusion_expr(
-            &current,
-            REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES,
-        ) {
-            Ok(DynFilterPayload::Datafusion(payload)) => payload,
-            Ok(_) => {
-                warn!("Ignored unsupported remote dynamic filter producer payload");
-                return;
-            }
-            Err(error) => {
-                warn!(error; "Failed to encode remote dynamic filter producer snapshot");
-                return;
-            }
-        };
-
-        self.fanout_update(
+        let mut lifecycle_rx = self.lifecycle_tx.subscribe();
+        fanout_snapshot_for_query(
+            self.query_id,
             region_query_handler,
             entry,
-            generation,
+            filter,
             is_complete,
-            payload,
+            &mut lifecycle_rx,
         )
         .await;
     }
 
-    async fn fanout_update(
-        &self,
-        region_query_handler: &RegionQueryHandlerRef,
-        entry: &DynFilterEntry,
-        generation: u64,
-        is_complete: bool,
-        payload: Vec<u8>,
-    ) {
-        let query_id = self.query_id.to_string();
-        let filter_id = entry.filter_id().to_string();
-
-        for subscriber in entry.subscribers() {
-            let update = RemoteDynFilterUpdate {
-                filter_id: filter_id.clone(),
-                payload: payload.clone(),
-                generation,
-                is_complete,
-            };
-
-            if let Err(error) = region_query_handler
-                .handle_remote_dyn_filter_update(subscriber.region_id(), query_id.clone(), update)
-                .await
-            {
-                warn!(error; "Failed to fan out remote dynamic filter update");
-            }
-        }
-    }
-
+    #[cfg(test)]
     async fn unregister_all_once(&self, region_query_handler: &RegionQueryHandlerRef) {
         for entry in self.entries() {
-            self.unregister_entry_once(region_query_handler, &entry)
-                .await;
+            unregister_entry_once_for_query(region_query_handler, self.query_id, &entry).await;
+        }
+    }
+}
+
+fn ensure_entry_fanout_task(
+    query_id: QueryId,
+    entry: Arc<DynFilterEntry>,
+    region_query_handler: RegionQueryHandlerRef,
+    lifecycle_rx: watch::Receiver<()>,
+) {
+    if !entry.mark_fanout_started() {
+        return;
+    }
+
+    let _handle = spawn_global(async move {
+        run_entry_fanout(query_id, entry, region_query_handler, lifecycle_rx).await;
+    });
+}
+
+async fn run_entry_fanout(
+    query_id: QueryId,
+    entry: Arc<DynFilterEntry>,
+    region_query_handler: RegionQueryHandlerRef,
+    mut lifecycle_rx: watch::Receiver<()>,
+) {
+    let mut is_complete = false;
+    // `interval()` ticks immediately for the first tick. Start after one full interval so the
+    // reconcile branch remains a periodic fallback instead of an eager re-poll right after fanout.
+    let mut reconcile_interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + REMOTE_DYN_FILTER_RECONCILE_INTERVAL,
+        REMOTE_DYN_FILTER_RECONCILE_INTERVAL,
+    );
+
+    loop {
+        let Some(filter) = entry.upgrade_producer_filter() else {
+            unregister_entry_once_for_query(&region_query_handler, query_id, &entry).await;
+            return;
+        };
+
+        if !fanout_snapshot_for_query(
+            query_id,
+            &region_query_handler,
+            &entry,
+            &filter,
+            is_complete,
+            &mut lifecycle_rx,
+        )
+        .await
+        {
+            break;
+        }
+
+        if is_complete {
+            tokio::select! {
+                _ = entry.subscriber_changed.notified() => {}
+                result = lifecycle_rx.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        tokio::select! {
+            _ = filter.wait_update() => {}
+            _ = filter.wait_complete() => {
+                is_complete = true;
+            }
+            // `wait_update()` can miss an update sent while an RPC is in-flight.
+            // Re-read periodically to coalesce to the latest generation.
+            _ = reconcile_interval.tick() => {}
+            _ = entry.subscriber_changed.notified() => {}
+            result = lifecycle_rx.changed() => {
+                if result.is_err() {
+                    break;
+                }
+            }
         }
     }
 
-    async fn unregister_entry_once(
-        &self,
-        region_query_handler: &RegionQueryHandlerRef,
-        entry: &DynFilterEntry,
+    unregister_entry_once_for_query(&region_query_handler, query_id, &entry).await;
+}
+
+async fn fanout_snapshot_for_query(
+    query_id: QueryId,
+    region_query_handler: &RegionQueryHandlerRef,
+    entry: &DynFilterEntry,
+    filter: &DynamicFilterPhysicalExpr,
+    is_complete: bool,
+    lifecycle_rx: &mut watch::Receiver<()>,
+) -> bool {
+    let Some((generation, current)) = current_stable_snapshot(filter, lifecycle_rx).await else {
+        return true;
+    };
+
+    if !is_complete && !entry.mark_generation_sent(generation) {
+        return true;
+    }
+
+    if is_complete {
+        let _ = entry.mark_generation_sent(generation);
+    }
+
+    let payload = match DynFilterPayload::from_datafusion_expr(
+        &current,
+        REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES,
     ) {
-        if !entry.try_mark_unregistered() {
-            return;
+        Ok(DynFilterPayload::Datafusion(payload)) => payload,
+        Ok(_) => {
+            warn!("Ignored unsupported remote dynamic filter producer payload");
+            return true;
         }
+        Err(error) => {
+            warn!(error; "Failed to encode remote dynamic filter producer snapshot");
+            return true;
+        }
+    };
 
-        let query_id = self.query_id.to_string();
-        let filter_id = entry.filter_id().to_string();
+    fanout_update_for_query(
+        query_id,
+        region_query_handler,
+        entry,
+        generation,
+        is_complete,
+        payload,
+        lifecycle_rx,
+    )
+    .await
+}
 
-        for subscriber in entry.subscribers() {
-            let unregister = RemoteDynFilterUnregister {
-                filter_id: filter_id.clone(),
-            };
+async fn fanout_update_for_query(
+    query_id: QueryId,
+    region_query_handler: &RegionQueryHandlerRef,
+    entry: &DynFilterEntry,
+    generation: u64,
+    is_complete: bool,
+    payload: Vec<u8>,
+    lifecycle_rx: &mut watch::Receiver<()>,
+) -> bool {
+    let query_id = query_id.to_string();
+    let filter_id = entry.filter_id().to_string();
 
-            if let Err(error) = region_query_handler
-                .handle_remote_dyn_filter_unregister(
-                    subscriber.region_id(),
-                    query_id.clone(),
-                    unregister,
-                )
-                .await
-            {
-                warn!(error; "Failed to fan out remote dynamic filter unregister");
+    for subscriber in entry.subscribers() {
+        let update = RemoteDynFilterUpdate {
+            filter_id: filter_id.clone(),
+            payload: payload.clone(),
+            generation,
+            is_complete,
+        };
+
+        let Some(result) = await_control_rpc_or_lifecycle_close(
+            lifecycle_rx,
+            format!(
+                "update query_id={} filter_id={} region_id={}",
+                query_id,
+                filter_id,
+                subscriber.region_id()
+            ),
+            region_query_handler.handle_remote_dyn_filter_update(
+                subscriber.region_id(),
+                query_id.clone(),
+                update,
+            ),
+        )
+        .await
+        else {
+            return false;
+        };
+
+        if let Err(error) = result {
+            warn!(
+                error;
+                "Failed to fan out remote dynamic filter update, query_id={}, filter_id={}, region_id={}",
+                query_id,
+                filter_id,
+                subscriber.region_id()
+            );
+        }
+    }
+
+    true
+}
+
+async fn unregister_entry_once_for_query(
+    region_query_handler: &RegionQueryHandlerRef,
+    query_id: QueryId,
+    entry: &DynFilterEntry,
+) {
+    if !entry.try_mark_unregistered() {
+        return;
+    }
+
+    let query_id = query_id.to_string();
+    let filter_id = entry.filter_id().to_string();
+
+    for subscriber in entry.subscribers() {
+        let unregister = RemoteDynFilterUnregister {
+            filter_id: filter_id.clone(),
+        };
+
+        let Some(result) = await_control_rpc_timeout(
+            format!(
+                "unregister query_id={} filter_id={} region_id={}",
+                query_id,
+                filter_id,
+                subscriber.region_id()
+            ),
+            region_query_handler.handle_remote_dyn_filter_unregister(
+                subscriber.region_id(),
+                query_id.clone(),
+                unregister,
+            ),
+        )
+        .await
+        else {
+            continue;
+        };
+
+        if let Err(error) = result {
+            warn!(
+                error;
+                "Failed to fan out remote dynamic filter unregister, query_id={}, filter_id={}, region_id={}",
+                query_id,
+                filter_id,
+                subscriber.region_id()
+            );
+        }
+    }
+
+    debug!("Remote dynamic filter producer unregistered subscribers");
+}
+
+async fn await_control_rpc_or_lifecycle_close<T>(
+    lifecycle_rx: &mut watch::Receiver<()>,
+    operation: String,
+    rpc: impl Future<Output = T>,
+) -> Option<T> {
+    if lifecycle_rx.has_changed().is_err() {
+        return None;
+    }
+
+    tokio::select! {
+        biased;
+        result = lifecycle_rx.changed() => {
+            if result.is_err() {
+                debug!("Cancelled remote dynamic filter control RPC after lifecycle close");
             }
+            None
         }
+        result = rpc => Some(result),
+        _ = tokio::time::sleep(REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT) => {
+            warn!("Timed out remote dynamic filter control RPC: {}", operation);
+            None
+        }
+    }
+}
 
-        debug!("Remote dynamic filter producer unregistered subscribers");
+async fn await_control_rpc_timeout<T>(
+    operation: String,
+    rpc: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        result = rpc => Some(result),
+        _ = tokio::time::sleep(REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT) => {
+            warn!("Timed out remote dynamic filter control RPC: {}", operation);
+            None
+        }
     }
 }
 
 async fn current_stable_snapshot(
     filter: &DynamicFilterPhysicalExpr,
+    lifecycle_rx: &mut watch::Receiver<()>,
 ) -> Option<(u64, Arc<dyn PhysicalExpr>)> {
     loop {
+        if lifecycle_rx.has_changed().is_err() {
+            return None;
+        }
+
         let before = filter.snapshot_generation();
         let current = match filter.current() {
             Ok(current) => current,
@@ -496,13 +562,21 @@ async fn current_stable_snapshot(
             return Some((after, current));
         }
 
-        tokio::task::yield_now().await;
+        tokio::select! {
+            biased;
+            result = lifecycle_rx.changed() => {
+                if result.is_err() {
+                    return None;
+                }
+            }
+            _ = tokio::task::yield_now() => {}
+        }
     }
 }
 
 /// Stream-scoped lease that keeps a query registry alive.
 ///
-/// Production code owns registries through this lease; the manager only keeps a weak index.
+/// Stream leases own registry lifecycle; the manager only keeps a weak index.
 #[derive(Debug)]
 pub struct RemoteDynFilterRegistryLease {
     registry_manager: Arc<DynFilterRegistryManager>,
@@ -517,7 +591,6 @@ impl RemoteDynFilterRegistryLease {
         registry_manager: Arc<DynFilterRegistryManager>,
         registry: Arc<QueryDynFilterRegistry>,
     ) -> Self {
-        registry.acquire_stream();
         Self {
             registry_manager,
             registry: Some(registry),
@@ -554,20 +627,18 @@ impl Drop for RemoteDynFilterRegistryLease {
         let query_id = registry.query_id();
         let registry_weak = Arc::downgrade(&registry);
 
-        registry.release_stream();
-
-        // Release this lease before pruning; concurrent drops must not observe each other's stream refs.
+        // Release this lease before pruning; concurrent drops must not observe each other's strong refs.
         drop(registry);
 
         let _ = self
             .registry_manager
-            .remove_if_inactive_registry(&query_id, &registry_weak);
+            .remove_if_dropped_registry(&query_id, &registry_weak);
     }
 }
 
 /// Query-engine manager for query-scoped remote dynamic filter registries.
 ///
-/// Weak index only; active streams own registries through [`RemoteDynFilterRegistryLease`].
+/// Weak index only; stream leases own registries through [`RemoteDynFilterRegistryLease`].
 #[derive(Debug, Default)]
 pub struct DynFilterRegistryManager {
     registries: RwLock<HashMap<QueryId, Weak<QueryDynFilterRegistry>>>,
@@ -595,10 +666,10 @@ impl DynFilterRegistryManager {
         self.registries.write().unwrap().remove(query_id)
     }
 
-    fn remove_if_inactive_registry(
+    fn remove_if_dropped_registry(
         &self,
         query_id: &QueryId,
-        registry_weak: &Weak<QueryDynFilterRegistry>,
+        dropped_registry: &Weak<QueryDynFilterRegistry>,
     ) -> Option<Weak<QueryDynFilterRegistry>> {
         let mut registries = self
             .registries
@@ -606,14 +677,8 @@ impl DynFilterRegistryManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let current = registries.get(query_id)?;
 
-        // `ptr_eq` protects a newer registry for the same query id. In 03b the fanout
-        // task can briefly hold a strong `Arc`, so stream lifecycle uses active_streams
-        // instead of relying only on `Weak::upgrade().is_none()`.
-        let inactive = match current.upgrade() {
-            Some(registry) => registry.active_stream_count() == 0,
-            None => true,
-        };
-        if current.ptr_eq(registry_weak) && inactive {
+        // `ptr_eq` protects a newer registry for the same query id; `upgrade` ensures it is dead.
+        if current.ptr_eq(dropped_registry) && current.upgrade().is_none() {
             registries.remove(query_id)
         } else {
             None
@@ -758,6 +823,16 @@ mod tests {
             }
             panic!("timed out waiting for {expected} remote dyn filter unregisters");
         }
+    }
+
+    async fn wait_for_registry_drop(registry: Weak<QueryDynFilterRegistry>) {
+        for _ in 0..300 {
+            if registry.upgrade().is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for remote dyn filter registry drop");
     }
 
     #[async_trait]
@@ -1011,7 +1086,7 @@ mod tests {
 
         assert!(
             manager
-                .remove_if_inactive_registry(&query_id, &old_registry)
+                .remove_if_dropped_registry(&query_id, &old_registry)
                 .is_none(),
             "old registry cleanup must not remove the replacement weak entry"
         );
@@ -1120,18 +1195,22 @@ mod tests {
         let query_id = test_query_id(3);
         let manager = Arc::new(DynFilterRegistryManager::default());
         let lease = manager.acquire_lease(query_id);
-        let registry = manager.get(&query_id).unwrap();
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let _ = registry.register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
         let subscriber = Subscriber::new(RegionId::new(1024, 7));
         assert_eq!(
-            registry.register_subscriber(&filter_id, subscriber.clone()),
+            lease
+                .registry()
+                .register_subscriber(&filter_id, subscriber.clone()),
             SubscriberRegistration::Added
         );
 
         let handler = Arc::new(RecordingRegionQueryHandler::default());
-        registry.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
 
         handler.wait_for_update_count(1).await;
         let initial_generation = handler.updates()[0].generation;
@@ -1153,6 +1232,137 @@ mod tests {
         let unregisters = handler.unregisters();
         assert_eq!(unregisters[0].region_id, subscriber.region_id());
         assert_eq!(unregisters[0].filter_id, filter_id.to_string());
+
+        wait_for_registry_drop(registry_weak).await;
+    }
+
+    #[tokio::test]
+    async fn repeated_ensure_fanout_task_keeps_single_watcher() {
+        let query_id = test_query_id(6);
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let lease = manager.acquire_lease(query_id);
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let entry = match lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone())
+        {
+            EntryRegistration::Inserted(entry) => entry,
+            other => panic!("unexpected registration result: {other:?}"),
+        };
+        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+
+        assert!(entry.fanout_started.load(Ordering::SeqCst));
+        handler.wait_for_update_count(1).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(handler.updates().len(), 1);
+
+        filter.update(lit(false) as _).unwrap();
+        handler.wait_for_update_count(2).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(handler.updates().len(), 2);
+
+        drop(lease);
+        handler.wait_for_unregister_count(1).await;
+        wait_for_registry_drop(registry_weak).await;
+    }
+
+    #[tokio::test]
+    async fn fanout_task_resends_complete_snapshot_to_late_subscriber() {
+        let query_id = test_query_id(7);
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let lease = manager.acquire_lease(query_id);
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let first_subscriber = Subscriber::new(RegionId::new(1024, 7));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, first_subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+        handler.wait_for_update_count(1).await;
+
+        filter.mark_complete();
+        handler.wait_for_update_count(2).await;
+        assert!(handler.updates()[1].is_complete);
+
+        let late_subscriber = Subscriber::new(RegionId::new(1024, 8));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, late_subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+
+        handler.wait_for_update_count(4).await;
+        let updates = handler.updates();
+        assert!(
+            updates[2..].iter().any(
+                |update| update.region_id == first_subscriber.region_id() && update.is_complete
+            )
+        );
+        assert!(
+            updates[2..]
+                .iter()
+                .any(|update| update.region_id == late_subscriber.region_id()
+                    && update.is_complete)
+        );
+
+        drop(lease);
+        handler.wait_for_unregister_count(1).await;
+        wait_for_registry_drop(registry_weak).await;
+    }
+
+    #[tokio::test]
+    async fn fanout_task_unregisters_when_producer_filter_is_dropped() {
+        let query_id = test_query_id(8);
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let lease = manager.acquire_lease(query_id);
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+        handler.wait_for_update_count(1).await;
+
+        drop(filter);
+        handler.wait_for_unregister_count(1).await;
+        let unregisters = handler.unregisters();
+        assert_eq!(unregisters[0].region_id, subscriber.region_id());
+        assert_eq!(unregisters[0].filter_id, filter_id.to_string());
+
+        drop(lease);
+        wait_for_registry_drop(registry_weak).await;
     }
 
     #[tokio::test]
@@ -1160,27 +1370,28 @@ mod tests {
         let query_id = test_query_id(4);
         let manager = Arc::new(DynFilterRegistryManager::default());
         let lease = manager.acquire_lease(query_id);
-        let registry = manager.get(&query_id).unwrap();
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let _ = registry.register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
         let subscriber = Subscriber::new(RegionId::new(1024, 7));
         assert_eq!(
-            registry.register_subscriber(&filter_id, subscriber.clone()),
+            lease
+                .registry()
+                .register_subscriber(&filter_id, subscriber.clone()),
             SubscriberRegistration::Added
         );
 
         let handler = Arc::new(RecordingRegionQueryHandler::default());
         handler.block_next_update();
-        registry.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
 
         handler.wait_for_blocked_update().await;
         let initial_generation = handler.updates()[0].generation;
 
-        // Update while the first RPC is still in-flight. A pure `wait_update()` loop can
-        // subscribe after this update and miss the edge; the reconcile tick must still
-        // observe `snapshot_generation() > last_sent_generation` and fan out the latest
-        // snapshot.
+        // Update before the watcher can subscribe again; reconcile must catch it.
         filter.update(lit(false) as _).unwrap();
         handler.release_blocked_update();
 
@@ -1192,6 +1403,40 @@ mod tests {
 
         drop(lease);
         handler.wait_for_unregister_count(1).await;
+        wait_for_registry_drop(registry_weak).await;
+    }
+
+    #[tokio::test]
+    async fn fanout_task_unregisters_after_lifecycle_close_during_blocked_update() {
+        let query_id = test_query_id(5);
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let lease = manager.acquire_lease(query_id);
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        handler.block_next_update();
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+
+        handler.wait_for_blocked_update().await;
+        drop(lease);
+
+        handler.wait_for_unregister_count(1).await;
+        let unregisters = handler.unregisters();
+        assert_eq!(unregisters[0].region_id, subscriber.region_id());
+        assert_eq!(unregisters[0].filter_id, filter_id.to_string());
+        wait_for_registry_drop(registry_weak).await;
     }
 
     #[tokio::test]
