@@ -339,6 +339,7 @@ impl RegionOpener {
 
         let version = VersionBuilder::new(metadata, mutable)
             .options(options)
+            .flushed_entry_id(flushed_entry_id)
             .build();
         let version_control = Arc::new(VersionControl::new(version));
         let access_layer = Arc::new(AccessLayer::new(
@@ -371,7 +372,7 @@ impl RegionOpener {
             last_flush_millis: AtomicI64::new(now),
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
-            topic_latest_entry_id: AtomicU64::new(0),
+            topic_latest_entry_id: AtomicU64::new(flushed_entry_id),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats,
         }))
@@ -534,11 +535,11 @@ impl RegionOpener {
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
 
+        let replay_from_entry_id = self
+            .replay_checkpoint
+            .unwrap_or_default()
+            .max(flushed_entry_id);
         let topic_latest_entry_id = if !self.skip_wal_replay {
-            let replay_from_entry_id = self
-                .replay_checkpoint
-                .unwrap_or_default()
-                .max(flushed_entry_id);
             info!(
                 "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
                 replay_from_entry_id,
@@ -561,7 +562,11 @@ impl RegionOpener {
             // Only set after the WAL replay is completed.
 
             if provider.is_remote_wal() && version_control.current().version.memtables.is_empty() {
-                wal.store().latest_entry_id(&provider).unwrap_or(0)
+                wal.store()
+                    .latest_entry_id(&provider)
+                    .unwrap_or(replay_from_entry_id)
+            } else if provider.is_remote_wal() {
+                replay_from_entry_id
             } else {
                 0
             }
@@ -574,7 +579,11 @@ impl RegionOpener {
                 now.elapsed()
             );
 
-            0
+            if provider.is_remote_wal() {
+                replay_from_entry_id
+            } else {
+                0
+            }
         };
 
         if let Some(committed_in_manifest) = manifest.committed_sequence {

@@ -126,6 +126,34 @@ impl ReplayCheckpoint {
             metadata_entry_id,
         }
     }
+
+    /// Merges the checkpoint with the topic pruned entry id.
+    pub fn merge_with_topic_pruned_entry_id(
+        checkpoint: Option<Self>,
+        pruned_entry_id: Option<u64>,
+        is_metric_engine: bool,
+    ) -> Option<Self> {
+        match (checkpoint, pruned_entry_id) {
+            (Some(checkpoint), Some(pruned_entry_id)) => Some(Self {
+                entry_id: checkpoint.entry_id.max(pruned_entry_id),
+                metadata_entry_id: if is_metric_engine {
+                    Some(
+                        checkpoint
+                            .metadata_entry_id
+                            .unwrap_or_default()
+                            .max(pruned_entry_id),
+                    )
+                } else {
+                    checkpoint.metadata_entry_id
+                },
+            }),
+            (None, Some(pruned_entry_id)) => Some(Self {
+                entry_id: pruned_entry_id,
+                metadata_entry_id: is_metric_engine.then_some(pruned_entry_id),
+            }),
+            (checkpoint, None) => checkpoint,
+        }
+    }
 }
 
 impl TopicRegionValue {
@@ -368,6 +396,58 @@ mod tests {
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
+
+    #[test]
+    fn test_merge_checkpoint_with_topic_pruned_entry_id_missing_pruned() {
+        let checkpoint = Some(ReplayCheckpoint::new(10, None));
+
+        assert_eq!(
+            ReplayCheckpoint::merge_with_topic_pruned_entry_id(checkpoint, None, true),
+            checkpoint
+        );
+    }
+
+    #[test]
+    fn test_merge_checkpoint_with_topic_pruned_entry_id_creates_checkpoint() {
+        assert_eq!(
+            ReplayCheckpoint::merge_with_topic_pruned_entry_id(None, Some(10), true),
+            Some(ReplayCheckpoint::new(10, Some(10)))
+        );
+    }
+
+    #[test]
+    fn test_merge_checkpoint_with_topic_pruned_entry_id_updates_both_ids() {
+        let checkpoint = ReplayCheckpoint::new(10, Some(5));
+
+        assert_eq!(
+            ReplayCheckpoint::merge_with_topic_pruned_entry_id(Some(checkpoint), Some(20), true),
+            Some(ReplayCheckpoint::new(20, Some(20)))
+        );
+    }
+
+    #[test]
+    fn test_merge_checkpoint_with_topic_pruned_entry_id_preserves_larger_ids() {
+        let checkpoint = ReplayCheckpoint::new(30, Some(40));
+
+        assert_eq!(
+            ReplayCheckpoint::merge_with_topic_pruned_entry_id(Some(checkpoint), Some(20), true),
+            Some(checkpoint)
+        );
+    }
+
+    #[test]
+    fn test_merge_checkpoint_with_topic_pruned_entry_id_for_mito() {
+        assert_eq!(
+            ReplayCheckpoint::merge_with_topic_pruned_entry_id(None, Some(10), false),
+            Some(ReplayCheckpoint::new(10, None))
+        );
+
+        let checkpoint = ReplayCheckpoint::new(5, Some(8));
+        assert_eq!(
+            ReplayCheckpoint::merge_with_topic_pruned_entry_id(Some(checkpoint), Some(10), false),
+            Some(ReplayCheckpoint::new(10, Some(8)))
+        );
+    }
 
     #[tokio::test]
     async fn test_topic_region_manager() {

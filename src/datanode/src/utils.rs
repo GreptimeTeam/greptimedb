@@ -16,11 +16,16 @@ use std::collections::HashMap;
 
 use common_meta::DatanodeId;
 use common_meta::key::datanode_table::DatanodeTableManager;
-use common_meta::key::topic_region::{TopicRegionKey, TopicRegionManager, TopicRegionValue};
+use common_meta::key::topic_name::{TopicNameKey, TopicNameManager, TopicNameValue};
+use common_meta::key::topic_region::{
+    ReplayCheckpoint as MetadataReplayCheckpoint, TopicRegionKey, TopicRegionManager,
+    TopicRegionValue,
+};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::wal_provider::{extract_topic_from_wal_options, prepare_wal_options};
 use futures::TryStreamExt;
 use snafu::ResultExt;
+use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::path_utils::table_dir;
 use store_api::region_request::{PathType, RegionOpenRequest, ReplayCheckpoint};
 use store_api::storage::{RegionId, RegionNumber};
@@ -63,14 +68,45 @@ fn group_region_by_topic(
     }
 }
 
+fn region_pruned_entry_ids(
+    topic_regions: &HashMap<String, Vec<RegionId>>,
+    topic_name_values: &HashMap<String, TopicNameValue>,
+) -> HashMap<RegionId, u64> {
+    topic_regions
+        .iter()
+        .flat_map(|(topic, region_ids)| {
+            topic_name_values
+                .get(topic)
+                .into_iter()
+                .flat_map(move |value| {
+                    region_ids
+                        .iter()
+                        .map(move |region_id| (*region_id, value.pruned_entry_id))
+                })
+        })
+        .collect()
+}
+
 fn get_replay_checkpoint(
     region_id: RegionId,
     topic_region_values: &Option<HashMap<RegionId, TopicRegionValue>>,
+    pruned_entry_id: Option<u64>,
+    is_metric_engine: bool,
 ) -> Option<ReplayCheckpoint> {
-    let topic_region_values = topic_region_values.as_ref()?;
-    let topic_region_value = topic_region_values.get(&region_id);
-    let replay_checkpoint = topic_region_value.and_then(|value| value.checkpoint);
-    replay_checkpoint.map(|checkpoint| ReplayCheckpoint {
+    let checkpoint = topic_region_values
+        .as_ref()
+        .and_then(|values| values.get(&region_id))
+        .and_then(|value| value.checkpoint)
+        .map(|checkpoint| {
+            MetadataReplayCheckpoint::new(checkpoint.entry_id, checkpoint.metadata_entry_id)
+        });
+
+    MetadataReplayCheckpoint::merge_with_topic_pruned_entry_id(
+        checkpoint,
+        pruned_entry_id,
+        is_metric_engine,
+    )
+    .map(|checkpoint| ReplayCheckpoint {
         entry_id: checkpoint.entry_id,
         metadata_entry_id: checkpoint.metadata_entry_id,
     })
@@ -88,7 +124,8 @@ pub async fn build_region_open_requests(
         .await
         .context(GetMetadataSnafu)?;
 
-    let topic_region_manager = TopicRegionManager::new(kv_backend);
+    let topic_region_manager = TopicRegionManager::new(kv_backend.clone());
+    let topic_name_manager = TopicNameManager::new(kv_backend);
     let mut topic_regions = HashMap::<String, Vec<RegionId>>::new();
     let mut regions = vec![];
     #[cfg(feature = "enterprise")]
@@ -161,10 +198,36 @@ pub async fn build_region_open_requests(
         None
     };
 
+    let topic_name_values = if !topic_regions.is_empty() {
+        let topics = topic_regions
+            .keys()
+            .map(|topic| TopicNameKey::new(topic))
+            .collect::<Vec<_>>();
+        Some(
+            topic_name_manager
+                .batch_get(topics)
+                .await
+                .context(GetMetadataSnafu)?,
+        )
+    } else {
+        None
+    };
+    let region_pruned_entry_ids = topic_name_values
+        .as_ref()
+        .map(|values| region_pruned_entry_ids(&topic_regions, values));
+
     let mut leader_region_requests = Vec::with_capacity(regions.len());
     for (region_id, engine, store_path, options) in regions {
         let table_dir = table_dir(&store_path, region_id.table_id());
-        let checkpoint = get_replay_checkpoint(region_id, &topic_region_values);
+        let pruned_entry_id = region_pruned_entry_ids
+            .as_ref()
+            .and_then(|values| values.get(&region_id).copied());
+        let checkpoint = get_replay_checkpoint(
+            region_id,
+            &topic_region_values,
+            pruned_entry_id,
+            engine == METRIC_ENGINE_NAME,
+        );
         info!("region_id: {}, checkpoint: {:?}", region_id, checkpoint);
         leader_region_requests.push((
             region_id,

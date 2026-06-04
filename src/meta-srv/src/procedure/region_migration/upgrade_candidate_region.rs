@@ -21,7 +21,6 @@ use common_meta::ddl::utils::parse_region_wal_options;
 use common_meta::instruction::{
     Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply, UpgradeRegionsReply,
 };
-use common_meta::key::topic_region::TopicRegionKey;
 use common_meta::lock_key::RemoteWalLock;
 use common_meta::wal_provider::extract_topic_from_wal_options;
 use common_procedure::{Context as ProcedureContext, Status};
@@ -30,6 +29,7 @@ use common_telemetry::{error, info};
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use tokio::time::{Instant, sleep};
 
 use crate::error::{self, Result};
@@ -133,17 +133,14 @@ impl UpgradeCandidateRegion {
                     &datanode_table_value.region_info.region_wal_options,
                 )
             {
-                region_topic.push((*region_id, topic));
+                let is_metric_engine =
+                    datanode_table_value.region_info.engine == METRIC_ENGINE_NAME;
+                region_topic.push((*region_id, topic, is_metric_engine));
             }
         }
 
         let replay_checkpoints = ctx
-            .get_replay_checkpoints(
-                region_topic
-                    .iter()
-                    .map(|(region_id, topic)| TopicRegionKey::new(*region_id, topic))
-                    .collect(),
-            )
+            .get_replay_checkpoints_with_topic_pruned_entry_ids(&region_topic)
             .await?;
         // Build upgrade regions instruction.
         let mut upgrade_regions = Vec::with_capacity(region_ids.len());
@@ -358,8 +355,11 @@ mod tests {
 
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
+    use common_meta::key::topic_name::TopicNameKey;
+    use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey, TopicRegionValue};
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use common_wal::options::KafkaWalOptions;
     use store_api::storage::RegionId;
 
     use super::*;
@@ -382,9 +382,28 @@ mod tests {
         )
     }
 
+    fn kafka_wal_options(topic: &str) -> HashMap<u32, String> {
+        HashMap::from([(
+            1,
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            }))
+            .unwrap(),
+        )])
+    }
+
     async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {
+        prepare_table_metadata_with_engine(ctx, wal_options, "engine").await;
+    }
+
+    async fn prepare_table_metadata_with_engine(
+        ctx: &Context,
+        wal_options: HashMap<u32, String>,
+        engine: &str,
+    ) {
         let region_id = ctx.persistent_ctx.region_ids[0];
-        let table_info = new_test_table_info(region_id.table_id());
+        let mut table_info = new_test_table_info(region_id.table_id());
+        table_info.meta.engine = engine.to_string();
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(ctx.persistent_ctx.from_peer.clone()),
@@ -399,6 +418,104 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_build_upgrade_region_instruction_merges_topic_pruned_entry_id() {
+        let state = UpgradeCandidateRegion::default();
+        let persistent_context = new_persistent_context();
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let region_id = ctx.persistent_ctx.region_ids[0];
+        let topic = "test_topic";
+        prepare_table_metadata(&ctx, kafka_wal_options(topic)).await;
+        ctx.table_metadata_manager
+            .topic_region_manager()
+            .batch_put(&[(
+                TopicRegionKey::new(region_id, topic),
+                Some(TopicRegionValue::new(Some(ReplayCheckpoint::new(10, None)))),
+            )])
+            .await
+            .unwrap();
+        ctx.table_metadata_manager
+            .topic_name_manager()
+            .batch_put(vec![TopicNameKey::new(topic)])
+            .await
+            .unwrap();
+        let prev = ctx
+            .table_metadata_manager
+            .topic_name_manager()
+            .get(topic)
+            .await
+            .unwrap();
+        ctx.table_metadata_manager
+            .topic_name_manager()
+            .update(topic, 20, prev)
+            .await
+            .unwrap();
+
+        let instruction = state
+            .build_upgrade_region_instruction(&mut ctx, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let Instruction::UpgradeRegions(upgrade_regions) = instruction else {
+            unreachable!()
+        };
+
+        assert_eq!(upgrade_regions.len(), 1);
+        assert_eq!(upgrade_regions[0].replay_entry_id, Some(20));
+        assert_eq!(upgrade_regions[0].metadata_replay_entry_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_build_upgrade_region_instruction_merges_metric_metadata_pruned_entry_id() {
+        let state = UpgradeCandidateRegion::default();
+        let persistent_context = new_persistent_context();
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let region_id = ctx.persistent_ctx.region_ids[0];
+        let topic = "test_topic";
+        prepare_table_metadata_with_engine(&ctx, kafka_wal_options(topic), METRIC_ENGINE_NAME)
+            .await;
+        ctx.table_metadata_manager
+            .topic_region_manager()
+            .batch_put(&[(
+                TopicRegionKey::new(region_id, topic),
+                Some(TopicRegionValue::new(Some(ReplayCheckpoint::new(
+                    10,
+                    Some(5),
+                )))),
+            )])
+            .await
+            .unwrap();
+        ctx.table_metadata_manager
+            .topic_name_manager()
+            .batch_put(vec![TopicNameKey::new(topic)])
+            .await
+            .unwrap();
+        let prev = ctx
+            .table_metadata_manager
+            .topic_name_manager()
+            .get(topic)
+            .await
+            .unwrap();
+        ctx.table_metadata_manager
+            .topic_name_manager()
+            .update(topic, 20, prev)
+            .await
+            .unwrap();
+
+        let instruction = state
+            .build_upgrade_region_instruction(&mut ctx, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let Instruction::UpgradeRegions(upgrade_regions) = instruction else {
+            unreachable!()
+        };
+
+        assert_eq!(upgrade_regions.len(), 1);
+        assert_eq!(upgrade_regions[0].replay_entry_id, Some(20));
+        assert_eq!(upgrade_regions[0].metadata_replay_entry_id, Some(20));
     }
 
     #[tokio::test]
