@@ -557,9 +557,13 @@ impl PlanRewriter {
                 let partition_key_indices = info.meta.partition_key_indices.clone();
                 let schema = info.meta.schema.clone();
                 let mut partition_cols = partition_key_indices
-                    .into_iter()
-                    .map(|index| schema.column_name_by_index(index).to_string())
+                    .iter()
+                    .map(|index| schema.column_name_by_index(*index).to_string())
                     .collect::<Vec<String>>();
+                debug!(
+                    "PlanRewriter: loaded table partition metadata, table: {}, table_id: {}, partition_key_indices: {:?}, partition_columns: {:?}",
+                    info.name, info.ident.table_id, info.meta.partition_key_indices, partition_cols,
+                );
 
                 let partition_rules = table.partition_rules();
                 let exist_phy_part_cols_not_in_logical_table = partition_rules

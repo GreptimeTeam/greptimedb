@@ -20,6 +20,7 @@ use ahash::HashMap;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_telemetry::debug;
 use datafusion::common::Result;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
@@ -225,6 +226,14 @@ impl DistExtensionPlanner {
         // Extract partition columns
         let partition_columns: Vec<String> =
             table_info.meta.partition_column_names().cloned().collect();
+        debug!(
+            "DistExtensionPlanner: loaded table partition metadata, table: {}, table_id: {}, partition_key_indices: {:?}, partition_columns: {:?}, all_regions: {:?}",
+            table_name,
+            table_info.table_id(),
+            table_info.meta.partition_key_indices,
+            partition_columns,
+            all_regions,
+        );
         if partition_columns.is_empty() {
             return Ok(all_regions);
         }

@@ -102,7 +102,6 @@ impl State for UpdatePartitionMetadata {
             new_table_info
                 .meta
                 .partition_column_names()
-                .cloned()
                 .collect::<Vec<_>>(),
         );
         ctx.update_table_info(&table_info_value, table_info_value.update(new_table_info))
