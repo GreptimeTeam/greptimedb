@@ -14,8 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
@@ -33,7 +32,8 @@ use crate::region_query::RegionQueryHandlerRef;
 
 const REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 const REMOTE_DYN_FILTER_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
-const REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound best-effort RDF control RPCs so one bad subscriber cannot stall fanout.
+const REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Region subscribed to a remote dynamic filter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -73,10 +73,15 @@ pub struct DynFilterEntry {
     filter_id: FilterId,
     producer_filter: Weak<DynamicFilterPhysicalExpr>,
     subscribers: RwLock<HashSet<Subscriber>>,
-    last_sent_generation: AtomicU64,
-    unregistered: AtomicBool,
-    fanout_started: AtomicBool,
+    state: Mutex<DynFilterEntryState>,
     subscriber_changed: Notify,
+}
+
+#[derive(Debug, Default)]
+struct DynFilterEntryState {
+    last_sent_generation: u64,
+    unregistered: bool,
+    fanout_started: bool,
 }
 
 #[derive(Debug)]
@@ -90,9 +95,7 @@ impl DynFilterEntry {
             filter_id,
             producer_filter: Arc::downgrade(&producer_filter),
             subscribers: RwLock::new(HashSet::new()),
-            last_sent_generation: AtomicU64::new(0),
-            unregistered: AtomicBool::new(false),
-            fanout_started: AtomicBool::new(false),
+            state: Mutex::new(DynFilterEntryState::default()),
             subscriber_changed: Notify::new(),
         }
     }
@@ -115,43 +118,48 @@ impl DynFilterEntry {
     }
 
     fn mark_generation_sent(&self, generation: u64) -> bool {
-        let mut current = self.last_sent_generation.load(Ordering::SeqCst);
-        loop {
-            if generation <= current {
-                return false;
-            }
-
-            match self.last_sent_generation.compare_exchange(
-                current,
-                generation,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return true,
-                Err(next) => current = next,
-            }
+        let mut state = self.state.lock().unwrap();
+        if generation <= state.last_sent_generation {
+            return false;
         }
+
+        state.last_sent_generation = generation;
+        true
     }
 
     fn try_mark_unregistered(&self) -> bool {
-        self.unregistered
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+        let mut state = self.state.lock().unwrap();
+        if state.unregistered {
+            return false;
+        }
+
+        state.unregistered = true;
+        true
     }
 
     fn reactivate_for_new_subscriber(&self) {
-        self.last_sent_generation.store(0, Ordering::SeqCst);
-        self.unregistered.store(false, Ordering::SeqCst);
+        {
+            let mut state = self.state.lock().unwrap();
+            // Reset generation/unregister state so late subscribers get the current snapshot.
+            state.last_sent_generation = 0;
+            state.unregistered = false;
+        }
         self.subscriber_changed.notify_one();
     }
 
     fn mark_fanout_started(&self) -> bool {
-        !self.fanout_started.swap(true, Ordering::SeqCst)
+        let mut state = self.state.lock().unwrap();
+        if state.fanout_started {
+            return false;
+        }
+
+        state.fanout_started = true;
+        true
     }
 
     #[cfg(test)]
     pub(crate) fn fanout_started_for_test(&self) -> bool {
-        self.fanout_started.load(Ordering::SeqCst)
+        self.state.lock().unwrap().fanout_started
     }
 }
 
@@ -165,6 +173,7 @@ pub struct QueryDynFilterRegistry {
 
 impl QueryDynFilterRegistry {
     pub fn new(query_id: QueryId) -> Self {
+        // Close-only lifecycle signal; dropping the registry closes it for watchers.
         let (lifecycle_tx, _) = watch::channel(());
         Self {
             query_id,
@@ -260,6 +269,7 @@ impl QueryDynFilterRegistry {
             filter,
             is_complete,
             &mut lifecycle_rx,
+            REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT,
         )
         .await;
     }
@@ -294,12 +304,12 @@ async fn run_entry_fanout(
     mut lifecycle_rx: watch::Receiver<()>,
 ) {
     let mut is_complete = false;
-    // `interval()` ticks immediately for the first tick. Start after one full interval so the
-    // reconcile branch remains a periodic fallback instead of an eager re-poll right after fanout.
+    // Start reconcile after one interval and skip missed ticks; it is only a coalescing fallback.
     let mut reconcile_interval = tokio::time::interval_at(
         tokio::time::Instant::now() + REMOTE_DYN_FILTER_RECONCILE_INTERVAL,
         REMOTE_DYN_FILTER_RECONCILE_INTERVAL,
     );
+    reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         let Some(filter) = entry.upgrade_producer_filter() else {
@@ -314,6 +324,7 @@ async fn run_entry_fanout(
             &filter,
             is_complete,
             &mut lifecycle_rx,
+            REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT,
         )
         .await
         {
@@ -359,11 +370,15 @@ async fn fanout_snapshot_for_query(
     filter: &DynamicFilterPhysicalExpr,
     is_complete: bool,
     lifecycle_rx: &mut watch::Receiver<()>,
+    control_rpc_timeout: Duration,
 ) -> bool {
     let Some((generation, current)) = current_stable_snapshot(filter, lifecycle_rx).await else {
         return true;
     };
 
+    // The entry-global watermark advances before best-effort fanout. A timed-out
+    // subscriber may miss this generation; later/complete snapshots supersede it,
+    // and RDF only prunes.
     if !is_complete && !entry.mark_generation_sent(generation) {
         return true;
     }
@@ -395,10 +410,12 @@ async fn fanout_snapshot_for_query(
         is_complete,
         payload,
         lifecycle_rx,
+        control_rpc_timeout,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fanout_update_for_query(
     query_id: QueryId,
     region_query_handler: &RegionQueryHandlerRef,
@@ -407,6 +424,7 @@ async fn fanout_update_for_query(
     is_complete: bool,
     payload: Vec<u8>,
     lifecycle_rx: &mut watch::Receiver<()>,
+    control_rpc_timeout: Duration,
 ) -> bool {
     let query_id = query_id.to_string();
     let filter_id = entry.filter_id().to_string();
@@ -419,7 +437,7 @@ async fn fanout_update_for_query(
             is_complete,
         };
 
-        let Some(result) = await_control_rpc_or_lifecycle_close(
+        match await_control_rpc_or_lifecycle_close(
             lifecycle_rx,
             format!(
                 "update query_id={} filter_id={} region_id={}",
@@ -432,20 +450,23 @@ async fn fanout_update_for_query(
                 query_id.clone(),
                 update,
             ),
+            control_rpc_timeout,
         )
         .await
-        else {
-            return false;
-        };
-
-        if let Err(error) = result {
-            warn!(
-                error;
-                "Failed to fan out remote dynamic filter update, query_id={}, filter_id={}, region_id={}",
-                query_id,
-                filter_id,
-                subscriber.region_id()
-            );
+        {
+            ControlRpcResult::Ok(result) => {
+                if let Err(error) = result {
+                    warn!(
+                        error;
+                        "Failed to fan out remote dynamic filter update, query_id={}, filter_id={}, region_id={}",
+                        query_id,
+                        filter_id,
+                        subscriber.region_id()
+                    );
+                }
+            }
+            ControlRpcResult::TimedOut => {}
+            ControlRpcResult::LifecycleClosed => return false,
         }
     }
 
@@ -501,13 +522,20 @@ async fn unregister_entry_once_for_query(
     debug!("Remote dynamic filter producer unregistered subscribers");
 }
 
+enum ControlRpcResult<T> {
+    Ok(T),
+    TimedOut,
+    LifecycleClosed,
+}
+
 async fn await_control_rpc_or_lifecycle_close<T>(
     lifecycle_rx: &mut watch::Receiver<()>,
     operation: String,
     rpc: impl Future<Output = T>,
-) -> Option<T> {
+    control_rpc_timeout: Duration,
+) -> ControlRpcResult<T> {
     if lifecycle_rx.has_changed().is_err() {
-        return None;
+        return ControlRpcResult::LifecycleClosed;
     }
 
     tokio::select! {
@@ -516,12 +544,12 @@ async fn await_control_rpc_or_lifecycle_close<T>(
             if result.is_err() {
                 debug!("Cancelled remote dynamic filter control RPC after lifecycle close");
             }
-            None
+            ControlRpcResult::LifecycleClosed
         }
-        result = rpc => Some(result),
-        _ = tokio::time::sleep(REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT) => {
+        result = rpc => ControlRpcResult::Ok(result),
+        _ = tokio::time::sleep(control_rpc_timeout) => {
             warn!("Timed out remote dynamic filter control RPC: {}", operation);
-            None
+            ControlRpcResult::TimedOut
         }
     }
 }
@@ -1263,7 +1291,7 @@ mod tests {
         lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
         lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
 
-        assert!(entry.fanout_started.load(Ordering::SeqCst));
+        assert!(entry.fanout_started_for_test());
         handler.wait_for_update_count(1).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(handler.updates().len(), 1);
@@ -1437,6 +1465,96 @@ mod tests {
         assert_eq!(unregisters[0].region_id, subscriber.region_id());
         assert_eq!(unregisters[0].filter_id, filter_id.to_string());
         wait_for_registry_drop(registry_weak).await;
+    }
+
+    #[tokio::test]
+    async fn update_timeout_does_not_stop_fanout_for_other_subscribers() {
+        let query_id = test_query_id(9);
+        let registry = QueryDynFilterRegistry::new(query_id);
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
+            EntryRegistration::Inserted(entry) => entry,
+            other => panic!("unexpected registration result: {other:?}"),
+        };
+        let first_subscriber = Subscriber::new(RegionId::new(1024, 7));
+        let second_subscriber = Subscriber::new(RegionId::new(1024, 8));
+        assert_eq!(
+            registry.register_subscriber(&filter_id, first_subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+        assert_eq!(
+            registry.register_subscriber(&filter_id, second_subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        let handler_ref = handler.clone() as RegionQueryHandlerRef;
+        let mut lifecycle_rx = registry.lifecycle_tx.subscribe();
+        handler.block_next_update();
+        assert!(
+            fanout_snapshot_for_query(
+                query_id,
+                &handler_ref,
+                &entry,
+                filter.as_ref(),
+                false,
+                &mut lifecycle_rx,
+                Duration::from_millis(100),
+            )
+            .await
+        );
+
+        handler.wait_for_blocked_update().await;
+        // Fanout is serial and the blocked RPC stays blocked; the second update proves
+        // timeout continued to the next subscriber.
+        handler.wait_for_update_count(2).await;
+
+        let initial_updates = handler.updates();
+        assert_eq!(
+            initial_updates.len(),
+            2,
+            "the healthy subscriber must still receive the update after another subscriber times out"
+        );
+        assert!(
+            initial_updates
+                .iter()
+                .any(|update| update.region_id == first_subscriber.region_id())
+        );
+        assert!(
+            initial_updates
+                .iter()
+                .any(|update| update.region_id == second_subscriber.region_id())
+        );
+
+        filter.update(lit(false) as _).unwrap();
+        assert!(
+            fanout_snapshot_for_query(
+                query_id,
+                &handler_ref,
+                &entry,
+                filter.as_ref(),
+                false,
+                &mut lifecycle_rx,
+                Duration::from_millis(100),
+            )
+            .await
+        );
+        handler.wait_for_update_count(4).await;
+        let updates = handler.updates();
+        assert!(
+            updates[2..]
+                .iter()
+                .any(|update| update.region_id == first_subscriber.region_id())
+        );
+        assert!(
+            updates[2..]
+                .iter()
+                .any(|update| update.region_id == second_subscriber.region_id())
+        );
+
+        registry.unregister_all_once(&handler_ref).await;
+        handler.wait_for_unregister_count(1).await;
     }
 
     #[tokio::test]
