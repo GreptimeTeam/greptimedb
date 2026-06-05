@@ -76,6 +76,9 @@ pub trait RegionFailureDetectorController: Send + Sync {
     /// Registers failure detectors for the given identifiers.
     async fn register_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>);
 
+    /// Resets failure detectors for the given identifiers.
+    async fn reset_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>);
+
     /// Deregisters failure detectors for the given identifiers.
     async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>);
 }
@@ -87,6 +90,8 @@ pub struct NoopRegionFailureDetectorControl;
 #[async_trait::async_trait]
 impl RegionFailureDetectorController for NoopRegionFailureDetectorControl {
     async fn register_failure_detectors(&self, _detecting_regions: Vec<DetectingRegion>) {}
+
+    async fn reset_failure_detectors(&self, _detecting_regions: Vec<DetectingRegion>) {}
 
     async fn deregister_failure_detectors(&self, _detecting_regions: Vec<DetectingRegion>) {}
 }

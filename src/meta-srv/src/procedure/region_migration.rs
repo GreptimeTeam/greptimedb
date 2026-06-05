@@ -628,6 +628,23 @@ impl Context {
         );
     }
 
+    /// Notifies the RegionSupervisor to reset failure detectors of candidate regions.
+    pub async fn reset_failure_detectors_for_candidate_regions(&self) {
+        let datanode_id = self.persistent_ctx.to_peer.id;
+        let region_ids = &self.persistent_ctx.region_ids;
+        let detecting_regions = region_ids
+            .iter()
+            .map(|region_id| (datanode_id, *region_id))
+            .collect::<Vec<_>>();
+        self.region_failure_detector_controller
+            .reset_failure_detectors(detecting_regions)
+            .await;
+        info!(
+            "Reset failure detectors after migration success for datanode {}, regions {:?}",
+            datanode_id, region_ids
+        );
+    }
+
     /// Notifies the RegionSupervisor to deregister failure detectors.
     ///
     /// The original failure detectors won't be removed once the procedure was triggered.
@@ -645,11 +662,11 @@ impl Context {
             .await;
     }
 
-    /// Notifies the RegionSupervisor to deregister failure detectors for the candidate region on the destination peer.
+    /// Notifies the RegionSupervisor to deregister failure detectors for the candidate regions on the destination peer.
     ///
-    /// The candidate region may be created on the destination peer,
-    /// so we need to deregister the failure detectors for the candidate region if the procedure is aborted.
-    pub async fn deregister_failure_detectors_for_candidate_region(&self) {
+    /// The candidate regions may be created on the destination peer,
+    /// so we need to deregister the failure detectors for the candidate regions if the procedure is aborted.
+    pub async fn deregister_failure_detectors_for_candidate_regions(&self) {
         let to_peer_id = self.persistent_ctx.to_peer.id;
         let region_ids = &self.persistent_ctx.region_ids;
         let detecting_regions = region_ids
@@ -867,7 +884,7 @@ impl RegionMigrationProcedure {
             }
         }
         self.context
-            .deregister_failure_detectors_for_candidate_region()
+            .deregister_failure_detectors_for_candidate_regions()
             .await;
         self.context.register_failure_detectors().await;
 
@@ -919,7 +936,7 @@ impl Procedure for RegionMigrationProcedure {
                     // Consumes the opening region guard before deregistering the failure detectors.
                     self.context.volatile_ctx.opening_region_guards.clear();
                     self.context
-                        .deregister_failure_detectors_for_candidate_region()
+                        .deregister_failure_detectors_for_candidate_regions()
                         .await;
                     error!(
                         e;
