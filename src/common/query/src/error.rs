@@ -199,6 +199,18 @@ pub enum Error {
 
     #[snafu(display("Invalid character in prefix config: {}", prefix))]
     InvalidColumnPrefix { prefix: String },
+
+    #[snafu(display(
+        "DynFilterPayload::Datafusion is {} bytes, which exceeds the configured limit of {} bytes",
+        payload_size_bytes,
+        max_payload_bytes
+    ))]
+    DynFilterPayloadTooLarge {
+        payload_size_bytes: usize,
+        max_payload_bytes: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -228,6 +240,8 @@ impl ErrorExt for Error {
             | Error::TypeCast { .. }
             | Error::InvalidFuncArgs { .. }
             | Error::InvalidColumnPrefix { .. } => StatusCode::InvalidArguments,
+
+            Error::DynFilterPayloadTooLarge { .. } => StatusCode::PlanQuery,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
 
