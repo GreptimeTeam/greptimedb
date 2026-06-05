@@ -343,7 +343,8 @@ impl ExistingLogColumn {
                     .datatype_extension
                     .as_ref()
                     .and_then(|datatype_extension| datatype_extension.type_ext.as_ref()),
-                Some(TypeExt::JsonType(_))
+                Some(TypeExt::JsonType(json_type))
+                     if *json_type == JsonTypeExtension::JsonBinary as i32
             )
     }
 }
