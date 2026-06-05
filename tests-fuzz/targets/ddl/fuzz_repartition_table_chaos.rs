@@ -25,7 +25,7 @@ use common_time::Timestamp;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use sqlx::{Executor, MySql, Pool};
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
@@ -55,6 +55,7 @@ use tests_fuzz::utils::network_chaos::{
     inject_datanode_metasrv_network_partition, recover_network_chaos,
 };
 use tests_fuzz::utils::procedure::procedure_state as fetch_procedure_state_json;
+use tests_fuzz::utils::retry::retry_with_backoff;
 use tests_fuzz::utils::{
     Connections, GT_FUZZ_CLUSTER_NAME, GT_FUZZ_CLUSTER_NAMESPACE, get_fuzz_override,
     get_gt_fuzz_input_max_rows, init_greptime_connections_via_env,
@@ -72,6 +73,9 @@ struct FuzzContext {
 
 const PROCEDURE_TIMEOUT: Duration = Duration::from_secs(300);
 const NETWORK_CHAOS_DURATION_SECS: usize = 360;
+const VALIDATE_QUERY_MAX_ATTEMPTS: usize = 6;
+const VALIDATE_QUERY_INIT_BACKOFF: Duration = Duration::from_millis(50);
+const VALIDATE_QUERY_MAX_BACKOFF: Duration = Duration::from_millis(800);
 
 impl FuzzContext {
     async fn close(self) {
@@ -230,17 +234,36 @@ async fn validate_table_rows(
     inserted_rows: u64,
 ) -> Result<()> {
     let count_sql = format!("SELECT COUNT(1) AS count FROM {}", table_ctx.name);
-    let count = count_values(&ctx.greptime, &count_sql).await?;
-    assert_eq!(count.count as u64, inserted_rows);
-
     let timestamp_column_name = table_ctx.timestamp_column().unwrap().name.clone();
     let distinct_count_sql = format!(
         "SELECT COUNT(DISTINCT {}) AS count FROM {}",
         timestamp_column_name, table_ctx.name
     );
-    let distinct_count = count_values(&ctx.greptime, &distinct_count_sql).await?;
-    assert_eq!(distinct_count.count as u64, inserted_rows);
-    Ok(())
+    retry_with_backoff(
+        || async {
+            let count = count_values(&ctx.greptime, &count_sql).await?;
+            let distinct_count = count_values(&ctx.greptime, &distinct_count_sql).await?;
+            info!(
+                "Validate rows for table: {}, expected: {}, count: {}, distinct_count: {}",
+                table_ctx.name, inserted_rows, count.count, distinct_count.count
+            );
+            ensure!(
+                count.count as u64 == inserted_rows
+                    && distinct_count.count as u64 == inserted_rows,
+                error::AssertSnafu {
+                    reason: format!(
+                        "row validation failed for table {}, expected: {}, count: {}, distinct_count: {}",
+                        table_ctx.name, inserted_rows, count.count, distinct_count.count
+                    )
+                }
+            );
+            Ok(())
+        },
+        VALIDATE_QUERY_MAX_ATTEMPTS,
+        VALIDATE_QUERY_INIT_BACKOFF,
+        VALIDATE_QUERY_MAX_BACKOFF,
+    )
+    .await
 }
 
 fn repartition_operation<R: Rng + 'static>(
