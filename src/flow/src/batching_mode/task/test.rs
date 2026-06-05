@@ -321,6 +321,14 @@ fn expire_after_for_retention_filter_test() -> i64 {
     (now_secs - 10) as i64
 }
 
+fn aggregate_time_window_sink_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("time_window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+    ]))
+}
+
 async fn assert_unscoped_failure_restore(
     consumed_dirty_windows: DirtyTimeWindows,
     current_dirty_windows: DirtyTimeWindows,
@@ -942,6 +950,134 @@ async fn test_incremental_delta_applies_expire_after_retention_filter() {
         plan_text.contains("Filter: ts >= TimestampMillisecond("),
         "{plan_text}"
     );
+}
+
+#[tokio::test]
+async fn test_successful_incremental_fallback_restores_unscoped_dirty_signal() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+    let sink_schema = aggregate_time_window_sink_schema();
+
+    let plan_info = task
+        .gen_query_with_time_window(query_engine.clone(), &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(plan_info.can_advance_checkpoints);
+    assert!(matches!(
+        &plan_info.dirty_restore,
+        DirtyRestore::Unscoped(_)
+    ));
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+
+    let result = output_with_region_watermarks([(1_u64, Some(12_u64)), (2_u64, None)]);
+    let decision = {
+        let mut state = task.state.write().unwrap();
+        BatchingTask::apply_query_result_to_state(
+            &mut state,
+            &result,
+            std::time::Duration::from_millis(1),
+            plan_info.can_advance_checkpoints,
+        )
+    };
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: CheckpointMode::Incremental,
+            reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+        }
+    );
+
+    task.restore_unscoped_dirty_signal_after_successful_incremental_fallback(
+        &plan_info.dirty_restore,
+        decision,
+    );
+    {
+        let state = task.state.read().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(state.dirty_time_windows.len(), 1);
+        assert_eq!(
+            state.dirty_time_windows.window_size(),
+            std::time::Duration::from_secs(5)
+        );
+    }
+
+    let followup = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap();
+    assert!(
+        followup.is_some(),
+        "restored dirty signal should schedule a full snapshot follow-up"
+    );
+}
+
+#[tokio::test]
+async fn test_successful_incremental_advance_keeps_unscoped_dirty_signal_clean() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+    let sink_schema = aggregate_time_window_sink_schema();
+
+    let plan_info = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+
+    let result = output_with_region_watermarks([(1_u64, Some(12_u64))]);
+    let decision = {
+        let mut state = task.state.write().unwrap();
+        BatchingTask::apply_query_result_to_state(
+            &mut state,
+            &result,
+            std::time::Duration::from_millis(1),
+            plan_info.can_advance_checkpoints,
+        )
+    };
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::AdvancedIncremental {
+            participating_regions: 1,
+            watermarks: 1,
+        }
+    );
+
+    task.restore_unscoped_dirty_signal_after_successful_incremental_fallback(
+        &plan_info.dirty_restore,
+        decision,
+    );
+
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+    assert!(state.dirty_time_windows.is_empty());
 }
 
 #[tokio::test]
