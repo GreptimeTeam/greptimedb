@@ -83,7 +83,7 @@ use store_api::region_request::{
     RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore,  mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::time::timeout;
 use tonic::{Request, Response, Result as TonicResult};
 

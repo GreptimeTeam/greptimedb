@@ -131,27 +131,19 @@ impl GlobalRuntimes {
         datanode_query: Option<Runtime>,
         datanode_ingest: Option<Runtime>,
     ) -> Self {
+        let global_runtime =
+            global.unwrap_or_else(|| create_runtime("global", "global-worker", GLOBAL_WORKERS));
+        let datanode_query_runtime = datanode_query.unwrap_or_else(|| global_runtime.clone());
+        let datanode_ingest_runtime = datanode_ingest.unwrap_or_else(|| global_runtime.clone());
+
         Self {
-            global_runtime: global
-                .unwrap_or_else(|| create_runtime("global", "global-worker", GLOBAL_WORKERS)),
+            global_runtime,
             compact_runtime: compact
                 .unwrap_or_else(|| create_runtime("compact", "compact-worker", COMPACT_WORKERS)),
             hb_runtime: heartbeat
                 .unwrap_or_else(|| create_runtime("heartbeat", "hb-worker", HB_WORKERS)),
-            datanode_query_runtime: datanode_query.unwrap_or_else(|| {
-                create_runtime(
-                    "datanode-query",
-                    "datanode-query-worker",
-                    DatanodeRuntimeOptions::default().datanode_query_rt_size,
-                )
-            }),
-            datanode_ingest_runtime: datanode_ingest.unwrap_or_else(|| {
-                create_runtime(
-                    "datanode-ingest",
-                    "datanode-ingest-worker",
-                    DatanodeRuntimeOptions::default().datanode_ingest_rt_size,
-                )
-            }),
+            datanode_query_runtime,
+            datanode_ingest_runtime,
         }
     }
 }
@@ -286,6 +278,21 @@ mod tests {
             options.datanode_query_rt_size
         );
         assert_eq!(1, options.datanode_ingest_rt_size);
+    }
+
+    #[test]
+    fn test_datanode_runtimes_fallback_to_global_runtime() {
+        let runtimes = GlobalRuntimes::new(
+            Some(create_runtime("test-global", "test-global-worker", 1)),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!("test-global", runtimes.global_runtime.name());
+        assert_eq!("test-global", runtimes.datanode_query_runtime.name());
+        assert_eq!("test-global", runtimes.datanode_ingest_runtime.name());
     }
 
     #[test]
