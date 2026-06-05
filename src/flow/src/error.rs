@@ -165,9 +165,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid auth config"))]
-    IllegalAuthConfig { source: auth::error::Error },
-
     #[snafu(display("Flow plan error: {reason}"))]
     Plan {
         reason: String,
@@ -358,7 +355,6 @@ impl ErrorExt for Error {
             Self::InvalidQuery { .. }
             | Self::InvalidRequest { .. }
             | Self::ParseAddr { .. }
-            | Self::IllegalAuthConfig { .. }
             | Self::InvalidClientConfig { .. } => StatusCode::InvalidArguments,
 
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),

@@ -5291,7 +5291,6 @@ dependencies = [
  "arrow-schema 58.3.0",
  "async-recursion",
  "async-trait",
- "auth",
  "bytes",
  "cache",
  "catalog",

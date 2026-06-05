@@ -110,7 +110,6 @@ pub struct FlownodeOptions {
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
-    pub user_provider: Option<String>,
     pub memory: MemoryOptions,
 }
 
@@ -131,7 +130,6 @@ impl Default for FlownodeOptions {
                 allow_query_fallback: false,
                 memory_pool_size: MemoryLimit::default(),
             },
-            user_provider: None,
             memory: MemoryOptions::default(),
         }
     }

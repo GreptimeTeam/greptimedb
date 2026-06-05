@@ -39,12 +39,12 @@ use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::SetOnce;
 
+use crate::Error;
 use crate::batching_mode::BatchingModeOptions;
 use crate::error::{
     CreateSinkTableSnafu, ExternalSnafu, InvalidClientConfigSnafu, InvalidRequestSnafu,
     NoAvailableFrontendSnafu, UnexpectedSnafu,
 };
-use crate::{Error, FlowAuthHeader};
 
 /// Adapter trait for [`GrpcQueryHandler`] that boxes the underlying error into [`BoxedError`].
 ///
@@ -92,7 +92,6 @@ pub enum FrontendClient {
     Distributed {
         meta_client: Arc<MetaClient>,
         chnl_mgr: ChannelManager,
-        auth: Option<FlowAuthHeader>,
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
     },
@@ -133,11 +132,10 @@ impl FrontendClient {
 
     pub fn from_meta_client(
         meta_client: Arc<MetaClient>,
-        auth: Option<FlowAuthHeader>,
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
     ) -> Result<Self, Error> {
-        common_telemetry::info!("Frontend client build with auth={:?}", auth);
+        common_telemetry::info!("Frontend client build without auth");
         Ok(Self::Distributed {
             meta_client,
             chnl_mgr: {
@@ -149,7 +147,6 @@ impl FrontendClient {
                     .context(InvalidClientConfigSnafu)?;
                 ChannelManager::with_config(cfg, tls_config)
             },
-            auth,
             query,
             batch_opts,
         })
@@ -221,7 +218,6 @@ impl FrontendClient {
         let Self::Distributed {
             meta_client: _,
             chnl_mgr,
-            auth,
             query: _,
             batch_opts,
         } = self
@@ -242,13 +238,7 @@ impl FrontendClient {
             for peer in frontends {
                 let addr = peer.addr.clone();
                 let client = Client::with_manager_and_urls(chnl_mgr.clone(), vec![addr.clone()]);
-                let database = {
-                    let mut db = Database::new(catalog, schema, client);
-                    if let Some(auth) = auth {
-                        db.set_auth(auth.auth().clone());
-                    }
-                    db
-                };
+                let database = Database::new(catalog, schema, client);
                 let db = DatabaseWithPeer::new(database, peer);
                 match db.try_select_one().await {
                     Ok(_) => return Ok(db),
@@ -759,7 +749,6 @@ mod tests {
         let meta_client = Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend));
         let client = FrontendClient::from_meta_client(
             meta_client,
-            None,
             QueryOptions::default(),
             BatchingModeOptions::default(),
         )
