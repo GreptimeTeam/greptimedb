@@ -6387,6 +6387,28 @@ pub async fn test_otlp_logs(store_type: StorageType) {
             "[[1]]",
         )
         .await;
+
+        // Write another batch after the table exists. This verifies existing-schema
+        // alignment accepts the built-in JSONB columns in direct OTLP logs.
+        let res = send_req(
+            &client,
+            vec![(
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            )],
+            "/v1/otlp/v1/logs?db=public",
+            body.clone(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status());
+        validate_data(
+            "otlp_logs_multiple_batches",
+            &client,
+            "select count(*) from opentelemetry_logs;",
+            "[[4]]",
+        )
+        .await;
     }
 
     {

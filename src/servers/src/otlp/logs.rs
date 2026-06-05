@@ -327,6 +327,27 @@ struct ExistingLogColumn {
     datatype: ColumnDataType,
 }
 
+impl ExistingLogColumn {
+    fn schema_for_request_type(&self, request_type: ColumnDataType) -> ColumnSchema {
+        let mut schema = self.schema.clone();
+        if request_type == ColumnDataType::Binary && self.is_json_binary() {
+            schema.datatype = ColumnDataType::Binary as i32;
+        }
+        schema
+    }
+
+    fn is_json_binary(&self) -> bool {
+        self.datatype == ColumnDataType::Json
+            && matches!(
+                self.schema
+                    .datatype_extension
+                    .as_ref()
+                    .and_then(|datatype_extension| datatype_extension.type_ext.as_ref()),
+                Some(TypeExt::JsonType(_))
+            )
+    }
+}
+
 #[derive(Default)]
 struct ExistingLogSchema {
     columns: HashMap<String, ExistingLogColumn>,
@@ -581,6 +602,7 @@ fn decide_existing_column_schema_and_convert_value(
         existing_column.datatype,
         existing_column.schema.semantic_type(),
         request_type,
+        existing_column.is_json_binary(),
         column_name,
         table_name,
     )?;
@@ -655,11 +677,12 @@ fn align_rows_with_existing_schema(
                 target_type,
                 semantic_type,
                 request_type,
+                existing_column.is_json_binary(),
                 &schema.column_name,
                 table_name,
             )?;
         }
-        *schema = existing_column.schema.clone();
+        *schema = existing_column.schema_for_request_type(request_type);
     }
 
     Ok(())
@@ -670,6 +693,7 @@ fn coerce_log_value_data(
     target_type: ColumnDataType,
     _semantic_type: SemanticType,
     request_type: ColumnDataType,
+    target_is_json_binary: bool,
     column_name: &str,
     table_name: &str,
 ) -> Result<Option<ValueData>> {
@@ -678,6 +702,10 @@ fn coerce_log_value_data(
     };
 
     if request_type == target_type {
+        return Ok(Some(value_data));
+    }
+
+    if request_type == ColumnDataType::Binary && target_is_json_binary {
         return Ok(Some(value_data));
     }
 
