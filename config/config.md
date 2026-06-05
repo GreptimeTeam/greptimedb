@@ -619,7 +619,6 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `node_id` | Integer | Unset | The flownode identifier and should be unique in the cluster. |
-| `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd" |
 | `flow` | -- | -- | flow engine options. |
 | `flow.num_workers` | Integer | `0` | The number of flow worker in flownode.<br/>Not setting(or set to 0) this value will use the number of CPU cores divided by 2. |
 | `flow.batching_mode` | -- | -- | -- |
