@@ -513,6 +513,7 @@ impl JsonValue {
         }
 
         let x = std::mem::take(&mut self.json_variant);
+
         self.json_variant = helper(x, expected.native_type())?;
         self.json_type = OnceLock::new();
         Ok(())
@@ -650,6 +651,7 @@ where
         Some(t) => t,
         None => return JsonNativeType::Array(Box::new(JsonNativeType::Null)),
     };
+
     for x in iter {
         if matches!(item_type, JsonNativeType::Variant) {
             break;

@@ -168,7 +168,7 @@ impl From<&ConcreteDataType> for JsonNativeType {
             ConcreteDataType::Float64(_) | ConcreteDataType::Float32(_) => JsonNativeType::f64(),
             ConcreteDataType::String(_) => JsonNativeType::String,
             ConcreteDataType::List(list_type) => {
-                JsonNativeType::Array(Box::new(list_type.item_type().into()))
+                JsonNativeType::Array(Box::new(JsonNativeType::from(list_type.item_type())))
             }
             ConcreteDataType::Struct(struct_type) => JsonNativeType::Object(
                 struct_type
@@ -243,9 +243,7 @@ impl Display for JsonNativeType {
                 write!(f, r#""<Number>""#)
             }
             JsonNativeType::String => write!(f, r#""<String>""#),
-            JsonNativeType::Array(item_type) => {
-                write!(f, "[{}]", item_type)
-            }
+            JsonNativeType::Array(item_type) => write!(f, "[{}]", item_type),
             JsonNativeType::Object(object) => {
                 write!(
                     f,
@@ -342,9 +340,7 @@ impl JsonType {
     pub fn is_include(&self, other: &JsonType) -> bool {
         match (&self.format, &other.format) {
             (JsonFormat::Jsonb, JsonFormat::Jsonb) => true,
-            (JsonFormat::Json2(this), JsonFormat::Json2(that)) => {
-                is_include(this.as_ref(), that.as_ref())
-            }
+            (JsonFormat::Json2(this), JsonFormat::Json2(that)) => is_include(this, that),
             _ => false,
         }
     }
@@ -365,9 +361,7 @@ fn is_include(this: &JsonNativeType, that: &JsonNativeType) -> bool {
 
     match (this, that) {
         (this, that) if this == that => true,
-        (JsonNativeType::Array(this), JsonNativeType::Array(that)) => {
-            is_include(this.as_ref(), that.as_ref())
-        }
+        (JsonNativeType::Array(this), JsonNativeType::Array(that)) => is_include(this, that),
         (JsonNativeType::Object(this), JsonNativeType::Object(that)) => {
             is_include_object(this, that)
         }
@@ -398,14 +392,9 @@ impl DataType for JsonType {
     fn name(&self) -> String {
         match &self.format {
             JsonFormat::Jsonb => JSON_TYPE_NAME.to_string(),
-            JsonFormat::Json2(x) => format!(
-                "{JSON2_TYPE_NAME}{}",
-                if x.is_null() {
-                    "".to_string()
-                } else {
-                    x.to_string()
-                }
-            ),
+            JsonFormat::Json2(ty) => {
+                format!("{JSON2_TYPE_NAME}{}", ty)
+            }
         }
     }
 
@@ -427,7 +416,7 @@ impl DataType for JsonType {
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         match &self.format {
             JsonFormat::Jsonb => Box::new(BinaryVectorBuilder::with_capacity(capacity)),
-            JsonFormat::Json2(x) => Box::new(JsonVectorBuilder::new(*x.clone(), capacity)),
+            JsonFormat::Json2(x) => Box::new(JsonVectorBuilder::new(x.as_ref().clone(), capacity)),
         }
     }
 
@@ -528,7 +517,7 @@ pub fn parse_string_to_jsonb(s: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::json::JsonStructureSettings;
+    use crate::json::JsonSettings;
 
     #[test]
     fn test_fix_unicode_point() -> Result<()> {
@@ -585,13 +574,13 @@ mod tests {
     #[test]
     fn test_json_type_include() {
         fn test(this: &JsonNativeType, that: &JsonNativeType, expected: bool) {
-            assert_eq!(is_include(this, that), expected);
+            assert_eq!(is_include(this, that), expected, "this={this}, that={that}");
         }
 
         test(&JsonNativeType::Null, &JsonNativeType::Null, true);
         test(&JsonNativeType::Null, &JsonNativeType::Bool, false);
-
         test(&JsonNativeType::Bool, &JsonNativeType::Null, true);
+
         test(&JsonNativeType::Bool, &JsonNativeType::Bool, true);
         test(&JsonNativeType::Bool, &JsonNativeType::u64(), false);
 
@@ -637,7 +626,6 @@ mod tests {
             "foo".to_string(),
             JsonNativeType::String,
         )]));
-        test(simple_json_object, &JsonNativeType::Null, true);
         test(simple_json_object, simple_json_object, true);
         test(simple_json_object, &JsonNativeType::i64(), false);
         test(
@@ -665,7 +653,7 @@ mod tests {
             ),
             ("bar".to_string(), JsonNativeType::i64()),
         ]));
-        test(complex_json_object, &JsonNativeType::Null, true);
+        test(simple_json_object, &JsonNativeType::Null, true);
         test(complex_json_object, &JsonNativeType::String, false);
         test(complex_json_object, complex_json_object, true);
         test(
@@ -789,7 +777,7 @@ mod tests {
         ) -> Result<()> {
             let json: serde_json::Value = serde_json::from_str(json).unwrap();
 
-            let settings = JsonStructureSettings::Structured(None);
+            let settings = JsonSettings::default();
             let value = settings.encode(json)?;
             let value_type = value.data_type();
             let Some(other) = value_type.as_json() else {

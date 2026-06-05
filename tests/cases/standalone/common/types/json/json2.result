@@ -151,14 +151,6 @@ select j.c, j.y from json2_table order by ts;
 |                                   | false                             |
 +-----------------------------------+-----------------------------------+
 
-select j from json2_table order by ts;
-
-Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
-
-select * from json2_table order by ts;
-
-Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
-
 select j.a.b + 1 from json2_table order by ts;
 
 +------------------------------------------------------------+
@@ -209,4 +201,26 @@ select j.d from json2_table order by ts;
 drop table json2_table;
 
 Affected Rows: 0
+
+create table json2_default_null_ok (
+    ts timestamp time index,
+    j json2(
+        a int64 null default null
+    )
+);
+
+Affected Rows: 0
+
+drop table json2_default_null_ok;
+
+Affected Rows: 0
+
+create table json2_default_null_check (
+    ts timestamp time index,
+    j json2(
+        a int64 not null default null
+    )
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: invalid DEFAULT for JSON2 type hint 'a': Default value should not be null for non null column
 
