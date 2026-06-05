@@ -21,6 +21,7 @@ use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::{error, info, warn};
 use itertools::Itertools;
 use snafu::ResultExt;
+use store_api::ManifestVersion;
 use tokio::sync::mpsc;
 
 use crate::compaction::LocalCompactionState;
@@ -250,7 +251,7 @@ impl CompactionTaskImpl {
     async fn update_manifest(
         &self,
         compaction_result: crate::compaction::compactor::MergeOutput,
-    ) -> error::Result<RegionEdit> {
+    ) -> error::Result<(RegionEdit, ManifestVersion)> {
         let _manifest_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])
             .start_timer();
@@ -305,16 +306,9 @@ impl CompactionTaskImpl {
         }
     }
 
-    async fn invoke_manifest_hook(&self, edit: &RegionEdit) {
+    async fn invoke_manifest_hook(&self, edit: &RegionEdit, manifest_version: ManifestVersion) {
         let hook: Option<FlushHookRef> = self.compaction_region.plugins.get();
         if let Some(hook) = hook {
-            let manifest_version = self
-                .compaction_region
-                .manifest_ctx
-                .manifest_manager
-                .read()
-                .await
-                .last_version();
             hook.on_manifest_updated(self.compaction_region.region_id, edit, manifest_version)
                 .await;
         }
@@ -367,8 +361,8 @@ impl CompactionTask for CompactionTaskImpl {
                     })
                 } else {
                     match self.update_manifest(merge_output).await {
-                        Ok(edit) => {
-                            self.invoke_manifest_hook(&edit).await;
+                        Ok((edit, manifest_version)) => {
+                            self.invoke_manifest_hook(&edit, manifest_version).await;
                             let senders = std::mem::take(&mut self.waiters);
                             BackgroundNotify::CompactionFinished(CompactionFinished {
                                 region_id: self.compaction_region.region_id,

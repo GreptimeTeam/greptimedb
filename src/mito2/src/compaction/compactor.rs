@@ -27,6 +27,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
@@ -292,7 +293,7 @@ pub trait Compactor: Send + Sync + 'static {
         &self,
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
-    ) -> Result<RegionEdit>;
+    ) -> Result<(RegionEdit, ManifestVersion)>;
 }
 
 /// Trait for merging a single compaction output into SST files.
@@ -608,7 +609,7 @@ where
         &self,
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
-    ) -> Result<RegionEdit> {
+    ) -> Result<(RegionEdit, ManifestVersion)> {
         // Write region edit to manifest.
         let edit = RegionEdit {
             files_to_add: merge_output.files_to_add,
@@ -625,12 +626,12 @@ where
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
-        compaction_region
+        let manifest_version = compaction_region
             .manifest_ctx
             .update_manifest_for_compaction(action_list)
             .await?;
 
-        Ok(edit)
+        Ok((edit, manifest_version))
     }
 }
 
