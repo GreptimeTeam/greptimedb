@@ -35,10 +35,6 @@ pub struct RuntimeOptions {
     pub global_rt_size: usize,
     /// The number of threads to execute the runtime for compact operations.
     pub compact_rt_size: usize,
-    /// The number of threads to execute datanode query operations.
-    pub datanode_query_rt_size: usize,
-    /// The number of threads to execute datanode ingestion operations.
-    pub datanode_ingest_rt_size: usize,
 }
 
 impl Default for RuntimeOptions {
@@ -47,6 +43,27 @@ impl Default for RuntimeOptions {
         Self {
             global_rt_size: cpus,
             compact_rt_size: usize::max(cpus / 2, 1),
+        }
+    }
+}
+
+/// The options for datanode-specific global runtimes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DatanodeRuntimeOptions {
+    #[serde(flatten)]
+    pub base: RuntimeOptions,
+    /// The number of threads to execute datanode query operations.
+    pub datanode_query_rt_size: usize,
+    /// The number of threads to execute datanode ingestion operations.
+    pub datanode_ingest_rt_size: usize,
+}
+
+impl Default for DatanodeRuntimeOptions {
+    fn default() -> Self {
+        let cpus = num_cpus::get();
+        Self {
+            base: RuntimeOptions::default(),
             datanode_query_rt_size: usize::max(cpus.saturating_sub(1), 1),
             datanode_ingest_rt_size: 1,
         }
@@ -125,14 +142,14 @@ impl GlobalRuntimes {
                 create_runtime(
                     "datanode-query",
                     "datanode-query-worker",
-                    RuntimeOptions::default().datanode_query_rt_size,
+                    DatanodeRuntimeOptions::default().datanode_query_rt_size,
                 )
             }),
             datanode_ingest_runtime: datanode_ingest.unwrap_or_else(|| {
                 create_runtime(
                     "datanode-ingest",
                     "datanode-ingest-worker",
-                    RuntimeOptions::default().datanode_ingest_rt_size,
+                    DatanodeRuntimeOptions::default().datanode_ingest_rt_size,
                 )
             }),
         }
@@ -185,6 +202,19 @@ pub fn init_global_runtimes(options: &RuntimeOptions) {
             options.compact_rt_size,
         ));
         c.hb_runtime = Some(create_runtime("heartbeat", "hb-worker", HB_WORKERS));
+    });
+}
+
+/// Initialize the datanode-specific global runtimes.
+///
+/// # Panics
+/// Panics when the global runtimes are already initialized.
+/// You should call this function before using any runtime functions.
+pub fn init_datanode_runtimes(options: &DatanodeRuntimeOptions) {
+    static START: Once = Once::new();
+    START.call_once(move || {
+        let mut c = CONFIG_RUNTIMES.lock().unwrap();
+        assert!(!c.already_init, "Global runtimes already initialized");
         c.datanode_query_runtime = Some(create_runtime(
             "datanode-query",
             "datanode-query-worker",
@@ -246,9 +276,11 @@ mod tests {
 
     #[test]
     fn test_datanode_runtime_options_default() {
-        let options = RuntimeOptions::default();
+        let options = DatanodeRuntimeOptions::default();
         let cpus = num_cpus::get();
 
+        assert_eq!(cpus, options.base.global_rt_size);
+        assert_eq!(usize::max(cpus / 2, 1), options.base.compact_rt_size);
         assert_eq!(
             usize::max(cpus.saturating_sub(1), 1),
             options.datanode_query_rt_size

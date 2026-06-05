@@ -23,11 +23,12 @@ pub mod runtime_throttleable;
 pub use global::{
     block_on_compact, block_on_datanode_ingest, block_on_datanode_query, block_on_global,
     compact_runtime, create_runtime, datanode_ingest_runtime, datanode_query_runtime,
-    global_runtime, init_global_runtimes, spawn_blocking_compact,
+    global_runtime, init_datanode_runtimes, init_global_runtimes, spawn_blocking_compact,
     spawn_blocking_datanode_ingest, spawn_blocking_datanode_query, spawn_blocking_global,
-    spawn_blocking_hb, spawn_compact, spawn_datanode_ingest, spawn_datanode_query,
-    spawn_global, spawn_hb,
+    spawn_blocking_hb, spawn_compact, spawn_datanode_ingest, spawn_datanode_query, spawn_global,
+    spawn_hb,
 };
 
+pub use crate::global::DatanodeRuntimeOptions;
 pub use crate::repeated_task::{BoxedTaskFunction, RepeatedTask, TaskFunction};
 pub use crate::runtime::{Builder, JoinError, JoinHandle, Runtime};

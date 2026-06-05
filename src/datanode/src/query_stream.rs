@@ -33,7 +33,10 @@ pub struct QueryRuntimeStream {
 }
 
 impl QueryRuntimeStream {
-    pub fn new(schema: SchemaRef, receiver: mpsc::Receiver<RecordBatchResult<RecordBatch>>) -> Self {
+    pub fn new(
+        schema: SchemaRef,
+        receiver: mpsc::Receiver<RecordBatchResult<RecordBatch>>,
+    ) -> Self {
         Self {
             schema,
             receiver,
@@ -119,7 +122,10 @@ mod tests {
     async fn test_query_runtime_stream_forwards_errors() {
         let schema = test_batch().schema.clone();
         let (tx, rx) = mpsc::channel(1);
-        tx.send(Err(CreateRecordBatchesSnafu { reason: "test error" }.build()))
+        tx.send(Err(CreateRecordBatchesSnafu {
+            reason: "test error",
+        }
+        .build()))
             .await
             .unwrap();
         drop(tx);

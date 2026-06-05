@@ -82,6 +82,11 @@ watch = false
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
+## The number of threads to execute datanode query operations.
+## Defaults to max(num_cpus - 1, 1).
+#+ datanode_query_rt_size = 7
+## The number of threads to execute datanode ingestion operations.
+#+ datanode_ingest_rt_size = 1
 
 ## The metasrv client options.
 [meta_client]

@@ -51,8 +51,8 @@ use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::schema::SchemaRef;
 use either::Either;
-use futures_util::{Stream, StreamExt};
 use futures_util::future::try_join_all;
+use futures_util::{Stream, StreamExt};
 use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
 use prost::Message;
@@ -145,7 +145,7 @@ impl RegionServer {
             inner: Arc::new(RegionServerInner::new(
                 query_engine,
                 runtime,
-                    event_listener,
+                event_listener,
                 table_provider_factory,
                 RegionServerParallelism::from_opts(
                     max_concurrent_queries,
@@ -233,8 +233,8 @@ impl RegionServer {
             return common_runtime::spawn_datanode_ingest(async move {
                 inner.handle_request(region_id, request).await
             })
-                .await
-                .context(RuntimeJoinSnafu { request_type })?;
+            .await
+            .context(RuntimeJoinSnafu { request_type })?;
         }
 
         self.inner.handle_request(region_id, request).await
@@ -274,10 +274,10 @@ impl RegionServer {
         return common_runtime::spawn_datanode_query(async move {
             server.handle_remote_read_inner(request, query_ctx).await
         })
-            .await
-            .context(RuntimeJoinSnafu {
-                request_type: "remote_read",
-            })?;
+        .await
+        .context(RuntimeJoinSnafu {
+            request_type: "remote_read",
+        })?;
     }
 
     async fn handle_remote_read_inner(
@@ -335,10 +335,10 @@ impl RegionServer {
         return common_runtime::spawn_datanode_query(async move {
             server.handle_read_inner(request).await
         })
-            .await
-            .context(RuntimeJoinSnafu {
-                request_type: "read",
-            })?;
+        .await
+        .context(RuntimeJoinSnafu {
+            request_type: "read",
+        })?;
     }
 
     async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
@@ -1838,7 +1838,8 @@ impl RegionServerInner {
             match inner.handle_read_inner(request, query_ctx).await {
                 Ok(mut stream) => {
                     let schema = stream.schema();
-                    let output_ordering = stream.output_ordering().map(|ordering| ordering.to_vec());
+                    let output_ordering =
+                        stream.output_ordering().map(|ordering| ordering.to_vec());
                     if init_sender.send(Ok((schema, output_ordering))).is_err() {
                         return;
                     }
@@ -1985,11 +1986,11 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use api::v1::{Rows, SemanticType};
     use api::v1::region::{
         RemoteDynFilterRequest, RemoteDynFilterUnregister, RemoteDynFilterUpdate,
         remote_dyn_filter_request,
     };
+    use api::v1::{Rows, SemanticType};
     use common_error::ext::ErrorExt;
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
@@ -2011,7 +2012,6 @@ mod tests {
     use crate::error::Result;
     use crate::tests::{MockRegionEngine, mock_region_server};
 
-
     #[test]
     fn test_is_ingest_request() {
         let rows = || Rows {
@@ -2026,13 +2026,13 @@ mod tests {
                 partition_expr_version: None,
             },
         )));
-        assert!(RegionServerInner::is_ingest_request(&RegionRequest::Delete(
-            RegionDeleteRequest {
+        assert!(RegionServerInner::is_ingest_request(
+            &RegionRequest::Delete(RegionDeleteRequest {
                 rows: rows(),
                 hint: None,
                 partition_expr_version: None,
-            },
-        )));
+            },)
+        ));
         assert!(!RegionServerInner::is_ingest_request(
             &RegionRequest::Compact(RegionCompactRequest::default()),
         ));
