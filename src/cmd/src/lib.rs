@@ -25,8 +25,6 @@ use crate::error::Result;
 
 pub mod cli;
 pub mod datanode;
-#[cfg(feature = "dev-tools")]
-pub mod dev_tools;
 pub mod error;
 pub mod flownode;
 pub mod frontend;

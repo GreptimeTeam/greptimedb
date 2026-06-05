@@ -42,7 +42,7 @@ use store_api::region_request::PathType;
 use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, is_internal_column};
 use store_api::storage::{ColumnId, FileId, RegionId};
 
-use crate::datanode::objbench::{build_object_store, extract_region_metadata, parse_config};
+use super::objbench::{build_object_store, extract_region_metadata, parse_config};
 use crate::error;
 
 const DEFAULT_READ_BATCH_SIZE: usize = 8 * 1024;

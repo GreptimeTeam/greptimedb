@@ -9,11 +9,6 @@ default-run = "greptime"
 name = "greptime"
 path = "src/bin/greptime.rs"
 
-[[bin]]
-name = "dev-tools"
-path = "src/bin/dev_tools.rs"
-required-features = ["dev-tools"]
-
 [features]
 default = [
     "servers/pprof",
@@ -22,7 +17,7 @@ default = [
     "meta-srv/mysql_kvbackend",
 ]
 enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise"]
-# Developer-only tools (benchmarks, diagnostics) hosted in the `dev-tools` binary.
+# Developer-only tools (benchmarks, diagnostics) gating the `datanode parquetbench` subcommand.
 # Kept out of `default` so normal/release builds don't compile them.
 dev-tools = []
 tokio-console = ["common-telemetry/tokio-console"]
