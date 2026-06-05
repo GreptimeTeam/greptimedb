@@ -125,6 +125,32 @@ pub(crate) fn primary_key_column_index(num_columns: usize) -> usize {
     num_columns - 3
 }
 
+/// Wraps the `__primary_key` `BinaryArray` back into a `DictionaryArray<UInt32, Binary>` with identity keys.
+pub(crate) fn wrap_pk_binary_to_dict(
+    record_batch: RecordBatch,
+    dict_schema: &SchemaRef,
+) -> Result<RecordBatch> {
+    let pk_idx = primary_key_column_index(record_batch.num_columns());
+    let pk_column = record_batch.column(pk_idx);
+    let binary_array = pk_column
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .with_context(|| InvalidRecordBatchSnafu {
+            reason: format!(
+                "expected BinaryArray for __primary_key, got {:?}",
+                pk_column.data_type()
+            ),
+        })?;
+    let n = binary_array.len();
+    let keys = UInt32Array::from_iter_values(0..n as u32);
+    let dict_array: ArrayRef = Arc::new(DictionaryArray::new(keys, pk_column.clone()));
+
+    let mut columns = record_batch.columns().to_vec();
+    columns[pk_idx] = dict_array;
+
+    RecordBatch::try_new(dict_schema.clone(), columns).context(NewRecordBatchSnafu)
+}
+
 /// Returns the position of the op type key column.
 pub(crate) fn op_type_column_index(num_columns: usize) -> usize {
     num_columns - 1
@@ -156,6 +182,8 @@ pub struct FlatReadFormat {
     override_sequence: Option<SequenceNumber>,
     /// Parquet format adapter.
     parquet_adapter: ParquetAdapter,
+    /// Output schema to wrap binary `__primary_key` back to a dictionary; `None` disables wrapping.
+    pk_dict_wrap_schema: Option<SchemaRef>,
 }
 
 impl FlatReadFormat {
@@ -198,12 +226,19 @@ impl FlatReadFormat {
         Ok(FlatReadFormat {
             override_sequence: None,
             parquet_adapter,
+            pk_dict_wrap_schema: None,
         })
     }
 
     /// Sets the sequence number to override.
     pub(crate) fn set_override_sequence(&mut self, sequence: Option<SequenceNumber>) {
         self.override_sequence = sequence;
+    }
+
+    /// Enables wrapping binary `__primary_key` batches back to a dictionary in [`Self::convert_batch`].
+    pub(crate) fn set_pk_as_binary(&mut self) -> Result<()> {
+        self.pk_dict_wrap_schema = Some(self.output_arrow_schema()?);
+        Ok(())
     }
 
     /// Index of a column in the projected batch by its column id.
@@ -317,6 +352,12 @@ impl FlatReadFormat {
         record_batch: RecordBatch,
         override_sequence_array: Option<&ArrayRef>,
     ) -> Result<RecordBatch> {
+        let record_batch = if let Some(dict_schema) = &self.pk_dict_wrap_schema {
+            wrap_pk_binary_to_dict(record_batch, dict_schema)?
+        } else {
+            record_batch
+        };
+
         // First, apply flat format conversion.
         let batch = match &self.parquet_adapter {
             ParquetAdapter::Flat(_) => record_batch,
@@ -809,16 +850,22 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::DataType as ArrowDataType;
+    use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
-    use super::{FlatReadFormat, field_column_start};
+    use super::*;
     use crate::read::read_columns::ReadColumns;
     use crate::sst::{
-        FlatSchemaOptions, flat_sst_arrow_schema_column_num, to_flat_sst_arrow_schema,
+        FlatSchemaOptions, flat_sst_arrow_schema_column_num, override_pk_field_to_binary,
+        to_flat_sst_arrow_schema,
     };
 
     /// Builds a `RegionMetadata` with the given number of tags and fields.
@@ -892,6 +939,86 @@ mod tests {
                 "num_tags={num_tags}, num_fields={num_fields}, encoding={encoding:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_convert_batch_wraps_binary_pk_to_dict() {
+        use datatypes::arrow::array::{Array, DictionaryArray, StringArray};
+        use datatypes::arrow::datatypes::UInt32Type;
+
+        // build_metadata(1, 1, Dense) projects to:
+        // [tag_0: Dict<UInt32, Utf8>, field_0: UInt64, ts: Timestamp(ms),
+        //  __primary_key: Dict<UInt32, Binary>, __sequence: UInt64, __op_type: UInt8]
+        let metadata = Arc::new(build_metadata(1, 1, PrimaryKeyEncoding::Dense));
+        let column_ids: Vec<u32> = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let mut read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::from_deduped_column_ids(column_ids),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        read_format.set_pk_as_binary().unwrap();
+
+        let output_schema = read_format.output_arrow_schema().unwrap();
+        let binary_schema = override_pk_field_to_binary(&output_schema);
+
+        // Repeat the second pk to verify identity keys (no dedup).
+        let tag_keys = UInt32Array::from(vec![0u32, 1, 1]);
+        let tag_values = Arc::new(StringArray::from(vec!["t0", "t1"]));
+        let tag_array: ArrayRef =
+            Arc::new(DictionaryArray::<UInt32Type>::new(tag_keys, tag_values));
+        let field_array: ArrayRef = Arc::new(UInt64Array::from(vec![10u64, 11, 12]));
+        let ts_array: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1i64, 2, 3]));
+        let pk_array: ArrayRef = Arc::new(BinaryArray::from_iter_values(
+            [b"alpha".as_ref(), b"beta", b"beta"].iter().copied(),
+        ));
+        let seq_array: ArrayRef = Arc::new(UInt64Array::from(vec![100u64, 101, 102]));
+        let op_array: ArrayRef = Arc::new(UInt8Array::from(vec![1u8, 1, 1]));
+
+        let batch = RecordBatch::try_new(
+            binary_schema,
+            vec![
+                tag_array,
+                field_array,
+                ts_array,
+                pk_array,
+                seq_array,
+                op_array,
+            ],
+        )
+        .unwrap();
+
+        let wrapped = read_format.convert_batch(batch, None).unwrap();
+        assert_eq!(wrapped.schema(), output_schema);
+
+        let pk_idx = primary_key_column_index(wrapped.num_columns());
+        let pk_col = wrapped.column(pk_idx);
+        assert_eq!(
+            pk_col.data_type(),
+            &ArrowDataType::Dictionary(
+                Box::new(ArrowDataType::UInt32),
+                Box::new(ArrowDataType::Binary)
+            )
+        );
+        let dict = pk_col
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap();
+        assert_eq!(dict.keys().values(), &[0, 1, 2]);
+        let values = dict
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(values.value(0), b"alpha");
+        assert_eq!(values.value(1), b"beta");
+        assert_eq!(values.value(2), b"beta");
     }
 
     #[test]
