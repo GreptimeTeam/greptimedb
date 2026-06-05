@@ -668,6 +668,7 @@ fn align_rows_with_existing_schema(
 
         let target_type = existing_column.datatype;
         let semantic_type = existing_column.schema.semantic_type();
+        let target_is_json_binary = existing_column.is_json_binary();
         for row in rows.iter_mut() {
             let Some(value) = row.values.get_mut(column_idx) else {
                 continue;
@@ -677,7 +678,7 @@ fn align_rows_with_existing_schema(
                 target_type,
                 semantic_type,
                 request_type,
-                existing_column.is_json_binary(),
+                target_is_json_binary,
                 &schema.column_name,
                 table_name,
             )?;
