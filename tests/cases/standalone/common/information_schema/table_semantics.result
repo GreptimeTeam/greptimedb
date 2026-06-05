@@ -1,0 +1,86 @@
+DESC TABLE information_schema.table_semantics;
+
++------------------+--------+-----+------+---------+---------------+
+| Column           | Type   | Key | Null | Default | Semantic Type |
++------------------+--------+-----+------+---------+---------------+
+| table_catalog    | String |     | NO   |         | FIELD         |
+| table_schema     | String |     | NO   |         | FIELD         |
+| table_name       | String |     | NO   |         | FIELD         |
+| table_id         | UInt32 |     | NO   |         | FIELD         |
+| signal_type      | String |     | YES  |         | FIELD         |
+| source           | String |     | YES  |         | FIELD         |
+| pipeline         | String |     | YES  |         | FIELD         |
+| metadata_quality | String |     | YES  |         | FIELD         |
+| semantic_options | String |     | YES  |         | FIELD         |
++------------------+--------+-----+------+---------+---------------+
+
+CREATE TABLE metrics_tagged (
+  ts TIMESTAMP TIME INDEX,
+  val DOUBLE,
+)
+WITH (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'opentelemetry',
+  'greptime.semantic.pipeline' = 'greptime_metric_v1',
+  'greptime.semantic.metric.metadata_quality' = 'declared',
+  'greptime.semantic.metric.type' = 'counter',
+  'greptime.semantic.metric.unit' = 'By'
+);
+
+Affected Rows: 0
+
+CREATE TABLE traces_tagged (
+  ts TIMESTAMP TIME INDEX,
+  span_name STRING,
+)
+WITH (
+  'greptime.semantic.signal_type' = 'trace',
+  'greptime.semantic.source' = 'opentelemetry',
+  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.27.0'
+);
+
+Affected Rows: 0
+
+-- A table with no semantic options must not appear in the view.
+CREATE TABLE plain_table (
+  ts TIMESTAMP TIME INDEX,
+  val DOUBLE,
+);
+
+Affected Rows: 0
+
+SELECT table_schema, table_name, signal_type, source, pipeline, metadata_quality, semantic_options
+FROM information_schema.table_semantics
+ORDER BY table_name;
+
++--------------+----------------+-------------+---------------+--------------------+------------------+-----------------------------------------------------------------+
+| table_schema | table_name     | signal_type | source        | pipeline           | metadata_quality | semantic_options                                                |
++--------------+----------------+-------------+---------------+--------------------+------------------+-----------------------------------------------------------------+
+| public       | metrics_tagged | metric      | opentelemetry | greptime_metric_v1 | declared         | {"metric.type":"counter","metric.unit":"By"}                    |
+| public       | traces_tagged  | trace       | opentelemetry |                    |                  | {"trace.conventions":"https://opentelemetry.io/schemas/1.27.0"} |
++--------------+----------------+-------------+---------------+--------------------+------------------+-----------------------------------------------------------------+
+
+-- Predicate pushdown on a promoted column.
+SELECT table_name, signal_type
+FROM information_schema.table_semantics
+WHERE signal_type = 'metric'
+ORDER BY table_name;
+
++----------------+-------------+
+| table_name     | signal_type |
++----------------+-------------+
+| metrics_tagged | metric      |
++----------------+-------------+
+
+DROP TABLE metrics_tagged;
+
+Affected Rows: 0
+
+DROP TABLE traces_tagged;
+
+Affected Rows: 0
+
+DROP TABLE plain_table;
+
+Affected Rows: 0
+

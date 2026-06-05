@@ -51,3 +51,4 @@ pub const PROCESS_LIST: &str = "process_list";
 pub const SSTS_MANIFEST: &str = "ssts_manifest";
 pub const SSTS_STORAGE: &str = "ssts_storage";
 pub const SSTS_INDEX_META: &str = "ssts_index_meta";
+pub const TABLE_SEMANTICS: &str = "table_semantics";
