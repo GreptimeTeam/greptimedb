@@ -45,6 +45,7 @@ use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCache, FileType, IndexKey};
 use crate::config::MitoConfig;
+use crate::engine::region_hook::RegionHookRef;
 use crate::error;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidMetadataSnafu, InvalidRegionOptionsSnafu, ObjectStoreNotFoundSnafu,
@@ -114,6 +115,7 @@ pub(crate) struct RegionOpener {
     replay_checkpoint: Option<u64>,
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
+    hook: Option<RegionHookRef>,
 }
 
 impl RegionOpener {
@@ -152,7 +154,14 @@ impl RegionOpener {
             replay_checkpoint: None,
             file_ref_manager,
             partition_expr_fetcher,
+            hook: None,
         }
+    }
+
+    /// Sets the region hook for observing manifest mutations.
+    pub(crate) fn hook(mut self, hook: Option<RegionHookRef>) -> Self {
+        self.hook = hook;
+        self
     }
 
     /// Sets metadata builder of the region to create.
@@ -358,6 +367,7 @@ impl RegionOpener {
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
+                self.hook.clone(),
             )),
             file_purger: create_file_purger(
                 config.gc.enable,
@@ -601,6 +611,7 @@ impl RegionOpener {
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
                 RegionRoleState::Follower,
+                self.hook.clone(),
             )),
             file_purger,
             provider: provider.clone(),

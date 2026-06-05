@@ -39,6 +39,7 @@ use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
 use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
 use crate::config::MitoConfig;
+use crate::engine::region_hook::RegionHookRef;
 use crate::error;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, ObjectStoreNotFoundSnafu, Result,
@@ -181,6 +182,7 @@ pub async fn open_compaction_region(
     let manifest_ctx = Arc::new(ManifestContext::new(
         manifest_manager,
         RegionRoleState::Leader(RegionLeaderState::Writable),
+        None,
     ));
 
     let file_purger = {
@@ -514,6 +516,7 @@ where
             tasks.push((inputs_to_remove, fut));
         }
 
+        let hook: Option<RegionHookRef> = compaction_region.plugins.get();
         let mut output_files = Vec::with_capacity(tasks.len());
         let mut all_sst_infos: Vec<SstInfo> = Vec::new();
         let mut compacted_inputs = Vec::with_capacity(
@@ -541,7 +544,9 @@ where
                 match CancellableFuture::new(handle, self.cancel_handle.clone()).await {
                     Ok(Ok(Ok((files, infos)))) => {
                         output_files.extend(files);
-                        all_sst_infos.extend(infos);
+                        if hook.is_some() {
+                            all_sst_infos.extend(infos);
+                        }
                         compacted_inputs.extend(inputs);
                     }
                     Ok(Ok(Err(e))) => {

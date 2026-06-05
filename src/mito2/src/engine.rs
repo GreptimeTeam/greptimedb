@@ -40,7 +40,7 @@ mod drop_test;
 mod edit_region_test;
 #[cfg(test)]
 mod filter_deleted_test;
-pub mod flush_hook;
+pub mod region_hook;
 #[cfg(test)]
 mod flush_test;
 #[cfg(test)]

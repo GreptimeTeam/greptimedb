@@ -45,6 +45,7 @@ use tokio::sync::RwLockWriteGuard;
 pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
+use crate::engine::region_hook::RegionHookRef;
 use crate::error::{
     FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
     RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
@@ -947,15 +948,27 @@ pub(crate) struct ManifestContext {
     /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
     /// so we need to store the partition info separately.
     staging_partition_info: Mutex<Option<StagingPartitionInfo>>,
+    /// Optional region hook for observing manifest mutations.
+    hook: Option<RegionHookRef>,
 }
 
 impl ManifestContext {
-    pub(crate) fn new(manager: RegionManifestManager, state: RegionRoleState) -> Self {
+    pub(crate) fn new(
+        manager: RegionManifestManager,
+        state: RegionRoleState,
+        hook: Option<RegionHookRef>,
+    ) -> Self {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
             staging_partition_info: Mutex::new(None),
+            hook,
         }
+    }
+
+    /// Returns the region hook if one is registered.
+    pub(crate) fn hook(&self) -> Option<RegionHookRef> {
+        self.hook.clone()
     }
 
     pub(crate) fn staging_partition_info(&self) -> Option<StagingPartitionInfo> {
@@ -1174,6 +1187,10 @@ impl ManifestContext {
         }
 
         // Now we can update the manifest.
+        // If a region hook is registered, clone the action list before it is consumed
+        // so we can pass a reference to the hook after a successful update.
+        let hook = self.hook.clone();
+        let action_list_for_hook = hook.as_ref().map(|_| action_list.clone());
         let version = manager.update(action_list, is_staging).await.inspect_err(
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
@@ -1184,6 +1201,12 @@ impl ManifestContext {
                 manifest.metadata.region_id
             );
         }
+
+        if let Some(hook) = hook
+            && let Some(action_list) = action_list_for_hook {
+                hook.on_manifest_updated(manifest.metadata.region_id, &action_list, version)
+                    .await;
+            }
 
         Ok(version)
     }
@@ -1718,6 +1741,7 @@ mod tests {
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
             RegionRoleState::Leader(RegionLeaderState::Writable),
+            None,
         ));
 
         MitoRegion {
@@ -2007,6 +2031,7 @@ mod tests {
             Arc::new(ManifestContext::new(
                 manager,
                 RegionRoleState::Leader(RegionLeaderState::Staging),
+                None,
             ))
         };
 
@@ -2075,6 +2100,7 @@ mod tests {
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
             RegionRoleState::Leader(RegionLeaderState::Writable),
+            None,
         ));
 
         let region = MitoRegion {

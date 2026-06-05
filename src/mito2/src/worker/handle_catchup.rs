@@ -125,6 +125,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.partition_expr_fetcher.clone(),
         )
         .cache(Some(self.cache_manager.clone()))
+        .hook(self.plugins.get())
         .options(region.version().options.clone())?
         .skip_wal_replay(true)
         .open(&self.config, &self.wal)

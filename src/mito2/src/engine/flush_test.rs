@@ -34,9 +34,9 @@ use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Notify;
 
 use crate::config::MitoConfig;
-use crate::engine::flush_hook::{FlushHook, FlushHookRef, SstFileInfo};
 use crate::engine::listener::{FlushListener, StallListener};
-use crate::manifest::action::RegionEdit;
+use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
+use crate::manifest::action::RegionMetaActionList;
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv, build_rows,
     build_rows_for_key, flush_region, kafka_log_store_factory, multiple_log_store_factories,
@@ -668,13 +668,14 @@ async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
     assert_eq!(region.topic_latest_entry_id.load(Ordering::Relaxed), 1);
 }
 
-struct MockFlushHook {
+#[derive(Debug)]
+struct MockRegionHook {
     sst_written_count: AtomicUsize,
     manifest_updated_count: AtomicUsize,
     notify: Notify,
 }
 
-impl MockFlushHook {
+impl MockRegionHook {
     fn new() -> Self {
         Self {
             sst_written_count: AtomicUsize::new(0),
@@ -689,7 +690,7 @@ impl MockFlushHook {
 }
 
 #[async_trait]
-impl FlushHook for MockFlushHook {
+impl RegionHook for MockRegionHook {
     async fn on_sst_files_written(
         &self,
         region_id: RegionId,
@@ -699,7 +700,7 @@ impl FlushHook for MockFlushHook {
         self.sst_written_count
             .fetch_add(files.len(), Ordering::Relaxed);
         common_telemetry::info!(
-            "MockFlushHook::on_sst_files_written: region={}, files={}",
+            "MockRegionHook::on_sst_files_written: region={}, files={}",
             region_id,
             files.len(),
         );
@@ -718,28 +719,37 @@ impl FlushHook for MockFlushHook {
     async fn on_manifest_updated(
         &self,
         region_id: RegionId,
-        edit: &RegionEdit,
+        action_list: &RegionMetaActionList,
         manifest_version: ManifestVersion,
     ) {
         self.manifest_updated_count.fetch_add(1, Ordering::Relaxed);
+        // Count files added across all Edit actions.
+        let files_added: usize = action_list
+            .actions
+            .iter()
+            .map(|action| match action {
+                crate::manifest::action::RegionMetaAction::Edit(edit) => edit.files_to_add.len(),
+                _ => 0,
+            })
+            .sum();
         common_telemetry::info!(
-            "MockFlushHook::on_manifest_updated: region={}, manifest_version={}, files_added={}",
+            "MockRegionHook::on_manifest_updated: region={}, manifest_version={}, files_added={}",
             region_id,
             manifest_version,
-            edit.files_to_add.len(),
+            files_added,
         );
         self.notify.notify_one();
     }
 }
 
 #[tokio::test]
-async fn test_flush_hook() {
+async fn test_region_hook() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
 
-    let hook = Arc::new(MockFlushHook::new());
+    let hook = Arc::new(MockRegionHook::new());
     let plugins = Plugins::new();
-    plugins.insert(hook.clone() as FlushHookRef);
+    plugins.insert(hook.clone() as RegionHookRef);
 
     let engine = env
         .create_engine_with_plugins(MitoConfig::default(), plugins)
@@ -782,7 +792,7 @@ async fn test_flush_hook() {
     );
 
     common_telemetry::info!(
-        "test_flush_hook passed: sst_count={}, manifest_count={}",
+        "test_region_hook passed: sst_count={}, manifest_count={}",
         sst_count,
         manifest_count,
     );

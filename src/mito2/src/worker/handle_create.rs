@@ -70,6 +70,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .metadata_builder(builder)
         .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))
+        .hook(self.plugins.get())
         .create_or_open(&self.config, &self.wal)
         .await?;
 

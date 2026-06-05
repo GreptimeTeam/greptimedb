@@ -21,7 +21,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
-use common_base::Plugins;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
@@ -37,7 +36,7 @@ use crate::access_layer::{
 };
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
-use crate::engine::flush_hook::{FlushHookRef, SstFileInfo};
+use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
     Error, FlushRegionSnafu, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
     RegionTruncatedSnafu, Result,
@@ -277,8 +276,6 @@ pub(crate) struct RegionFlushTask {
     ///
     /// This is used to generate the file meta.
     pub(crate) partition_expr: Option<String>,
-    /// Plugins for flush hooks.
-    pub(crate) plugins: Plugins,
 }
 
 impl RegionFlushTask {
@@ -419,7 +416,7 @@ impl RegionFlushTask {
         );
         flush_metrics.observe();
 
-        let hook: Option<FlushHookRef> = self.plugins.get();
+        let hook = self.manifest_ctx.hook();
         if let Some(hook) = &hook {
             let files: Vec<SstFileInfo<'_>> = sst_infos
                 .iter()
@@ -474,11 +471,6 @@ impl RegionFlushTask {
             self.reason.as_str()
         );
 
-        if let Some(hook) = &hook {
-            hook.on_manifest_updated(self.region_id, &edit, manifest_version)
-                .await;
-        }
-
         Ok(edit)
     }
 
@@ -494,7 +486,7 @@ impl RegionFlushTask {
         let mut encoded_part_count = 0;
         let mut flush_metrics = Metrics::new(WriteType::Flush);
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
-        let hook: Option<FlushHookRef> = self.plugins.get();
+        let hook = self.manifest_ctx.hook();
         let mut all_sst_infos = Vec::new();
         for mem in memtables {
             if mem.is_empty() {
@@ -1401,7 +1393,6 @@ mod tests {
             flush_semaphore: Arc::new(Semaphore::new(2)),
             is_staging: false,
             partition_expr: None,
-            plugins: Plugins::new(),
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
@@ -1446,7 +1437,6 @@ mod tests {
                 flush_semaphore: Arc::new(Semaphore::new(2)),
                 is_staging: false,
                 partition_expr: None,
-                plugins: Plugins::new(),
             })
             .collect();
         // Schedule first task.
@@ -1633,7 +1623,6 @@ mod tests {
                 flush_semaphore: Arc::new(Semaphore::new(2)),
                 is_staging: false,
                 partition_expr: None,
-                plugins: Plugins::new(),
             })
             .collect();
         // Schedule first task.
