@@ -947,9 +947,13 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "digest 0.10.7",
+ "hex",
+ "pbkdf2",
  "sha1",
+ "sha2 0.10.9",
  "snafu 0.8.6",
  "sql",
+ "subtle",
  "tokio",
 ]
 

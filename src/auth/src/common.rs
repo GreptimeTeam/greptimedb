@@ -109,15 +109,31 @@ pub fn auth_mysql(
     username: &str,
     save_pwd: &[u8],
 ) -> Result<()> {
+    let hash_stage_2 = mysql_native_password_hash(save_pwd);
+    auth_mysql_with_hash_stage_2(auth_data, salt, username, &hash_stage_2)
+}
+
+pub(crate) fn auth_mysql_with_hash_stage_2(
+    auth_data: HashedPassword,
+    salt: Salt,
+    username: &str,
+    hash_stage_2: &[u8],
+) -> Result<()> {
     ensure!(
         auth_data.len() == 20,
         IllegalParamSnafu {
             msg: "Illegal mysql password length"
         }
     );
+    ensure!(
+        hash_stage_2.len() == 20,
+        InvalidConfigSnafu {
+            value: hex::encode(hash_stage_2),
+            msg: "Illegal mysql native password verifier length",
+        }
+    );
     // ref: https://github.com/mysql/mysql-server/blob/a246bad76b9271cb4333634e954040a970222e0a/sql/auth/password.cc#L62
-    let hash_stage_2 = double_sha1(save_pwd);
-    let tmp = sha1_two(salt, &hash_stage_2);
+    let tmp = sha1_two(salt, hash_stage_2);
     // xor auth_data and tmp
     let mut xor_result = [0u8; 20];
     for i in 0..20 {
@@ -132,6 +148,10 @@ pub fn auth_mysql(
         }
         .fail()
     }
+}
+
+pub(crate) fn mysql_native_password_hash(save_pwd: &[u8]) -> Vec<u8> {
+    double_sha1(save_pwd)
 }
 
 fn sha1_two(input_1: &[u8], input_2: &[u8]) -> Vec<u8> {

@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 
-use crate::error::{FromUtf8Snafu, InvalidConfigSnafu, Result};
+use crate::error::{InvalidConfigSnafu, Result};
 use crate::user_provider::{
     UserInfoMap, authenticate_with_credential, load_credential_from_file, parse_credential_line,
 };
@@ -64,8 +64,11 @@ impl StaticUserProvider {
             msg: "Expect at least one pair of username and password",
         })?;
         let username = kv.0;
-        let pwd = String::from_utf8(kv.1.0.clone()).context(FromUtf8Snafu)?;
-        Ok((username.clone(), pwd))
+        let pwd = kv.1.0.as_plain_text().context(InvalidConfigSnafu {
+            value: username.as_str(),
+            msg: "Cannot export a non-plain password verifier",
+        })?;
+        Ok((username.clone(), pwd.to_string()))
     }
 }
 
@@ -96,6 +99,8 @@ pub mod test {
     use std::io::{LineWriter, Write};
 
     use common_test_util::temp_dir::create_temp_dir;
+    use pbkdf2::pbkdf2_hmac;
+    use sha2::Sha256;
 
     use crate::UserProvider;
     use crate::user_info::DefaultUserInfo;
@@ -110,6 +115,28 @@ pub mod test {
             )
             .await;
         let _ = re.unwrap();
+    }
+
+    async fn test_authenticate_fails(provider: &dyn UserProvider, username: &str, password: &str) {
+        let re = provider
+            .authenticate(
+                Identity::UserId(username, None),
+                Password::PlainText(password.to_string().into()),
+            )
+            .await;
+        assert!(re.is_err());
+    }
+
+    fn pbkdf2_sha256_verifier(password: &str) -> String {
+        let iterations = 4096;
+        let salt = b"salt";
+        let mut hash = [0u8; 32];
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut hash);
+        format!(
+            "pbkdf2_sha256:{iterations}:{}:{}",
+            hex::encode(salt),
+            hex::encode(hash)
+        )
     }
 
     #[tokio::test]
@@ -127,6 +154,25 @@ pub mod test {
         let provider = StaticUserProvider::new("cmd:root=123456,admin=654321").unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
+    }
+
+    #[tokio::test]
+    async fn test_inline_provider_with_pbkdf2_sha256_verifier() {
+        let provider =
+            StaticUserProvider::new(&format!("cmd:root={}", pbkdf2_sha256_verifier("123456")))
+                .unwrap();
+
+        test_authenticate(&provider, "root", "123456").await;
+        test_authenticate_fails(&provider, "root", "654321").await;
+    }
+
+    #[test]
+    fn test_get_one_user_pwd_rejects_non_plain_verifier() {
+        let provider =
+            StaticUserProvider::new(&format!("cmd:root={}", pbkdf2_sha256_verifier("123456")))
+                .unwrap();
+
+        assert!(provider.get_one_user_pwd().is_err());
     }
 
     #[tokio::test]
