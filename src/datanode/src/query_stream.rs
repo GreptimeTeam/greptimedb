@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::pin::Pin;
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 
 use common_recordbatch::adapter::RecordBatchMetrics;
@@ -23,13 +24,14 @@ use futures_util::Stream;
 use tokio::sync::mpsc;
 
 pub type QueryRuntimeSender = mpsc::Sender<RecordBatchResult<RecordBatch>>;
+pub type QueryRuntimeMetrics = Arc<RwLock<Option<RecordBatchMetrics>>>;
 
 /// A record batch stream backed by batches produced on the datanode query runtime.
 pub struct QueryRuntimeStream {
     schema: SchemaRef,
     receiver: mpsc::Receiver<RecordBatchResult<RecordBatch>>,
     output_ordering: Option<Vec<OrderOption>>,
-    metrics: Option<RecordBatchMetrics>,
+    metrics: QueryRuntimeMetrics,
 }
 
 impl QueryRuntimeStream {
@@ -41,7 +43,7 @@ impl QueryRuntimeStream {
             schema,
             receiver,
             output_ordering: None,
-            metrics: None,
+            metrics: Default::default(),
         }
     }
 
@@ -50,9 +52,18 @@ impl QueryRuntimeStream {
         self
     }
 
-    pub fn with_metrics(mut self, metrics: Option<RecordBatchMetrics>) -> Self {
+    pub fn with_metrics(self, metrics: Option<RecordBatchMetrics>) -> Self {
+        *self.metrics.write().unwrap() = metrics;
+        self
+    }
+
+    pub fn with_metrics_store(mut self, metrics: QueryRuntimeMetrics) -> Self {
         self.metrics = metrics;
         self
+    }
+
+    pub fn metrics_store() -> QueryRuntimeMetrics {
+        Default::default()
     }
 }
 
@@ -78,7 +89,7 @@ impl RecordBatchStream for QueryRuntimeStream {
     }
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
-        self.metrics.clone()
+        self.metrics.read().unwrap().clone()
     }
 }
 
@@ -132,6 +143,23 @@ mod tests {
 
         let mut stream = QueryRuntimeStream::new(schema, rx);
         assert!(stream.next().await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_query_runtime_stream_reads_shared_metrics() {
+        let schema = test_batch().schema.clone();
+        let (tx, rx) = mpsc::channel(1);
+        drop(tx);
+        let metrics = QueryRuntimeStream::metrics_store();
+        let stream = QueryRuntimeStream::new(schema, rx).with_metrics_store(metrics.clone());
+
+        assert!(stream.metrics().is_none());
+        *metrics.write().unwrap() = Some(RecordBatchMetrics {
+            elapsed_compute: 42,
+            ..Default::default()
+        });
+
+        assert_eq!(42, stream.metrics().unwrap().elapsed_compute);
     }
 
     #[tokio::test]

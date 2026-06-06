@@ -1833,6 +1833,8 @@ impl RegionServerInner {
         let inner = self.clone();
         let (sender, receiver) = mpsc::channel(QUERY_RUNTIME_STREAM_BUFFER_SIZE);
         let (init_sender, init_receiver) = oneshot::channel();
+        let metrics = QueryRuntimeStream::metrics_store();
+        let producer_metrics = metrics.clone();
 
         let _handle = common_runtime::spawn_datanode_query(async move {
             match inner.handle_read_inner(request, query_ctx).await {
@@ -1845,10 +1847,12 @@ impl RegionServerInner {
                     }
 
                     while let Some(batch) = stream.next().await {
+                        *producer_metrics.write().unwrap() = stream.metrics();
                         if sender.send(batch).await.is_err() {
                             break;
                         }
                     }
+                    *producer_metrics.write().unwrap() = stream.metrics();
                 }
                 Err(error) => {
                     let _ = init_sender.send(Err(error));
@@ -1864,7 +1868,9 @@ impl RegionServerInner {
         })??;
 
         Ok(Box::pin(
-            QueryRuntimeStream::new(schema, receiver).with_output_ordering(output_ordering),
+            QueryRuntimeStream::new(schema, receiver)
+                .with_output_ordering(output_ordering)
+                .with_metrics_store(metrics),
         ))
     }
 
