@@ -189,7 +189,10 @@ pub mod test {
         .unwrap();
 
         let (username, pwd) = provider.get_one_user_pwd().unwrap();
-        assert_eq!(("plainer".to_string(), "plain_pwd".to_string()), (username, pwd));
+        assert_eq!(
+            ("plainer".to_string(), "plain_pwd".to_string()),
+            (username, pwd)
+        );
     }
 
     #[tokio::test]
