@@ -266,7 +266,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
                             "",
                         );
                     }
-                    if keys.contains(&idx) {
+                    if let Some(pk_seq) = keys.iter().position(|k| *k == idx) {
                         self.add_key_column_usage(
                             &predicates,
                             &schema_name,
@@ -275,7 +275,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
                             &schema_name,
                             table_name,
                             &column.name,
-                            idx as u32 + 1,
+                            pk_seq as u32 + 1,
                             INDEX_TYPE_PRI,
                         );
                     }
