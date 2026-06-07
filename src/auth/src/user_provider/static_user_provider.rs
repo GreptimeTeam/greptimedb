@@ -56,19 +56,24 @@ impl StaticUserProvider {
         }
     }
 
-    /// Return a random username/password pair
-    /// This is useful for invoking from other components in the cluster
+    /// Return one plain-text username/password pair.
+    /// This is useful for invoking from other components in the cluster.
+    ///
+    /// Only plain-text verifiers can be exported: hashed verifiers (e.g. pbkdf2)
+    /// are irreversible. Non-plain users are skipped; if none is plain-text,
+    /// configure `frontend_auth` instead.
     pub fn get_one_user_pwd(&self) -> Result<(String, String)> {
-        let kv = self.users.iter().next().context(InvalidConfigSnafu {
-            value: "",
-            msg: "Expect at least one pair of username and password",
-        })?;
-        let username = kv.0;
-        let pwd = kv.1.0.as_plain_text().context(InvalidConfigSnafu {
-            value: username.as_str(),
-            msg: "Cannot export a non-plain password verifier",
-        })?;
-        Ok((username.clone(), pwd.to_string()))
+        self.users
+            .iter()
+            .find_map(|(username, (verifier, _))| {
+                verifier
+                    .as_plain_text()
+                    .map(|pwd| (username.clone(), pwd.to_string()))
+            })
+            .context(InvalidConfigSnafu {
+                value: "",
+                msg: "No plain-text credential to export; configure `frontend_auth` or add a plain-text user",
+            })
     }
 }
 
@@ -173,6 +178,18 @@ pub mod test {
                 .unwrap();
 
         assert!(provider.get_one_user_pwd().is_err());
+    }
+
+    #[test]
+    fn test_get_one_user_pwd_skips_non_plain_verifier() {
+        let provider = StaticUserProvider::new(&format!(
+            "cmd:hashed={},plainer=plain_pwd",
+            pbkdf2_sha256_verifier("123456")
+        ))
+        .unwrap();
+
+        let (username, pwd) = provider.get_one_user_pwd().unwrap();
+        assert_eq!(("plainer".to_string(), "plain_pwd".to_string()), (username, pwd));
     }
 
     #[tokio::test]
