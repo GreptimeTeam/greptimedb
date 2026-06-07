@@ -24,7 +24,7 @@ use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatc
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder, VectorRef};
-use datatypes::schema::{ColumnSchema, FulltextBackend, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{ConstantVector, StringVector, StringVectorBuilder, UInt32VectorBuilder};
 use futures_util::TryStreamExt;
@@ -59,19 +59,19 @@ pub(crate) const CONSTRAINT_NAME_PRI: &str = "PRIMARY";
 /// Primary key index type
 pub(crate) const INDEX_TYPE_PRI: &str = "greptime-primary-key-v1";
 
-/// Inverted index constraint name
+/// Inverted index name
 pub(crate) const CONSTRAINT_NAME_INVERTED_INDEX: &str = "INVERTED INDEX";
 /// Inverted index type
 pub(crate) const INDEX_TYPE_INVERTED_INDEX: &str = "greptime-inverted-index-v1";
 
-/// Fulltext index constraint name
+/// Fulltext index name
 pub(crate) const CONSTRAINT_NAME_FULLTEXT_INDEX: &str = "FULLTEXT INDEX";
 /// Fulltext index v1 type
 pub(crate) const INDEX_TYPE_FULLTEXT_TANTIVY: &str = "greptime-fulltext-index-v1";
 /// Fulltext index bloom type
 pub(crate) const INDEX_TYPE_FULLTEXT_BLOOM: &str = "greptime-fulltext-index-bloom";
 
-/// Skipping index constraint name
+/// Skipping index name
 pub(crate) const CONSTRAINT_NAME_SKIPPING_INDEX: &str = "SKIPPING INDEX";
 /// Skipping index type
 pub(crate) const INDEX_TYPE_SKIPPING_INDEX: &str = "greptime-bloom-filter-v1";
@@ -253,8 +253,6 @@ impl InformationSchemaKeyColumnUsageBuilder {
                 let schema = table.schema();
 
                 for (idx, column) in schema.column_schemas().iter().enumerate() {
-                    let mut constraints = vec![];
-                    let mut greptime_index_type = vec![];
                     if column.is_time_index() {
                         self.add_key_column_usage(
                             &predicates,
@@ -268,43 +266,17 @@ impl InformationSchemaKeyColumnUsageBuilder {
                             "",
                         );
                     }
-                    // TODO(dimbtp): foreign key constraint not supported yet
                     if keys.contains(&idx) {
-                        constraints.push(CONSTRAINT_NAME_PRI);
-                        greptime_index_type.push(INDEX_TYPE_PRI);
-                    }
-                    if column.is_inverted_indexed() {
-                        constraints.push(CONSTRAINT_NAME_INVERTED_INDEX);
-                        greptime_index_type.push(INDEX_TYPE_INVERTED_INDEX);
-                    }
-                    if let Ok(Some(options)) = column.fulltext_options()
-                        && options.enable
-                    {
-                        constraints.push(CONSTRAINT_NAME_FULLTEXT_INDEX);
-                        let index_type = match options.backend {
-                            FulltextBackend::Bloom => INDEX_TYPE_FULLTEXT_BLOOM,
-                            FulltextBackend::Tantivy => INDEX_TYPE_FULLTEXT_TANTIVY,
-                        };
-                        greptime_index_type.push(index_type);
-                    }
-                    if column.is_skipping_indexed() {
-                        constraints.push(CONSTRAINT_NAME_SKIPPING_INDEX);
-                        greptime_index_type.push(INDEX_TYPE_SKIPPING_INDEX);
-                    }
-
-                    if !constraints.is_empty() {
-                        let aggregated_constraints = constraints.join(", ");
-                        let aggregated_index_types = greptime_index_type.join(", ");
                         self.add_key_column_usage(
                             &predicates,
                             &schema_name,
-                            &aggregated_constraints,
+                            CONSTRAINT_NAME_PRI,
                             &catalog_name,
                             &schema_name,
                             table_name,
                             &column.name,
                             idx as u32 + 1,
-                            &aggregated_index_types,
+                            INDEX_TYPE_PRI,
                         );
                     }
                 }
