@@ -278,9 +278,9 @@ show index from phy;
 | phy   | 0          | PRIMARY        | 2            | __table_id  | A         |             |          |        | NO   | greptime-primary-key-v1  |         |               | YES     |            |
 | phy   | 0          | PRIMARY        | 3            | __tsid      | A         |             |          |        | NO   | greptime-primary-key-v1  |         |               | YES     |            |
 | phy   | 0          | PRIMARY        | 4            | job         | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
-| phy   | 1          | SKIPPING INDEX | 3            | host        | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| phy   | 1          | SKIPPING INDEX | 4            | __table_id  | A         |             |          |        | NO   | greptime-bloom-filter-v1 |         |               | YES     |            |
-| phy   | 1          | SKIPPING INDEX | 6            | job         | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| phy   | 1          | SKIPPING INDEX | 1            | host        | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| phy   | 1          | SKIPPING INDEX | 2            | __table_id  | A         |             |          |        | NO   | greptime-bloom-filter-v1 |         |               | YES     |            |
+| phy   | 1          | SKIPPING INDEX | 3            | job         | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
 | phy   | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                          |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 

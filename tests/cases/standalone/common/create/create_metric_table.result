@@ -302,8 +302,8 @@ SHOW INDEX FROM phy;
 | phy   | 0          | PRIMARY        | 1            | __table_id  | A         |             |          |        | NO   | greptime-primary-key-v1  |         |               | YES     |            |
 | phy   | 0          | PRIMARY        | 2            | __tsid      | A         |             |          |        | NO   | greptime-primary-key-v1  |         |               | YES     |            |
 | phy   | 0          | PRIMARY        | 3            | host        | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
-| phy   | 1          | SKIPPING INDEX | 3            | __table_id  | A         |             |          |        | NO   | greptime-bloom-filter-v1 |         |               | YES     |            |
-| phy   | 1          | SKIPPING INDEX | 5            | host        | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| phy   | 1          | SKIPPING INDEX | 1            | __table_id  | A         |             |          |        | NO   | greptime-bloom-filter-v1 |         |               | YES     |            |
+| phy   | 1          | SKIPPING INDEX | 2            | host        | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
 | phy   | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                          |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 

@@ -254,7 +254,11 @@ impl InformationSchemaStatisticsBuilder {
                     }
                 }
 
-                for (idx, column) in schema.column_schemas().iter().enumerate() {
+                let mut inverted_seq = 0;
+                let mut fulltext_seq = 0;
+                let mut skipping_seq = 0;
+
+                for column in schema.column_schemas() {
                     if column.is_time_index() {
                         self.add_statistics(
                             &predicates,
@@ -269,13 +273,14 @@ impl InformationSchemaStatisticsBuilder {
                         );
                     }
                     if column.is_inverted_indexed() {
+                        inverted_seq += 1;
                         self.add_statistics(
                             &predicates,
                             &schema_name,
                             table_name,
                             1,
                             CONSTRAINT_NAME_INVERTED_INDEX,
-                            idx as i64 + 1,
+                            inverted_seq,
                             column,
                             INVERTED,
                             INDEX_TYPE_INVERTED_INDEX,
@@ -288,26 +293,28 @@ impl InformationSchemaStatisticsBuilder {
                             FulltextBackend::Bloom => INDEX_TYPE_FULLTEXT_BLOOM,
                             FulltextBackend::Tantivy => INDEX_TYPE_FULLTEXT_TANTIVY,
                         };
+                        fulltext_seq += 1;
                         self.add_statistics(
                             &predicates,
                             &schema_name,
                             table_name,
                             1,
                             CONSTRAINT_NAME_FULLTEXT_INDEX,
-                            idx as i64 + 1,
+                            fulltext_seq,
                             column,
                             FULLTEXT,
                             greptime_index_type,
                         );
                     }
                     if column.is_skipping_indexed() {
+                        skipping_seq += 1;
                         self.add_statistics(
                             &predicates,
                             &schema_name,
                             table_name,
                             1,
                             CONSTRAINT_NAME_SKIPPING_INDEX,
-                            idx as i64 + 1,
+                            skipping_seq,
                             column,
                             BLOOM,
                             INDEX_TYPE_SKIPPING_INDEX,
