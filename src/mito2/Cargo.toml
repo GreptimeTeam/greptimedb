@@ -134,5 +134,9 @@ name = "simple_bulk_memtable"
 harness = false
 required-features = ["test"]
 
+[[bench]]
+name = "bench_wal_encode"
+harness = false
+
 [package.metadata.cargo-udeps.ignore]
 normal = ["aquamarine"]
