@@ -128,7 +128,7 @@ pub(crate) fn auth_mysql_with_hash_stage_2(
     ensure!(
         hash_stage_2.len() == 20,
         InvalidConfigSnafu {
-            value: hex::encode(hash_stage_2),
+            value: hash_stage_2.len().to_string(),
             msg: "Illegal mysql native password verifier length",
         }
     );

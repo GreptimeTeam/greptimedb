@@ -36,6 +36,10 @@ use crate::user_info::{DefaultUserInfo, PermissionMode};
 use crate::{UserInfoRef, auth_mysql};
 
 const MAX_PBKDF2_SHA256_ITERATIONS: u32 = 1_000_000;
+/// PBKDF2-SHA256 derived key length, fixed to the native SHA-256 output size.
+const PBKDF2_SHA256_HASH_LEN: usize = 32;
+/// Upper bound on the salt length to reject misconfigured credentials.
+const MAX_PBKDF2_SHA256_SALT_LEN: usize = 1024;
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
@@ -117,7 +121,8 @@ impl PasswordVerifier {
                 || iterations == 0
                 || iterations > MAX_PBKDF2_SHA256_ITERATIONS
                 || salt.is_empty()
-                || hash.is_empty()
+                || salt.len() > MAX_PBKDF2_SHA256_SALT_LEN
+                || hash.len() != PBKDF2_SHA256_HASH_LEN
             {
                 return None;
             }
@@ -151,9 +156,12 @@ impl PasswordVerifier {
                 salt,
                 hash,
             } => {
-                let mut actual = vec![0u8; hash.len()];
+                if hash.len() != PBKDF2_SHA256_HASH_LEN {
+                    return false;
+                }
+                let mut actual = [0u8; PBKDF2_SHA256_HASH_LEN];
                 pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, *iterations, &mut actual);
-                hash.as_slice().ct_eq(actual.as_slice()).into()
+                hash.as_slice().ct_eq(&actual[..]).into()
             }
             PasswordVerifier::MysqlNativePassword { .. } => false,
         }
@@ -450,6 +458,14 @@ mod tests {
         );
 
         let result = parse_credential_line("user=pbkdf2_sha256:4096:not-hex:abcd");
+        assert_eq!(result, None);
+
+        // A well-formed but truncated hash must be rejected: a short hash would let
+        // many wrong passwords pass by matching only a few derived bytes.
+        let result = parse_credential_line(&format!(
+            "user=pbkdf2_sha256:4096:{}:abcd",
+            hex::encode(salt)
+        ));
         assert_eq!(result, None);
 
         let result = parse_credential_line(&format!(
