@@ -26,6 +26,7 @@ use common_time::Timestamp;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::utils::quote_identifier;
 use datafusion_common::{DFSchemaRef, TableReference};
 use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp, col, lit};
 use datatypes::schema::Schema;
@@ -120,6 +121,15 @@ fn encode_insert_plan_request(
             },
         )),
     })
+}
+
+fn format_insert_target_columns(plan: &LogicalPlan) -> String {
+    plan.schema()
+        .fields()
+        .iter()
+        .map(|field| quote_identifier(field.name()).to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Clone)]
@@ -585,14 +595,16 @@ impl BatchingTask {
                     // keep the previous InsertIntoPlan transport as a fallback.
                     match df_plan_to_sql(&insert_plan) {
                         Ok(select_sql) => {
+                            let target_columns = format_insert_target_columns(&insert_plan);
                             let sql = format!(
-                                "INSERT INTO {} {}",
+                                "INSERT INTO {} ({}) {}",
                                 TableReference::full(
                                     insert_to.catalog_name.as_str(),
                                     insert_to.schema_name.as_str(),
                                     insert_to.table_name.as_str(),
                                 )
                                 .to_quoted_string(),
+                                target_columns,
                                 select_sql
                             );
                             api::v1::QueryRequest {
