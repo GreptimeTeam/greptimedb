@@ -630,22 +630,25 @@ impl RegionServer {
         }
 
         // Now extract Put requests by consuming ownership (zero clone!)
-        let put_requests = requests.into_iter().map(|(region_id, req)| {
-            if let RegionRequest::Put(put) = req {
-                (region_id, put)
-            } else {
-                unreachable!("Already checked all are Put")
-            }
-        });
+        let put_requests = requests
+            .into_iter()
+            .map(|(region_id, req)| {
+                if let RegionRequest::Put(put) = req {
+                    (region_id, put)
+                } else {
+                    unreachable!("Already checked all are Put")
+                }
+            })
+            .collect::<Vec<_>>();
 
         // Downcast to MetricEngine and call batch API
-        let metric_engine =
-            engine
-                .as_any()
-                .downcast_ref::<MetricEngine>()
-                .context(UnexpectedSnafu {
-                    violated: "Failed to downcast to MetricEngine",
-                })?;
+        let metric_engine = engine
+            .as_any()
+            .downcast_ref::<MetricEngine>()
+            .context(UnexpectedSnafu {
+                violated: "Failed to downcast to MetricEngine",
+            })?
+            .clone();
 
         let tracing_context = TracingContext::from_current_span();
         let batch_size = put_requests.len();
@@ -653,14 +656,18 @@ impl RegionServer {
             "RegionServer::handle_metric_batch_puts",
             batch_size = batch_size,
         ));
-        let result = metric_engine
-            .put_regions_batch(put_requests)
-            .trace(span)
-            .await
-            .map_err(BoxedError::new)
-            .context(HandleRegionRequestSnafu {
-                region_id: first_region_id,
-            });
+        let result = common_runtime::spawn_datanode_ingest(async move {
+            metric_engine
+                .put_regions_batch(put_requests.into_iter())
+                .trace(span)
+                .await
+        })
+        .await
+        .context(RuntimeJoinSnafu { request_type })?
+        .map_err(BoxedError::new)
+        .context(HandleRegionRequestSnafu {
+            region_id: first_region_id,
+        });
 
         match result {
             Ok(total_affected) => {
