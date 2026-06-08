@@ -56,6 +56,53 @@ async fn test_manual_flush() {
     test_manual_flush_with_format(true).await;
 }
 
+#[tokio::test]
+async fn test_flush_with_max_row_group_row_count() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    // Sets a small row group size so the flushed SST is split into multiple row groups.
+    let request = CreateRequestBuilder::new()
+        .insert_option("max_row_group_row_count", "5")
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // 15 rows with a row group size of 5 => 3 row groups.
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 15),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Passes `None` so the flush falls back to the region option instead of a
+    // per-flush override.
+    flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let total_row_groups: u64 = region.version().ssts.levels()[0]
+        .files
+        .values()
+        .map(|file| file.meta_ref().num_row_groups)
+        .sum();
+    assert_eq!(3, total_row_groups);
+}
+
 async fn test_manual_flush_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env

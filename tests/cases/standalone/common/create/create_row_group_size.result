@@ -1,0 +1,66 @@
+CREATE TABLE row_group_tbl (
+    host STRING,
+    cpu DOUBLE,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(host)
+) WITH ('max_row_group_row_count' = '1024');
+
+Affected Rows: 0
+
+-- The option should be persisted and shown.
+SHOW CREATE TABLE row_group_tbl;
+
++---------------+----------------------------------------------+
+| Table         | Create Table                                 |
++---------------+----------------------------------------------+
+| row_group_tbl | CREATE TABLE IF NOT EXISTS "row_group_tbl" ( |
+|               |   "host" STRING NULL,                        |
+|               |   "cpu" DOUBLE NULL,                         |
+|               |   "ts" TIMESTAMP(3) NOT NULL,                |
+|               |   TIME INDEX ("ts"),                         |
+|               |   PRIMARY KEY ("host")                       |
+|               | )                                            |
+|               |                                              |
+|               | ENGINE=mito                                  |
+|               | WITH(                                        |
+|               |   max_row_group_row_count = '1024'           |
+|               | )                                            |
++---------------+----------------------------------------------+
+
+INSERT INTO row_group_tbl VALUES
+    ('host1', 1.0, 1667446797450),
+    ('host2', 2.0, 1667446797450);
+
+Affected Rows: 2
+
+ADMIN flush_table('row_group_tbl');
+
++------------------------------------+
+| ADMIN flush_table('row_group_tbl') |
++------------------------------------+
+| 0                                  |
++------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM row_group_tbl;
+
++-------+-----+-------------------------+
+| host  | cpu | ts                      |
++-------+-----+-------------------------+
+| host1 | 1.0 | 2022-11-03T03:39:57.450 |
+| host2 | 2.0 | 2022-11-03T03:39:57.450 |
++-------+-----+-------------------------+
+
+DROP TABLE row_group_tbl;
+
+Affected Rows: 0
+
+-- A zero value is rejected.
+CREATE TABLE row_group_bad (
+    host STRING,
+    cpu DOUBLE,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(host)
+) WITH ('max_row_group_row_count' = '0');
+
+Error: 1004(InvalidArguments), Invalid region options, max_row_group_row_count must be in (0, 10485760], got 0
