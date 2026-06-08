@@ -5288,10 +5288,10 @@ version = "1.1.0"
 dependencies = [
  "api",
  "arrow 58.3.0",
+ "arrow-flight",
  "arrow-schema 58.3.0",
  "async-recursion",
  "async-trait",
- "auth",
  "bytes",
  "cache",
  "catalog",
@@ -5356,6 +5356,7 @@ dependencies = [
  "substrait 1.1.0",
  "table",
  "tokio",
+ "tokio-stream",
  "tonic 0.14.2",
 ]
 

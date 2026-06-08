@@ -198,9 +198,9 @@ impl FlowDualEngine {
         }
     }
 
-    /// In distributed mode, scan periodically(1s) until available frontend is found, or timeout,
-    /// in standalone mode, return immediately
-    /// notice here if any frontend appear in cluster info this function will return immediately
+    /// In distributed mode, scan periodically(1s) until all advertised frontends
+    /// accept unauthenticated queries, or timeout. In standalone mode, return
+    /// immediately.
     async fn wait_for_available_frontend(&self, timeout: std::time::Duration) -> Result<(), Error> {
         if !self.is_distributed() {
             return Ok(());
@@ -215,8 +215,20 @@ impl FlowDualEngine {
                     .iter()
                     .map(|peer| &peer.addr)
                     .collect::<Vec<_>>();
-                info!("Available frontend found: {:?}", fe_list);
-                return Ok(());
+                let probe_failures = frontend_client
+                    .check_all_frontends_without_auth(&frontend_list)
+                    .await?;
+                if probe_failures.is_empty() {
+                    info!(
+                        "Available frontend found and unauthenticated probe succeeded: {:?}",
+                        fe_list
+                    );
+                    return Ok(());
+                }
+                warn!(
+                    "Unauthenticated frontend probe failed, will retry. frontends={:?}, failures={:?}",
+                    fe_list, probe_failures
+                );
             }
             let elapsed = now.elapsed();
             tokio::time::sleep(sleep_duration).await;
@@ -224,7 +236,7 @@ impl FlowDualEngine {
             if elapsed >= timeout {
                 return NoAvailableFrontendSnafu {
                     timeout,
-                    context: "No available frontend found in cluster info",
+                    context: "No frontend accepted unauthenticated flownode probe",
                 }
                 .fail();
             }
@@ -499,19 +511,14 @@ impl ConsistentCheckTask {
             .batching_engine()
             .batch_opts
             .experimental_frontend_scan_timeout;
+        engine
+            .wait_for_available_frontend(frontend_scan_timeout)
+            .await?;
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let (trigger_tx, mut trigger_rx) =
             tokio::sync::mpsc::channel::<(bool, bool, tokio::sync::oneshot::Sender<()>)>(10);
         let handle = common_runtime::spawn_global(async move {
-            // first check if available frontend is found
-            if let Err(err) = engine
-                .wait_for_available_frontend(frontend_scan_timeout)
-                .await
-            {
-                warn!("No frontend is available yet:\n {err:?}");
-            }
-
-            // then do recover flows, if failed, always retry
+            // Recover flows after the startup frontend probe succeeds.
             let mut recover_retry = 0;
             while let Err(err) = engine.check_flow_consistent(true, false).await {
                 recover_retry += 1;

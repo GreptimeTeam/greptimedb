@@ -250,7 +250,6 @@ fn test_load_flownode_example_config() {
                 addr: "127.0.0.1:4000".to_string(),
                 ..Default::default()
             },
-            user_provider: None,
             memory: Default::default(),
         },
         ..Default::default()
