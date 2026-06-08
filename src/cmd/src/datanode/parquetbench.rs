@@ -137,6 +137,14 @@ impl ParquetbenchCommand {
 
         println!("{}", "Starting parquetbench...".cyan().bold());
 
+        if self.iterations <= 1 && self.pprof_after_warmup && self.pprof_file.is_some() {
+            return error::IllegalConfigSnafu {
+                msg: "pprof-after-warmup requires at least 2 iterations (1 warmup + 1 profiled)"
+                    .to_string(),
+            }
+            .fail();
+        }
+
         let region_id = parse_region_id(&self.region_id)?;
         let path_type = parse_path_type(&self.path_type)?;
         let file_id = FileId::parse_str(&self.file_id).map_err(|e| {
