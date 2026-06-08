@@ -25,6 +25,7 @@ pub mod region_peers;
 mod region_statistics;
 pub mod schemata;
 mod ssts;
+pub mod statistics;
 mod table_constraints;
 mod table_names;
 mod table_semantics;
@@ -72,6 +73,7 @@ use crate::system_schema::information_schema::schemata::InformationSchemaSchemat
 use crate::system_schema::information_schema::ssts::{
     InformationSchemaSstsIndexMeta, InformationSchemaSstsManifest, InformationSchemaSstsStorage,
 };
+use crate::system_schema::information_schema::statistics::InformationSchemaStatistics;
 use crate::system_schema::information_schema::table_constraints::InformationSchemaTableConstraints;
 use crate::system_schema::information_schema::table_semantics::InformationSchemaTableSemantics;
 use crate::system_schema::information_schema::tables::InformationSchemaTables;
@@ -225,6 +227,10 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
+            STATISTICS => Some(Arc::new(InformationSchemaStatistics::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
             CLUSTER_INFO => Some(Arc::new(InformationSchemaClusterInfo::new(
                 self.catalog_manager.clone(),
             )) as _),
@@ -361,6 +367,10 @@ impl InformationSchemaProvider {
         tables.insert(
             TABLE_CONSTRAINTS.to_string(),
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
+        );
+        tables.insert(
+            STATISTICS.to_string(),
+            self.build_table(STATISTICS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
         tables.insert(
