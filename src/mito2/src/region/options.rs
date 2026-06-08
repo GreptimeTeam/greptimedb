@@ -39,8 +39,11 @@ use strum::EnumString;
 use crate::error::{InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
 use crate::memtable::bulk::BulkMemtableConfig;
 use crate::sst::FormatType;
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
+/// Upper bound for `max_row_group_row_count` to guard against pathological values.
+const MAX_ROW_GROUP_ROW_COUNT_LIMIT: usize = 10 * 1024 * 1024;
 const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
 const MEMTABLE_PARTITION_TREE_PREFIX: &str = "memtable.partition_tree.";
 const MEMTABLE_BULK_PREFIX: &str = "memtable.bulk.";
@@ -104,6 +107,9 @@ pub struct RegionOptions {
     pub merge_mode: Option<MergeMode>,
     /// SST format type.
     pub sst_format: Option<FormatType>,
+    /// Max number of rows in a parquet row group. Uses [DEFAULT_ROW_GROUP_SIZE] if `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_row_group_row_count: Option<usize>,
     /// Internal primary key encoding override used by metric-engine.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key_encoding: Option<PrimaryKeyEncoding>,
@@ -129,7 +135,36 @@ impl RegionOptions {
                 }
             );
         }
+        if let Some(row_count) = self.max_row_group_row_count {
+            let segment_row_count = self.index_options.inverted_index.segment_row_count;
+            ensure!(
+                row_count > 0 && row_count <= MAX_ROW_GROUP_ROW_COUNT_LIMIT,
+                InvalidRegionOptionsSnafu {
+                    reason: format!(
+                        "max_row_group_row_count must be in (0, {MAX_ROW_GROUP_ROW_COUNT_LIMIT}], got {row_count}",
+                    ),
+                }
+            );
+            // A row group size that is not a multiple of the inverted index segment row count
+            // would let a segment cross row group boundaries, which breaks the index row
+            // selection (see RowGroupSelection::from_inverted_index_apply_output).
+            ensure!(
+                row_count % segment_row_count == 0,
+                InvalidRegionOptionsSnafu {
+                    reason: format!(
+                        "max_row_group_row_count ({row_count}) must be a multiple of \
+                         the inverted index segment_row_count ({segment_row_count})",
+                    ),
+                }
+            );
+        }
         Ok(())
+    }
+
+    /// Returns the configured row group size, falling back to [DEFAULT_ROW_GROUP_SIZE].
+    pub fn row_group_size(&self) -> usize {
+        self.max_row_group_row_count
+            .unwrap_or(DEFAULT_ROW_GROUP_SIZE)
     }
 
     /// Returns `true` if deduplication is needed.
@@ -255,6 +290,7 @@ impl RegionOptions {
             memtable,
             merge_mode: options.merge_mode,
             sst_format,
+            max_row_group_row_count: options.max_row_group_row_count,
             primary_key_encoding,
         };
         opts.validate()?;
@@ -365,6 +401,8 @@ struct RegionOptionsWithoutEnum {
     merge_mode: Option<MergeMode>,
     #[serde_as(as = "NoneAsEmptyString")]
     sst_format: Option<FormatType>,
+    #[serde_as(as = "NoneAsEmptyString")]
+    max_row_group_row_count: Option<usize>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -377,6 +415,7 @@ impl Default for RegionOptionsWithoutEnum {
             append_mode: options.append_mode,
             merge_mode: options.merge_mode,
             sst_format: options.sst_format,
+            max_row_group_row_count: options.max_row_group_row_count,
         }
     }
 }
@@ -897,6 +936,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: Some(FormatType::Flat),
+            max_row_group_row_count: None,
             primary_key_encoding: None,
         };
         assert_eq!(expect, options);
@@ -927,6 +967,7 @@ mod tests {
             memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig::default())),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            max_row_group_row_count: None,
             primary_key_encoding: None,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
@@ -984,8 +1025,45 @@ mod tests {
             memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig::default())),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            max_row_group_row_count: None,
             primary_key_encoding: None,
         };
         assert_eq!(options, got);
+    }
+
+    #[test]
+    fn test_with_max_row_group_row_count() {
+        let map = make_map(&[("max_row_group_row_count", "51200")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        let expect = RegionOptions {
+            max_row_group_row_count: Some(51200),
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+        assert_eq!(51200, options.row_group_size());
+    }
+
+    #[test]
+    fn test_max_row_group_row_count_default() {
+        let options = RegionOptions::default();
+        assert_eq!(None, options.max_row_group_row_count);
+        assert_eq!(DEFAULT_ROW_GROUP_SIZE, options.row_group_size());
+    }
+
+    #[test]
+    fn test_max_row_group_row_count_misaligned_rejected() {
+        // Default segment_row_count is 1024; 100000 is not a multiple of it.
+        let map = make_map(&[("max_row_group_row_count", "100000")]);
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
+        assert!(
+            err.to_string().contains("multiple"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_max_row_group_row_count_zero_rejected() {
+        let map = make_map(&[("max_row_group_row_count", "0")]);
+        assert!(RegionOptions::try_from_options(RegionId::new(0, 0), &map).is_err());
     }
 }

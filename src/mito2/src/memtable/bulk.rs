@@ -393,6 +393,8 @@ pub struct BulkMemtable {
     append_mode: bool,
     /// Mode to handle duplicate rows while merging
     merge_mode: MergeMode,
+    /// Max number of rows in a parquet row group for encoded parts.
+    row_group_size: usize,
 }
 
 impl std::fmt::Debug for BulkMemtable {
@@ -631,10 +633,12 @@ impl Memtable for BulkMemtable {
                 metadata.region_id,
                 id,
                 self.config.clone(),
+                self.row_group_size,
             ))),
             compact_dispatcher: self.compact_dispatcher.clone(),
             append_mode: self.append_mode,
             merge_mode: self.merge_mode,
+            row_group_size: self.row_group_size,
         })
     }
 
@@ -665,7 +669,7 @@ impl Memtable for BulkMemtable {
 }
 
 impl BulkMemtable {
-    /// Creates a new BulkMemtable
+    /// Creates a new BulkMemtable with the default row group size.
     pub fn new(
         id: MemtableId,
         config: BulkMemtableConfig,
@@ -674,6 +678,30 @@ impl BulkMemtable {
         compact_dispatcher: Option<Arc<CompactDispatcher>>,
         append_mode: bool,
         merge_mode: MergeMode,
+    ) -> Self {
+        Self::new_with_row_group_size(
+            id,
+            config,
+            metadata,
+            write_buffer_manager,
+            compact_dispatcher,
+            append_mode,
+            merge_mode,
+            DEFAULT_ROW_GROUP_SIZE,
+        )
+    }
+
+    /// Creates a new BulkMemtable with the given `row_group_size`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_row_group_size(
+        id: MemtableId,
+        config: BulkMemtableConfig,
+        metadata: RegionMetadataRef,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        compact_dispatcher: Option<Arc<CompactDispatcher>>,
+        append_mode: bool,
+        merge_mode: MergeMode,
+        row_group_size: usize,
     ) -> Self {
         let config = config.sanitize();
         let region_id = metadata.region_id;
@@ -687,10 +715,16 @@ impl BulkMemtable {
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
             num_rows: AtomicUsize::new(0),
-            compactor: Arc::new(Mutex::new(MemtableCompactor::new(region_id, id, config))),
+            compactor: Arc::new(Mutex::new(MemtableCompactor::new(
+                region_id,
+                id,
+                config,
+                row_group_size,
+            ))),
             compact_dispatcher,
             append_mode,
             merge_mode,
+            row_group_size,
         }
     }
 
@@ -1060,15 +1094,23 @@ struct MemtableCompactor {
     memtable_id: MemtableId,
     /// Configuration for the bulk memtable.
     config: BulkMemtableConfig,
+    /// Max number of rows in a parquet row group for encoded parts.
+    row_group_size: usize,
 }
 
 impl MemtableCompactor {
     /// Creates a new MemtableCompactor.
-    fn new(region_id: RegionId, memtable_id: MemtableId, config: BulkMemtableConfig) -> Self {
+    fn new(
+        region_id: RegionId,
+        memtable_id: MemtableId,
+        config: BulkMemtableConfig,
+        row_group_size: usize,
+    ) -> Self {
         Self {
             region_id,
             memtable_id,
             config,
+            row_group_size,
         }
     }
 
@@ -1106,6 +1148,7 @@ impl MemtableCompactor {
 
         let encode_row_threshold = self.config.encode_row_threshold;
         let encode_bytes_threshold = self.config.encode_bytes_threshold;
+        let row_group_size = self.row_group_size;
 
         // Merge all groups in parallel
         let merged_parts = collected
@@ -1119,6 +1162,7 @@ impl MemtableCompactor {
                     merge_mode,
                     encode_row_threshold,
                     encode_bytes_threshold,
+                    row_group_size,
                 )
             })
             .collect::<Result<Vec<Option<MergedPart>>>>()?;
@@ -1145,6 +1189,7 @@ impl MemtableCompactor {
     }
 
     /// Merges a group of parts into a single part (either MultiBulkPart or EncodedBulkPart).
+    #[allow(clippy::too_many_arguments)]
     fn merge_parts_group(
         parts_to_merge: Vec<PartToMerge>,
         metadata: &RegionMetadataRef,
@@ -1152,6 +1197,7 @@ impl MemtableCompactor {
         merge_mode: MergeMode,
         encode_row_threshold: usize,
         encode_bytes_threshold: usize,
+        row_group_size: usize,
     ) -> Result<Option<MergedPart>> {
         if parts_to_merge.is_empty() {
             return Ok(None);
@@ -1230,7 +1276,7 @@ impl MemtableCompactor {
         if estimated_total_rows > encode_row_threshold
             || estimated_total_bytes > encode_bytes_threshold
         {
-            let encoder = BulkPartEncoder::new(metadata.clone(), DEFAULT_ROW_GROUP_SIZE)?;
+            let encoder = BulkPartEncoder::new(metadata.clone(), row_group_size)?;
             let mut metrics = BulkPartEncodeMetrics::default();
             let encoded_part = encoder.encode_record_batch_iter(
                 boxed_iter,
@@ -1347,7 +1393,7 @@ impl CompactDispatcher {
 }
 
 /// Builder to build a [BulkMemtable].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BulkMemtableBuilder {
     /// Configuration for the bulk memtable.
     config: BulkMemtableConfig,
@@ -1355,6 +1401,21 @@ pub struct BulkMemtableBuilder {
     compact_dispatcher: Option<Arc<CompactDispatcher>>,
     append_mode: bool,
     merge_mode: MergeMode,
+    /// Max number of rows in a parquet row group for encoded parts.
+    row_group_size: usize,
+}
+
+impl Default for BulkMemtableBuilder {
+    fn default() -> Self {
+        Self {
+            config: BulkMemtableConfig::default(),
+            write_buffer_manager: None,
+            compact_dispatcher: None,
+            append_mode: false,
+            merge_mode: MergeMode::default(),
+            row_group_size: DEFAULT_ROW_GROUP_SIZE,
+        }
+    }
 }
 
 impl BulkMemtableBuilder {
@@ -1365,17 +1426,22 @@ impl BulkMemtableBuilder {
         merge_mode: MergeMode,
     ) -> Self {
         Self {
-            config: BulkMemtableConfig::default(),
             write_buffer_manager,
-            compact_dispatcher: None,
             append_mode,
             merge_mode,
+            ..Default::default()
         }
     }
 
     /// Sets the bulk memtable config.
     pub fn with_config(mut self, config: BulkMemtableConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Sets the max number of rows in a parquet row group for encoded parts.
+    pub fn with_row_group_size(mut self, row_group_size: usize) -> Self {
+        self.row_group_size = row_group_size;
         self
     }
 
@@ -1393,7 +1459,7 @@ impl BulkMemtableBuilder {
 
 impl MemtableBuilder for BulkMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(BulkMemtable::new(
+        Arc::new(BulkMemtable::new_with_row_group_size(
             id,
             self.config.clone(),
             metadata.clone(),
@@ -1401,6 +1467,7 @@ impl MemtableBuilder for BulkMemtableBuilder {
             self.compact_dispatcher.clone(),
             self.append_mode,
             self.merge_mode,
+            self.row_group_size,
         ))
     }
 
