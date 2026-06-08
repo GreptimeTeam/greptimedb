@@ -638,8 +638,7 @@ impl RegionServer {
                 } else {
                     unreachable!("Already checked all are Put")
                 }
-            })
-            .collect::<Vec<_>>();
+            });
 
         // Downcast to MetricEngine and call batch API
         let metric_engine = engine
@@ -658,7 +657,7 @@ impl RegionServer {
         ));
         let result = common_runtime::spawn_datanode_ingest(async move {
             metric_engine
-                .put_regions_batch(put_requests.into_iter())
+                .put_regions_batch(put_requests)
                 .trace(span)
                 .await
         })

@@ -65,7 +65,7 @@ impl Default for DatanodeRuntimeOptions {
         Self {
             base: RuntimeOptions::default(),
             datanode_query_rt_size: usize::max(cpus.saturating_sub(1), 1),
-            datanode_ingest_rt_size: 1,
+            datanode_ingest_rt_size: cpus,
         }
     }
 }
