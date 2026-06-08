@@ -202,6 +202,18 @@ impl DatanodeBuilder {
         &self.kv_backend
     }
 
+    pub fn meta_client(&self) -> Option<&MetaClientRef> {
+        self.meta_client.as_ref()
+    }
+
+    pub fn cache_registry(&self) -> Option<&Arc<LayeredCacheRegistry>> {
+        self.cache_registry.as_ref()
+    }
+
+    pub fn set_plugins(&mut self, plugins: Plugins) {
+        self.plugins = plugins;
+    }
+
     pub fn with_table_provider_factory(&mut self, factory: TableProviderFactoryRef) -> &mut Self {
         self.table_provider_factory = Some(factory);
         self

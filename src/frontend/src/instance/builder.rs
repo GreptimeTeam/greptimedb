@@ -132,6 +132,34 @@ impl FrontendBuilder {
         }
     }
 
+    pub fn options(&self) -> &FrontendOptions {
+        &self.options
+    }
+
+    pub fn kv_backend(&self) -> &KvBackendRef {
+        &self.kv_backend
+    }
+
+    pub fn layered_cache_registry(&self) -> &LayeredCacheRegistryRef {
+        &self.layered_cache_registry
+    }
+
+    pub fn catalog_manager(&self) -> &CatalogManagerRef {
+        &self.catalog_manager
+    }
+
+    pub fn node_manager(&self) -> &NodeManagerRef {
+        &self.node_manager
+    }
+
+    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
+        &self.procedure_executor
+    }
+
+    pub fn process_manager(&self) -> &ProcessManagerRef {
+        &self.process_manager
+    }
+
     pub fn with_plugin(self, plugins: Plugins) -> Self {
         Self {
             plugins: Some(plugins),

@@ -289,7 +289,7 @@ pub async fn test_http_auth_from_standalone_user_provider_config() {
 
     let mut plugins = Plugins::new();
     plugins.insert(StandaloneFlag);
-    plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+    plugins::setup_frontend_plugins_pre_build(&mut plugins, &[], &fe_opts, None)
         .await
         .unwrap();
     let user_provider = plugins.get::<UserProviderRef>();

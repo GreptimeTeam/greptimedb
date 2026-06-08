@@ -46,7 +46,12 @@ impl InstanceBuilder {
     ) -> Result<Self> {
         let guard = Self::init(&mut opts, &mut plugins).await?;
 
-        let datanode_builder = Self::datanode_builder(&opts, plugins).await?;
+        let mut datanode_builder = Self::datanode_builder(&opts, &plugins).await?;
+
+        plugins::setup_datanode_plugins_post_build(&mut plugins, &opts.plugins, &datanode_builder)
+            .await
+            .context(StartDatanodeSnafu)?;
+        datanode_builder.set_plugins(plugins);
 
         Ok(Self {
             guard,
@@ -71,7 +76,7 @@ impl InstanceBuilder {
         maybe_activate_heap_profile(&dn_opts.memory);
         create_resource_limit_metrics(APP_NAME);
 
-        plugins::setup_datanode_plugins(plugins, &opts.plugins, dn_opts)
+        plugins::setup_datanode_plugins_pre_build(plugins, &opts.plugins, dn_opts)
             .await
             .context(StartDatanodeSnafu)?;
 
@@ -81,7 +86,10 @@ impl InstanceBuilder {
         Ok(guard)
     }
 
-    async fn datanode_builder(opts: &DatanodeOptions, plugins: Plugins) -> Result<DatanodeBuilder> {
+    async fn datanode_builder(
+        opts: &DatanodeOptions,
+        plugins: &Plugins,
+    ) -> Result<DatanodeBuilder> {
         let dn_opts = &opts.component;
 
         let member_id = dn_opts
@@ -93,7 +101,7 @@ impl InstanceBuilder {
         let client = meta_client::create_meta_client(
             MetaClientType::Datanode { member_id },
             meta_client_options,
-            Some(&plugins),
+            Some(plugins),
             None,
         )
         .await

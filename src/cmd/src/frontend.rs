@@ -52,7 +52,6 @@ use plugins::PluginOptions;
 use plugins::frontend::context::{
     CatalogManagerConfigureContext, DistributedCatalogManagerConfigureContext,
 };
-use plugins::frontend::setup_frontend_dynamic_plugins;
 use plugins::options::PluginOptionsDeserializerImpl;
 use servers::addrs;
 use servers::grpc::GrpcOptions;
@@ -354,10 +353,6 @@ impl StartCommand {
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
-        let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
-            .await
-            .context(error::StartFrontendSnafu)?;
 
         set_default_timezone(opts.default_timezone.as_deref()).context(error::InitTimezoneSnafu)?;
         set_default_prefix(opts.default_column_prefix.as_deref())
@@ -375,6 +370,29 @@ impl StartCommand {
         let cache_ttl = meta_client_options.metadata_cache_ttl;
         let cache_tti = meta_client_options.metadata_cache_tti;
 
+        let meta_config: Vec<PluginOptions> = meta_client::create_meta_client(
+            MetaClientType::Frontend,
+            meta_client_options,
+            None,
+            None,
+        )
+        .await
+        .context(error::MetaClientInitSnafu)?
+        .pull_config(PluginOptionsDeserializerImpl)
+        .await
+        .context(error::MetaClientInitSnafu)?;
+
+        let mut plugins = Plugins::new();
+        plugins::setup_frontend_plugins_pre_build(
+            &mut plugins,
+            &plugin_opts,
+            &opts,
+            Some(&meta_config),
+        )
+        .await
+        .context(error::StartFrontendSnafu)?;
+
+        // now initialize the meta_client with plugins
         let meta_client = meta_client::create_meta_client(
             MetaClientType::Frontend,
             meta_client_options,
@@ -383,14 +401,6 @@ impl StartCommand {
         )
         .await
         .context(error::MetaClientInitSnafu)?;
-
-        let meta_config: Vec<PluginOptions> = meta_client
-            .pull_config(PluginOptionsDeserializerImpl)
-            .await
-            .context(error::MetaClientInitSnafu)?;
-        setup_frontend_dynamic_plugins(meta_config, &mut plugins)
-            .await
-            .context(error::StartFrontendSnafu)?;
 
         let readonly_meta_backend = new_read_only_meta_kv_backend(meta_client.clone());
 
@@ -470,7 +480,7 @@ impl StartCommand {
         };
         let catalog_manager = builder.build();
 
-        let instance = FrontendBuilder::new(
+        let builder = FrontendBuilder::new(
             opts.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
@@ -478,12 +488,18 @@ impl StartCommand {
             client,
             meta_client.clone(),
             process_manager,
-        )
-        .with_plugin(plugins.clone())
-        .with_local_cache_invalidator(layered_cache_registry)
-        .try_build()
-        .await
-        .context(error::StartFrontendSnafu)?;
+        );
+
+        plugins::setup_frontend_plugins_post_build(&mut plugins, &plugin_opts, &builder)
+            .await
+            .context(error::StartFrontendSnafu)?;
+
+        let instance = builder
+            .with_plugin(plugins.clone())
+            .with_local_cache_invalidator(layered_cache_registry)
+            .try_build()
+            .await
+            .context(error::StartFrontendSnafu)?;
 
         let heartbeat_task = Some(create_heartbeat_task(&opts, meta_client, &instance));
 
@@ -638,7 +654,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+        plugins::setup_frontend_plugins_pre_build(&mut plugins, &[], &fe_opts, None)
             .await
             .unwrap();
 
