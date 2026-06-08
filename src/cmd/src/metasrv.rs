@@ -342,14 +342,23 @@ impl StartCommand {
         info!("Metasrv options: {:#?}", opts);
 
         let mut plugins = Plugins::new();
-        plugins::setup_metasrv_plugins(&mut plugins, &plugin_opts, &opts)
+        plugins::setup_metasrv_plugins_pre_build(&mut plugins, &plugin_opts, &opts)
             .await
             .context(StartMetaServerSnafu)?;
 
-        let builder = metasrv_builder(&opts, plugins, None)
+        let builder = metasrv_builder(&opts, &plugins, None)
             .await
             .context(error::BuildMetaServerSnafu)?;
-        let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
+
+        plugins::setup_metasrv_plugins_post_build(&mut plugins, &plugin_opts, &builder)
+            .await
+            .context(StartMetaServerSnafu)?;
+
+        let metasrv = builder
+            .plugins(plugins)
+            .build()
+            .await
+            .context(error::BuildMetaServerSnafu)?;
 
         let instance = MetasrvInstance::new(metasrv)
             .await

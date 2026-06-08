@@ -348,6 +348,30 @@ impl FlownodeBuilder {
         }
     }
 
+    pub fn opts(&self) -> &FlownodeOptions {
+        &self.opts
+    }
+
+    pub fn table_meta(&self) -> &TableMetadataManagerRef {
+        &self.table_meta
+    }
+
+    pub fn catalog_manager(&self) -> &CatalogManagerRef {
+        &self.catalog_manager
+    }
+
+    pub fn flow_metadata_manager(&self) -> &FlowMetadataManagerRef {
+        &self.flow_metadata_manager
+    }
+
+    pub fn frontend_client(&self) -> &Arc<FrontendClient> {
+        &self.frontend_client
+    }
+
+    pub fn set_plugins(&mut self, plugins: Plugins) {
+        self.plugins = plugins;
+    }
+
     pub async fn build(mut self) -> Result<FlownodeInstance, Error> {
         // TODO(discord9): does this query engine need those?
         let query_engine_factory = QueryEngineFactory::new_with_plugins(

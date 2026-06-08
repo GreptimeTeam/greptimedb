@@ -261,7 +261,7 @@ pub fn router(metasrv: Arc<Metasrv>) -> Router {
 
 pub async fn metasrv_builder(
     opts: &MetasrvOptions,
-    plugins: Plugins,
+    plugins: &Plugins,
     kv_backend: Option<KvBackendRef>,
 ) -> Result<MetasrvBuilder> {
     let (mut kv_backend, election) = match (kv_backend, &opts.backend) {
@@ -421,8 +421,7 @@ pub async fn metasrv_builder(
         .in_memory(in_memory)
         .selector(selector)
         .election(election)
-        .meta_peer_client(meta_peer_client)
-        .plugins(plugins))
+        .meta_peer_client(meta_peer_client))
 }
 
 pub(crate) fn build_default_meta_peer_client(
@@ -472,7 +471,7 @@ mod tests {
 
         metasrv_builder(
             &opts,
-            plugins,
+            &plugins,
             Some(Arc::new(MemoryKvBackend::new()) as KvBackendRef),
         )
         .await

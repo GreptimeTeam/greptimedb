@@ -278,7 +278,7 @@ impl StartCommand {
         opts.grpc.detect_server_addr();
 
         let mut plugins = Plugins::new();
-        plugins::setup_flownode_plugins(&mut plugins, &plugin_opts, &opts)
+        plugins::setup_flownode_plugins_pre_build(&mut plugins, &plugin_opts, &opts)
             .await
             .context(StartFlownodeSnafu)?;
 
@@ -376,7 +376,7 @@ impl StartCommand {
         )
         .context(StartFlownodeSnafu)?;
         let frontend_client = Arc::new(frontend_client);
-        let flownode_builder = FlownodeBuilder::new(
+        let mut flownode_builder = FlownodeBuilder::new(
             opts.clone(),
             plugins.clone(),
             table_metadata_manager,
@@ -385,6 +385,11 @@ impl StartCommand {
             frontend_client.clone(),
         )
         .with_heartbeat_task(heartbeat_task);
+
+        plugins::setup_flownode_plugins_post_build(&mut plugins, &plugin_opts, &flownode_builder)
+            .await
+            .context(StartFlownodeSnafu)?;
+        flownode_builder.set_plugins(plugins.clone());
 
         let mut flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
