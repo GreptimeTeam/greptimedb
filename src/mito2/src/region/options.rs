@@ -136,24 +136,11 @@ impl RegionOptions {
             );
         }
         if let Some(row_count) = self.max_row_group_row_count {
-            let segment_row_count = self.index_options.inverted_index.segment_row_count;
             ensure!(
                 row_count > 0 && row_count <= MAX_ROW_GROUP_ROW_COUNT_LIMIT,
                 InvalidRegionOptionsSnafu {
                     reason: format!(
                         "max_row_group_row_count must be in (0, {MAX_ROW_GROUP_ROW_COUNT_LIMIT}], got {row_count}",
-                    ),
-                }
-            );
-            // A row group size that is not a multiple of the inverted index segment row count
-            // would let a segment cross row group boundaries, which breaks the index row
-            // selection (see RowGroupSelection::from_inverted_index_apply_output).
-            ensure!(
-                row_count % segment_row_count == 0,
-                InvalidRegionOptionsSnafu {
-                    reason: format!(
-                        "max_row_group_row_count ({row_count}) must be a multiple of \
-                         the inverted index segment_row_count ({segment_row_count})",
                     ),
                 }
             );
@@ -1032,37 +1019,21 @@ mod tests {
     }
 
     #[test]
-    fn test_with_max_row_group_row_count() {
+    fn test_max_row_group_row_count() {
+        // Default falls back to DEFAULT_ROW_GROUP_SIZE.
+        assert_eq!(None, RegionOptions::default().max_row_group_row_count);
+        assert_eq!(
+            DEFAULT_ROW_GROUP_SIZE,
+            RegionOptions::default().row_group_size()
+        );
+
+        // A configured value is parsed and used as the row group size.
         let map = make_map(&[("max_row_group_row_count", "51200")]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
-        let expect = RegionOptions {
-            max_row_group_row_count: Some(51200),
-            ..Default::default()
-        };
-        assert_eq!(expect, options);
+        assert_eq!(Some(51200), options.max_row_group_row_count);
         assert_eq!(51200, options.row_group_size());
-    }
 
-    #[test]
-    fn test_max_row_group_row_count_default() {
-        let options = RegionOptions::default();
-        assert_eq!(None, options.max_row_group_row_count);
-        assert_eq!(DEFAULT_ROW_GROUP_SIZE, options.row_group_size());
-    }
-
-    #[test]
-    fn test_max_row_group_row_count_misaligned_rejected() {
-        // Default segment_row_count is 1024; 100000 is not a multiple of it.
-        let map = make_map(&[("max_row_group_row_count", "100000")]);
-        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
-        assert!(
-            err.to_string().contains("multiple"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn test_max_row_group_row_count_zero_rejected() {
+        // Zero is rejected.
         let map = make_map(&[("max_row_group_row_count", "0")]);
         assert!(RegionOptions::try_from_options(RegionId::new(0, 0), &map).is_err());
     }

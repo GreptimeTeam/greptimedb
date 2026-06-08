@@ -160,21 +160,37 @@ impl RowGroupSelection {
         num_row_groups: usize,
         apply_output: ApplyOutput,
     ) -> Self {
-        // Step 1: Convert segment IDs to row ranges within row groups
-        // For each segment ID, calculate its corresponding row range in the row group
+        // Step 1: Convert segment IDs to row ranges within row groups.
+        // A segment may span more than one row group when `row_group_size` is not a multiple
+        // of `segment_row_count`, so we split each matched segment's global row range across
+        // every row group it overlaps instead of dropping the overflow.
         let segment_row_count = apply_output.segment_row_count;
-        let row_group_ranges = apply_output.matched_segment_ids.iter_ones().map(|seg_id| {
-            // Calculate the global row ID where this segment starts
-            let begin_row_id = seg_id * segment_row_count;
-            // Determine which row group this segment belongs to
-            let row_group_id = begin_row_id / row_group_size;
-            // Calculate the offset within the row group
-            let rg_begin_row_id = begin_row_id % row_group_size;
-            // Ensure the end row ID doesn't exceed the row group size
-            let rg_end_row_id = (rg_begin_row_id + segment_row_count).min(row_group_size);
+        // Nominal total row count. Clamping to it ensures we never reference a row group beyond
+        // `num_row_groups` (the last segment may extend past the end of the file).
+        let total_row_count = num_row_groups * row_group_size;
+        let row_group_ranges = apply_output
+            .matched_segment_ids
+            .iter_ones()
+            .flat_map(|seg_id| {
+                // Global row range covered by this segment, clamped to the file's row count.
+                let begin_row_id = seg_id * segment_row_count;
+                let end_row_id = (begin_row_id + segment_row_count).min(total_row_count);
 
-            (row_group_id, rg_begin_row_id..rg_end_row_id)
-        });
+                // Walk the range, emitting one (row_group_id, in-group range) per row group.
+                let mut cursor = begin_row_id;
+                std::iter::from_fn(move || {
+                    if cursor >= end_row_id {
+                        return None;
+                    }
+                    let row_group_id = cursor / row_group_size;
+                    let rg_begin_row_id = cursor % row_group_size;
+                    let rg_boundary = (row_group_id + 1) * row_group_size;
+                    let chunk_end = end_row_id.min(rg_boundary);
+                    let rg_end_row_id = rg_begin_row_id + (chunk_end - cursor);
+                    cursor = chunk_end;
+                    Some((row_group_id, rg_begin_row_id..rg_end_row_id))
+                })
+            });
 
         // Step 2: Group ranges by row group ID and create row selections
         let mut total_row_count = 0;
@@ -644,6 +660,8 @@ fn selector_len(selection: &RowSelection) -> usize {
 #[cfg(test)]
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
+    use index::bitmap::Bitmap;
+
     use super::*;
 
     #[test]
@@ -709,6 +727,77 @@ mod tests {
             RowSelector::select(1),
         ]);
         assert_eq!(selection, expected);
+    }
+
+    fn apply_output(matched: &[usize], segment_row_count: usize) -> ApplyOutput {
+        let mut matched_segment_ids = Bitmap::new_bitvec();
+        for &seg_id in matched {
+            matched_segment_ids.insert_range(seg_id..=seg_id);
+        }
+        ApplyOutput {
+            matched_segment_ids,
+            total_row_count: 0,
+            segment_row_count,
+        }
+    }
+
+    #[test]
+    fn test_from_inverted_index_segment_within_row_group() {
+        // segment_row_count (4) divides row_group_size (8): each segment maps to one row group.
+        // segment 1 -> rows [4, 8) in row group 0; segment 2 -> rows [8, 12) in row group 1.
+        let selection =
+            RowGroupSelection::from_inverted_index_apply_output(8, 2, apply_output(&[1, 2], 4));
+        assert_eq!(selection.row_count(), 8);
+        assert_eq!(
+            selection.get(0),
+            Some(&RowSelection::from(vec![
+                RowSelector::skip(4),
+                RowSelector::select(4),
+            ]))
+        );
+        assert_eq!(
+            selection.get(1),
+            Some(&RowSelection::from(vec![RowSelector::select(4)]))
+        );
+    }
+
+    #[test]
+    fn test_from_inverted_index_segment_crosses_row_group_boundary() {
+        // row_group_size (10) is not a multiple of segment_row_count (4): segment 2 covers global
+        // rows [8, 12), straddling row group 0 (rows [8, 10)) and row group 1 (rows [0, 2)).
+        // Both halves must be selected; the old code dropped the row group 1 half.
+        let selection =
+            RowGroupSelection::from_inverted_index_apply_output(10, 2, apply_output(&[2], 4));
+        assert_eq!(selection.row_count(), 4);
+        assert_eq!(
+            selection.get(0),
+            Some(&RowSelection::from(vec![
+                RowSelector::skip(8),
+                RowSelector::select(2),
+            ]))
+        );
+        assert_eq!(
+            selection.get(1),
+            Some(&RowSelection::from(vec![RowSelector::select(2)]))
+        );
+    }
+
+    #[test]
+    fn test_from_inverted_index_last_segment_clamped_to_end() {
+        // Last segment 4 covers global rows [16, 20) but only 18 rows exist (num_row_groups=2,
+        // row_group_size=9). The overflow rows [18, 20) must be clamped, never referencing a
+        // third row group.
+        let selection =
+            RowGroupSelection::from_inverted_index_apply_output(9, 2, apply_output(&[4], 4));
+        assert_eq!(selection.get(2), None);
+        // Rows [16, 18) land in row group 1 at offset [7, 9).
+        assert_eq!(
+            selection.get(1),
+            Some(&RowSelection::from(vec![
+                RowSelector::skip(7),
+                RowSelector::select(2),
+            ]))
+        );
     }
 
     #[test]
