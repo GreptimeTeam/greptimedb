@@ -73,12 +73,13 @@ runs:
         -n my-greptimedb \
         --values "${BASE_VALUES}" \
         --values "${SCENARIO_VALUES}" \
+        --timeout 10m \
         --wait \
         --wait-for-jobs
   - name: Wait for GreptimeDB
     uses: nick-fields/retry@v3
     with:
-      timeout_minutes: 3
+      timeout_minutes: 10
       max_attempts: 1
       shell: bash
       command: |
