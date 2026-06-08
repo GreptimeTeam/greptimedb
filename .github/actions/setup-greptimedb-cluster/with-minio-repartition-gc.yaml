@@ -3,6 +3,8 @@ logging:
   format: "json"
   filters:
   - mito2::sst::file=debug
+  - query::dist_plan::analyzer=debug
+  - query::dist_plan::planner=debug
 meta:
   configData: |-
     [runtime]

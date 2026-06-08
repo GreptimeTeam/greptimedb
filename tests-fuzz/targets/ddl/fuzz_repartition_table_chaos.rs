@@ -60,7 +60,7 @@ use tests_fuzz::utils::{
     get_gt_fuzz_input_max_rows, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator;
-use tests_fuzz::validator::row::count_values;
+use tests_fuzz::validator::row::count_values_all;
 
 #[derive(Clone)]
 struct FuzzContext {
@@ -230,16 +230,26 @@ async fn validate_table_rows(
     inserted_rows: u64,
 ) -> Result<()> {
     let count_sql = format!("SELECT COUNT(1) AS count FROM {}", table_ctx.name);
-    let count = count_values(&ctx.greptime, &count_sql).await?;
-    assert_eq!(count.count as u64, inserted_rows);
+    let counts = count_values_all(&ctx.greptime, &count_sql).await?;
+    info!("Validate table row count: sql={count_sql}, expected={inserted_rows}, counts={counts:?}");
+    assert_eq!(counts.len(), 1, "count query must return exactly one row");
+    assert_eq!(counts[0].count as u64, inserted_rows);
 
     let timestamp_column_name = table_ctx.timestamp_column().unwrap().name.clone();
     let distinct_count_sql = format!(
         "SELECT COUNT(DISTINCT {}) AS count FROM {}",
         timestamp_column_name, table_ctx.name
     );
-    let distinct_count = count_values(&ctx.greptime, &distinct_count_sql).await?;
-    assert_eq!(distinct_count.count as u64, inserted_rows);
+    let distinct_counts = count_values_all(&ctx.greptime, &distinct_count_sql).await?;
+    info!(
+        "Validate table distinct row count: sql={distinct_count_sql}, expected={inserted_rows}, counts={distinct_counts:?}"
+    );
+    assert_eq!(
+        distinct_counts.len(),
+        1,
+        "distinct count query must return exactly one row"
+    );
+    assert_eq!(distinct_counts[0].count as u64, inserted_rows);
     Ok(())
 }
 
