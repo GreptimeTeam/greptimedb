@@ -21,7 +21,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_telemetry::info;
 use store_api::storage::{FileId, RegionId};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
 use crate::sst::file::RegionFileId;
 
@@ -441,18 +441,32 @@ impl EventListener for IndexBuildListener {
 /// // ... do something while begin is blocked ...
 /// gate.release_begin();           // let begin proceed
 /// ```
-#[derive(Default)]
 pub struct GateIndexBuildListener {
     begin_count: AtomicUsize,
     begin_notify: Notify,
     /// Blocks `on_index_build_begin` until released by the test.
-    begin_blocker: Notify,
+    begin_blocker: Semaphore,
     finish_count: AtomicUsize,
     finish_notify: Notify,
     abort_count: AtomicUsize,
     abort_notify: Notify,
     /// stop = finish or abort
     stop_notify: Notify,
+}
+
+impl Default for GateIndexBuildListener {
+    fn default() -> Self {
+        Self {
+            begin_count: AtomicUsize::new(0),
+            begin_notify: Notify::new(),
+            begin_blocker: Semaphore::new(0),
+            finish_count: AtomicUsize::new(0),
+            finish_notify: Notify::new(),
+            abort_count: AtomicUsize::new(0),
+            abort_notify: Notify::new(),
+            stop_notify: Notify::new(),
+        }
+    }
 }
 
 impl GateIndexBuildListener {
@@ -481,16 +495,17 @@ impl GateIndexBuildListener {
 
     /// Release one blocked `on_index_build_begin` invocation.
     ///
-    /// This uses `Notify::notify_one()`, so each call releases at most one
-    /// blocked begin hook. If a test blocks multiple index build tasks, call
-    /// this method once per task. The release order is not guaranteed to be
-    /// FIFO and cannot target a specific region/file.
+    /// This adds one semaphore permit, so each call releases at most one blocked
+    /// begin hook. If a test blocks multiple index build tasks, call this method
+    /// once per task. Permits are accumulated if release happens before a task
+    /// reaches the gate, but the release order still cannot target a specific
+    /// region/file.
     ///
     /// Tests should generally call [`Self::wait_begin`] first and then release
     /// the gate, so the build is known to be blocked before the test performs
     /// the operation under test.
     pub fn release_begin(&self) {
-        self.begin_blocker.notify_one();
+        self.begin_blocker.add_permits(1);
     }
 
     /// Returns the begin count.
@@ -516,7 +531,11 @@ impl EventListener for GateIndexBuildListener {
         self.begin_count.fetch_add(1, Ordering::Relaxed);
         self.begin_notify.notify_one();
         // Block until the test releases the gate.
-        self.begin_blocker.notified().await;
+        let _permit = self
+            .begin_blocker
+            .acquire()
+            .await
+            .expect("gate semaphore should not be closed");
     }
 
     async fn on_index_build_finish(&self, region_file_id: RegionFileId) {

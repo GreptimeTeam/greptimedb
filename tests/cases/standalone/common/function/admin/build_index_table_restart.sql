@@ -34,6 +34,9 @@ ALTER TABLE build_index_restart_test MODIFY COLUMN msg SET FULLTEXT INDEX;
 
 ADMIN BUILD_INDEX('build_index_restart_test');
 
+-- ALTER may already schedule an async schema-change rebuild. If ADMIN BUILD_INDEX
+-- races with it, the manual task can be duplicate-aborted immediately while the
+-- schema-change task is still finishing, so wait before checking query visibility.
 -- SQLNESS SLEEP 1s
 -- Fulltext index built, verify via fulltext query
 SELECT msg FROM build_index_restart_test WHERE MATCHES(msg, 'fox') ORDER BY ts;

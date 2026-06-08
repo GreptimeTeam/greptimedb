@@ -346,9 +346,10 @@ async fn test_index_build_type_schema_change_multiple_files() {
     put_and_flush(&engine, region_id, &column_schemas, 20..30).await;
     put_and_flush(&engine, region_id, &column_schemas, 30..40).await;
 
-    // Reset scheduler state: flush-triggered no-index builds mark files
-    // as building but produce no index output, polluting building_files.
-    // Reopen ensures subsequent ALTER rebuilds can schedule builds cleanly.
+    // Async flush still schedules index builds for flushed SSTs. Since this
+    // region has no index metadata yet, those builds are no-ops; if they already
+    // stopped, reopening is harmless, and if they are still running, reopening
+    // clears building_files so the subsequent ALTER rebuild schedules cleanly.
     reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
 
     let scanner = engine
