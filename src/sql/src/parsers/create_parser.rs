@@ -410,7 +410,7 @@ impl<'a> ParserContext<'a> {
                 .fail();
             };
 
-            if !utils::is_simple_tql_cte_query(query) {
+            if utils::has_tql_cte(query) && !utils::is_simple_tql_cte_query(query) {
                 return InvalidFlowQuerySnafu {
                     reason: "WITH is only supported for the simplest TQL CTE in CREATE FLOW"
                         .to_string(),
@@ -1962,7 +1962,7 @@ SELECT * FROM tql;
     }
 
     #[test]
-    fn test_parse_create_flow_with_sql_cte_is_unsupported() {
+    fn test_parse_create_flow_with_sql_cte_is_supported() {
         let sql = r#"
 CREATE FLOW f
 SINK TO s
@@ -1970,11 +1970,17 @@ AS
 WITH cte AS (SELECT 1) SELECT * FROM cte;
 "#;
 
-        let err =
+        let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.to_uppercase().contains("WITH"), "err: {msg}");
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        let Statement::CreateFlow(create_flow) = &stmts[0] else {
+            panic!("unexpected stmt: {:?}", stmts[0]);
+        };
+        assert_eq!(
+            "WITH cte AS (SELECT 1) SELECT * FROM cte",
+            create_flow.query.to_string()
+        );
     }
 
     #[test]
