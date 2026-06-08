@@ -1843,7 +1843,7 @@ impl RegionServerInner {
         let metrics = QueryRuntimeStream::metrics_store();
         let producer_metrics = metrics.clone();
 
-        let _handle = common_runtime::spawn_datanode_query(async move {
+        let producer_handle = common_runtime::spawn_datanode_query(async move {
             match inner.handle_read_inner(request, query_ctx).await {
                 Ok(mut stream) => {
                     let schema = stream.schema();
@@ -1877,7 +1877,8 @@ impl RegionServerInner {
         Ok(Box::pin(
             QueryRuntimeStream::new(schema, receiver)
                 .with_output_ordering(output_ordering)
-                .with_metrics_store(metrics),
+                .with_metrics_store(metrics)
+                .with_producer_handle(producer_handle),
         ))
     }
 

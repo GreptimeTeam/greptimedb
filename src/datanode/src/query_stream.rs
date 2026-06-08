@@ -19,6 +19,7 @@ use std::task::{Context, Poll};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
+use common_runtime::JoinHandle;
 use datatypes::schema::SchemaRef;
 use futures_util::Stream;
 use tokio::sync::mpsc;
@@ -32,6 +33,7 @@ pub struct QueryRuntimeStream {
     receiver: mpsc::Receiver<RecordBatchResult<RecordBatch>>,
     output_ordering: Option<Vec<OrderOption>>,
     metrics: QueryRuntimeMetrics,
+    producer_handle: Option<JoinHandle<()>>,
 }
 
 impl QueryRuntimeStream {
@@ -44,6 +46,7 @@ impl QueryRuntimeStream {
             receiver,
             output_ordering: None,
             metrics: Default::default(),
+            producer_handle: None,
         }
     }
 
@@ -62,6 +65,11 @@ impl QueryRuntimeStream {
         self
     }
 
+    pub fn with_producer_handle(mut self, handle: JoinHandle<()>) -> Self {
+        self.producer_handle = Some(handle);
+        self
+    }
+
     pub fn metrics_store() -> QueryRuntimeMetrics {
         Default::default()
     }
@@ -72,6 +80,14 @@ impl Stream for QueryRuntimeStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.receiver.poll_recv(cx)
+    }
+}
+
+impl Drop for QueryRuntimeStream {
+    fn drop(&mut self) {
+        if let Some(handle) = self.producer_handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -160,6 +176,36 @@ mod tests {
         });
 
         assert_eq!(42, stream.metrics().unwrap().elapsed_compute);
+    }
+
+    #[tokio::test]
+    async fn test_query_runtime_stream_drop_aborts_producer() {
+        struct AbortGuard(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for AbortGuard {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+
+        let schema = test_batch().schema.clone();
+        let (_tx, rx) = mpsc::channel(1);
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _guard = AbortGuard(Some(abort_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+
+        let stream = QueryRuntimeStream::new(schema, rx).with_producer_handle(handle);
+        drop(stream);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), abort_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
