@@ -276,7 +276,7 @@ mod tests {
             usize::max(cpus.saturating_sub(1), 1),
             options.datanode_query_rt_size
         );
-        assert_eq!(1, options.datanode_ingest_rt_size);
+        assert_eq!(cpus, options.datanode_ingest_rt_size);
     }
 
     #[test]

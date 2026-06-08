@@ -270,14 +270,7 @@ impl RegionServer {
         request: api::v1::region::QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
-        let server = self.clone();
-        return common_runtime::spawn_datanode_query(async move {
-            server.handle_remote_read_inner(request, query_ctx).await
-        })
-        .await
-        .context(RuntimeJoinSnafu {
-            request_type: "remote_read",
-        })?;
+        self.handle_remote_read_inner(request, query_ctx).await
     }
 
     async fn handle_remote_read_inner(
