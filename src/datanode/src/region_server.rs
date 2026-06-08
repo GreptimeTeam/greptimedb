@@ -13,13 +13,14 @@
 // limitations under the License.
 
 mod catalog;
+mod registrations;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
 use bytes::Bytes;
+use common_base::Plugins;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::datanode::TopicStatsReporter;
@@ -47,7 +49,13 @@ use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
+use datafusion::config::ConfigOptions;
 use datafusion::datasource::TableProvider;
+use datafusion::physical_expr::utils::conjunction;
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_optimizer::filter_pushdown::FilterPushdown;
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::filter::FilterExec;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::schema::SchemaRef;
 use either::Either;
@@ -61,6 +69,7 @@ pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
 use query::options::should_collect_region_watermark_from_extensions;
+use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrappers, PhysicalPlanWrappersRef};
 use serde_json;
 use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
@@ -69,6 +78,7 @@ use servers::grpc::FlightCompression;
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
+use session::query_id::QueryId;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
@@ -99,6 +109,13 @@ use crate::error::{
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::query_stream::QueryRuntimeStream;
 use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
+use crate::region_server::registrations::{
+    RemoteDynFilterId, RemoteDynFilterRegistry, RemoteDynFilterUpdateOutcome,
+    apply_remote_dyn_filter_update, initial_dyn_filter_regs_from_query_ctx,
+    register_initial_dyn_filter_regs, remote_dyn_filter_exprs_for_initial_regs,
+    remove_initial_dyn_filter_regs, unregister_remote_dyn_filter,
+};
+
 const QUERY_RUNTIME_STREAM_BUFFER_SIZE: usize = 8;
 
 #[derive(Clone)]
@@ -112,6 +129,60 @@ pub struct RegionStat {
     pub region_id: RegionId,
     pub engine: String,
     pub role: RegionRole,
+}
+
+struct RemoteDynFilterPhysicalPlanWrapper {
+    server: Weak<RegionServerInner>,
+}
+
+impl PhysicalPlanWrapper for RemoteDynFilterPhysicalPlanWrapper {
+    fn wrap(
+        &self,
+        origin: Arc<dyn ExecutionPlan>,
+        ctx: QueryContextRef,
+        config: &ConfigOptions,
+    ) -> Arc<dyn ExecutionPlan> {
+        let Some(query_id) = ctx.remote_query_id_value() else {
+            return origin;
+        };
+
+        let Some(initial_regs) = initial_dyn_filter_regs_from_query_ctx(&ctx) else {
+            return origin;
+        };
+
+        let Some(server) = self.server.upgrade() else {
+            return origin;
+        };
+
+        let input_schema = origin.schema();
+        let dyn_filters = remote_dyn_filter_exprs_for_initial_regs(
+            &server.initial_remote_dyn_filter_registrations,
+            &query_id,
+            &initial_regs,
+            input_schema.as_ref(),
+        );
+
+        if dyn_filters.is_empty() {
+            return origin;
+        }
+
+        let predicate = conjunction(dyn_filters);
+        let filter_plan = match FilterExec::try_new(predicate, Arc::clone(&origin)) {
+            Ok(plan) => Arc::new(plan) as Arc<dyn ExecutionPlan>,
+            Err(error) => {
+                warn!(error; "Failed to build remote dynamic filter FilterExec");
+                return origin;
+            }
+        };
+
+        match FilterPushdown::new().optimize(Arc::clone(&filter_plan), config) {
+            Ok(plan) => plan,
+            Err(error) => {
+                warn!(error; "Failed to push down remote dynamic filters; keeping FilterExec fallback");
+                filter_plan
+            }
+        }
+    }
 }
 
 impl RegionServer {
@@ -155,6 +226,15 @@ impl RegionServer {
             flight_compression,
             suspend: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn install_remote_dyn_filter_physical_plan_wrapper(&self, plugins: &Plugins) {
+        let wrappers = plugins.get_or_insert::<PhysicalPlanWrappersRef, _>(|| {
+            Arc::new(PhysicalPlanWrappers::default())
+        });
+        wrappers.push(Arc::new(RemoteDynFilterPhysicalPlanWrapper {
+            server: Arc::downgrade(&self.inner),
+        }));
     }
 
     /// Registers an engine.
@@ -257,11 +337,14 @@ impl RegionServer {
             RegionNotReadySnafu { region_id }
         );
 
-        self.inner
+        let provider = self
+            .inner
             .table_provider_factory
             .create(region_id, status.into_engine(), ctx)
             .await
-            .context(ExecuteLogicalPlanSnafu)
+            .context(ExecuteLogicalPlanSnafu)?;
+
+        Ok(provider)
     }
 
     /// Handle reads from remote. They're often query requests received by our Arrow Flight service.
@@ -307,6 +390,30 @@ impl RegionServer {
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
+        let initial_dyn_filter_regs = initial_dyn_filter_regs_from_query_ctx(&query_ctx);
+        let query_id = query_ctx.remote_query_id_value();
+        let registered_filter_ids = if let (Some(query_id), Some(regs)) =
+            (query_id.as_ref(), initial_dyn_filter_regs.as_ref())
+        {
+            register_initial_dyn_filter_regs(
+                &self.inner.initial_remote_dyn_filter_registrations,
+                query_id,
+                region_id,
+                regs,
+            )
+        } else {
+            Vec::new()
+        };
+        let cleanup = match (query_id, registered_filter_ids.is_empty()) {
+            (Some(query_id), false) => Some(RemoteDynFilterCleanup::new(
+                self.clone(),
+                query_id,
+                region_id,
+                registered_filter_ids,
+            )),
+            _ => None,
+        };
+
         let stream = self
             .inner
             .handle_read(
@@ -318,7 +425,13 @@ impl RegionServer {
                 query_ctx.clone(),
             )
             .await?;
+
         let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
+        let stream = if let Some(cleanup) = cleanup {
+            wrap_remote_dyn_filter_cleanup_stream(stream, cleanup)
+        } else {
+            stream
+        };
         Ok(maybe_guard_stream(stream, permit))
     }
 
@@ -750,17 +863,26 @@ impl RegionServer {
             return error::MissingRequiredFieldSnafu { name: "query_id" }.fail();
         }
 
+        let query_id = request.query_id.parse::<QueryId>();
+        ensure!(
+            query_id.is_ok(),
+            UnexpectedSnafu {
+                violated: "remote dynamic filter query_id must be a valid QueryId"
+            }
+        );
+        let query_id = query_id.unwrap();
+
         match request
             .action
             .as_ref()
             .context(error::MissingRequiredFieldSnafu { name: "action" })?
         {
             Action::Update(update) => {
-                self.handle_remote_dyn_filter_update(&request.query_id, update)
+                self.handle_remote_dyn_filter_update(&query_id, update)
                     .await
             }
             Action::Unregister(unregister) => {
-                self.handle_remote_dyn_filter_unregister(&request.query_id, unregister)
+                self.handle_remote_dyn_filter_unregister(&query_id, unregister)
                     .await
             }
         }
@@ -768,7 +890,7 @@ impl RegionServer {
 
     async fn handle_remote_dyn_filter_update(
         &self,
-        query_id: &str,
+        query_id: &QueryId,
         request: &api::v1::region::RemoteDynFilterUpdate,
     ) -> Result<RegionResponse> {
         if request.filter_id.is_empty() {
@@ -779,31 +901,96 @@ impl RegionServer {
             return error::MissingRequiredFieldSnafu { name: "payload" }.fail();
         }
 
-        NotYetImplementedSnafu {
-            what: format!(
-                "remote dyn filter update unary RPC placeholder for query_id {query_id}, filter_id {}",
-                request.filter_id
-            ),
-        }
-        .fail()
+        let filter_id = RemoteDynFilterId::new(request.filter_id.clone());
+        let outcome = apply_remote_dyn_filter_update(
+            &self.inner.initial_remote_dyn_filter_registrations,
+            query_id,
+            &filter_id,
+            &request.payload,
+            request.generation,
+            request.is_complete,
+        );
+        self.log_remote_dyn_filter_update_outcome(query_id, &filter_id, outcome);
+
+        Ok(RegionResponse::new(0))
     }
 
     async fn handle_remote_dyn_filter_unregister(
         &self,
-        query_id: &str,
+        query_id: &QueryId,
         request: &api::v1::region::RemoteDynFilterUnregister,
     ) -> Result<RegionResponse> {
         if request.filter_id.is_empty() {
             return error::MissingRequiredFieldSnafu { name: "filter_id" }.fail();
         }
 
-        NotYetImplementedSnafu {
-            what: format!(
-                "remote dyn filter unregister unary RPC placeholder for query_id {query_id}, filter_id {}",
-                request.filter_id
-            ),
+        let filter_id = RemoteDynFilterId::new(request.filter_id.clone());
+        let outcome = unregister_remote_dyn_filter(
+            &self.inner.initial_remote_dyn_filter_registrations,
+            query_id,
+            &filter_id,
+        );
+        self.log_remote_dyn_filter_update_outcome(query_id, &filter_id, outcome);
+
+        Ok(RegionResponse::new(0))
+    }
+
+    fn log_remote_dyn_filter_update_outcome(
+        &self,
+        query_id: &QueryId,
+        filter_id: &RemoteDynFilterId,
+        outcome: RemoteDynFilterUpdateOutcome,
+    ) {
+        match outcome {
+            RemoteDynFilterUpdateOutcome::MissingRegistration => {
+                warn!(
+                    "Remote dynamic filter update had no active registration, query_id: {}, filter_id: {}",
+                    query_id, filter_id
+                );
+            }
+            RemoteDynFilterUpdateOutcome::Buffered => {
+                debug!(
+                    "Buffered early remote dynamic filter update, query_id: {}, filter_id: {}",
+                    query_id, filter_id
+                );
+            }
+            RemoteDynFilterUpdateOutcome::Applied => {
+                debug!(
+                    "Applied remote dynamic filter update, query_id: {}, filter_id: {}",
+                    query_id, filter_id
+                );
+            }
+            RemoteDynFilterUpdateOutcome::Idempotent => {
+                debug!(
+                    "Ignored idempotent remote dynamic filter update, query_id: {}, filter_id: {}",
+                    query_id, filter_id
+                );
+            }
+            RemoteDynFilterUpdateOutcome::Stale => {
+                debug!(
+                    "Discarded stale remote dynamic filter update, query_id: {}, filter_id: {}",
+                    query_id, filter_id
+                );
+            }
+            RemoteDynFilterUpdateOutcome::AlreadyComplete => {
+                warn!(
+                    "Discarded remote dynamic filter update after completion, query_id: {}, filter_id: {}",
+                    query_id, filter_id
+                );
+            }
+            RemoteDynFilterUpdateOutcome::PayloadTooLarge => {
+                warn!(
+                    "Discarded oversized remote dynamic filter update, query_id: {}, filter_id: {}",
+                    query_id, filter_id
+                );
+            }
+            RemoteDynFilterUpdateOutcome::DecodeFailed => {
+                warn!(
+                    "Remote dynamic filter update failed to decode or apply, query_id: {}, filter_id: {}",
+                    query_id, filter_id
+                );
+            }
         }
-        .fail()
     }
 
     /// Sync region manifest and registers new opened logical regions.
@@ -869,6 +1056,101 @@ fn wrap_flow_region_watermark_stream(
         Box::pin(RegionWatermarkStream::new(stream, region_id, seq)) as SendableRecordBatchStream
     } else {
         stream
+    }
+}
+
+fn wrap_remote_dyn_filter_cleanup_stream(
+    stream: SendableRecordBatchStream,
+    cleanup: RemoteDynFilterCleanup,
+) -> SendableRecordBatchStream {
+    Box::pin(RemoteDynFilterCleanupStream { stream, cleanup })
+}
+
+/// Removes query-scoped remote dynamic filter subscriptions unless ownership is moved elsewhere.
+struct RemoteDynFilterCleanup {
+    server: RegionServer,
+    query_id: QueryId,
+    region_id: RegionId,
+    filter_ids: Vec<RemoteDynFilterId>,
+    cleaned: bool,
+}
+
+impl RemoteDynFilterCleanup {
+    fn new(
+        server: RegionServer,
+        query_id: QueryId,
+        region_id: RegionId,
+        filter_ids: Vec<RemoteDynFilterId>,
+    ) -> Self {
+        Self {
+            server,
+            query_id,
+            region_id,
+            filter_ids,
+            cleaned: false,
+        }
+    }
+
+    fn cleanup_once(&mut self) {
+        if self.cleaned {
+            return;
+        }
+
+        remove_initial_dyn_filter_regs(
+            &self.server.inner.initial_remote_dyn_filter_registrations,
+            &self.query_id,
+            self.region_id,
+            &self.filter_ids,
+        );
+        self.cleaned = true;
+    }
+}
+
+impl Drop for RemoteDynFilterCleanup {
+    fn drop(&mut self) {
+        self.cleanup_once();
+    }
+}
+
+/// Removes query-scoped remote dynamic filter subscriptions when a remote read stream is done.
+struct RemoteDynFilterCleanupStream {
+    stream: SendableRecordBatchStream,
+    cleanup: RemoteDynFilterCleanup,
+}
+
+impl RecordBatchStream for RemoteDynFilterCleanupStream {
+    fn name(&self) -> &str {
+        self.stream.name()
+    }
+
+    fn schema(&self) -> datatypes::schema::SchemaRef {
+        self.stream.schema()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.stream.output_ordering()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.stream.metrics()
+    }
+}
+
+impl Stream for RemoteDynFilterCleanupStream {
+    type Item = common_recordbatch::error::Result<RecordBatch>;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.stream.size_hint()
+    }
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.stream).poll_next(cx) {
+            Poll::Ready(None) => {
+                self.cleanup.cleanup_once();
+                Poll::Ready(None)
+            }
+            other => other,
+        }
     }
 }
 
@@ -1081,6 +1363,9 @@ struct RegionServerInner {
     /// server with a concrete engine; acceptable for now to fetch Mito-specific
     /// info (e.g., list SSTs). Consider a diagnostics trait later.
     mito_engine: RwLock<Option<MitoEngine>>,
+    /// TODO(remote-dyn-filter): Reap this query-scoped placeholder registry on query finish/cancel
+    /// and later fold it into the real remote dyn filter runtime state lifecycle.
+    initial_remote_dyn_filter_registrations: RemoteDynFilterRegistry,
 }
 
 struct RegionServerParallelism {
@@ -1197,6 +1482,7 @@ impl RegionServerInner {
             parallelism,
             topic_stats_reporter: RwLock::new(None),
             mito_engine: RwLock::new(None),
+            initial_remote_dyn_filter_registrations: RemoteDynFilterRegistry::new(),
         }
     }
 
@@ -1970,24 +2256,42 @@ mod tests {
     };
     use api::v1::{Rows, SemanticType};
     use common_error::ext::ErrorExt;
+    use common_query::request::{
+        DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+        InitialDynFilterReg, InitialDynFilterRegs, InitialDynFilterSnapshot,
+    };
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+    use datafusion::arrow::datatypes::Schema as ArrowSchema;
+    use datafusion::physical_expr::expressions::Column;
+    use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+    use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datafusion::physical_plan::sorts::sort::SortExec;
+    use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures_util::StreamExt;
     use mito2::test_util::CreateRequestBuilder;
     use query::options::FLOW_RETURN_REGION_SEQ;
+    use session::context::REMOTE_QUERY_ID_EXTENSION_KEY;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
-    use store_api::region_engine::RegionEngine;
+    use store_api::region_engine::{
+        PrepareRequest, QueryScanContext, RegionEngine, RegionScanner, ScannerProperties,
+        SinglePartitionScanner,
+    };
     use store_api::region_request::{
         PathType, RegionCompactRequest, RegionDeleteRequest, RegionDropRequest, RegionOpenRequest,
         RegionPutRequest, RegionTruncateRequest,
     };
-    use store_api::storage::RegionId;
+    use store_api::storage::{RegionId, ScanRequest};
+    use table::table::scan::RegionScanExec;
 
     use super::*;
     use crate::error::Result;
+    use crate::region_server::registrations::REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES;
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[test]
@@ -2014,6 +2318,14 @@ mod tests {
         assert!(!RegionServerInner::is_ingest_request(
             &RegionRequest::Compact(RegionCompactRequest::default()),
         ));
+    }
+
+    fn test_remote_query_id() -> QueryId {
+        QueryId::new()
+    }
+
+    fn test_remote_dyn_filter_region_id() -> RegionId {
+        RegionId::new(1024, 7)
     }
 
     fn single_value_stream() -> SendableRecordBatchStream {
@@ -2152,6 +2464,233 @@ mod tests {
         while pinned.next().await.is_some() {}
 
         assert!(pinned.as_ref().get_ref().metrics().is_none());
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_can_be_read_from_query_context() {
+        let mut query_ctx = QueryContext::with("greptime", "public");
+        query_ctx.set_extension(
+            INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+            InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+                "filter-1",
+                vec![vec![1, 2, 3]],
+            )])
+            .to_extension_value()
+            .unwrap(),
+        );
+
+        let regs = initial_dyn_filter_regs_from_query_ctx(&Arc::new(query_ctx)).unwrap();
+
+        assert_eq!(regs.regs.len(), 1);
+        assert_eq!(regs.regs[0].filter_id, "filter-1");
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_from_query_context_rejects_duplicate_filter_ids() {
+        let mut query_ctx = QueryContext::with("greptime", "public");
+        query_ctx.set_extension(
+            INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+            InitialDynFilterRegs::new(vec![
+                InitialDynFilterReg::new("filter-1", vec![vec![1, 2, 3]]),
+                InitialDynFilterReg::new("filter-1", vec![vec![4, 5, 6]]),
+            ])
+            .to_extension_value()
+            .unwrap(),
+        );
+
+        let regs = initial_dyn_filter_regs_from_query_ctx(&Arc::new(query_ctx));
+
+        assert!(regs.is_none());
+    }
+
+    #[test]
+    fn register_initial_dyn_filter_regs_creates_query_scoped_entries() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-1", vec![vec![1, 2, 3]]),
+            InitialDynFilterReg::new("filter-2", vec![vec![4, 5, 6]]),
+        ]);
+        let query_id = test_remote_query_id();
+        let region_id = test_remote_dyn_filter_region_id();
+
+        let registered_filter_ids =
+            register_initial_dyn_filter_regs(&regs_by_query, &query_id, region_id, &regs);
+
+        let query_regs = regs_by_query.get(&query_id).unwrap();
+        assert_eq!(query_regs.len(), 2);
+        assert_eq!(
+            registered_filter_ids,
+            vec![
+                RemoteDynFilterId::new("filter-1"),
+                RemoteDynFilterId::new("filter-2")
+            ]
+        );
+        let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
+        assert_eq!(registered.filter_id, RemoteDynFilterId::new("filter-1"));
+        assert_eq!(registered.child_exprs_datafusion_proto, vec![vec![1, 2, 3]]);
+        assert_eq!(registered.subscriber_regions.len(), 1);
+        assert!(registered.subscriber_regions.contains(&region_id));
+    }
+
+    #[test]
+    fn register_initial_dyn_filter_regs_same_region_duplicate_is_idempotent() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+            "filter-1",
+            vec![vec![1, 2, 3]],
+        )]);
+        let query_id = test_remote_query_id();
+        let region_id = test_remote_dyn_filter_region_id();
+
+        let first = register_initial_dyn_filter_regs(&regs_by_query, &query_id, region_id, &regs);
+        let duplicate =
+            register_initial_dyn_filter_regs(&regs_by_query, &query_id, region_id, &regs);
+
+        let query_regs = regs_by_query.get(&query_id).unwrap();
+        assert_eq!(query_regs.len(), 1);
+        assert_eq!(first, vec![RemoteDynFilterId::new("filter-1")]);
+        assert!(duplicate.is_empty());
+        let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
+        assert_eq!(registered.subscriber_regions.len(), 1);
+        assert!(registered.subscriber_regions.contains(&region_id));
+    }
+
+    #[test]
+    fn register_initial_dyn_filter_regs_ignores_invalid_duplicate_payload_set() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-1", vec![vec![1, 2, 3]]),
+            InitialDynFilterReg::new("filter-1", vec![vec![4, 5, 6]]),
+        ]);
+        let query_id = test_remote_query_id();
+        let region_id = test_remote_dyn_filter_region_id();
+
+        register_initial_dyn_filter_regs(&regs_by_query, &query_id, region_id, &regs);
+
+        assert!(regs_by_query.get(&query_id).is_none());
+    }
+
+    #[test]
+    fn register_initial_dyn_filter_regs_tracks_different_region_subscribers_for_same_filter() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+            "filter-1",
+            vec![vec![1, 2, 3]],
+        )]);
+        let query_id = test_remote_query_id();
+        let first_region_id = RegionId::new(1024, 7);
+        let second_region_id = RegionId::new(1024, 8);
+
+        register_initial_dyn_filter_regs(&regs_by_query, &query_id, first_region_id, &regs);
+        register_initial_dyn_filter_regs(&regs_by_query, &query_id, second_region_id, &regs);
+
+        let query_regs = regs_by_query.get(&query_id).unwrap();
+        assert_eq!(query_regs.len(), 1);
+        let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
+        assert_eq!(registered.subscriber_regions.len(), 2);
+        assert!(registered.subscriber_regions.contains(&first_region_id));
+        assert!(registered.subscriber_regions.contains(&second_region_id));
+    }
+
+    #[test]
+    fn remove_initial_dyn_filter_regs_removes_registered_filter_entries() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let other_query_id = test_remote_query_id();
+        let region_id = test_remote_dyn_filter_region_id();
+
+        let registered_filter_ids = register_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            region_id,
+            &InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+                "filter-1",
+                vec![vec![1, 2, 3]],
+            )]),
+        );
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            &other_query_id,
+            region_id,
+            &InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+                "filter-2",
+                vec![vec![4, 5, 6]],
+            )]),
+        );
+
+        remove_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            region_id,
+            &registered_filter_ids,
+        );
+
+        assert!(regs_by_query.get(&query_id).is_none());
+        let other_query_regs = regs_by_query.get(&other_query_id).unwrap();
+        assert_eq!(other_query_regs.len(), 1);
+    }
+
+    #[test]
+    fn remove_initial_dyn_filter_regs_keeps_other_subscribers() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+            "filter-1",
+            vec![vec![1, 2, 3]],
+        )]);
+        let first_region_id = RegionId::new(1024, 7);
+        let second_region_id = RegionId::new(1024, 8);
+
+        let first_subscription =
+            register_initial_dyn_filter_regs(&regs_by_query, &query_id, first_region_id, &regs);
+        register_initial_dyn_filter_regs(&regs_by_query, &query_id, second_region_id, &regs);
+
+        remove_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            first_region_id,
+            &first_subscription,
+        );
+
+        let query_regs = regs_by_query.get(&query_id).unwrap();
+        assert_eq!(query_regs.len(), 1);
+        let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
+        assert_eq!(registered.subscriber_regions.len(), 1);
+        assert!(registered.subscriber_regions.contains(&second_region_id));
+    }
+
+    #[test]
+    fn remove_initial_remote_dyn_filter_regs_keeps_other_filters_for_same_query() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let region_id = test_remote_dyn_filter_region_id();
+
+        let first_subscription = register_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            region_id,
+            &InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]),
+        );
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            region_id,
+            &InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-2", vec![])]),
+        );
+
+        remove_initial_dyn_filter_regs(&regs_by_query, &query_id, region_id, &first_subscription);
+
+        let query_regs = regs_by_query.get(&query_id).unwrap();
+        assert!(
+            query_regs
+                .get(&RemoteDynFilterId::new("filter-1"))
+                .is_none()
+        );
+        assert!(
+            query_regs
+                .get(&RemoteDynFilterId::new("filter-2"))
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -2808,7 +3347,7 @@ mod tests {
 
         let err = mock_region_server
             .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
-                query_id: "query-1".to_string(),
+                query_id: test_remote_query_id().to_string(),
                 action: None,
             })
             .await
@@ -2826,7 +3365,7 @@ mod tests {
 
         let err = mock_region_server
             .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
-                query_id: "query-1".to_string(),
+                query_id: test_remote_query_id().to_string(),
                 action: Some(remote_dyn_filter_request::Action::Update(
                     RemoteDynFilterUpdate {
                         filter_id: String::new(),
@@ -2851,7 +3390,7 @@ mod tests {
 
         let err = mock_region_server
             .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
-                query_id: "query-1".to_string(),
+                query_id: test_remote_query_id().to_string(),
                 action: Some(remote_dyn_filter_request::Action::Update(
                     RemoteDynFilterUpdate {
                         filter_id: "filter-1".to_string(),
@@ -2871,12 +3410,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_remote_dyn_filter_update_placeholder() {
+    async fn test_handle_remote_dyn_filter_update_no_registration() {
         let mock_region_server = mock_region_server();
 
-        let err = mock_region_server
+        let response = mock_region_server
             .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
-                query_id: "query-1".to_string(),
+                query_id: test_remote_query_id().to_string(),
                 action: Some(remote_dyn_filter_request::Action::Update(
                     RemoteDynFilterUpdate {
                         filter_id: "filter-1".to_string(),
@@ -2887,18 +3426,18 @@ mod tests {
                 )),
             })
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert_matches!(err, crate::error::Error::NotYetImplemented { .. });
+        assert_eq!(response.affected_rows, 0);
     }
 
     #[tokio::test]
-    async fn test_handle_remote_dyn_filter_unregister_placeholder() {
+    async fn test_handle_remote_dyn_filter_unregister_no_registration() {
         let mock_region_server = mock_region_server();
 
-        let err = mock_region_server
+        let response = mock_region_server
             .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
-                query_id: "query-1".to_string(),
+                query_id: test_remote_query_id().to_string(),
                 action: Some(remote_dyn_filter_request::Action::Unregister(
                     RemoteDynFilterUnregister {
                         filter_id: "filter-1".to_string(),
@@ -2906,8 +3445,657 @@ mod tests {
                 )),
             })
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert_matches!(err, crate::error::Error::NotYetImplemented { .. });
+        assert_eq!(response.affected_rows, 0);
+    }
+
+    #[test]
+    fn test_apply_remote_dyn_filter_update_missing_registration() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let filter_id = RemoteDynFilterId::new("filter-1");
+
+        let outcome =
+            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[1], 1, false);
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::MissingRegistration);
+
+        let outcome = unregister_remote_dyn_filter(&regs_by_query, &query_id, &filter_id);
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::MissingRegistration);
+    }
+
+    #[test]
+    fn test_apply_remote_dyn_filter_update_buffering_before_scan() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+            "filter-1",
+            vec![vec![1, 2, 3]],
+        )]);
+        let query_id = test_remote_query_id();
+        let filter_id = RemoteDynFilterId::new("filter-1");
+
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            test_remote_dyn_filter_region_id(),
+            &regs,
+        );
+
+        // First update with generation 1: should be Buffered (no runtime installed yet)
+        let outcome =
+            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[1], 1, false);
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Buffered);
+
+        // Update with generation 0: should be Stale (older than pending generation 1)
+        let outcome =
+            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[2], 0, false);
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Stale);
+
+        // Update with generation 1 again: should be Idempotent (same generation)
+        let outcome =
+            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[3], 1, false);
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Idempotent);
+    }
+
+    fn datafusion_payload_bytes(expr: Arc<dyn PhysicalExpr>) -> Vec<u8> {
+        match DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
+            .unwrap()
+        {
+            DynFilterPayload::Datafusion(bytes) => bytes,
+            _ => unreachable!(
+                "DynFilterPayload::from_datafusion_expr only returns datafusion payloads"
+            ),
+        }
+    }
+
+    fn empty_arrow_schema() -> ArrowSchema {
+        ArrowSchema::empty()
+    }
+
+    fn register_empty_remote_dyn_filter(
+        regs_by_query: &RemoteDynFilterRegistry,
+        query_id: &QueryId,
+    ) -> Vec<RemoteDynFilterId> {
+        register_empty_remote_dyn_filter_for_region(
+            regs_by_query,
+            query_id,
+            test_remote_dyn_filter_region_id(),
+        )
+    }
+
+    fn register_empty_remote_dyn_filter_for_region(
+        regs_by_query: &RemoteDynFilterRegistry,
+        query_id: &QueryId,
+        region_id: RegionId,
+    ) -> Vec<RemoteDynFilterId> {
+        register_initial_dyn_filter_regs(
+            regs_by_query,
+            query_id,
+            region_id,
+            &InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]),
+        )
+    }
+
+    #[test]
+    fn initial_remote_dyn_filter_snapshot_initializes_runtime_filter() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let payload = DynFilterPayload::Datafusion(datafusion_payload_bytes(physical_lit(false)));
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-1", vec![])
+                .with_initial_snapshot(InitialDynFilterSnapshot::new(payload, 7, false)),
+        ]);
+
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            test_remote_dyn_filter_region_id(),
+            &regs,
+        );
+        let exprs = remote_dyn_filter_exprs_for_initial_regs(
+            &regs_by_query,
+            &query_id,
+            &regs,
+            &empty_arrow_schema(),
+        );
+
+        assert_eq!(exprs.len(), 1);
+        assert_eq!(format!("{}", exprs[0]), "DynamicFilter [ false ]");
+    }
+
+    struct DynFilterAcceptingScanner {
+        inner: SinglePartitionScanner,
+    }
+
+    impl std::fmt::Debug for DynFilterAcceptingScanner {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "DynFilterAcceptingScanner")
+        }
+    }
+
+    impl DisplayAs for DynFilterAcceptingScanner {
+        fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            self.inner.fmt_as(t, f)
+        }
+    }
+
+    impl RegionScanner for DynFilterAcceptingScanner {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+
+        fn properties(&self) -> &ScannerProperties {
+            self.inner.properties()
+        }
+
+        fn schema(&self) -> Arc<Schema> {
+            self.inner.schema()
+        }
+
+        fn metadata(&self) -> Arc<RegionMetadata> {
+            self.inner.metadata()
+        }
+
+        fn prepare(&mut self, request: PrepareRequest) -> std::result::Result<(), BoxedError> {
+            self.inner.prepare(request)
+        }
+
+        fn scan_partition(
+            &self,
+            ctx: &QueryScanContext,
+            metrics_set: &ExecutionPlanMetricsSet,
+            partition: usize,
+        ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+            self.inner.scan_partition(ctx, metrics_set, partition)
+        }
+
+        fn has_predicate_without_region(&self) -> bool {
+            self.inner.has_predicate_without_region()
+        }
+
+        fn add_dyn_filter_to_predicate(
+            &mut self,
+            filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
+        ) -> Vec<bool> {
+            vec![true; filter_exprs.len()]
+        }
+
+        fn set_logical_region(&mut self, logical_region: bool) {
+            self.inner.set_logical_region(logical_region)
+        }
+    }
+
+    fn region_scan_exec(region_id: RegionId) -> Arc<RegionScanExec> {
+        let scanner = Box::new(DynFilterAcceptingScanner {
+            inner: SinglePartitionScanner::new(
+                single_value_stream(),
+                false,
+                Arc::new(mock_region_metadata(region_id)),
+                None,
+            ),
+        });
+        Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap())
+    }
+
+    fn remote_dyn_filter_query_ctx(
+        query_id: &QueryId,
+        regs: &InitialDynFilterRegs,
+    ) -> QueryContextRef {
+        Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                    query_id.to_string(),
+                )
+                .set_extension(
+                    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
+                    regs.to_extension_value().unwrap(),
+                )
+                .build(),
+        )
+    }
+
+    fn wrap_remote_dyn_filter_plan(
+        server: &RegionServer,
+        plan: Arc<dyn ExecutionPlan>,
+        query_id: &QueryId,
+        regs: &InitialDynFilterRegs,
+    ) -> Arc<dyn ExecutionPlan> {
+        let wrapper = RemoteDynFilterPhysicalPlanWrapper {
+            server: Arc::downgrade(&server.inner),
+        };
+        wrapper.wrap(
+            plan,
+            remote_dyn_filter_query_ctx(query_id, regs),
+            &ConfigOptions::default(),
+        )
+    }
+
+    fn contains_filter_exec(plan: &Arc<dyn ExecutionPlan>) -> bool {
+        plan.as_any().is::<FilterExec>()
+            || plan
+                .children()
+                .into_iter()
+                .any(|child| contains_filter_exec(child))
+    }
+
+    fn sort_with_fetch(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        let ordering =
+            LexOrdering::new([PhysicalSortExpr::new_default(
+                Arc::new(Column::new("timestamp", 0)) as Arc<dyn PhysicalExpr>,
+            )])
+            .unwrap();
+        Arc::new(SortExec::new(ordering, input).with_fetch(Some(1)))
+    }
+
+    fn only_remote_dyn_filter(
+        regs_by_query: &RemoteDynFilterRegistry,
+        query_id: &QueryId,
+    ) -> Arc<DynamicFilterPhysicalExpr> {
+        let initial_regs =
+            InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]);
+        let exprs = remote_dyn_filter_exprs_for_initial_regs(
+            regs_by_query,
+            query_id,
+            &initial_regs,
+            &empty_arrow_schema(),
+        );
+        assert_eq!(1, exprs.len());
+        let expr = exprs.into_iter().next().unwrap();
+        let expr = expr as Arc<dyn std::any::Any + Send + Sync>;
+        expr.downcast::<DynamicFilterPhysicalExpr>().unwrap()
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_filter_exec_pushes_through_transparent_node() {
+        let mock_region_server = mock_region_server();
+        let query_id = test_remote_query_id();
+        let region_id = RegionId::new(1024, 7);
+        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]);
+        register_empty_remote_dyn_filter(
+            &mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations,
+            &query_id,
+        );
+
+        let scan = region_scan_exec(region_id);
+        let plan = Arc::new(CoalescePartitionsExec::new(scan)) as Arc<dyn ExecutionPlan>;
+        let wrapped = wrap_remote_dyn_filter_plan(&mock_region_server, plan, &query_id, &regs);
+
+        assert!(wrapped.as_any().is::<CoalescePartitionsExec>());
+        assert!(!contains_filter_exec(&wrapped));
+
+        let payload = datafusion_payload_bytes(physical_lit(false));
+        let outcome = apply_remote_dyn_filter_update(
+            &mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations,
+            &query_id,
+            &RemoteDynFilterId::new("filter-1"),
+            &payload,
+            0,
+            false,
+        );
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_filter_exec_stays_above_pushdown_barrier() {
+        let mock_region_server = mock_region_server();
+        let query_id = test_remote_query_id();
+        let region_id = RegionId::new(1024, 7);
+        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]);
+        register_empty_remote_dyn_filter(
+            &mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations,
+            &query_id,
+        );
+
+        let scan: Arc<dyn ExecutionPlan> = region_scan_exec(region_id);
+        let plan = sort_with_fetch(scan);
+        let wrapped = wrap_remote_dyn_filter_plan(&mock_region_server, plan, &query_id, &regs);
+
+        let filter = wrapped.as_any().downcast_ref::<FilterExec>().unwrap();
+        assert!(filter.input().as_any().is::<SortExec>());
+
+        let payload = datafusion_payload_bytes(physical_lit(false));
+        let outcome = apply_remote_dyn_filter_update(
+            &mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations,
+            &query_id,
+            &RemoteDynFilterId::new("filter-1"),
+            &payload,
+            0,
+            false,
+        );
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_rejects_oversized_payload_before_buffering() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let filter_id = RemoteDynFilterId::new("filter-1");
+        register_empty_remote_dyn_filter(&regs_by_query, &query_id);
+
+        let oversized = vec![0; REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES + 1];
+        let outcome = apply_remote_dyn_filter_update(
+            &regs_by_query,
+            &query_id,
+            &filter_id,
+            &oversized,
+            1,
+            false,
+        );
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::PayloadTooLarge);
+
+        // The rejected generation must not become the pending generation.
+        let outcome =
+            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[1], 0, false);
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Buffered);
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_generation_zero_applies_as_first_update() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let filter_id = RemoteDynFilterId::new("filter-1");
+        register_empty_remote_dyn_filter(&regs_by_query, &query_id);
+
+        // Installing the wrapper before the update exercises the runtime apply path directly.
+        let dyn_filter = only_remote_dyn_filter(&regs_by_query, &query_id);
+        let payload = datafusion_payload_bytes(physical_lit(false));
+        let outcome = apply_remote_dyn_filter_update(
+            &regs_by_query,
+            &query_id,
+            &filter_id,
+            &payload,
+            0,
+            false,
+        );
+
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
+        assert!(dyn_filter.snapshot_generation() > 1);
+        assert_eq!(format!("{}", dyn_filter.current().unwrap()), "false");
+    }
+
+    #[test]
+    fn test_buffered_update_applies_when_scan_installs_wrapper() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let filter_id = RemoteDynFilterId::new("filter-1");
+        register_empty_remote_dyn_filter(&regs_by_query, &query_id);
+
+        let payload = datafusion_payload_bytes(physical_lit(false));
+        let outcome = apply_remote_dyn_filter_update(
+            &regs_by_query,
+            &query_id,
+            &filter_id,
+            &payload,
+            1,
+            false,
+        );
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Buffered);
+
+        let dyn_filter = only_remote_dyn_filter(&regs_by_query, &query_id);
+        assert!(dyn_filter.snapshot_generation() > 1);
+        assert_eq!(format!("{}", dyn_filter.current().unwrap()), "false");
+    }
+
+    #[test]
+    fn test_unregister_completes_installed_remote_dyn_filter_without_relaxing() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let filter_id = RemoteDynFilterId::new("filter-1");
+        register_empty_remote_dyn_filter(&regs_by_query, &query_id);
+
+        let dyn_filter = only_remote_dyn_filter(&regs_by_query, &query_id);
+        let payload = datafusion_payload_bytes(physical_lit(false));
+        let outcome = apply_remote_dyn_filter_update(
+            &regs_by_query,
+            &query_id,
+            &filter_id,
+            &payload,
+            1,
+            false,
+        );
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
+        assert_eq!(format!("{}", dyn_filter.current().unwrap()), "false");
+
+        let outcome = unregister_remote_dyn_filter(&regs_by_query, &query_id, &filter_id);
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
+        assert!(regs_by_query.get(&query_id).is_none());
+        assert_eq!(format!("{}", dyn_filter.current().unwrap()), "false");
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_unregister_removes_all_region_subscribers_for_filter() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let filter_id = RemoteDynFilterId::new("filter-1");
+        let first_region_id = RegionId::new(1024, 7);
+        let second_region_id = RegionId::new(1024, 8);
+        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]);
+
+        let first_subscription =
+            register_initial_dyn_filter_regs(&regs_by_query, &query_id, first_region_id, &regs);
+        let second_subscription =
+            register_initial_dyn_filter_regs(&regs_by_query, &query_id, second_region_id, &regs);
+        let dyn_filter = only_remote_dyn_filter(&regs_by_query, &query_id);
+
+        let payload = datafusion_payload_bytes(physical_lit(false));
+        let outcome = apply_remote_dyn_filter_update(
+            &regs_by_query,
+            &query_id,
+            &filter_id,
+            &payload,
+            1,
+            false,
+        );
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
+
+        let outcome = unregister_remote_dyn_filter(&regs_by_query, &query_id, &filter_id);
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
+        assert!(regs_by_query.get(&query_id).is_none());
+        assert_eq!(format!("{}", dyn_filter.current().unwrap()), "false");
+
+        // Stream-local cleanup may run after FE's peer-deduplicated unregister. It should be benign.
+        remove_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            first_region_id,
+            &first_subscription,
+        );
+        remove_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            second_region_id,
+            &second_subscription,
+        );
+        assert!(regs_by_query.get(&query_id).is_none());
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_unregister_keeps_other_filters_for_same_query() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let region_id = test_remote_dyn_filter_region_id();
+
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            region_id,
+            &InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]),
+        );
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            region_id,
+            &InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-2", vec![])]),
+        );
+
+        let outcome = unregister_remote_dyn_filter(
+            &regs_by_query,
+            &query_id,
+            &RemoteDynFilterId::new("filter-1"),
+        );
+        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
+
+        let query_regs = regs_by_query.get(&query_id).unwrap();
+        assert!(
+            query_regs
+                .get(&RemoteDynFilterId::new("filter-1"))
+                .is_none()
+        );
+        assert!(
+            query_regs
+                .get(&RemoteDynFilterId::new("filter-2"))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remote_dyn_filter_cleanup_stream_removes_on_eof() {
+        let mock_region_server = mock_region_server();
+        let query_id = test_remote_query_id();
+        let region_id = test_remote_dyn_filter_region_id();
+        let registered_filter_ids = register_empty_remote_dyn_filter(
+            &mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations,
+            &query_id,
+        );
+        let cleanup = RemoteDynFilterCleanup::new(
+            mock_region_server.clone(),
+            query_id,
+            region_id,
+            registered_filter_ids,
+        );
+
+        let stream = wrap_remote_dyn_filter_cleanup_stream(single_value_stream(), cleanup);
+        let mut pinned = Box::pin(stream);
+        while pinned.next().await.is_some() {}
+
+        assert!(
+            mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations
+                .get(&query_id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_cleanup_stream_removes_on_drop() {
+        let mock_region_server = mock_region_server();
+        let query_id = test_remote_query_id();
+        let region_id = test_remote_dyn_filter_region_id();
+        let registered_filter_ids = register_empty_remote_dyn_filter(
+            &mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations,
+            &query_id,
+        );
+        let cleanup = RemoteDynFilterCleanup::new(
+            mock_region_server.clone(),
+            query_id,
+            region_id,
+            registered_filter_ids,
+        );
+
+        let stream = wrap_remote_dyn_filter_cleanup_stream(single_value_stream(), cleanup);
+        drop(stream);
+
+        assert!(
+            mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations
+                .get(&query_id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_cleanup_guard_removes_on_drop_before_stream_wrap() {
+        let mock_region_server = mock_region_server();
+        let query_id = test_remote_query_id();
+        let region_id = test_remote_dyn_filter_region_id();
+        let registered_filter_ids = register_empty_remote_dyn_filter(
+            &mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations,
+            &query_id,
+        );
+
+        let cleanup = RemoteDynFilterCleanup::new(
+            mock_region_server.clone(),
+            query_id,
+            region_id,
+            registered_filter_ids,
+        );
+        drop(cleanup);
+
+        assert!(
+            mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations
+                .get(&query_id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_multi_region_subscription_cleanup() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+            "filter-1",
+            vec![vec![1, 2, 3]],
+        )]);
+        let query_id = test_remote_query_id();
+        let first_region_id = RegionId::new(1024, 7);
+        let second_region_id = RegionId::new(1024, 8);
+
+        // Register the same logical filter for two regions on the same datanode.
+        let first_subscription =
+            register_initial_dyn_filter_regs(&regs_by_query, &query_id, first_region_id, &regs);
+        let second_subscription =
+            register_initial_dyn_filter_regs(&regs_by_query, &query_id, second_region_id, &regs);
+
+        // Verify only one filter entry exists and both region subscribers are tracked explicitly.
+        {
+            let query_regs = regs_by_query.get(&query_id).unwrap();
+            assert_eq!(query_regs.len(), 1);
+            let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
+            assert_eq!(registered.subscriber_regions.len(), 2);
+            assert!(registered.subscriber_regions.contains(&first_region_id));
+            assert!(registered.subscriber_regions.contains(&second_region_id));
+        }
+
+        // One region cleanup should not drop the entry while another region is subscribed.
+        remove_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            first_region_id,
+            &first_subscription,
+        );
+        assert!(regs_by_query.get(&query_id).is_some());
+        {
+            let query_regs = regs_by_query.get(&query_id).unwrap();
+            let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
+            assert_eq!(registered.subscriber_regions.len(), 1);
+            assert!(registered.subscriber_regions.contains(&second_region_id));
+        }
+
+        // Last region cleanup should drop the entry.
+        remove_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            second_region_id,
+            &second_subscription,
+        );
+        assert!(regs_by_query.get(&query_id).is_none());
     }
 }
