@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 use api::v1::region::RegionRequestHeader;
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::expressions::Column;
+use datafusion::physical_expr::expressions::{Column, InListExpr, lit};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::joins::HashTableLookupExpr;
-use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result as DataFusionResult};
 use datafusion_expr::LogicalPlan;
 use datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec;
@@ -31,6 +31,7 @@ use datafusion_proto::physical_plan::to_proto::serialize_physical_expr;
 use datafusion_proto::protobuf::PhysicalExprNode;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 use store_api::storage::RegionId;
 
 /// Current wire-format version for remote dynamic filter payload updates.
@@ -39,6 +40,7 @@ pub use self::initial_remote_dyn_filter_reg::{
     INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES, InitialDynFilterReg,
     InitialDynFilterRegs, InitialDynFilterSnapshot,
 };
+use crate::error::{DynFilterPayloadTooLargeSnafu, Error as CommonQueryError};
 
 pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;
 
@@ -63,24 +65,23 @@ pub enum DynFilterPayload {
 impl DynFilterPayload {
     /// Encodes a DataFusion physical expression into a bounded dynamic filter payload.
     ///
-    /// This rejects expressions that cannot be safely shipped as dynamic filter
-    /// predicates and fails if the serialized payload exceeds `max_payload_bytes`.
+    /// Runtime-only hash lookup predicates are degraded to `true` before encoding so
+    /// serializable min/max bounds around them can still be shipped to remote scans.
+    /// If the full serializable predicate is still larger than `max_payload_bytes`, large
+    /// membership predicates (`IN (...)`) are also degraded to `true` as a bounds-only fallback.
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
     ) -> DataFusionResult<Self> {
-        validate_supported_payload_expr(expr)?;
-
-        let codec = DefaultPhysicalExtensionCodec {};
-        let proto = serialize_physical_expr(expr, &codec)?;
-        let mut bytes = Vec::new();
-        proto.encode(&mut bytes).map_err(|e| {
-            DataFusionError::Internal(format!("Failed to encode PhysicalExprNode: {e}"))
-        })?;
-
-        validate_payload_size(bytes.len(), max_payload_bytes)?;
-
-        Ok(Self::Datafusion(bytes))
+        match encode_remote_dyn_filter_expr(expr, max_payload_bytes, false) {
+            Ok(bytes) => Ok(Self::Datafusion(bytes)),
+            Err(CommonQueryError::DynFilterPayloadTooLarge { .. }) => {
+                encode_remote_dyn_filter_expr(expr, max_payload_bytes, true)
+                    .map(Self::Datafusion)
+                    .map_err(DataFusionError::from)
+            }
+            Err(error) => Err(DataFusionError::from(error)),
+        }
     }
 
     /// Decodes a DataFusion dynamic filter payload against the provided input schema.
@@ -95,7 +96,7 @@ impl DynFilterPayload {
         max_payload_bytes: usize,
     ) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
         let Self::Datafusion(bytes) = self;
-        validate_payload_size(bytes.len(), max_payload_bytes)?;
+        validate_payload_size(bytes.len(), max_payload_bytes).map_err(DataFusionError::from)?;
         let codec = DefaultPhysicalExtensionCodec {};
         let proto = PhysicalExprNode::decode(bytes.as_slice()).map_err(|e| {
             DataFusionError::Internal(format!("Failed to decode PhysicalExprNode: {e}"))
@@ -118,13 +119,41 @@ fn encode_physical_expr_to_bytes(expr: &Arc<dyn PhysicalExpr>) -> DataFusionResu
     Ok(bytes)
 }
 
+fn encode_remote_dyn_filter_expr(
+    expr: &Arc<dyn PhysicalExpr>,
+    max_payload_bytes: usize,
+    bounds_only: bool,
+) -> Result<Vec<u8>, CommonQueryError> {
+    let expr = portable_remote_dyn_filter_expr(Arc::clone(expr), bounds_only)
+        .map_err(CommonQueryError::from)?;
+    let bytes = encode_physical_expr_to_bytes(&expr).map_err(CommonQueryError::from)?;
+    validate_payload_size(bytes.len(), max_payload_bytes)?;
+    Ok(bytes)
+}
+
+fn portable_remote_dyn_filter_expr(
+    expr: Arc<dyn PhysicalExpr>,
+    bounds_only: bool,
+) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
+    expr.transform_up(|node| {
+        if node.as_any().is::<HashTableLookupExpr>()
+            || (bounds_only && node.as_any().is::<InListExpr>())
+        {
+            Ok(Transformed::yes(lit(true)))
+        } else {
+            Ok(Transformed::no(node))
+        }
+    })
+    .map(|transformed| transformed.data)
+}
+
 pub(crate) fn decode_physical_expr_from_bytes(
     bytes: &[u8],
     task_ctx: &TaskContext,
     input_schema: &datafusion::arrow::datatypes::Schema,
     max_payload_bytes: usize,
 ) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
-    validate_payload_size(bytes.len(), max_payload_bytes)?;
+    validate_payload_size(bytes.len(), max_payload_bytes).map_err(DataFusionError::from)?;
     let codec = DefaultPhysicalExtensionCodec {};
     let proto = PhysicalExprNode::decode(bytes).map_err(|e| {
         DataFusionError::Internal(format!("Failed to decode PhysicalExprNode: {e}"))
@@ -139,13 +168,14 @@ pub(crate) fn decode_physical_expr_from_bytes(
 fn validate_payload_size(
     payload_size_bytes: usize,
     max_payload_bytes: usize,
-) -> DataFusionResult<()> {
-    if payload_size_bytes > max_payload_bytes {
-        return Err(DataFusionError::Plan(format!(
-            "DynFilterPayload::Datafusion is {} bytes, which exceeds the configured limit of {} bytes",
-            payload_size_bytes, max_payload_bytes
-        )));
-    }
+) -> Result<(), CommonQueryError> {
+    ensure!(
+        payload_size_bytes <= max_payload_bytes,
+        DynFilterPayloadTooLargeSnafu {
+            payload_size_bytes,
+            max_payload_bytes,
+        }
+    );
 
     Ok(())
 }
@@ -263,7 +293,11 @@ mod tests {
     use base64::Engine;
     use base64::prelude::BASE64_STANDARD;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
-    use datafusion::physical_expr::expressions::Column;
+    use datafusion::physical_expr::expressions::{BinaryExpr, Column, InListExpr, lit};
+    use datafusion::physical_plan::expressions::col;
+    use datafusion::physical_plan::joins::join_hash_map::JoinHashMapU32;
+    use datafusion::physical_plan::joins::{HashTableLookupExpr, Map, SeededRandomState};
+    use datafusion_expr::Operator;
 
     use super::*;
 
@@ -408,11 +442,113 @@ mod tests {
     }
 
     #[test]
+    fn dyn_filter_payload_hash_lookup_fallback_preserves_bounds() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "device_id",
+            DataType::Int32,
+            false,
+        )]));
+        let device_id = col("device_id", &schema).unwrap();
+        let lower_bound = Arc::new(BinaryExpr::new(
+            Arc::clone(&device_id),
+            Operator::GtEq,
+            lit(10i32),
+        )) as Arc<dyn PhysicalExpr>;
+        let lookup = Arc::new(HashTableLookupExpr::new(
+            vec![Arc::clone(&device_id)],
+            SeededRandomState::with_seeds(0, 0, 0, 0),
+            Arc::new(Map::HashMap(Box::new(JoinHashMapU32::with_capacity(0)))),
+            "hash_lookup".to_string(),
+        )) as Arc<dyn PhysicalExpr>;
+        let expr =
+            Arc::new(BinaryExpr::new(lower_bound, Operator::And, lookup)) as Arc<dyn PhysicalExpr>;
+
+        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
+        let decoded = payload
+            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .unwrap();
+
+        assert!(!contains_expr::<HashTableLookupExpr>(&decoded));
+        let decoded_display = decoded.to_string();
+        assert!(decoded_display.contains("device_id"));
+        assert!(decoded_display.contains(">="));
+        assert!(!decoded_display.contains("hash_lookup"));
+    }
+
+    #[test]
+    fn dyn_filter_payload_oversized_inlist_falls_back_to_bounds() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "device_id",
+            DataType::Int32,
+            false,
+        )]));
+        let device_id = col("device_id", &schema).unwrap();
+        let lower_bound = Arc::new(BinaryExpr::new(
+            Arc::clone(&device_id),
+            Operator::GtEq,
+            lit(8192i32),
+        )) as Arc<dyn PhysicalExpr>;
+        let upper_bound = Arc::new(BinaryExpr::new(
+            Arc::clone(&device_id),
+            Operator::LtEq,
+            lit(8255i32),
+        )) as Arc<dyn PhysicalExpr>;
+        let bounds = Arc::new(BinaryExpr::new(lower_bound, Operator::And, upper_bound))
+            as Arc<dyn PhysicalExpr>;
+        let in_list = Arc::new(
+            InListExpr::try_new(
+                Arc::clone(&device_id),
+                (8192..8256).map(lit).collect(),
+                false,
+                &schema,
+            )
+            .unwrap(),
+        ) as Arc<dyn PhysicalExpr>;
+        let expr = Arc::new(BinaryExpr::new(Arc::clone(&bounds), Operator::And, in_list))
+            as Arc<dyn PhysicalExpr>;
+        let bounds_only = portable_remote_dyn_filter_expr(Arc::clone(&expr), true).unwrap();
+        let bounds_only_size = encode_physical_expr_to_bytes(&bounds_only).unwrap().len();
+        let full_size = encode_physical_expr_to_bytes(&expr).unwrap().len();
+        assert!(full_size > bounds_only_size);
+
+        let payload = DynFilterPayload::from_datafusion_expr(&expr, bounds_only_size).unwrap();
+        let decoded = payload
+            .decode_datafusion_expr(&TaskContext::default(), &schema, bounds_only_size)
+            .unwrap();
+
+        assert!(!contains_expr::<InListExpr>(&decoded));
+        let decoded_display = decoded.to_string();
+        assert!(decoded_display.contains("device_id"));
+        assert!(decoded_display.contains(">="));
+        assert!(decoded_display.contains("<="));
+    }
+
+    #[test]
     fn dyn_filter_payload_rejects_oversized_payload() {
         let expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new("host", 0));
 
         let err = DynFilterPayload::from_datafusion_expr(&expr, 1).unwrap_err();
 
-        assert!(matches!(err, DataFusionError::Plan(_)));
+        let DataFusionError::External(error) = err else {
+            panic!("expected external common query error, got: {err:?}");
+        };
+        assert!(matches!(
+            error.downcast_ref::<CommonQueryError>(),
+            Some(CommonQueryError::DynFilterPayloadTooLarge { .. })
+        ));
+    }
+
+    fn contains_expr<T: 'static>(expr: &Arc<dyn PhysicalExpr>) -> bool {
+        let mut found = false;
+        expr.apply(|node| {
+            if node.as_any().is::<T>() {
+                found = true;
+                Ok(TreeNodeRecursion::Stop)
+            } else {
+                Ok(TreeNodeRecursion::Continue)
+            }
+        })
+        .unwrap();
+        found
     }
 }
