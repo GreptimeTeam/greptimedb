@@ -98,6 +98,14 @@ pub(crate) fn is_simple_tql_cte_query(query: &Query) -> bool {
     reference == cte_name
 }
 
+pub(crate) fn has_tql_cte(query: &Query) -> bool {
+    query.hybrid_cte.as_ref().is_some_and(|with| {
+        with.cte_tables
+            .iter()
+            .any(|cte| matches!(cte.content, CteContent::Tql(_)))
+    })
+}
+
 fn has_only_hybrid_tql_cte(query: &Query) -> bool {
     query
         .inner

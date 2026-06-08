@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use api::v1::CreateTableExpr;
+use api::v1::{CreateTableExpr, TableName};
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::breakup_insert_plan;
@@ -25,8 +25,9 @@ use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::sql::unparser::expr_to_sql;
-use datafusion_common::DFSchemaRef;
 use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::utils::quote_identifier;
+use datafusion_common::{DFSchemaRef, TableReference};
 use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp, col, lit};
 use datatypes::schema::Schema;
 use query::QueryEngineRef;
@@ -51,7 +52,7 @@ use crate::batching_mode::state::{
 use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    AddFilterRewriter, ColumnMatcherRewriter, gen_plan_with_matching_schema,
+    AddFilterRewriter, ColumnMatcherRewriter, df_plan_to_sql, gen_plan_with_matching_schema,
     get_table_info_df_schema, sql_to_df_plan,
 };
 use crate::df_optimizer::apply_df_optimizer;
@@ -103,6 +104,32 @@ fn is_merge_mode_last_non_null(options: &HashMap<String, String>) -> bool {
         .get(MERGE_MODE_KEY)
         .map(|mode| mode.eq_ignore_ascii_case("last_non_null"))
         .unwrap_or(false)
+}
+
+fn encode_insert_plan_request(
+    insert_to: TableName,
+    insert_input_plan: &LogicalPlan,
+) -> Result<api::v1::QueryRequest, Error> {
+    let message = DFLogicalSubstraitConvertor {}
+        .encode(insert_input_plan, DefaultSerializer)
+        .context(SubstraitEncodeLogicalPlanSnafu)?;
+    Ok(api::v1::QueryRequest {
+        query: Some(api::v1::query_request::Query::InsertIntoPlan(
+            api::v1::InsertIntoPlan {
+                table_name: Some(insert_to),
+                logical_plan: message.to_vec(),
+            },
+        )),
+    })
+}
+
+fn format_insert_target_columns(plan: &LogicalPlan) -> String {
+    plan.schema()
+        .fields()
+        .iter()
+        .map(|field| quote_identifier(field.name()).to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Clone)]
@@ -549,19 +576,52 @@ impl BatchingTask {
                 .with_label_values(&[flow_id.to_string().as_str()])
                 .start_timer();
 
-            let req = if let Some((insert_to, insert_plan)) =
+            let req = if let Some((insert_to, insert_input_plan)) =
                 breakup_insert_plan(&plan, catalog, schema)
             {
-                let message = DFLogicalSubstraitConvertor {}
-                    .encode(&insert_plan, DefaultSerializer)
-                    .context(SubstraitEncodeLogicalPlanSnafu)?;
-                api::v1::QueryRequest {
-                    query: Some(api::v1::query_request::Query::InsertIntoPlan(
-                        api::v1::InsertIntoPlan {
-                            table_name: Some(insert_to),
-                            logical_plan: message.to_vec(),
-                        },
-                    )),
+                if query_mode == CheckpointMode::FullSnapshot
+                    && matches!(self.config.query_type, QueryType::Sql)
+                    && self.config.flow_eval_interval.is_some()
+                    && self.config.time_window_expr.is_none()
+                {
+                    // Evaluation-interval SQL flows without a time-window
+                    // expression execute as full-query snapshots. Send these
+                    // as SQL text instead of Substrait to avoid logical-plan
+                    // round-trip issues around complex joins/unions/CTEs and
+                    // duplicate field aliases. Keep ordinary SQL full snapshots
+                    // on the existing InsertIntoPlan path because SQL unparsing
+                    // is not valid for every planned aggregate shape yet.
+                    // If the local SQL unparser does not support this plan,
+                    // keep the previous InsertIntoPlan transport as a fallback.
+                    match df_plan_to_sql(&insert_input_plan) {
+                        Ok(select_sql) => {
+                            let target_columns = format_insert_target_columns(&insert_input_plan);
+                            let sql = format!(
+                                "INSERT INTO {} ({}) {}",
+                                TableReference::full(
+                                    insert_to.catalog_name.as_str(),
+                                    insert_to.schema_name.as_str(),
+                                    insert_to.table_name.as_str(),
+                                )
+                                .to_quoted_string(),
+                                target_columns,
+                                select_sql
+                            );
+                            api::v1::QueryRequest {
+                                query: Some(api::v1::query_request::Query::Sql(sql)),
+                            }
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Failed to unparse full-snapshot SQL flow {} plan; \
+                                 falling back to InsertIntoPlan: {:?}",
+                                flow_id, err
+                            );
+                            encode_insert_plan_request(insert_to, &insert_input_plan)?
+                        }
+                    }
+                } else {
+                    encode_insert_plan_request(insert_to, &insert_input_plan)?
                 }
             } else {
                 let message = DFLogicalSubstraitConvertor {}
