@@ -1203,10 +1203,11 @@ impl ManifestContext {
         }
 
         if let Some(hook) = hook
-            && let Some(action_list) = action_list_for_hook {
-                hook.on_manifest_updated(manifest.metadata.region_id, &action_list, version)
-                    .await;
-            }
+            && let Some(action_list) = action_list_for_hook
+        {
+            hook.on_manifest_updated(manifest.metadata.region_id, &action_list, version)
+                .await;
+        }
 
         Ok(version)
     }

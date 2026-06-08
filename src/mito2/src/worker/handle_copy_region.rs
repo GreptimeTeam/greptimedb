@@ -19,7 +19,9 @@ use store_api::storage::{FileId, RegionId};
 
 use crate::error::{InvalidRequestSnafu, MissingManifestSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::region::{FileDescriptor, MitoRegionRef, RegionFileCopier, RegionLeaderState, RegionMetadataLoader};
+use crate::region::{
+    FileDescriptor, MitoRegionRef, RegionFileCopier, RegionLeaderState, RegionMetadataLoader,
+};
 use crate::request::{
     BackgroundNotify, CopyRegionFromFinished, CopyRegionFromRequest, WorkerRequest,
 };
@@ -228,7 +230,10 @@ impl<S> RegionWorkerLoop<S> {
             committed_sequence: None,
         };
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-        info!("Applying {:?} to region {target_region_id}, reason: CopyRegionFrom", edit);
+        info!(
+            "Applying {:?} to region {target_region_id}, reason: CopyRegionFrom",
+            edit
+        );
         let version = region
             .manifest_ctx
             .update_manifest(RegionLeaderState::Writable, action_list, false)
