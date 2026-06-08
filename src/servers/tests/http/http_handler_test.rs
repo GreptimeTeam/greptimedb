@@ -384,7 +384,6 @@ async fn test_status() {
         .unwrap_or_else(|_| "unknown".to_string());
     let build_info = common_version::build_info();
     let expected_json = http_handler::StatusResponse {
-        source_time: build_info.source_time,
         commit: build_info.commit,
         branch: build_info.branch,
         rustc_version: build_info.rustc,

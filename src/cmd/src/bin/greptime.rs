@@ -144,8 +144,7 @@ async fn start(cli: Command) -> Result<()> {
 
 fn setup_human_panic() {
     human_panic::setup_panic!(
-        human_panic::Metadata::new(product_name(), version())
-            .homepage("https://github.com/GreptimeTeam/greptimedb/discussions")
+        human_panic::Metadata::new(product_name(), version()).homepage("https://greptime.cn")
     );
 
     common_telemetry::set_panic_hook();
