@@ -193,6 +193,7 @@ impl FlownodeServer {
     async fn start_workers(&self) -> Result<(), Error> {
         let manager_ref = self.inner.flow_service.dual_engine.clone();
         let mut state_report_task_handler = self.inner.state_report_task_handler.lock().await;
+        let started_state_report_task = state_report_task_handler.is_none();
         if state_report_task_handler.is_none() {
             *state_report_task_handler = manager_ref.clone().start_state_report_task().await;
         }
@@ -206,13 +207,37 @@ impl FlownodeServer {
             .await
             .replace(handle);
 
-        self.inner
+        if let Err(err) = self
+            .inner
             .flow_service
             .dual_engine
             .start_flow_consistent_check_task()
-            .await?;
+            .await
+        {
+            self.rollback_started_workers(started_state_report_task)
+                .await;
+            return Err(err);
+        }
 
         Ok(())
+    }
+
+    async fn rollback_started_workers(&self, abort_state_report_task: bool) {
+        let tx = self.inner.worker_shutdown_tx.lock().await;
+        if tx.send(()).is_err() {
+            info!("Receiver dropped, the flow node server has already shutdown");
+        }
+        drop(tx);
+
+        if let Some(handle) = self.inner.streaming_task_handler.lock().await.take() {
+            handle.abort();
+        }
+
+        if abort_state_report_task {
+            if let Some(handle) = self.inner.state_report_task_handler.lock().await.take() {
+                handle.abort();
+            }
+        }
     }
 
     /// Stop the background task for streaming computation.
@@ -669,11 +694,13 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use api::v1::meta::Role;
     use catalog::memory::new_memory_catalog_manager;
     use common_base::Plugins;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::flow::FlowMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use meta_client::client::MetaClient;
     use query::options::QueryOptions;
 
     use super::*;
@@ -683,6 +710,22 @@ mod tests {
     use crate::utils::SizeReportSender;
 
     async fn new_test_flownode_server() -> (FlownodeServer, SizeReportSender) {
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+
+        new_test_flownode_server_with_frontend_client(
+            frontend_client,
+            BatchingModeOptions::default(),
+            None,
+        )
+        .await
+    }
+
+    async fn new_test_flownode_server_with_frontend_client(
+        frontend_client: FrontendClient,
+        batching_opts: BatchingModeOptions,
+        node_id: Option<u32>,
+    ) -> (FlownodeServer, SizeReportSender) {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_meta.init().await.unwrap();
@@ -691,19 +734,17 @@ mod tests {
         let query_engine = crate::test_utils::create_test_query_engine();
 
         let streaming_engine = Arc::new(StreamingEngine::new(
-            None,
+            node_id,
             query_engine.clone(),
             table_meta.clone(),
         ));
-        let (frontend_client, _handler) =
-            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
         let batching_engine = Arc::new(BatchingEngine::new(
             Arc::new(frontend_client),
             query_engine,
             flow_meta.clone(),
             table_meta,
             catalog_manager.clone(),
-            BatchingModeOptions::default(),
+            batching_opts,
         ));
         let dual_engine = Arc::new(FlowDualEngine::new(
             streaming_engine,
@@ -734,5 +775,34 @@ mod tests {
         report_sender.query(Duration::from_secs(3)).await.unwrap();
 
         server.stop_workers().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_start_workers_rolls_back_on_check_task_start_failure() {
+        let batching_opts = BatchingModeOptions {
+            experimental_frontend_scan_timeout: Duration::from_millis(1),
+            ..Default::default()
+        };
+        let frontend_client = FrontendClient::from_meta_client(
+            Arc::new(MetaClient::new(0, Role::Frontend)),
+            QueryOptions::default(),
+            batching_opts.clone(),
+        )
+        .unwrap();
+        let (server, _report_sender) =
+            new_test_flownode_server_with_frontend_client(frontend_client, batching_opts, Some(1))
+                .await;
+
+        server.start_workers().await.unwrap_err();
+
+        assert!(server.inner.streaming_task_handler.lock().await.is_none());
+        assert!(
+            server
+                .inner
+                .state_report_task_handler
+                .lock()
+                .await
+                .is_none()
+        );
     }
 }

@@ -78,6 +78,7 @@ tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
+arrow-flight.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-catalog.workspace = true
 pretty_assertions.workspace = true
@@ -85,3 +86,4 @@ prost.workspace = true
 query.workspace = true
 session.workspace = true
 table.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
