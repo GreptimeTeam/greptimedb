@@ -331,14 +331,7 @@ impl RegionServer {
 
     #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
-        let server = self.clone();
-        return common_runtime::spawn_datanode_query(async move {
-            server.handle_read_inner(request).await
-        })
-        .await
-        .context(RuntimeJoinSnafu {
-            request_type: "read",
-        })?;
+        self.handle_read_inner(request).await
     }
 
     async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
