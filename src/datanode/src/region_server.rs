@@ -2586,16 +2586,8 @@ mod tests {
         remove_initial_dyn_filter_regs(&regs_by_query, &query_id, region_id, &first_subscription);
 
         let query_regs = regs_by_query.get(&query_id).unwrap();
-        assert!(
-            query_regs
-                .get(&RemoteDynFilterId::new("filter-1"))
-                .is_none()
-        );
-        assert!(
-            query_regs
-                .get(&RemoteDynFilterId::new("filter-2"))
-                .is_some()
-        );
+        assert!(!query_regs.contains_key(&RemoteDynFilterId::new("filter-1")));
+        assert!(query_regs.contains_key(&RemoteDynFilterId::new("filter-2")));
     }
 
     #[tokio::test]
@@ -3577,11 +3569,7 @@ mod tests {
     }
 
     fn contains_filter_exec(plan: &Arc<dyn ExecutionPlan>) -> bool {
-        plan.as_any().is::<FilterExec>()
-            || plan
-                .children()
-                .into_iter()
-                .any(|child| contains_filter_exec(child))
+        plan.as_any().is::<FilterExec>() || plan.children().into_iter().any(contains_filter_exec)
     }
 
     fn sort_with_fetch(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
@@ -3850,16 +3838,8 @@ mod tests {
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
 
         let query_regs = regs_by_query.get(&query_id).unwrap();
-        assert!(
-            query_regs
-                .get(&RemoteDynFilterId::new("filter-1"))
-                .is_none()
-        );
-        assert!(
-            query_regs
-                .get(&RemoteDynFilterId::new("filter-2"))
-                .is_some()
-        );
+        assert!(!query_regs.contains_key(&RemoteDynFilterId::new("filter-1")));
+        assert!(query_regs.contains_key(&RemoteDynFilterId::new("filter-2")));
     }
 
     #[tokio::test]
