@@ -233,10 +233,10 @@ impl FlownodeServer {
             handle.abort();
         }
 
-        if abort_state_report_task {
-            if let Some(handle) = self.inner.state_report_task_handler.lock().await.take() {
-                handle.abort();
-            }
+        if abort_state_report_task
+            && let Some(handle) = self.inner.state_report_task_handler.lock().await.take()
+        {
+            handle.abort();
         }
     }
 
