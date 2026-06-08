@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use common_time::Timezone;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::config::ConfigOptions;
@@ -21,10 +19,10 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
 use datafusion_expr::expr::InList;
 use datafusion_expr::{
-    Between, BinaryExpr, Expr, ExprSchemable, Filter, Literal, LogicalPlan, Operator, TableScan,
+    Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan,
 };
 use datatypes::arrow::compute;
-use datatypes::arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
+use datatypes::arrow::datatypes::DataType;
 use session::context::QueryContextRef;
 
 use crate::QueryEngineContext;
@@ -146,9 +144,7 @@ impl TypeConverter {
     ) -> Result<ScalarValue> {
         match (target_type, value) {
             (DataType::Timestamp(_, _), ScalarValue::Utf8(Some(v))) => {
-                let parsed = string_to_timestamp_scalar(v, Some(&self.query_ctx.timezone()))?;
-                // Align the parsed timestamp scalar to the compared column's exact unit.
-                self.cast_scalar_value(&parsed, target_type)
+                string_to_timestamp_ms(v, Some(&self.query_ctx.timezone()))
             }
             (DataType::Boolean, ScalarValue::Utf8(Some(v))) => match v.to_lowercase().as_str() {
                 "true" => Ok(ScalarValue::Boolean(Some(true))),
@@ -205,166 +201,6 @@ impl TypeConverter {
             _ => Ok((left.clone(), right.clone())),
         }
     }
-
-    fn convert_comparison_expr(&self, left: Expr, op: Operator, right: Expr) -> Result<Expr> {
-        if let Some(expr) = self.convert_timestamp_string_comparison(&left, op, &right)? {
-            return Ok(expr);
-        }
-
-        let Some(swapped_op) = op.swap() else {
-            let (left, right) = self.convert_type(&left, &right)?;
-            return Ok(Expr::BinaryExpr(BinaryExpr {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            }));
-        };
-
-        if let Some(expr) = self.convert_timestamp_string_comparison(&right, swapped_op, &left)? {
-            return Ok(expr);
-        }
-
-        let (left, right) = self.convert_type(&left, &right)?;
-        Ok(Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        }))
-    }
-
-    fn convert_timestamp_string_comparison(
-        &self,
-        column_expr: &Expr,
-        op: Operator,
-        literal_expr: &Expr,
-    ) -> Result<Option<Expr>> {
-        let Some(DataType::Timestamp(target_arrow_unit, target_timezone)) =
-            self.column_type(column_expr)
-        else {
-            return Ok(None);
-        };
-        let Expr::Literal(ScalarValue::Utf8(Some(value)), _) = literal_expr else {
-            return Ok(None);
-        };
-
-        let literal = Timestamp::from_str(value, Some(&self.query_ctx.timezone()))
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let target_unit = TimeUnit::from(target_arrow_unit);
-
-        if literal.unit().factor() >= target_unit.factor() {
-            let casted = timestamp_to_scalar(literal, target_unit, target_timezone)?;
-            return Ok(Some(Expr::BinaryExpr(BinaryExpr {
-                left: Box::new(column_expr.clone()),
-                op,
-                right: Box::new(casted.lit()),
-            })));
-        }
-
-        let floor = literal
-            .convert_to(target_unit)
-            .ok_or_else(|| DataFusionError::Plan("timestamp literal overflow".to_string()))?;
-        let ceil = literal
-            .convert_to_ceil(target_unit)
-            .ok_or_else(|| DataFusionError::Plan("timestamp literal overflow".to_string()))?;
-        let is_exact = floor == ceil;
-        let literal =
-            |value| timestamp_scalar(target_arrow_unit, target_timezone.clone(), value).lit();
-        let expr = match op {
-            Operator::Eq if is_exact => column_expr.clone().eq(literal(floor.value())),
-            Operator::Eq => false.lit(),
-            Operator::NotEq if is_exact => column_expr.clone().not_eq(literal(floor.value())),
-            Operator::NotEq => true.lit(),
-            Operator::Lt => {
-                column_expr
-                    .clone()
-                    .lt_eq(literal(ceil.value().checked_sub(1).ok_or_else(|| {
-                        DataFusionError::Plan("timestamp literal overflow".to_string())
-                    })?))
-            }
-            Operator::LtEq => column_expr.clone().lt_eq(literal(floor.value())),
-            Operator::Gt => {
-                column_expr
-                    .clone()
-                    .gt_eq(literal(floor.value().checked_add(1).ok_or_else(|| {
-                        DataFusionError::Plan("timestamp literal overflow".to_string())
-                    })?))
-            }
-            Operator::GtEq => column_expr.clone().gt_eq(literal(ceil.value())),
-            _ => return Ok(None),
-        };
-
-        Ok(Some(expr))
-    }
-
-    fn convert_timestamp_string_between(
-        &self,
-        expr: &Expr,
-        negated: bool,
-        low: &Expr,
-        high: &Expr,
-    ) -> Result<Option<Expr>> {
-        let (low_op, high_op) = if negated {
-            (Operator::Lt, Operator::Gt)
-        } else {
-            (Operator::GtEq, Operator::LtEq)
-        };
-        let Some(low) = self.convert_timestamp_string_comparison(expr, low_op, low)? else {
-            return Ok(None);
-        };
-        let Some(high) = self.convert_timestamp_string_comparison(expr, high_op, high)? else {
-            return Ok(None);
-        };
-
-        Ok(Some(if negated { low.or(high) } else { low.and(high) }))
-    }
-
-    fn convert_timestamp_string_in_list(
-        &self,
-        expr: &Expr,
-        list: &[Expr],
-        negated: bool,
-    ) -> Result<Option<Expr>> {
-        let Some(DataType::Timestamp(target_arrow_unit, target_timezone)) = self.column_type(expr)
-        else {
-            return Ok(None);
-        };
-        let target_unit = TimeUnit::from(target_arrow_unit);
-        let mut converted = Vec::with_capacity(list.len());
-
-        for item in list {
-            let Expr::Literal(ScalarValue::Utf8(Some(value)), _) = item else {
-                return Ok(None);
-            };
-            let literal = Timestamp::from_str(value, Some(&self.query_ctx.timezone()))
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-            if literal.unit().factor() >= target_unit.factor() {
-                converted.push(
-                    timestamp_to_scalar(literal, target_unit, target_timezone.clone())?.lit(),
-                );
-                continue;
-            }
-
-            let floor = literal
-                .convert_to(target_unit)
-                .ok_or_else(|| DataFusionError::Plan("timestamp literal overflow".to_string()))?;
-            let ceil = literal
-                .convert_to_ceil(target_unit)
-                .ok_or_else(|| DataFusionError::Plan("timestamp literal overflow".to_string()))?;
-            if floor == ceil {
-                converted.push(
-                    timestamp_scalar(target_arrow_unit, target_timezone.clone(), floor.value())
-                        .lit(),
-                );
-            }
-        }
-
-        Ok(Some(if converted.is_empty() {
-            negated.lit()
-        } else {
-            expr.clone().in_list(converted, negated)
-        }))
-    }
 }
 
 impl TreeNodeRewriter for TypeConverter {
@@ -378,7 +214,14 @@ impl TreeNodeRewriter for TypeConverter {
                 | Operator::Lt
                 | Operator::LtEq
                 | Operator::Gt
-                | Operator::GtEq => self.convert_comparison_expr(*left, op, *right)?,
+                | Operator::GtEq => {
+                    let (left, right) = self.convert_type(&left, &right)?;
+                    Expr::BinaryExpr(BinaryExpr {
+                        left: Box::new(left),
+                        op,
+                        right: Box::new(right),
+                    })
+                }
                 _ => Expr::BinaryExpr(BinaryExpr { left, op, right }),
             },
             Expr::Between(Between {
@@ -387,11 +230,6 @@ impl TreeNodeRewriter for TypeConverter {
                 low,
                 high,
             }) => {
-                if let Some(expr) =
-                    self.convert_timestamp_string_between(&expr, negated, &low, &high)?
-                {
-                    return Ok(Transformed::yes(expr));
-                }
                 let (expr, low) = self.convert_type(&expr, &low)?;
                 let (expr, high) = self.convert_type(&expr, &high)?;
                 Expr::Between(Between {
@@ -406,9 +244,6 @@ impl TreeNodeRewriter for TypeConverter {
                 list,
                 negated,
             }) => {
-                if let Some(expr) = self.convert_timestamp_string_in_list(&expr, &list, negated)? {
-                    return Ok(Transformed::yes(expr));
-                }
                 let mut list_expr = Vec::with_capacity(list.len());
                 for e in list {
                     let (_, expr_conversion) = self.convert_type(&expr, &e)?;
@@ -455,7 +290,7 @@ fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
     )
 }
 
-fn string_to_timestamp_scalar(string: &str, timezone: Option<&Timezone>) -> Result<ScalarValue> {
+fn string_to_timestamp_ms(string: &str, timezone: Option<&Timezone>) -> Result<ScalarValue> {
     let ts = Timestamp::from_str(string, timezone)
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
@@ -467,30 +302,6 @@ fn string_to_timestamp_scalar(string: &str, timezone: Option<&Timezone>) -> Resu
         TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(value, None),
     };
     Ok(scalar)
-}
-
-fn timestamp_to_scalar(
-    timestamp: Timestamp,
-    target_unit: TimeUnit,
-    timezone: Option<Arc<str>>,
-) -> Result<ScalarValue> {
-    let timestamp = timestamp
-        .convert_to(target_unit)
-        .ok_or_else(|| DataFusionError::Plan("timestamp literal overflow".to_string()))?;
-    Ok(timestamp_scalar(
-        timestamp.unit().as_arrow_time_unit(),
-        timezone,
-        timestamp.value(),
-    ))
-}
-
-fn timestamp_scalar(unit: ArrowTimeUnit, timezone: Option<Arc<str>>, value: i64) -> ScalarValue {
-    match unit {
-        ArrowTimeUnit::Second => ScalarValue::TimestampSecond(Some(value), timezone),
-        ArrowTimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), timezone),
-        ArrowTimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), timezone),
-        ArrowTimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), timezone),
-    }
 }
 
 #[cfg(test)]
@@ -507,18 +318,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_string_to_timestamp_scalar() {
+    fn test_string_to_timestamp_ms() {
         assert_eq!(
-            string_to_timestamp_scalar("2022-02-02 19:00:00+08:00", None).unwrap(),
+            string_to_timestamp_ms("2022-02-02 19:00:00+08:00", None).unwrap(),
             ScalarValue::TimestampSecond(Some(1643799600), None)
         );
         assert_eq!(
-            string_to_timestamp_scalar("2009-02-13 23:31:30Z", None).unwrap(),
+            string_to_timestamp_ms("2009-02-13 23:31:30Z", None).unwrap(),
             ScalarValue::TimestampSecond(Some(1234567890), None)
         );
 
         assert_eq!(
-            string_to_timestamp_scalar(
+            string_to_timestamp_ms(
                 "2009-02-13 23:31:30",
                 Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
             )
@@ -527,7 +338,7 @@ mod tests {
         );
 
         assert_eq!(
-            string_to_timestamp_scalar(
+            string_to_timestamp_ms(
                 "2009-02-13 23:31:30",
                 Some(&Timezone::from_tz_string("-8:00").unwrap())
             )
@@ -597,8 +408,8 @@ mod tests {
         };
 
         assert_eq!(
-            Expr::Column(Column::from_name("ts")).gt(ScalarValue::TimestampMillisecond(
-                Some(1599514949000),
+            Expr::Column(Column::from_name("ts")).gt(ScalarValue::TimestampSecond(
+                Some(1599514949),
                 None
             )
             .lit()),
@@ -675,189 +486,11 @@ mod tests {
             .unwrap();
         let expected = String::from(
             "Aggregate: groupBy=[[]], aggr=[[count(column1)]]\
-            \n  Filter: column3 >= TimestampMillisecond(-28800000, None)\
-            \n    Filter: column3 > TimestampMillisecond(-28800000, None)\
+            \n  Filter: TimestampSecond(-28800, None) <= column3\
+            \n    Filter: column3 > TimestampSecond(-28800, None)\
             \n      Values: (Int64(1), Float64(1), TimestampMillisecond(1, None))",
         );
         assert_eq!(format!("{}", transformed_plan.display_indent()), expected);
-    }
-
-    #[test]
-    fn test_convert_timestamp_str_to_column_precision() {
-        use datatypes::arrow::datatypes::TimeUnit as ArrowTimeUnit;
-
-        let query_ctx = QueryContext::arc();
-        let schema = Arc::new(
-            DFSchema::new_with_metadata(
-                vec![(
-                    None::<TableReference>,
-                    Arc::new(Field::new(
-                        "ts",
-                        DataType::Timestamp(ArrowTimeUnit::Microsecond, None),
-                        true,
-                    )),
-                )],
-                HashMap::new(),
-            )
-            .unwrap(),
-        );
-        let mut converter = TypeConverter {
-            schema,
-            query_ctx: query_ctx.clone(),
-        };
-        let expected = Timestamp::from_str("2026-06-02 03:50:00", Some(&query_ctx.timezone()))
-            .unwrap()
-            .convert_to(TimeUnit::Microsecond)
-            .unwrap()
-            .value();
-
-        assert_eq!(
-            Expr::Column(Column::from_name("ts"))
-                .lt_eq(ScalarValue::TimestampMicrosecond(Some(expected), None,).lit()),
-            converter
-                .f_up(Expr::Column(Column::from_name("ts")).lt_eq("2026-06-02 03:50:00".lit()))
-                .unwrap()
-                .data
-        );
-    }
-
-    #[test]
-    fn test_convert_finer_timestamp_str_comparison_to_column_precision() {
-        use datatypes::arrow::datatypes::TimeUnit as ArrowTimeUnit;
-
-        let schema = Arc::new(
-            DFSchema::new_with_metadata(
-                vec![(
-                    None::<TableReference>,
-                    Arc::new(Field::new(
-                        "ts",
-                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                        true,
-                    )),
-                )],
-                HashMap::new(),
-            )
-            .unwrap(),
-        );
-        let mut converter = TypeConverter {
-            schema,
-            query_ctx: QueryContext::arc(),
-        };
-
-        let ts = Expr::Column(Column::from_name("ts"));
-        let finer_literal = "1970-01-01 00:00:00.000100+00:00".lit();
-
-        assert_eq!(
-            ts.clone()
-                .lt_eq(ScalarValue::TimestampMillisecond(Some(0), None).lit()),
-            converter
-                .f_up(ts.clone().lt(finer_literal.clone()))
-                .unwrap()
-                .data
-        );
-        assert_eq!(
-            ts.clone()
-                .gt_eq(ScalarValue::TimestampMillisecond(Some(1), None).lit()),
-            converter
-                .f_up(ts.clone().gt_eq(finer_literal.clone()))
-                .unwrap()
-                .data
-        );
-        assert_eq!(
-            false.lit(),
-            converter
-                .f_up(ts.clone().eq(finer_literal.clone()))
-                .unwrap()
-                .data
-        );
-        assert_eq!(
-            true.lit(),
-            converter.f_up(ts.not_eq(finer_literal)).unwrap().data
-        );
-    }
-
-    #[test]
-    fn test_convert_finer_timestamp_str_between_to_column_precision() {
-        use datatypes::arrow::datatypes::TimeUnit as ArrowTimeUnit;
-
-        let schema = Arc::new(
-            DFSchema::new_with_metadata(
-                vec![(
-                    None::<TableReference>,
-                    Arc::new(Field::new(
-                        "ts",
-                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                        true,
-                    )),
-                )],
-                HashMap::new(),
-            )
-            .unwrap(),
-        );
-        let mut converter = TypeConverter {
-            schema,
-            query_ctx: QueryContext::arc(),
-        };
-
-        let ts = Expr::Column(Column::from_name("ts"));
-        let low = "1970-01-01 00:00:00.000100+00:00".lit();
-        let high = "1970-01-01 00:00:00.001100+00:00".lit();
-
-        assert_eq!(
-            ts.clone()
-                .gt_eq(ScalarValue::TimestampMillisecond(Some(1), None).lit())
-                .and(
-                    ts.clone()
-                        .lt_eq(ScalarValue::TimestampMillisecond(Some(1), None).lit())
-                ),
-            converter.f_up(ts.between(low, high)).unwrap().data
-        );
-    }
-
-    #[test]
-    fn test_convert_finer_timestamp_str_in_list_to_column_precision() {
-        use datatypes::arrow::datatypes::TimeUnit as ArrowTimeUnit;
-
-        let schema = Arc::new(
-            DFSchema::new_with_metadata(
-                vec![(
-                    None::<TableReference>,
-                    Arc::new(Field::new(
-                        "ts",
-                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                        true,
-                    )),
-                )],
-                HashMap::new(),
-            )
-            .unwrap(),
-        );
-        let mut converter = TypeConverter {
-            schema,
-            query_ctx: QueryContext::arc(),
-        };
-
-        let ts = Expr::Column(Column::from_name("ts"));
-        let non_exact = "1970-01-01 00:00:00.000100+00:00".lit();
-        let exact = "1970-01-01 00:00:00.001000+00:00".lit();
-
-        assert_eq!(
-            ts.clone().in_list(
-                vec![ScalarValue::TimestampMillisecond(Some(1), None).lit()],
-                false
-            ),
-            converter
-                .f_up(ts.clone().in_list(vec![non_exact.clone(), exact], false))
-                .unwrap()
-                .data
-        );
-        assert_eq!(
-            true.lit(),
-            converter
-                .f_up(ts.in_list(vec![non_exact], true))
-                .unwrap()
-                .data
-        );
     }
 
     #[test]
