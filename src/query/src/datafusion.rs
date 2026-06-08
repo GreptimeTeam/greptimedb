@@ -64,7 +64,7 @@ use crate::metrics::{
     OnDone, QUERY_STAGE_ELAPSED, maybe_attach_region_watermark_metrics,
     should_collect_region_watermark_from_query_ctx,
 };
-use crate::physical_wrapper::PhysicalPlanWrapperRef;
+use crate::physical_wrapper::PhysicalPlanWrappersRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
 use crate::{QueryEngine, metrics};
@@ -98,8 +98,12 @@ impl DatafusionQueryEngine {
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
         let optimized_physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
-        let physical_plan = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
-            wrapper.wrap(optimized_physical_plan, query_ctx)
+        let physical_plan = if let Some(wrappers) = self.plugins.get::<PhysicalPlanWrappersRef>() {
+            wrappers.wrap(
+                optimized_physical_plan,
+                query_ctx,
+                ctx.state().config_options(),
+            )
         } else {
             optimized_physical_plan
         };
