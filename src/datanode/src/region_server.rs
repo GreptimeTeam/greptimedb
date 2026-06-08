@@ -630,15 +630,13 @@ impl RegionServer {
         }
 
         // Now extract Put requests by consuming ownership (zero clone!)
-        let put_requests = requests
-            .into_iter()
-            .map(|(region_id, req)| {
-                if let RegionRequest::Put(put) = req {
-                    (region_id, put)
-                } else {
-                    unreachable!("Already checked all are Put")
-                }
-            });
+        let put_requests = requests.into_iter().map(|(region_id, req)| {
+            if let RegionRequest::Put(put) = req {
+                (region_id, put)
+            } else {
+                unreachable!("Already checked all are Put")
+            }
+        });
 
         // Downcast to MetricEngine and call batch API
         let metric_engine = engine

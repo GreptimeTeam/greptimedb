@@ -206,7 +206,6 @@ pub fn init_datanode_runtimes(options: &DatanodeRuntimeOptions) {
     static START: Once = Once::new();
     START.call_once(move || {
         let mut c = CONFIG_RUNTIMES.lock().unwrap();
-        assert!(!c.already_init, "Global runtimes already initialized");
         c.datanode_query_runtime = Some(create_runtime(
             "datanode-query",
             "datanode-query-worker",
