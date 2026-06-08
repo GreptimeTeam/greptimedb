@@ -230,7 +230,7 @@ impl RegionServer {
         if RegionServerInner::is_ingest_request(&request) {
             let inner = self.inner.clone();
             let request_type = request.request_type();
-            return common_runtime::spawn_datanode_ingest(async move {
+            return common_runtime::spawn_ingest(async move {
                 inner.handle_request(region_id, request).await
             })
             .await
@@ -639,7 +639,7 @@ impl RegionServer {
             "RegionServer::handle_metric_batch_puts",
             batch_size = batch_size,
         ));
-        let result = common_runtime::spawn_datanode_ingest(async move {
+        let result = common_runtime::spawn_ingest(async move {
             metric_engine
                 .put_regions_batch(put_requests)
                 .trace(span)
@@ -1828,7 +1828,7 @@ impl RegionServerInner {
         let metrics = QueryRuntimeStream::metrics_store();
         let producer_metrics = metrics.clone();
 
-        let producer_handle = common_runtime::spawn_datanode_query(async move {
+        let producer_handle = common_runtime::spawn_query(async move {
             while let Some(batch) = stream.next().await {
                 *producer_metrics.write().unwrap() = stream.metrics();
                 if sender.send(batch).await.is_err() {

@@ -44,8 +44,8 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
         [runtime]
         global_rt_size = 8
         compact_rt_size = 4
-        datanode_ingest_rt_size = 8
-        datanode_query_rt_size = 7
+        ingest_rt_size = 8
+        query_rt_size = 7
     "#;
 
     let options: GreptimeOptions<DatanodeOptions, DatanodeRuntimeOptions> =
@@ -53,8 +53,8 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
 
     assert_eq!(8, options.runtime.base.global_rt_size);
     assert_eq!(4, options.runtime.base.compact_rt_size);
-    assert_eq!(8, options.runtime.datanode_ingest_rt_size);
-    assert_eq!(7, options.runtime.datanode_query_rt_size);
+    assert_eq!(8, options.runtime.ingest_rt_size);
+    assert_eq!(7, options.runtime.query_rt_size);
 }
 
 #[allow(deprecated)]
