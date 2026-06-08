@@ -67,7 +67,6 @@ const INIT_CAPACITY: usize = 42;
 const MYSQL_DEFAULT_CATALOG: &str = "def";
 const ASCENDING_COLLATION: &str = "A";
 const YES: &str = "YES";
-const NO: &str = "NO";
 const EMPTY: &str = "";
 const BTREE: &str = "BTREE";
 const FULLTEXT: &str = "FULLTEXT";
@@ -340,7 +339,9 @@ impl InformationSchemaStatisticsBuilder {
         index_type: &str,
         greptime_index_type: &str,
     ) {
-        let nullable = if column.is_nullable() { YES } else { NO };
+        // MySQL's `information_schema.statistics.nullable` is `YES` or `''`,
+        // unlike `columns.is_nullable` which is `YES`/`NO`.
+        let nullable = if column.is_nullable() { YES } else { EMPTY };
         let row = [
             (TABLE_CATALOG, &Value::from(MYSQL_DEFAULT_CATALOG)),
             (TABLE_SCHEMA, &Value::from(table_schema)),

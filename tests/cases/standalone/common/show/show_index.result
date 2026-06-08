@@ -66,7 +66,7 @@ SHOW INDEX FROM test;
 | test  | 0          | PRIMARY        | 1            | a           | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
 | test  | 0          | PRIMARY        | 2            | b           | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
 | test  | 1          | SKIPPING INDEX | 1            | b           | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                          |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                          |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 SHOW INDEX FROM test_no_inverted_index;
@@ -77,7 +77,7 @@ SHOW INDEX FROM test_no_inverted_index;
 | test_no_inverted_index | 0          | PRIMARY        | 1            | a           | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
 | test_no_inverted_index | 0          | PRIMARY        | 2            | b           | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
 | test_no_inverted_index | 1          | SKIPPING INDEX | 1            | b           | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| test_no_inverted_index | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                          |         |               | YES     |            |
+| test_no_inverted_index | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                          |         |               | YES     |            |
 +------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 SHOW INDEX FROM system_metrics;
@@ -91,7 +91,7 @@ SHOW INDEX FROM system_metrics;
 | system_metrics | 1          | INVERTED INDEX | 1            | idc         | A         |             |          |        | YES  | greptime-inverted-index-v1    |         |               | YES     |            |
 | system_metrics | 0          | PRIMARY        | 1            | host        | A         |             |          |        | YES  | greptime-primary-key-v1       |         |               | YES     |            |
 | system_metrics | 0          | PRIMARY        | 2            | idc         | A         |             |          |        | YES  | greptime-primary-key-v1       |         |               | YES     |            |
-| system_metrics | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                               |         |               | YES     |            |
+| system_metrics | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                               |         |               | YES     |            |
 +----------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
 
 SHOW INDEX FROM system_metrics in public;
@@ -105,7 +105,7 @@ SHOW INDEX FROM system_metrics in public;
 | system_metrics | 1          | INVERTED INDEX | 1            | idc         | A         |             |          |        | YES  | greptime-inverted-index-v1    |         |               | YES     |            |
 | system_metrics | 0          | PRIMARY        | 1            | host        | A         |             |          |        | YES  | greptime-primary-key-v1       |         |               | YES     |            |
 | system_metrics | 0          | PRIMARY        | 2            | idc         | A         |             |          |        | YES  | greptime-primary-key-v1       |         |               | YES     |            |
-| system_metrics | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                               |         |               | YES     |            |
+| system_metrics | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                               |         |               | YES     |            |
 +----------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
 
 SHOW INDEX FROM system_metrics like '%util%';
@@ -117,7 +117,7 @@ SHOW INDEX FROM system_metrics WHERE Key_name = 'TIME INDEX';
 +----------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 | Table          | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
 +----------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| system_metrics | 1          | TIME INDEX | 1            | ts          | A         |             |          |        | NO   |            |         |               | YES     |            |
+| system_metrics | 1          | TIME INDEX | 1            | ts          | A         |             |          |        |      |            |         |               | YES     |            |
 +----------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 SELECT table_schema,

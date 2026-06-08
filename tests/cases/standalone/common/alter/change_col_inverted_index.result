@@ -69,7 +69,7 @@ SHOW INDEX FROM fox;
 | Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                 | Comment | Index_comment | Visible | Expression |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
 | fox   | 1          | INVERTED INDEX | 1            | fox         | A         |             |          |        | YES  | greptime-inverted-index-v1 |         |               | YES     |            |
-| fox   | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                            |         |               | YES     |            |
+| fox   | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                            |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE fox MODIFY COLUMN fox UNSET INVERTED INDEX;
@@ -112,7 +112,7 @@ SHOW INDEX FROM fox;
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| fox   | 1          | TIME INDEX | 1            | ts          | A         |             |          |        | NO   |            |         |               | YES     |            |
+| fox   | 1          | TIME INDEX | 1            | ts          | A         |             |          |        |      |            |         |               | YES     |            |
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 DROP TABLE fox;
@@ -130,7 +130,7 @@ SHOW INDEX FROM test_pk;
 +---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
 | test_pk | 0          | PRIMARY    | 1            | foo         | A         |             |          |        | YES  | greptime-primary-key-v1 |         |               | YES     |            |
 | test_pk | 0          | PRIMARY    | 2            | bar         | A         |             |          |        | YES  | greptime-primary-key-v1 |         |               | YES     |            |
-| test_pk | 1          | TIME INDEX | 1            | ts          | A         |             |          |        | NO   |                         |         |               | YES     |            |
+| test_pk | 1          | TIME INDEX | 1            | ts          | A         |             |          |        |      |                         |         |               | YES     |            |
 +---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE test_pk MODIFY COLUMN foo UNSET INVERTED INDEX;
@@ -144,7 +144,7 @@ SHOW INDEX FROM test_pk;
 +---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
 | test_pk | 0          | PRIMARY    | 1            | foo         | A         |             |          |        | YES  | greptime-primary-key-v1 |         |               | YES     |            |
 | test_pk | 0          | PRIMARY    | 2            | bar         | A         |             |          |        | YES  | greptime-primary-key-v1 |         |               | YES     |            |
-| test_pk | 1          | TIME INDEX | 1            | ts          | A         |             |          |        | NO   |                         |         |               | YES     |            |
+| test_pk | 1          | TIME INDEX | 1            | ts          | A         |             |          |        |      |                         |         |               | YES     |            |
 +---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE test_pk MODIFY COLUMN bar UNSET INVERTED INDEX;
@@ -158,7 +158,7 @@ SHOW INDEX FROM test_pk;
 +---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
 | test_pk | 0          | PRIMARY    | 1            | foo         | A         |             |          |        | YES  | greptime-primary-key-v1 |         |               | YES     |            |
 | test_pk | 0          | PRIMARY    | 2            | bar         | A         |             |          |        | YES  | greptime-primary-key-v1 |         |               | YES     |            |
-| test_pk | 1          | TIME INDEX | 1            | ts          | A         |             |          |        | NO   |                         |         |               | YES     |            |
+| test_pk | 1          | TIME INDEX | 1            | ts          | A         |             |          |        |      |                         |         |               | YES     |            |
 +---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE test_pk MODIFY COLUMN foo SET INVERTED INDEX;
@@ -173,7 +173,7 @@ SHOW INDEX FROM test_pk;
 | test_pk | 1          | INVERTED INDEX | 1            | foo         | A         |             |          |        | YES  | greptime-inverted-index-v1 |         |               | YES     |            |
 | test_pk | 0          | PRIMARY        | 1            | foo         | A         |             |          |        | YES  | greptime-primary-key-v1    |         |               | YES     |            |
 | test_pk | 0          | PRIMARY        | 2            | bar         | A         |             |          |        | YES  | greptime-primary-key-v1    |         |               | YES     |            |
-| test_pk | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                            |         |               | YES     |            |
+| test_pk | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                            |         |               | YES     |            |
 +---------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
 
 DROP TABLE test_pk;
