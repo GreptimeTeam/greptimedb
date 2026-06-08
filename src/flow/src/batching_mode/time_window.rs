@@ -68,6 +68,16 @@ struct TimeWindowPlanShape {
     has_unsupported_pruning_node: bool,
 }
 
+impl TimeWindowPlanShape {
+    fn should_skip_time_window_expr(&self) -> bool {
+        self.has_unsupported_pruning_node || self.table_scan_count != 1 || self.aggregate_count > 1
+    }
+
+    fn should_stop_inspection(&self) -> bool {
+        self.has_unsupported_pruning_node || self.table_scan_count > 1 || self.aggregate_count > 1
+    }
+}
+
 impl TreeNodeVisitor<'_> for TimeWindowPlanShape {
     type Node = LogicalPlan;
 
@@ -79,6 +89,10 @@ impl TreeNodeVisitor<'_> for TimeWindowPlanShape {
             LogicalPlan::Aggregate(_) => {
                 self.aggregate_count += 1;
             }
+            // The pinned DataFusion fork has no separate
+            // `LogicalPlan::CrossJoin` variant. SQL `CROSS JOIN` is represented
+            // as `LogicalPlan::Join(_)` here, so rejecting all joins also
+            // rejects cross joins.
             LogicalPlan::Join(_)
             | LogicalPlan::Window(_)
             | LogicalPlan::Union(_)
@@ -95,7 +109,15 @@ impl TreeNodeVisitor<'_> for TimeWindowPlanShape {
             _ => {}
         }
 
-        Ok(TreeNodeRecursion::Continue)
+        // These disqualifying conditions are monotonic. Once any of them is
+        // met, later traversal cannot make the plan eligible for TWE pruning
+        // again. Counts may be partial after `Stop`, but they are only used by
+        // the final skip predicate.
+        if self.should_stop_inspection() {
+            Ok(TreeNodeRecursion::Stop)
+        } else {
+            Ok(TreeNodeRecursion::Continue)
+        }
     }
 }
 
@@ -110,7 +132,7 @@ fn should_skip_time_window_expr(plan: &LogicalPlan) -> bool {
         return true;
     };
 
-    shape.has_unsupported_pruning_node || shape.table_scan_count != 1 || shape.aggregate_count > 1
+    shape.should_skip_time_window_expr()
 }
 
 /// Time window expr like `date_bin(INTERVAL '1' MINUTE, ts)`, this type help with
@@ -1112,6 +1134,14 @@ LIMIT 10
             r#"
 SELECT date_bin('5 minutes', l.ts) AS time_window
 FROM numbers_with_ts l, numbers_with_ts r
+GROUP BY time_window
+"#,
+            // A cross join with a constant relation still has only one table
+            // scan, so it must be rejected by the join node instead of relying
+            // on the multi-scan guard.
+            r#"
+SELECT date_bin('5 minutes', l.ts) AS time_window
+FROM numbers_with_ts l CROSS JOIN (VALUES (1)) AS v(x)
 GROUP BY time_window
 "#,
         ];
