@@ -111,7 +111,6 @@ DROP TABLE plain_timestamp;
 Affected Rows: 0
 
 -- Regression test for https://github.com/GreptimeTeam/greptimedb/issues/8214:
--- string timestamp predicates must align to the time index precision before comparison.
 CREATE TABLE ts_precision_bug (ts TIMESTAMP(3) TIME INDEX, v INT, PRIMARY KEY (v));
 
 Affected Rows: 0
