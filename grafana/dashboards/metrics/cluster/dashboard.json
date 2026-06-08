@@ -38,7 +38,7 @@
       },
       "id": 393,
       "panels": [],
-      "title": "Fleet health and golden signals",
+      "title": "Overview",
       "type": "row"
     },
     {
@@ -1149,6 +1149,353 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
+      "description": "Ingestion throughput by protocol near the top of the dashboard for quick traffic context.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "rowsps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 6
+      },
+      "id": 538,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_table_operator_ingest_rows{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "table-operator",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_servers_prometheus_remote_write_samples{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "prometheus-remote-write",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_servers_http_logs_ingestion_counter{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "http-logs",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_servers_loki_logs_ingestion_counter{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "loki-logs",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_servers_elasticsearch_logs_docs_count{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "elasticsearch-docs",
+          "range": true,
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_frontend_otlp_metrics_rows{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "otlp-metrics",
+          "range": true,
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_frontend_otlp_logs_rows{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "otlp-logs",
+          "range": true,
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_frontend_otlp_traces_rows{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "otlp-traces",
+          "range": true,
+          "refId": "H"
+        }
+      ],
+      "title": "Ingestion Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Query throughput by frontend protocol near the top of the dashboard for quick traffic context.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 9,
+        "w": 12,
+        "h": 6
+      },
+      "id": 539,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "mysql",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_servers_postgres_query_elapsed_count{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "postgres",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_servers_http_promql_elapsed_count{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "promql",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_servers_http_sql_elapsed_count{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "http-sql",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{instance=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "grpc-query",
+          "range": true,
+          "refId": "E"
+        }
+      ],
+      "title": "Query Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
       "description": "Prometheus scrape availability by job and instance. Drops to zero indicate unavailable or uns scraped nodes.",
       "fieldConfig": {
         "defaults": {
@@ -1207,7 +1554,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 9,
+        "y": 15,
         "w": 12,
         "h": 6
       },
@@ -1264,7 +1611,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Tail latency for HTTP requests served by frontends, excluding health and metrics endpoints.",
+      "description": "Tail latency for HTTP and gRPC requests served by frontends. HTTP excludes health and metrics endpoints.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1322,7 +1669,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 9,
+        "y": 15,
         "w": 12,
         "h": 6
       },
@@ -1356,9 +1703,22 @@
           "legendFormat": "http-p99",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_grpc_requests_elapsed_bucket{instance=~\"$frontend\"}[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "grpc-p99",
+          "range": true,
+          "refId": "B"
         }
       ],
-      "title": "Overall Request P99",
+      "title": "Request P99",
       "type": "timeseries"
     },
     {
@@ -1367,11 +1727,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 21
       },
       "id": 403,
       "panels": [],
-      "title": "Incident triage",
+      "title": "Health",
       "type": "row"
     },
     {
@@ -1437,7 +1797,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 16,
+        "y": 22,
         "w": 8,
         "h": 6
       },
@@ -1578,7 +1938,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 16,
+        "y": 22,
         "w": 8,
         "h": 6
       },
@@ -1693,7 +2053,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 16,
+        "y": 22,
         "w": 8,
         "h": 6
       },
@@ -1808,7 +2168,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 28,
         "w": 8,
         "h": 6
       },
@@ -1923,7 +2283,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 22,
+        "y": 28,
         "w": 8,
         "h": 6
       },
@@ -2064,7 +2424,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 22,
+        "y": 28,
         "w": 8,
         "h": 6
       },
@@ -2192,7 +2552,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 28,
+        "y": 34,
         "w": 8,
         "h": 6
       },
@@ -2294,7 +2654,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 28,
+        "y": 34,
         "w": 8,
         "h": 6
       },
@@ -2409,7 +2769,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 28,
+        "y": 34,
         "w": 8,
         "h": 6
       },
@@ -2493,11 +2853,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 34
+        "y": 40
       },
       "id": 411,
       "panels": [],
-      "title": "Saturation and backlog",
+      "title": "Capacity",
       "type": "row"
     },
     {
@@ -2563,7 +2923,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 35,
+        "y": 41,
         "w": 8,
         "h": 6
       },
@@ -2678,7 +3038,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 35,
+        "y": 41,
         "w": 8,
         "h": 6
       },
@@ -2780,7 +3140,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 35,
+        "y": 41,
         "w": 8,
         "h": 6
       },
@@ -2882,7 +3242,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 47,
         "w": 8,
         "h": 6
       },
@@ -3010,7 +3370,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 41,
+        "y": 47,
         "w": 8,
         "h": 6
       },
@@ -3125,7 +3485,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 41,
+        "y": 47,
         "w": 8,
         "h": 6
       },
@@ -3253,7 +3613,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 47,
+        "y": 53,
         "w": 8,
         "h": 6
       },
@@ -3311,7 +3671,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 59
       },
       "id": 412,
       "panels": [],
@@ -3382,7 +3742,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 54
+        "y": 60
       },
       "id": 462,
       "options": {
@@ -3497,7 +3857,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 54
+        "y": 60
       },
       "id": 463,
       "options": {
@@ -3614,7 +3974,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 64
+        "y": 70
       },
       "id": 464,
       "options": {
@@ -3729,7 +4089,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 64
+        "y": 70
       },
       "id": 465,
       "options": {
@@ -3846,7 +4206,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 80
       },
       "id": 466,
       "options": {
@@ -3961,7 +4321,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 74
+        "y": 80
       },
       "id": 467,
       "options": {
@@ -4078,7 +4438,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 84
+        "y": 90
       },
       "id": 468,
       "options": {
@@ -4193,7 +4553,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 84
+        "y": 90
       },
       "id": 469,
       "options": {
@@ -4252,11 +4612,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 94
+        "y": 100
       },
       "id": 419,
       "panels": [],
-      "title": "Ingestion and observability data paths",
+      "title": "Ingestion",
       "type": "row"
     },
     {
@@ -4322,7 +4682,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 95,
+        "y": 101,
         "w": 12,
         "h": 6
       },
@@ -4424,7 +4784,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 95,
+        "y": 101,
         "w": 12,
         "h": 6
       },
@@ -4617,7 +4977,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 101,
+        "y": 107,
         "w": 8,
         "h": 6
       },
@@ -4797,7 +5157,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 101,
+        "y": 107,
         "w": 8,
         "h": 6
       },
@@ -4912,7 +5272,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 101,
+        "y": 107,
         "w": 8,
         "h": 6
       },
@@ -5040,7 +5400,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 107,
+        "y": 113,
         "w": 8,
         "h": 6
       },
@@ -5085,11 +5445,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 113
+        "y": 119
       },
       "id": 427,
       "panels": [],
-      "title": "User traffic and query drill-down",
+      "title": "Queries",
       "type": "row"
     },
     {
@@ -5155,7 +5515,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 114,
+        "y": 120,
         "w": 12,
         "h": 6
       },
@@ -5309,7 +5669,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 114,
+        "y": 120,
         "w": 12,
         "h": 6
       },
@@ -5476,7 +5836,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 120,
+        "y": 126,
         "w": 8,
         "h": 6
       },
@@ -5591,7 +5951,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 120,
+        "y": 126,
         "w": 8,
         "h": 6
       },
@@ -5706,7 +6066,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 120,
+        "y": 126,
         "w": 8,
         "h": 6
       },
@@ -5808,7 +6168,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 126,
+        "y": 132,
         "w": 8,
         "h": 6
       },
@@ -5910,7 +6270,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 126,
+        "y": 132,
         "w": 8,
         "h": 6
       },
@@ -5994,7 +6354,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 132
+        "y": 138
       },
       "id": 428,
       "panels": [],
@@ -6066,7 +6426,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 133
+        "y": 139
       },
       "id": 470,
       "options": {
@@ -6167,7 +6527,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 133
+        "y": 139
       },
       "id": 471,
       "options": {
@@ -6268,7 +6628,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 141
+        "y": 147
       },
       "id": 472,
       "options": {
@@ -6369,7 +6729,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 141
+        "y": 147
       },
       "id": 473,
       "options": {
@@ -6468,7 +6828,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 149
+        "y": 155
       },
       "id": 474,
       "options": {
@@ -6569,7 +6929,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 149
+        "y": 155
       },
       "id": 475,
       "options": {
@@ -6671,7 +7031,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 157
+        "y": 163
       },
       "id": 476,
       "options": {
@@ -6772,7 +7132,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 157
+        "y": 163
       },
       "id": 477,
       "options": {
@@ -6812,7 +7172,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 165
+        "y": 171
       },
       "id": 429,
       "panels": [],
@@ -6884,7 +7244,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 166
+        "y": 172
       },
       "id": 478,
       "options": {
@@ -6985,7 +7345,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 172
+        "y": 178
       },
       "id": 479,
       "options": {
@@ -7086,7 +7446,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 172
+        "y": 178
       },
       "id": 480,
       "options": {
@@ -7215,7 +7575,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 180
+        "y": 186
       },
       "id": 481,
       "options": {
@@ -7270,11 +7630,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 188
+        "y": 194
       },
       "id": 434,
       "panels": [],
-      "title": "Datanode health",
+      "title": "Datanode",
       "type": "row"
     },
     {
@@ -7340,7 +7700,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 189,
+        "y": 195,
         "w": 8,
         "h": 6
       },
@@ -7455,7 +7815,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 189,
+        "y": 195,
         "w": 8,
         "h": 6
       },
@@ -7583,7 +7943,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 189,
+        "y": 195,
         "w": 8,
         "h": 6
       },
@@ -7698,7 +8058,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 195,
+        "y": 201,
         "w": 8,
         "h": 6
       },
@@ -7795,11 +8155,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 201
+        "y": 207
       },
       "id": 435,
       "panels": [],
-      "title": "Mito Engine",
+      "title": "Storage",
       "type": "row"
     },
     {
@@ -7867,7 +8227,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 202
+        "y": 208
       },
       "id": 482,
       "options": {
@@ -7968,7 +8328,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 202
+        "y": 208
       },
       "id": 483,
       "options": {
@@ -8069,7 +8429,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 210
+        "y": 216
       },
       "id": 484,
       "options": {
@@ -8170,7 +8530,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 210
+        "y": 216
       },
       "id": 485,
       "options": {
@@ -8271,7 +8631,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 218
+        "y": 224
       },
       "id": 486,
       "options": {
@@ -8305,6 +8665,236 @@
         }
       ],
       "title": "Flush OPS per Instance",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Mito flush p95 and p99 elapsed time by datanode and flush type. Use this to identify slow flush jobs.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 224,
+        "w": 12,
+        "h": 8
+      },
+      "id": 540,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{instance=~\"$datanode\"}[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "[{{instance}}]-[{{pod}}]-[{{type}}]-p95",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{instance=~\"$datanode\"}[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "[{{instance}}]-[{{pod}}]-[{{type}}]-p99",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Flush Elapsed Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Mito flushed bytes and flushed file rates. Use this with flush elapsed time to distinguish slow jobs from large jobs.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 232,
+        "w": 12,
+        "h": 8
+      },
+      "id": 541,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (instance, pod) (rate(greptime_mito_flush_bytes_total{instance=~\"$datanode\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "[{{instance}}]-[{{pod}}]-bytes",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (instance, pod) (rate(greptime_mito_flush_file_total{instance=~\"$datanode\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "[{{instance}}]-[{{pod}}]-files",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Flush Throughput",
       "type": "timeseries"
     },
     {
@@ -8371,7 +8961,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 218
+        "y": 232
       },
       "id": 487,
       "options": {
@@ -8472,7 +9062,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 226
+        "y": 240
       },
       "id": 488,
       "options": {
@@ -8598,7 +9188,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 226
+        "y": 240
       },
       "id": 489,
       "options": {
@@ -8699,7 +9289,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 234
+        "y": 248
       },
       "id": 490,
       "options": {
@@ -8802,7 +9392,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 234
+        "y": 248
       },
       "id": 491,
       "options": {
@@ -8903,7 +9493,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 242
+        "y": 256
       },
       "id": 492,
       "options": {
@@ -9017,7 +9607,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 242
+        "y": 256
       },
       "id": 493,
       "options": {
@@ -9118,7 +9708,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 250
+        "y": 264
       },
       "id": 494,
       "options": {
@@ -9270,7 +9860,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 250
+        "y": 264
       },
       "id": 495,
       "options": {
@@ -9369,7 +9959,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 258
+        "y": 272
       },
       "id": 496,
       "options": {
@@ -9470,7 +10060,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 258
+        "y": 272
       },
       "id": 497,
       "options": {
@@ -9571,7 +10161,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 266
+        "y": 280
       },
       "id": 498,
       "options": {
@@ -9672,7 +10262,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 266
+        "y": 280
       },
       "id": 499,
       "options": {
@@ -9773,7 +10363,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 274
+        "y": 288
       },
       "id": 500,
       "options": {
@@ -9916,7 +10506,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 274
+        "y": 288
       },
       "id": 501,
       "options": {
@@ -10030,7 +10620,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 282
+        "y": 296
       },
       "id": 502,
       "options": {
@@ -10144,7 +10734,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 282
+        "y": 296
       },
       "id": 503,
       "options": {
@@ -10261,7 +10851,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 290
+        "y": 304
       },
       "id": 504,
       "options": {
@@ -10302,11 +10892,816 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 298
+        "y": 312
+      },
+      "id": 549,
+      "panels": [],
+      "title": "Index",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Index apply p95 and p99 elapsed time by index type. Slow apply can increase read latency for indexed predicates.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 313,
+        "w": 8,
+        "h": 6
+      },
+      "id": 542,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, type) (rate(greptime_index_apply_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "{{type}}-p95",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le, type) (rate(greptime_index_apply_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "{{type}}-p99",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Index Apply Elapsed Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Index create p95 and p99 elapsed time by stage and index type. Slow stages can explain flush or compaction delays.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 313,
+        "w": 8,
+        "h": 6
+      },
+      "id": 543,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, stage, type) (rate(greptime_index_create_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "{{type}}-{{stage}}-p95",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le, stage, type) (rate(greptime_index_create_elapsed_bucket[$__rate_interval])))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "{{type}}-{{stage}}-p99",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Index Create Elapsed Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Rows and bytes produced by index creation by index type. Spikes here can explain storage write pressure.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 313,
+        "w": 8,
+        "h": 6
+      },
+      "id": 544,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (type) (rate(greptime_index_create_rows_total[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "{{type}}-rows",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (type) (rate(greptime_index_create_bytes_total[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "{{type}}-bytes",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Index Create Rows and Bytes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Memory used while applying and creating indexes. Growth here can explain memory pressure during indexed flush or compaction work.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 319,
+        "w": 8,
+        "h": 6
+      },
+      "id": 545,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "greptime_index_apply_memory_usage",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "apply",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (type) (greptime_index_create_memory_usage)",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "create-{{type}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Index Memory Usage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Index read and write byte rates by operation and file type for puffin and intermediate files.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 319,
+        "w": 8,
+        "h": 6
+      },
+      "id": 546,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (type, file_type) (rate(greptime_index_io_bytes_total[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "{{type}}-{{file_type}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Index IO Bytes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Index IO operation rates by operation and file type, including read, write, seek, and flush operations.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 319,
+        "w": 8,
+        "h": 6
+      },
+      "id": 547,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (type, file_type) (rate(greptime_index_io_op_total[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "{{type}}-{{file_type}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Index IO Operations",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Index-related cache hits, misses, and evictions from Mito caches.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 325,
+        "w": 8,
+        "h": 6
+      },
+      "id": 548,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (type) (rate(greptime_mito_cache_hit{type=~\"index.*|vector_index|index_result\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "hit-{{type}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (type) (rate(greptime_mito_cache_miss{type=~\"index.*|vector_index|index_result\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "miss-{{type}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (type, cause) (rate(greptime_mito_cache_eviction{type=~\"index.*|vector_index|index_result\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "evict-{{type}}-{{cause}}",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Index Cache",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 331
       },
       "id": 451,
       "panels": [],
-      "title": "Control plane, placement, and automation",
+      "title": "Metasrv",
       "type": "row"
     },
     {
@@ -10372,7 +11767,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 299,
+        "y": 332,
         "w": 8,
         "h": 6
       },
@@ -10487,7 +11882,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 299,
+        "y": 332,
         "w": 8,
         "h": 6
       },
@@ -10632,7 +12027,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 305
+        "y": 338
       },
       "id": 525,
       "options": {
@@ -10746,7 +12141,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 305
+        "y": 338
       },
       "id": 526,
       "options": {
@@ -10845,7 +12240,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 313
+        "y": 346
       },
       "id": 527,
       "options": {
@@ -10944,7 +12339,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 313
+        "y": 346
       },
       "id": 528,
       "options": {
@@ -11043,7 +12438,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 321
+        "y": 354
       },
       "id": 529,
       "options": {
@@ -11146,7 +12541,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 321
+        "y": 354
       },
       "id": 530,
       "options": {
@@ -11249,7 +12644,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 329
+        "y": 362
       },
       "id": 531,
       "options": {
@@ -11352,7 +12747,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 329
+        "y": 362
       },
       "id": 532,
       "options": {
@@ -11455,7 +12850,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 337
+        "y": 370
       },
       "id": 533,
       "options": {
@@ -11558,7 +12953,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 337
+        "y": 370
       },
       "id": 534,
       "options": {
@@ -11661,7 +13056,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 345
+        "y": 378
       },
       "id": 535,
       "options": {
@@ -11849,7 +13244,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 345
+        "y": 378
       },
       "id": 536,
       "options": {
@@ -11949,7 +13344,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 353
+        "y": 386
       },
       "id": 537,
       "options": {
@@ -12034,7 +13429,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 361,
+        "y": 394,
         "w": 24,
         "h": 18
       },
@@ -12186,7 +13581,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 379,
+        "y": 412,
         "w": 12,
         "h": 11
       },
@@ -12253,7 +13648,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 379,
+        "y": 412,
         "w": 12,
         "h": 11
       },
@@ -12371,7 +13766,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 390,
+        "y": 423,
         "w": 12,
         "h": 11
       },
@@ -12500,7 +13895,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 390,
+        "y": 423,
         "w": 6,
         "h": 6
       },
@@ -12602,7 +13997,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 390,
+        "y": 423,
         "w": 6,
         "h": 6
       },
@@ -12671,7 +14066,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 401,
+        "y": 434,
         "w": 6,
         "h": 6
       },
@@ -12738,7 +14133,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 401,
+        "y": 434,
         "w": 6,
         "h": 6
       },
@@ -12830,7 +14225,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 401,
+        "y": 434,
         "w": 6,
         "h": 6
       },
@@ -12937,7 +14332,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 401,
+        "y": 434,
         "w": 6,
         "h": 6
       },
@@ -13039,7 +14434,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 407,
+        "y": 440,
         "w": 6,
         "h": 6
       },
@@ -13141,7 +14536,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 407,
+        "y": 440,
         "w": 6,
         "h": 6
       },
@@ -13243,7 +14638,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 407,
+        "y": 440,
         "w": 6,
         "h": 6
       },
@@ -13288,11 +14683,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 413
+        "y": 446
       },
       "id": 452,
       "panels": [],
-      "title": "Object store and WAL drill-down",
+      "title": "Object Store and WAL",
       "type": "row"
     },
     {
@@ -13359,7 +14754,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 414
+        "y": 447
       },
       "id": 505,
       "options": {
@@ -13459,7 +14854,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 424
+        "y": 457
       },
       "id": 506,
       "options": {
@@ -13559,7 +14954,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 424
+        "y": 457
       },
       "id": 507,
       "options": {
@@ -13659,7 +15054,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 431
+        "y": 464
       },
       "id": 508,
       "options": {
@@ -13759,7 +15154,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 431
+        "y": 464
       },
       "id": 509,
       "options": {
@@ -13859,7 +15254,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 438
+        "y": 471
       },
       "id": 510,
       "options": {
@@ -13960,7 +15355,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 438
+        "y": 471
       },
       "id": 511,
       "options": {
@@ -14061,7 +15456,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 445
+        "y": 478
       },
       "id": 512,
       "options": {
@@ -14161,7 +15556,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 445
+        "y": 478
       },
       "id": 513,
       "options": {
@@ -14261,7 +15656,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 452
+        "y": 485
       },
       "id": 514,
       "options": {
@@ -14364,7 +15759,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 452
+        "y": 485
       },
       "id": 515,
       "options": {
@@ -14465,7 +15860,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 459
+        "y": 492
       },
       "id": 516,
       "options": {
@@ -14564,7 +15959,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 459
+        "y": 492
       },
       "id": 517,
       "options": {
@@ -14663,7 +16058,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 467
+        "y": 500
       },
       "id": 518,
       "options": {
@@ -14762,7 +16157,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 467
+        "y": 500
       },
       "id": 519,
       "options": {
@@ -14802,7 +16197,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 475
+        "y": 508
       },
       "id": 453,
       "panels": [],
@@ -14872,7 +16267,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 476
+        "y": 509
       },
       "id": 520,
       "options": {
@@ -14967,7 +16362,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 476
+        "y": 509
       },
       "id": 521,
       "options": {
@@ -15075,7 +16470,7 @@
         "h": 8,
         "w": 9,
         "x": 0,
-        "y": 484
+        "y": 517
       },
       "id": 522,
       "options": {
@@ -15183,7 +16578,7 @@
         "h": 8,
         "w": 9,
         "x": 9,
-        "y": 484
+        "y": 517
       },
       "id": 523,
       "options": {
@@ -15278,7 +16673,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 484
+        "y": 517
       },
       "id": 524,
       "options": {
@@ -15316,7 +16711,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 492
+        "y": 525
       },
       "id": 461,
       "panels": [],
@@ -15385,7 +16780,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 493,
+        "y": 526,
         "w": 6,
         "h": 6
       },
@@ -15483,7 +16878,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 493,
+        "y": 526,
         "w": 6,
         "h": 6
       },
@@ -15596,7 +16991,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 493,
+        "y": 526,
         "w": 6,
         "h": 6
       },
@@ -15696,7 +17091,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 493,
+        "y": 526,
         "w": 6,
         "h": 6
       },
@@ -15809,7 +17204,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 499,
+        "y": 532,
         "w": 6,
         "h": 6
       },
@@ -15909,7 +17304,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 499,
+        "y": 532,
         "w": 6,
         "h": 6
       },
@@ -16022,7 +17417,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 499,
+        "y": 532,
         "w": 6,
         "h": 6
       },
@@ -16196,7 +17591,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "GreptimeDB Copy",
+  "title": "GreptimeDB",
   "uid": "dflfbxbwvvchsa",
-  "version": 67
+  "version": 68
 }

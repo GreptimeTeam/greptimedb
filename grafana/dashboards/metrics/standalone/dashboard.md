@@ -1,4 +1,4 @@
-# Fleet health and golden signals
+# Overview
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
 | Uptime | `time() - process_start_time_seconds` | `stat` | The start time of GreptimeDB. | `prometheus` | `s` | `__auto` |
@@ -12,9 +12,11 @@
 | Total Storage Size | `select SUM(disk_size) from information_schema.region_statistics;` | `stat` | Total number of data file size. | `mysql` | `decbytes` | -- |
 | Total Rows | `select SUM(region_rows) from information_schema.region_statistics;` | `stat` | Total number of data rows in the cluster. Calculated by sum of rows from each region. | `mysql` | `sishort` | -- |
 | Data Size | `SELECT SUM(memtable_size) * 0.42825 as WAL FROM information_schema.region_statistics;`<br/>`SELECT SUM(index_size) as index FROM information_schema.region_statistics;`<br/>`SELECT SUM(manifest_size) as manifest FROM information_schema.region_statistics;` | `stat` | The data size of wal/index/manifest in the GreptimeDB. | `mysql` | `decbytes` | -- |
+| Ingestion Rate | `sum(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))`<br/>`sum(rate(greptime_servers_prometheus_remote_write_samples{}[$__rate_interval]))`<br/>`sum(rate(greptime_servers_http_logs_ingestion_counter{}[$__rate_interval]))`<br/>`sum(rate(greptime_servers_loki_logs_ingestion_counter{}[$__rate_interval]))`<br/>`sum(rate(greptime_servers_elasticsearch_logs_docs_count{}[$__rate_interval]))`<br/>`sum(rate(greptime_frontend_otlp_metrics_rows{}[$__rate_interval]))`<br/>`sum(rate(greptime_frontend_otlp_logs_rows{}[$__rate_interval]))`<br/>`sum(rate(greptime_frontend_otlp_traces_rows{}[$__rate_interval]))` | `timeseries` | Ingestion throughput by protocol near the top of the dashboard for quick traffic context. | `prometheus` | `rowsps` | `table-operator` |
+| Query Rate | `sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))`<br/>`sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))`<br/>`sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval]))`<br/>`sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval]))`<br/>`sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))` | `timeseries` | Query throughput by frontend protocol near the top of the dashboard for quick traffic context. | `prometheus` | `reqps` | `mysql` |
 | Node Availability | `sum by (job) (up)`<br/>`up` | `timeseries` | Prometheus scrape availability by job and instance. Drops to zero indicate unavailable or uns scraped nodes. | `prometheus` | `short` | `{{job}}` |
-| Overall Request P99 | `histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_requests_elapsed_bucket{path!~"/health\|/metrics"}[$__rate_interval])))` | `timeseries` | Tail latency for HTTP requests served by frontends, excluding health and metrics endpoints. | `prometheus` | `s` | `http-p99` |
-# Incident triage
+| Request P99 | `histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_requests_elapsed_bucket{path!~"/health\|/metrics"}[$__rate_interval])))`<br/>`histogram_quantile(0.99, sum by (le) (rate(greptime_servers_grpc_requests_elapsed_bucket{}[$__rate_interval])))` | `timeseries` | Tail latency for HTTP and gRPC requests served by frontends. HTTP excludes health and metrics endpoints. | `prometheus` | `s` | `http-p99` |
+# Health
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
 | Protocol Error Rates | `sum by (protocol) (rate(greptime_servers_error{}[$__rate_interval]))`<br/>`sum by (code) (rate(greptime_servers_auth_failure_count{}[$__rate_interval]))`<br/>`sum by (path, method, code) (rate(greptime_servers_http_requests_elapsed_count{path!~"/health\|/metrics",code!~"2.."}[$__rate_interval]))`<br/>`sum by (path, code) (rate(greptime_servers_grpc_requests_elapsed_count{code!~"0\|OK"}[$__rate_interval]))` | `timeseries` | User-facing and protocol-level error rates. Use labels to identify whether failures are server, auth, HTTP, or gRPC related. | `prometheus` | `eps` | `server-{{protocol}}` |
@@ -26,7 +28,7 @@
 | OpenDAL Errors | `sum by (scheme, operation, error) (rate(opendal_operation_errors_total{error!="NotFound"}[$__rate_interval]))` | `timeseries` | Object-store errors by scheme, operation, and error, excluding NotFound noise. | `prometheus` | `eps` | `{{scheme}}-{{operation}}-{{error}}` |
 | Control Plane Failures | `sum(rate(greptime_meta_region_migration_fail[$__rate_interval]))`<br/>`sum(rate(greptime_meta_reconciliation_procedure_error[$__rate_interval]))` | `timeseries` | Region migration and reconciliation failures in metasrv. | `prometheus` | `eps` | `migration-fail` |
 | Flow and Trigger Failures | `sum by (code) (rate(greptime_flow_errors[$__rate_interval]))`<br/>`sum(rate(greptime_trigger_evaluate_failure_count[$__rate_interval]))`<br/>`sum(rate(greptime_trigger_send_alert_failure_count[$__rate_interval]))`<br/>`sum(rate(greptime_trigger_save_alert_record_failure_count[$__rate_interval]))` | `timeseries` | Derived-data and alerting pipeline failures. | `prometheus` | `eps` | `flow-{{code}}` |
-# Saturation and backlog
+# Capacity
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
 | Runtime Threads | `sum by (instance, pod) (greptime_runtime_threads_alive)`<br/>`sum by (instance, pod) (greptime_runtime_threads_idle)` | `timeseries` | Runtime thread pool size and idle threads by instance. Low idle threads during latency spikes can indicate executor saturation. | `prometheus` | `short` | `alive-[{{instance}}]-[{{pod}}]` |
@@ -47,7 +49,7 @@
 | Metasrv CPU Usage per Instance | `sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)`<br/>`max(greptime_cpu_limit_in_millicores{})` | `timeseries` | Current cpu usage by instance | `prometheus` | `none` | `[{{ instance }}]-[{{ pod }}]` |
 | Flownode Memory per Instance | `sum(process_resident_memory_bytes{}) by (instance, pod)`<br/>`max(greptime_memory_limit_in_bytes{})` | `timeseries` | Current memory usage by instance | `prometheus` | `bytes` | `[{{ instance }}]-[{{ pod }}]` |
 | Flownode CPU Usage per Instance | `sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)`<br/>`max(greptime_cpu_limit_in_millicores{})` | `timeseries` | Current cpu usage by instance | `prometheus` | `none` | `[{{ instance }}]-[{{ pod }}]` |
-# Ingestion and observability data paths
+# Ingestion
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
 | Total Ingestion Rate | `sum(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))` | `timeseries` | Total ingestion rate.<br/><br/>Here we listed 3 primary protocols:<br/><br/>- Prometheus remote write<br/>- Greptime's gRPC API (when using our ingest SDK)<br/>- Log ingestion http API<br/> | `prometheus` | `rowsps` | `ingestion` |
@@ -56,7 +58,7 @@
 | Bulk Insert Message Rows and Size | `sum(rate(greptime_table_operator_bulk_insert_message_rows{}[$__rate_interval]))`<br/>`sum(rate(greptime_table_operator_bulk_insert_message_size{}[$__rate_interval]))` | `timeseries` | Bulk-insert message row and byte rates. Spikes here can explain frontend bulk-insert latency. | `prometheus` | `short` | `rows` |
 | Prom Store Flush Pipeline | `sum(rate(greptime_prom_store_flush_total{}[$__rate_interval]))`<br/>`sum(rate(greptime_prom_store_flush_rows{}[$__rate_interval]))`<br/>`histogram_quantile(0.99, sum by (le) (rate(greptime_prom_store_flush_elapsed_bucket{}[$__rate_interval])))` | `timeseries` | Remote-write pending-row flush operations, flushed rows, and p99 flush latency. | `prometheus` | `short` | `flush-ops` |
 | OTLP Trace Failures | `sum(rate(greptime_frontend_otlp_traces_failure_count{}[$__rate_interval]))` | `timeseries` | OTLP trace ingestion failures reported by frontends. | `prometheus` | `eps` | `trace-failures` |
-# User traffic and query drill-down
+# Queries
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
 | Query Rate by Protocol | `sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))`<br/>`sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))`<br/>`sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval]))`<br/>`sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval]))`<br/>`sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))` | `timeseries` | Query API call rates by protocol, collected from frontends. | `prometheus` | `reqps` | `mysql` |
@@ -84,14 +86,14 @@
 | Region Call QPS per Instance | `sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_count{}[$__rate_interval]))` | `timeseries` | Region Call QPS per Instance. | `prometheus` | `ops` | `[{{instance}}]-[{{pod}}]-[{{request_type}}]` |
 | Region Call P99 per Instance | `histogram_quantile(0.99, sum by(instance, pod, le, request_type) (rate(greptime_grpc_region_request_bucket{}[$__rate_interval])))` | `timeseries` | Region Call P99 per Instance. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{request_type}}]` |
 | Frontend Handle Bulk Insert Elapsed Time  | `sum by(instance, pod, stage) (rate(greptime_table_operator_handle_bulk_insert_sum[$__rate_interval]))/sum by(instance, pod, stage) (rate(greptime_table_operator_handle_bulk_insert_count[$__rate_interval]))`<br/>`histogram_quantile(0.99, sum by(instance, pod, stage, le) (rate(greptime_table_operator_handle_bulk_insert_bucket[$__rate_interval])))` | `timeseries` | Per-stage time for frontend to handle bulk insert requests | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{stage}}]-AVG` |
-# Datanode health
+# Datanode
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
 | Region Request Failures and Failed Inserts | `sum by (instance, pod) (rate(greptime_datanode_region_request_fail_count{}[$__rate_interval]))`<br/>`sum by (instance, pod) (rate(greptime_datanode_region_failed_insert_count{}[$__rate_interval]))` | `timeseries` | Datanode region request failures and failed inserts by instance. | `prometheus` | `eps` | `request-fail-[{{instance}}]-[{{pod}}]` |
 | Write Rejects and Stalls | `sum by (instance, pod) (rate(greptime_mito_write_reject_total{}[$__rate_interval]))`<br/>`sum by (instance, pod) (rate(greptime_mito_write_stall_total{}[$__rate_interval]))`<br/>`sum by (instance, pod) (greptime_mito_write_stalling_count{})` | `timeseries` | Mito write rejects, write stall events, and active write stalling by datanode. | `prometheus` | `short` | `reject-[{{instance}}]-[{{pod}}]` |
 | Flush and Compaction Failures | `sum by (instance, pod) (rate(greptime_mito_flush_failure_total{}[$__rate_interval]))`<br/>`sum by (instance, pod) (rate(greptime_mito_compaction_failure_total{}[$__rate_interval]))` | `timeseries` | Mito flush and compaction failure rates by datanode. | `prometheus` | `eps` | `flush-[{{instance}}]-[{{pod}}]` |
 | Mito GC Health | `sum(rate(greptime_mito_gc_runs_total{}[$__rate_interval]))`<br/>`sum(rate(greptime_mito_gc_errors_total{}[$__rate_interval]))`<br/>`sum(rate(greptime_mito_gc_files_deleted_total{}[$__rate_interval]))`<br/>`sum(greptime_mito_gc_orphaned_index_files{})`<br/>`sum(greptime_mito_gc_skipped_unparsable_files{})` | `timeseries` | Mito garbage-collection runs, errors, deleted files, orphaned index files, and skipped unparsable files. | `prometheus` | `short` | `runs` |
-# Mito Engine
+# Storage
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
 | Request OPS per Instance | `sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_count{}[$__rate_interval]))` | `timeseries` | Request QPS per Instance. | `prometheus` | `ops` | `[{{instance}}]-[{{pod}}]-[{{type}}]` |
@@ -99,6 +101,8 @@
 | Write Buffer per Instance | `greptime_mito_write_buffer_bytes{}` | `timeseries` | Write Buffer per Instance. | `prometheus` | `decbytes` | `[{{instance}}]-[{{pod}}]` |
 | Write Rows per Instance | `sum by (instance, pod) (rate(greptime_mito_write_rows_total{}[$__rate_interval]))` | `timeseries` | Ingestion size by row counts. | `prometheus` | `rowsps` | `[{{instance}}]-[{{pod}}]` |
 | Flush OPS per Instance | `sum by(instance, pod, reason) (rate(greptime_mito_flush_requests_total{}[$__rate_interval]))` | `timeseries` | Flush QPS per Instance. | `prometheus` | `ops` | `[{{instance}}]-[{{pod}}]-[{{reason}}]` |
+| Flush Elapsed Time | `histogram_quantile(0.95, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{}[$__rate_interval])))`<br/>`histogram_quantile(0.99, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{}[$__rate_interval])))` | `timeseries` | Mito flush p95 and p99 elapsed time by datanode and flush type. Use this to identify slow flush jobs. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{type}}]-p95` |
+| Flush Throughput | `sum by (instance, pod) (rate(greptime_mito_flush_bytes_total{}[$__rate_interval]))`<br/>`sum by (instance, pod) (rate(greptime_mito_flush_file_total{}[$__rate_interval]))` | `timeseries` | Mito flushed bytes and flushed file rates. Use this with flush elapsed time to distinguish slow jobs from large jobs. | `prometheus` | `bytes` | `[{{instance}}]-[{{pod}}]-bytes` |
 | Write Stall per Instance | `sum by(instance, pod) (greptime_mito_write_stall_total{})` | `timeseries` | Write Stall per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]` |
 | Read Stage OPS per Instance | `sum by(instance, pod) (rate(greptime_mito_read_stage_elapsed_count{ stage="total"}[$__rate_interval]))` | `timeseries` | Read Stage OPS per Instance. | `prometheus` | `ops` | `[{{instance}}]-[{{pod}}]` |
 | Read Stage P99 per Instance | `histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket{}[$__rate_interval])))` | `timeseries` | Read Stage P99 per Instance. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{stage}}]` |
@@ -117,7 +121,17 @@
 | Active Series and Field Builders Count | `sum by(instance, pod) (greptime_mito_memtable_active_series_count)`<br/>`sum by(instance, pod) (greptime_mito_memtable_field_builder_count)` | `timeseries` | Compaction oinput output bytes | `prometheus` | `none` | `[{{instance}}]-[{{pod}}]-series` |
 | Region Worker Convert Requests | `histogram_quantile(0.95, sum by(le, instance, stage, pod) (rate(greptime_datanode_convert_region_request_bucket[$__rate_interval])))`<br/>`sum by(le,instance, stage, pod) (rate(greptime_datanode_convert_region_request_sum[$__rate_interval]))/sum by(le,instance, stage, pod) (rate(greptime_datanode_convert_region_request_count[$__rate_interval]))` | `timeseries` | Per-stage elapsed time for region worker to decode requests. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{stage}}]-P95` |
 | Cache Miss | `sum by (instance,pod, type) (rate(greptime_mito_cache_miss{}[$__rate_interval]))` | `timeseries` | The local cache miss of the datanode. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-[{{type}}]` |
-# Control plane, placement, and automation
+# Index
+| Title | Query | Type | Description | Datasource | Unit | Legend Format |
+| --- | --- | --- | --- | --- | --- | --- |
+| Index Apply Elapsed Time | `histogram_quantile(0.95, sum by (le, type) (rate(greptime_index_apply_elapsed_bucket[$__rate_interval])))`<br/>`histogram_quantile(0.99, sum by (le, type) (rate(greptime_index_apply_elapsed_bucket[$__rate_interval])))` | `timeseries` | Index apply p95 and p99 elapsed time by index type. Slow apply can increase read latency for indexed predicates. | `prometheus` | `s` | `{{type}}-p95` |
+| Index Create Elapsed Time | `histogram_quantile(0.95, sum by (le, stage, type) (rate(greptime_index_create_elapsed_bucket[$__rate_interval])))`<br/>`histogram_quantile(0.99, sum by (le, stage, type) (rate(greptime_index_create_elapsed_bucket[$__rate_interval])))` | `timeseries` | Index create p95 and p99 elapsed time by stage and index type. Slow stages can explain flush or compaction delays. | `prometheus` | `s` | `{{type}}-{{stage}}-p95` |
+| Index Create Rows and Bytes | `sum by (type) (rate(greptime_index_create_rows_total[$__rate_interval]))`<br/>`sum by (type) (rate(greptime_index_create_bytes_total[$__rate_interval]))` | `timeseries` | Rows and bytes produced by index creation by index type. Spikes here can explain storage write pressure. | `prometheus` | `short` | `{{type}}-rows` |
+| Index Memory Usage | `greptime_index_apply_memory_usage`<br/>`sum by (type) (greptime_index_create_memory_usage)` | `timeseries` | Memory used while applying and creating indexes. Growth here can explain memory pressure during indexed flush or compaction work. | `prometheus` | `bytes` | `apply` |
+| Index IO Bytes | `sum by (type, file_type) (rate(greptime_index_io_bytes_total[$__rate_interval]))` | `timeseries` | Index read and write byte rates by operation and file type for puffin and intermediate files. | `prometheus` | `bytes` | `{{type}}-{{file_type}}` |
+| Index IO Operations | `sum by (type, file_type) (rate(greptime_index_io_op_total[$__rate_interval]))` | `timeseries` | Index IO operation rates by operation and file type, including read, write, seek, and flush operations. | `prometheus` | `ops` | `{{type}}-{{file_type}}` |
+| Index Cache | `sum by (type) (rate(greptime_mito_cache_hit{type=~"index.*\|vector_index\|index_result"}[$__rate_interval]))`<br/>`sum by (type) (rate(greptime_mito_cache_miss{type=~"index.*\|vector_index\|index_result"}[$__rate_interval]))`<br/>`sum by (type, cause) (rate(greptime_mito_cache_eviction{type=~"index.*\|vector_index\|index_result"}[$__rate_interval]))` | `timeseries` | Index-related cache hits, misses, and evictions from Mito caches. | `prometheus` | `ops` | `hit-{{type}}` |
+# Metasrv
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
 | Inactive and Lease-expired Regions | `sum(greptime_meta_inactive_regions)`<br/>`sum(greptime_lease_expired_region{})` | `timeseries` | Inactive regions and expired region leases. Non-zero values indicate control-plane or routing health issues. | `prometheus` | `short` | `inactive-regions` |
@@ -229,7 +243,7 @@ ORDER BY data_size DESC;` | `piechart` | Distribution of leader regions and data
 | Auto Repartition Gate Stops | `sum by (gate, reason) (changes(greptime_auto_repartition_gate_stop_total[$__rate_interval]))` | `timeseries` | Auto repartition gate stop count by gate and reason | `prometheus` | `short` | `{{gate}} / {{reason}}` |
 | Auto Repartition Sampling P99 | `histogram_quantile(0.99, sum by (le, stage) (rate(greptime_auto_repartition_sampling_elapsed_bucket[$__rate_interval])))` | `timeseries` | Auto repartition sampling elapsed time by stage | `prometheus` | `s` | `{{stage}}` |
 | Auto Repartition Executor P99 | `histogram_quantile(0.99, sum by (le, stage) (rate(greptime_auto_repartition_executor_elapsed_bucket[$__rate_interval])))` | `timeseries` | Auto repartition executor elapsed time by stage | `prometheus` | `s` | `{{stage}}` |
-# Object store and WAL drill-down
+# Object Store and WAL
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
 | QPS per Instance | `sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{}[$__rate_interval]))` | `timeseries` | QPS per Instance. | `prometheus` | `ops` | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]` |
