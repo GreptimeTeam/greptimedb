@@ -83,7 +83,7 @@ use store_api::region_request::{
     RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::timeout;
 use tonic::{Request, Response, Result as TonicResult};
 
@@ -1837,42 +1837,23 @@ impl RegionServerInner {
         request: QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
-        let inner = self.clone();
+        let mut stream = self.handle_read_inner(request, query_ctx).await?;
+        let schema = stream.schema();
+        let output_ordering = stream.output_ordering().map(|ordering| ordering.to_vec());
+
         let (sender, receiver) = mpsc::channel(QUERY_RUNTIME_STREAM_BUFFER_SIZE);
-        let (init_sender, init_receiver) = oneshot::channel();
         let metrics = QueryRuntimeStream::metrics_store();
         let producer_metrics = metrics.clone();
 
         let producer_handle = common_runtime::spawn_datanode_query(async move {
-            match inner.handle_read_inner(request, query_ctx).await {
-                Ok(mut stream) => {
-                    let schema = stream.schema();
-                    let output_ordering =
-                        stream.output_ordering().map(|ordering| ordering.to_vec());
-                    if init_sender.send(Ok((schema, output_ordering))).is_err() {
-                        return;
-                    }
-
-                    while let Some(batch) = stream.next().await {
-                        *producer_metrics.write().unwrap() = stream.metrics();
-                        if sender.send(batch).await.is_err() {
-                            break;
-                        }
-                    }
-                    *producer_metrics.write().unwrap() = stream.metrics();
-                }
-                Err(error) => {
-                    let _ = init_sender.send(Err(error));
+            while let Some(batch) = stream.next().await {
+                *producer_metrics.write().unwrap() = stream.metrics();
+                if sender.send(batch).await.is_err() {
+                    break;
                 }
             }
+            *producer_metrics.write().unwrap() = stream.metrics();
         });
-
-        let (schema, output_ordering) = init_receiver.await.map_err(|_| {
-            UnexpectedSnafu {
-                violated: "query runtime stream producer dropped before initialization",
-            }
-            .build()
-        })??;
 
         Ok(Box::pin(
             QueryRuntimeStream::new(schema, receiver)
