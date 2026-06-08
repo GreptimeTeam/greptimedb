@@ -55,6 +55,7 @@ use datafusion::physical_expr::utils::conjunction;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::filter_pushdown::FilterPushdown;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::schema::SchemaRef;
@@ -176,13 +177,42 @@ impl PhysicalPlanWrapper for RemoteDynFilterPhysicalPlanWrapper {
         };
 
         match FilterPushdown::new().optimize(Arc::clone(&filter_plan), config) {
-            Ok(plan) => plan,
+            Ok(plan) => {
+                if contains_remote_dyn_filter_exec(&plan) {
+                    debug!(
+                        "Remote dynamic filter was not fully pushed down to region scans; dropping fallback FilterExec"
+                    );
+                    origin
+                } else {
+                    plan
+                }
+            }
             Err(error) => {
-                warn!(error; "Failed to push down remote dynamic filters; keeping FilterExec fallback");
-                filter_plan
+                warn!(error; "Failed to push down remote dynamic filters; skipping remote filter");
+                origin
             }
         }
     }
+}
+
+fn contains_remote_dyn_filter_exec(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    if let Some(filter) = plan.as_any().downcast_ref::<FilterExec>()
+        && contains_dynamic_filter_expr(filter.predicate())
+    {
+        return true;
+    }
+
+    plan.children()
+        .into_iter()
+        .any(contains_remote_dyn_filter_exec)
+}
+
+fn contains_dynamic_filter_expr(expr: &Arc<dyn datafusion::physical_expr::PhysicalExpr>) -> bool {
+    expr.as_any().is::<DynamicFilterPhysicalExpr>()
+        || expr
+            .children()
+            .into_iter()
+            .any(contains_dynamic_filter_expr)
 }
 
 impl RegionServer {
@@ -3729,7 +3759,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_dyn_filter_filter_exec_stays_above_pushdown_barrier() {
+    fn test_remote_dyn_filter_drops_filter_exec_at_pushdown_barrier() {
         let mock_region_server = mock_region_server();
         let query_id = test_remote_query_id();
         let region_id = RegionId::new(1024, 7);
@@ -3745,8 +3775,8 @@ mod tests {
         let plan = sort_with_fetch(scan);
         let wrapped = wrap_remote_dyn_filter_plan(&mock_region_server, plan, &query_id, &regs);
 
-        let filter = wrapped.as_any().downcast_ref::<FilterExec>().unwrap();
-        assert!(filter.input().as_any().is::<SortExec>());
+        assert!(wrapped.as_any().is::<SortExec>());
+        assert!(!contains_filter_exec(&wrapped));
 
         let payload = datafusion_payload_bytes(physical_lit(false));
         let outcome = apply_remote_dyn_filter_update(
