@@ -193,6 +193,7 @@ impl ParquetbenchCommand {
         };
         let row_groups = resolve_row_groups(&scan_config, parquet_meta.num_row_groups())?;
         let read_all_row_groups = scan_config.row_groups.is_none();
+        let scanned_bytes = scanned_row_group_bytes(&parquet_meta, &row_groups);
         let projected_columns = projection_names_display(&scan_config);
         let row_groups_display = row_groups_display(&row_groups, parquet_meta.num_row_groups());
         let mut sst_schema = to_flat_sst_arrow_schema(
@@ -225,6 +226,13 @@ impl ParquetbenchCommand {
             projected_columns.as_deref().unwrap_or("all columns").cyan()
         );
         println!("{} Row groups: {}", "✓".green(), row_groups_display.cyan());
+        if !read_all_row_groups {
+            println!(
+                "{} Scanned bytes (selected row groups): {}",
+                "✓".green(),
+                format_bytes(scanned_bytes).cyan()
+            );
+        }
         println!(
             "{} __primary_key type: {}",
             "✓".green(),
@@ -374,7 +382,7 @@ impl ParquetbenchCommand {
                 stats.record_batches,
                 stats.elapsed,
                 format_rate(stats.rows as f64 / stats.elapsed.as_secs_f64()),
-                format_bytes_per_sec(file_size as f64 / stats.elapsed.as_secs_f64()),
+                format_bytes_per_sec(scanned_bytes as f64 / stats.elapsed.as_secs_f64()),
             );
 
             #[cfg(unix)]
@@ -703,6 +711,18 @@ fn resolve_row_groups(
         }
         None => Ok((0..num_row_groups).collect()),
     }
+}
+
+/// Sums the compressed byte size of the selected row groups, used as the denominator for
+/// scan throughput so partial-row-group benchmarks aren't measured against the whole file.
+fn scanned_row_group_bytes(
+    parquet_meta: &parquet::file::metadata::ParquetMetaData,
+    row_groups: &[usize],
+) -> u64 {
+    row_groups
+        .iter()
+        .map(|&idx| parquet_meta.row_group(idx).compressed_size() as u64)
+        .sum()
 }
 
 fn projection_names_display(scan_config: &ParquetScanConfig) -> Option<String> {
