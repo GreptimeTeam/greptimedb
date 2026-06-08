@@ -74,6 +74,10 @@ impl TimeWindowPlanShape {
     }
 
     fn should_stop_inspection(&self) -> bool {
+        // This intentionally differs from the final skip predicate above:
+        // zero table scans make a fully inspected plan ineligible, but they are
+        // not an early-stop condition because a later subtree may still contain
+        // the first table scan.
         self.has_unsupported_pruning_node || self.table_scan_count > 1 || self.aggregate_count > 1
     }
 }

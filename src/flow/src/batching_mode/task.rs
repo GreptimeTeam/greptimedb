@@ -108,10 +108,10 @@ fn is_merge_mode_last_non_null(options: &HashMap<String, String>) -> bool {
 
 fn encode_insert_plan_request(
     insert_to: TableName,
-    insert_plan: &LogicalPlan,
+    insert_input_plan: &LogicalPlan,
 ) -> Result<api::v1::QueryRequest, Error> {
     let message = DFLogicalSubstraitConvertor {}
-        .encode(insert_plan, DefaultSerializer)
+        .encode(insert_input_plan, DefaultSerializer)
         .context(SubstraitEncodeLogicalPlanSnafu)?;
     Ok(api::v1::QueryRequest {
         query: Some(api::v1::query_request::Query::InsertIntoPlan(
@@ -576,7 +576,7 @@ impl BatchingTask {
                 .with_label_values(&[flow_id.to_string().as_str()])
                 .start_timer();
 
-            let req = if let Some((insert_to, insert_plan)) =
+            let req = if let Some((insert_to, insert_input_plan)) =
                 breakup_insert_plan(&plan, catalog, schema)
             {
                 if query_mode == CheckpointMode::FullSnapshot
@@ -593,9 +593,9 @@ impl BatchingTask {
                     // is not valid for every planned aggregate shape yet.
                     // If the local SQL unparser does not support this plan,
                     // keep the previous InsertIntoPlan transport as a fallback.
-                    match df_plan_to_sql(&insert_plan) {
+                    match df_plan_to_sql(&insert_input_plan) {
                         Ok(select_sql) => {
-                            let target_columns = format_insert_target_columns(&insert_plan);
+                            let target_columns = format_insert_target_columns(&insert_input_plan);
                             let sql = format!(
                                 "INSERT INTO {} ({}) {}",
                                 TableReference::full(
@@ -617,11 +617,11 @@ impl BatchingTask {
                                  falling back to InsertIntoPlan: {:?}",
                                 flow_id, err
                             );
-                            encode_insert_plan_request(insert_to, &insert_plan)?
+                            encode_insert_plan_request(insert_to, &insert_input_plan)?
                         }
                     }
                 } else {
-                    encode_insert_plan_request(insert_to, &insert_plan)?
+                    encode_insert_plan_request(insert_to, &insert_input_plan)?
                 }
             } else {
                 let message = DFLogicalSubstraitConvertor {}
