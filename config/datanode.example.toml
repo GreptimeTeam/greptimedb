@@ -535,8 +535,8 @@ allow_stale_entries = false
 
 ## Memory limit for table scans across all queries.
 ## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
-## Setting it to 0 disables the limit.
-scan_memory_limit = "50%"
+## Setting it to 0 or "unlimited" disables the limit.
+scan_memory_limit = "unlimited"
 ## Controls what happens when a scan cannot get memory immediately.
 ## "fail" (default) fails fast and is the recommended option for most users.
 ## "wait" / "wait(<duration>)" waits for memory to become available. This is mainly
