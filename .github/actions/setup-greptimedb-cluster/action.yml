@@ -73,13 +73,13 @@ runs:
         -n my-greptimedb \
         --values "${BASE_VALUES}" \
         --values "${SCENARIO_VALUES}" \
-        --timeout 10m \
+        --timeout 3m \
         --wait \
         --wait-for-jobs
   - name: Wait for GreptimeDB
     uses: nick-fields/retry@v3
     with:
-      timeout_minutes: 10
+      timeout_minutes: 3
       max_attempts: 1
       shell: bash
       command: |
@@ -91,6 +91,7 @@ runs:
           else
             echo "Cluster is not ready yet: Current phase: $PHASE"
             kubectl get pods -n my-greptimedb
+            kubectl get pods -n my-greptimedb -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image
             sleep 5 # wait for 5 seconds before check again.
           fi
         done
@@ -99,6 +100,7 @@ runs:
     shell: bash
     run: |
       kubectl get all --show-labels -n my-greptimedb
+      kubectl get pods -n my-greptimedb -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image
   - name: Describe Nodes
     if: always()
     shell: bash
