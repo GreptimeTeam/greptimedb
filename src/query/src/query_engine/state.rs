@@ -57,7 +57,8 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::QueryEngineContext;
 use crate::dist_plan::{
     DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, DynFilterRegistryManager,
-    MergeSortExtensionPlanner, RemoteDynFilterRegistryLease,
+    MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
+    RemoteDynFilterRegistryLease,
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -511,8 +512,11 @@ impl DfQueryPlanner {
         partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
     ) -> Self {
-        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
-            vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
+        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
+            Arc::new(PromExtensionPlanner),
+            Arc::new(RangeSelectPlanner),
+            Arc::new(RemoteDynFilterReceiverExtensionPlanner),
+        ];
         if let (Some(region_query_handler), Some(partition_rule_manager)) =
             (region_query_handler, partition_rule_manager)
         {

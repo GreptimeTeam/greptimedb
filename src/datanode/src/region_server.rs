@@ -49,14 +49,9 @@ use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
-use datafusion::config::ConfigOptions;
 use datafusion::datasource::TableProvider;
-use datafusion::physical_expr::utils::conjunction;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_optimizer::filter_pushdown::FilterPushdown;
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::filter::FilterExec;
 use datafusion_common::tree_node::TreeNode;
+use datafusion_expr::LogicalPlan;
 use datatypes::schema::SchemaRef;
 use either::Either;
 use futures_util::future::try_join_all;
@@ -65,11 +60,14 @@ use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
 use prost::Message;
 use query::QueryEngineRef;
+use query::dist_plan::{
+    RemoteDynFilterReceiverInjector, RemoteDynFilterReceiverInjectorRef,
+    RemoteDynFilterReceiverLogicalPlan,
+};
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
 use query::options::should_collect_region_watermark_from_extensions;
-use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrappers, PhysicalPlanWrappersRef};
 use serde_json;
 use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
@@ -131,58 +129,35 @@ pub struct RegionStat {
     pub role: RegionRole,
 }
 
-struct RemoteDynFilterPhysicalPlanWrapper {
-    server: Weak<RegionServerInner>,
-}
+fn remote_dyn_filter_receiver_plan(
+    server: &Weak<RegionServerInner>,
+    origin: LogicalPlan,
+    ctx: QueryContextRef,
+) -> LogicalPlan {
+    let Some(query_id) = ctx.remote_query_id_value() else {
+        return origin;
+    };
 
-impl PhysicalPlanWrapper for RemoteDynFilterPhysicalPlanWrapper {
-    fn wrap(
-        &self,
-        origin: Arc<dyn ExecutionPlan>,
-        ctx: QueryContextRef,
-        config: &ConfigOptions,
-    ) -> Arc<dyn ExecutionPlan> {
-        let Some(query_id) = ctx.remote_query_id_value() else {
-            return origin;
-        };
+    let Some(initial_regs) = initial_dyn_filter_regs_from_query_ctx(&ctx) else {
+        return origin;
+    };
 
-        let Some(initial_regs) = initial_dyn_filter_regs_from_query_ctx(&ctx) else {
-            return origin;
-        };
+    let Some(server) = server.upgrade() else {
+        return origin;
+    };
 
-        let Some(server) = self.server.upgrade() else {
-            return origin;
-        };
+    let dyn_filters = remote_dyn_filter_exprs_for_initial_regs(
+        &server.initial_remote_dyn_filter_registrations,
+        &query_id,
+        &initial_regs,
+        origin.schema().as_arrow().as_ref(),
+    );
 
-        let input_schema = origin.schema();
-        let dyn_filters = remote_dyn_filter_exprs_for_initial_regs(
-            &server.initial_remote_dyn_filter_registrations,
-            &query_id,
-            &initial_regs,
-            input_schema.as_ref(),
-        );
-
-        if dyn_filters.is_empty() {
-            return origin;
-        }
-
-        let predicate = conjunction(dyn_filters);
-        let filter_plan = match FilterExec::try_new(predicate, Arc::clone(&origin)) {
-            Ok(plan) => Arc::new(plan) as Arc<dyn ExecutionPlan>,
-            Err(error) => {
-                warn!(error; "Failed to build remote dynamic filter FilterExec");
-                return origin;
-            }
-        };
-
-        match FilterPushdown::new().optimize(Arc::clone(&filter_plan), config) {
-            Ok(plan) => plan,
-            Err(error) => {
-                warn!(error; "Failed to push down remote dynamic filters; keeping FilterExec fallback");
-                filter_plan
-            }
-        }
+    if dyn_filters.is_empty() {
+        return origin;
     }
+
+    RemoteDynFilterReceiverLogicalPlan::new(origin, dyn_filters).into_logical_plan()
 }
 
 impl RegionServer {
@@ -228,13 +203,44 @@ impl RegionServer {
         }
     }
 
-    pub fn install_remote_dyn_filter_physical_plan_wrapper(&self, plugins: &Plugins) {
-        let wrappers = plugins.get_or_insert::<PhysicalPlanWrappersRef, _>(|| {
-            Arc::new(PhysicalPlanWrappers::default())
-        });
-        wrappers.push(Arc::new(RemoteDynFilterPhysicalPlanWrapper {
-            server: Arc::downgrade(&self.inner),
-        }));
+    pub fn install_remote_dyn_filter_receiver_injector(&self, plugins: &Plugins) {
+        let server = Arc::downgrade(&self.inner);
+        plugins.insert::<RemoteDynFilterReceiverInjectorRef>(Arc::new(
+            RemoteDynFilterReceiverInjector::new(move |origin, ctx| {
+                remote_dyn_filter_receiver_plan(&server, origin, ctx)
+            }),
+        ));
+    }
+
+    fn register_initial_remote_dyn_filter_cleanup(
+        &self,
+        query_ctx: &QueryContextRef,
+        region_id: RegionId,
+    ) -> Option<RemoteDynFilterCleanup> {
+        let initial_dyn_filter_regs = initial_dyn_filter_regs_from_query_ctx(query_ctx);
+        let query_id = query_ctx.remote_query_id_value();
+        let registered_filter_ids = if let (Some(query_id), Some(regs)) =
+            (query_id.as_ref(), initial_dyn_filter_regs.as_ref())
+        {
+            register_initial_dyn_filter_regs(
+                &self.inner.initial_remote_dyn_filter_registrations,
+                query_id,
+                region_id,
+                regs,
+            )
+        } else {
+            Vec::new()
+        };
+
+        match (query_id, registered_filter_ids.is_empty()) {
+            (Some(query_id), false) => Some(RemoteDynFilterCleanup::new(
+                self.clone(),
+                query_id,
+                region_id,
+                registered_filter_ids,
+            )),
+            _ => None,
+        }
     }
 
     /// Registers an engine.
@@ -390,29 +396,7 @@ impl RegionServer {
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
-        let initial_dyn_filter_regs = initial_dyn_filter_regs_from_query_ctx(&query_ctx);
-        let query_id = query_ctx.remote_query_id_value();
-        let registered_filter_ids = if let (Some(query_id), Some(regs)) =
-            (query_id.as_ref(), initial_dyn_filter_regs.as_ref())
-        {
-            register_initial_dyn_filter_regs(
-                &self.inner.initial_remote_dyn_filter_registrations,
-                query_id,
-                region_id,
-                regs,
-            )
-        } else {
-            Vec::new()
-        };
-        let cleanup = match (query_id, registered_filter_ids.is_empty()) {
-            (Some(query_id), false) => Some(RemoteDynFilterCleanup::new(
-                self.clone(),
-                query_id,
-                region_id,
-                registered_filter_ids,
-            )),
-            _ => None,
-        };
+        let cleanup = self.register_initial_remote_dyn_filter_cleanup(&query_ctx, region_id);
 
         let stream = self
             .inner
@@ -463,12 +447,19 @@ impl RegionServer {
             .context(DataFusionSnafu)?
             .data;
 
+        let cleanup = self.register_initial_remote_dyn_filter_cleanup(&query_ctx, region_id);
+
         let stream = self
             .inner
             .handle_read(QueryRequest { plan, ..request }, query_ctx.clone())
             .await?;
 
         let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
+        let stream = if let Some(cleanup) = cleanup {
+            wrap_remote_dyn_filter_cleanup_stream(stream, cleanup)
+        } else {
+            stream
+        };
         Ok(maybe_guard_stream(stream, permit))
     }
 
@@ -3629,53 +3620,6 @@ mod tests {
         Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap())
     }
 
-    fn remote_dyn_filter_query_ctx(
-        query_id: &QueryId,
-        regs: &InitialDynFilterRegs,
-    ) -> QueryContextRef {
-        Arc::new(
-            QueryContextBuilder::default()
-                .set_extension(
-                    REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
-                    query_id.to_string(),
-                )
-                .set_extension(
-                    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
-                    regs.to_extension_value().unwrap(),
-                )
-                .build(),
-        )
-    }
-
-    fn wrap_remote_dyn_filter_plan(
-        server: &RegionServer,
-        plan: Arc<dyn ExecutionPlan>,
-        query_id: &QueryId,
-        regs: &InitialDynFilterRegs,
-    ) -> Arc<dyn ExecutionPlan> {
-        let wrapper = RemoteDynFilterPhysicalPlanWrapper {
-            server: Arc::downgrade(&server.inner),
-        };
-        wrapper.wrap(
-            plan,
-            remote_dyn_filter_query_ctx(query_id, regs),
-            &ConfigOptions::default(),
-        )
-    }
-
-    fn contains_filter_exec(plan: &Arc<dyn ExecutionPlan>) -> bool {
-        plan.as_any().is::<FilterExec>() || plan.children().into_iter().any(contains_filter_exec)
-    }
-
-    fn sort_with_fetch(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        let ordering =
-            LexOrdering::new([PhysicalSortExpr::new_default(
-                Arc::new(Column::new("timestamp", 0)) as Arc<dyn PhysicalExpr>,
-            )])
-            .unwrap();
-        Arc::new(SortExec::new(ordering, input).with_fetch(Some(1)))
-    }
-
     fn only_remote_dyn_filter(
         regs_by_query: &RemoteDynFilterRegistry,
         query_id: &QueryId,
@@ -3692,74 +3636,6 @@ mod tests {
         let expr = exprs.into_iter().next().unwrap();
         let expr = expr as Arc<dyn std::any::Any + Send + Sync>;
         expr.downcast::<DynamicFilterPhysicalExpr>().unwrap()
-    }
-
-    #[test]
-    fn test_remote_dyn_filter_filter_exec_pushes_through_transparent_node() {
-        let mock_region_server = mock_region_server();
-        let query_id = test_remote_query_id();
-        let region_id = RegionId::new(1024, 7);
-        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]);
-        register_empty_remote_dyn_filter(
-            &mock_region_server
-                .inner
-                .initial_remote_dyn_filter_registrations,
-            &query_id,
-        );
-
-        let scan = region_scan_exec(region_id);
-        let plan = Arc::new(CoalescePartitionsExec::new(scan)) as Arc<dyn ExecutionPlan>;
-        let wrapped = wrap_remote_dyn_filter_plan(&mock_region_server, plan, &query_id, &regs);
-
-        assert!(wrapped.as_any().is::<CoalescePartitionsExec>());
-        assert!(!contains_filter_exec(&wrapped));
-
-        let payload = datafusion_payload_bytes(physical_lit(false));
-        let outcome = apply_remote_dyn_filter_update(
-            &mock_region_server
-                .inner
-                .initial_remote_dyn_filter_registrations,
-            &query_id,
-            &RemoteDynFilterId::new("filter-1"),
-            &payload,
-            0,
-            false,
-        );
-        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
-    }
-
-    #[test]
-    fn test_remote_dyn_filter_filter_exec_stays_above_pushdown_barrier() {
-        let mock_region_server = mock_region_server();
-        let query_id = test_remote_query_id();
-        let region_id = RegionId::new(1024, 7);
-        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]);
-        register_empty_remote_dyn_filter(
-            &mock_region_server
-                .inner
-                .initial_remote_dyn_filter_registrations,
-            &query_id,
-        );
-
-        let scan: Arc<dyn ExecutionPlan> = region_scan_exec(region_id);
-        let plan = sort_with_fetch(scan);
-        let wrapped = wrap_remote_dyn_filter_plan(&mock_region_server, plan, &query_id, &regs);
-
-        let filter = wrapped.as_any().downcast_ref::<FilterExec>().unwrap();
-        assert!(filter.input().as_any().is::<SortExec>());
-
-        let payload = datafusion_payload_bytes(physical_lit(false));
-        let outcome = apply_remote_dyn_filter_update(
-            &mock_region_server
-                .inner
-                .initial_remote_dyn_filter_registrations,
-            &query_id,
-            &RemoteDynFilterId::new("filter-1"),
-            &payload,
-            0,
-            false,
-        );
-        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
     }
 
     #[test]

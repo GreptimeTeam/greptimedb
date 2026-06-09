@@ -761,10 +761,12 @@ impl ExecutionPlan for MergeScanExec {
             filters: remote_dyn_filter_pushdown
                 .pushed_down
                 .into_iter()
-                .map(|_pushdown_ready| {
-                    // TODO(discord9): Return `PushedDown::Yes` after datanodes consume RDF
-                    // registrations and pending updates. Until then, keep the parent-side filter.
-                    PushedDown::No
+                .map(|pushdown_ready| {
+                    if pushdown_ready {
+                        PushedDown::Yes
+                    } else {
+                        PushedDown::No
+                    }
                 })
                 .collect(),
             updated_node: Some(new_self),
@@ -1077,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_dyn_filter_preflight_keeps_parent_filter_until_dn_runtime_is_ready() {
+    fn remote_dyn_filter_preflight_removes_parent_filter_after_dn_runtime_is_ready() {
         let remote_dyn_filter_producer_id = RemoteDynFilterProducerId::new(42);
         let plan = LogicalPlanBuilder::empty(true)
             .project(vec![lit(1i32).alias("col1")])
@@ -1124,6 +1126,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(exec.captured_remote_dyn_filters().len(), 1);
-        assert!(matches!(propagation.filters.as_slice(), [PushedDown::No]));
+        assert!(matches!(propagation.filters.as_slice(), [PushedDown::Yes]));
     }
 }

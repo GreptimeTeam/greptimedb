@@ -53,7 +53,9 @@ use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
-use crate::dist_plan::{DistPlannerOptions, MergeScanLogicalPlan};
+use crate::dist_plan::{
+    DistPlannerOptions, MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef,
+};
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
@@ -93,20 +95,22 @@ impl DatafusionQueryEngine {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         let mut ctx = self.engine_context(query_ctx.clone());
+        let plan = if let Some(receiver_injector) =
+            self.plugins.get::<RemoteDynFilterReceiverInjectorRef>()
+        {
+            receiver_injector.maybe_inject(plan, query_ctx.clone())
+        } else {
+            plan
+        };
 
         // `create_physical_plan` will optimize logical plan internally
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
-        let optimized_physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
-
         let physical_plan = if let Some(wrappers) = self.plugins.get::<PhysicalPlanWrappersRef>() {
-            wrappers.wrap(
-                optimized_physical_plan,
-                query_ctx,
-                ctx.state().config_options(),
-            )
+            wrappers.wrap(physical_plan, query_ctx, ctx.state().config_options())
         } else {
-            optimized_physical_plan
+            physical_plan
         };
+        let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
         let stream = self.execute_stream(&ctx, &physical_plan)?;
 
