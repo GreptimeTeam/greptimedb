@@ -93,6 +93,7 @@ INSERT INTO tsid_binary_join_third (host, job, ts, greptime_value) VALUES
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 
 -- Repeated operands in a safe arithmetic island should be planned once and reused
@@ -107,6 +108,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid_binary_join_left;
 
 -- A larger arithmetic island should still plan each distinct vector selector only once
@@ -120,6 +122,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (tsid_binary_join_left - tsid_binary_join_third)) / (tsid_binary_join_left + 2);
 
 -- Label modifiers must disable the TSID shortcut and keep matching on the remaining labels.
@@ -133,6 +136,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (ts
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join_right;
 
 -- `on(job)` must stay label-based when only the left side has extra row-key labels.
@@ -146,6 +150,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_by_job;
 
 -- Comparison filters can join on `__tsid`, but the filtered result must still behave like
@@ -160,6 +165,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 
 -- `bool` comparison should follow the same TSID-backed matching path.
@@ -173,6 +179,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 
 -- Comparison filters are a barrier for binary island coalescing because they filter the
@@ -186,6 +193,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > tsid_binary_join_right) / tsid_binary_join_left) * 100;
 
 -- Bool comparisons are intentionally outside the first island optimization version.
@@ -198,6 +206,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > tsid_binary_join_right) / tsi
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) + tsid_binary_join_left) / tsid_binary_join_left;
 
 -- Set operators are a barrier because they have distinct matching and output-domain
@@ -211,6 +220,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsid_binary_join_left;
 
 -- Group modifiers are many-to-one/one-to-many matching barriers and must stay on the
@@ -224,6 +234,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\r\n|]*\] FilterExec: DynamicFilter [ REDACTED ]
 TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left / ignoring(host) group_left tsid_binary_join_right) / tsid_binary_join_left;
 
 -- SQLNESS SORT_RESULT 3 1
