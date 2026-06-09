@@ -905,12 +905,16 @@ impl CreateRequestBuilder {
             column_id += 1;
         }
         for i in 0..self.field_num {
+            let mut column_schema =
+                ColumnSchema::new(format!("field_{i}"), self.field_datatype.clone(), nullable);
+            if self.field_datatype.is_json() {
+                column_schema.mut_metadata().insert(
+                    EXTENSION_TYPE_NAME_KEY.to_string(),
+                    JsonExtensionType::NAME.to_string(),
+                );
+            }
             column_metadatas.push(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    format!("field_{i}"),
-                    self.field_datatype.clone(),
-                    nullable,
-                ),
+                column_schema,
                 semantic_type: SemanticType::Field,
                 column_id,
             });

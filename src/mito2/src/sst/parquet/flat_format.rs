@@ -452,9 +452,22 @@ where
         .fields
         .into_iter()
         .zip(nested_paths)
-        .map(|(field, nested_paths)| {
-            let nested_paths = nested_paths.iter().map(Vec::as_slice).collect::<Vec<_>>();
-            prune_field_by_nested_paths(field, &nested_paths)
+        .map(|(field, paths)| {
+            if matches!(field.data_type(), ArrowDataType::Struct(_)) && !paths.is_empty() {
+                let child_paths = paths
+                    .iter()
+                    .map(|path| {
+                        if path.first().is_some_and(|root| root == field.name()) {
+                            &path[1..]
+                        } else {
+                            path
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                prune_field_by_nested_paths(field, &child_paths)
+            } else {
+                field.clone()
+            }
         })
         .collect::<Vec<_>>();
     schema.fields = fields.into()
@@ -465,32 +478,14 @@ fn prune_field_by_nested_paths(field: &FieldRef, nested_paths: &[&[String]]) -> 
         return field.clone();
     };
 
-    if nested_paths.is_empty() {
-        return field.clone();
-    }
-
-    let child_paths = nested_paths
-        .iter()
-        .map(|path| {
-            if path.first().is_some_and(|root| root == field.name()) {
-                &path[1..]
-            } else {
-                *path
-            }
-        })
-        .collect::<Vec<_>>();
-    if child_paths.iter().any(|path| path.is_empty()) {
-        return field.clone();
-    }
-
     let pruned_fields = fields
         .iter()
         .filter_map(|field| {
-            let child_paths = child_paths
+            let child_paths = nested_paths
                 .iter()
                 .filter_map(|path| {
                     path.first()
-                        .is_some_and(|name| name.as_str() == field.name().as_str())
+                        .is_some_and(|name| name == field.name())
                         .then_some(&path[1..])
                 })
                 .collect::<Vec<_>>();
