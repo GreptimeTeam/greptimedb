@@ -38,6 +38,7 @@ use mime_guess::mime;
 use operator::expr_helper::{create_table_expr_by_column_schemas, expr_to_create};
 use pipeline::util::to_pipeline_version;
 use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
+use prometheus::{HistogramVec, IntCounterVec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Map, Value as JsonValue, json};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -920,9 +921,9 @@ pub(crate) async fn ingest_logs_inner(
     query_ctx: QueryContextRef,
     pipeline_params: GreptimePipelineParams,
 ) -> Result<HttpResponse> {
-    let db = query_ctx.get_db_string();
-    let exec_timer = std::time::Instant::now();
-
+    // Keep the timer boundary before pipeline execution to preserve existing
+    // ingestion elapsed metrics.
+    let exec_timer = Instant::now();
     let mut req = ContextReq::default();
 
     let pipeline_ctx = PipelineContext::new(&pipeline, &pipeline_params, query_ctx.channel());
@@ -933,10 +934,31 @@ pub(crate) async fn ingest_logs_inner(
         req.merge(requests);
     }
 
-    let mut outputs = Vec::new();
+    execute_log_context_req(
+        handler,
+        req,
+        query_ctx,
+        exec_timer,
+        &METRIC_HTTP_LOGS_INGESTION_COUNTER,
+        &METRIC_HTTP_LOGS_INGESTION_ELAPSED,
+    )
+    .await
+}
+
+pub(crate) async fn execute_log_context_req(
+    handler: PipelineHandlerRef,
+    ctx_req: ContextReq,
+    query_ctx: QueryContextRef,
+    exec_timer: Instant,
+    counter: &IntCounterVec,
+    elapsed: &HistogramVec,
+) -> Result<HttpResponse> {
+    let db = query_ctx.get_db_string();
+
+    let mut outputs = Vec::with_capacity(ctx_req.map_len());
     let mut total_rows: u64 = 0;
     let mut fail = false;
-    for (temp_ctx, act_req) in req.as_req_iter(query_ctx) {
+    for (temp_ctx, act_req) in ctx_req.as_req_iter(query_ctx) {
         let output = handler.insert(act_req, temp_ctx).await;
 
         if let Ok(Output {
@@ -951,16 +973,15 @@ pub(crate) async fn ingest_logs_inner(
         outputs.push(output);
     }
 
+    // Record one aggregate metric sample for the whole ingestion request.
     if total_rows > 0 {
-        METRIC_HTTP_LOGS_INGESTION_COUNTER
-            .with_label_values(&[db.as_str()])
-            .inc_by(total_rows);
-        METRIC_HTTP_LOGS_INGESTION_ELAPSED
+        counter.with_label_values(&[db.as_str()]).inc_by(total_rows);
+        elapsed
             .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
             .observe(exec_timer.elapsed().as_secs_f64());
     }
     if fail {
-        METRIC_HTTP_LOGS_INGESTION_ELAPSED
+        elapsed
             .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
             .observe(exec_timer.elapsed().as_secs_f64());
     }
