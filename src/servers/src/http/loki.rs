@@ -166,6 +166,15 @@ pub struct LokiPipeline {
     pub map: VrlValue,
 }
 
+struct LokiPipelineContextReq {
+    content_type: ContentType,
+    table_name: String,
+    pipeline_name: String,
+    pipeline_version: Option<String>,
+    pipeline_params: GreptimePipelineParams,
+    bytes: Bytes,
+}
+
 async fn build_loki_context_req(
     handler: &PipelineHandlerRef,
     content_type: ContentType,
@@ -178,17 +187,15 @@ async fn build_loki_context_req(
     // it, Loki writes directly to the target log table.
     match pipeline_info.pipeline_name {
         Some(pipeline_name) => {
-            build_loki_pipeline_context_req(
-                handler,
+            let pipeline_req = LokiPipelineContextReq {
                 content_type,
                 table_name,
                 pipeline_name,
-                pipeline_info.pipeline_version,
-                pipeline_info.pipeline_params,
+                pipeline_version: pipeline_info.pipeline_version,
+                pipeline_params: pipeline_info.pipeline_params,
                 bytes,
-                ctx,
-            )
-            .await
+            };
+            build_loki_pipeline_context_req(handler, pipeline_req, ctx).await
         }
         None => {
             let req = build_loki_raw_insert_request(content_type, table_name, bytes)?;
@@ -199,14 +206,18 @@ async fn build_loki_context_req(
 
 async fn build_loki_pipeline_context_req(
     handler: &PipelineHandlerRef,
-    content_type: ContentType,
-    table_name: String,
-    pipeline_name: String,
-    pipeline_version: Option<String>,
-    pipeline_params: GreptimePipelineParams,
-    bytes: Bytes,
+    pipeline_req: LokiPipelineContextReq,
     ctx: &QueryContextRef,
 ) -> Result<ContextReq> {
+    let LokiPipelineContextReq {
+        content_type,
+        table_name,
+        pipeline_name,
+        pipeline_version,
+        pipeline_params,
+        bytes,
+    } = pipeline_req;
+
     let version = to_pipeline_version(pipeline_version.as_deref()).context(PipelineSnafu)?;
     let def =
         PipelineDefinition::from_name(&pipeline_name, version, None).context(PipelineSnafu)?;
