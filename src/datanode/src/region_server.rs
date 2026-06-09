@@ -150,7 +150,7 @@ fn remote_dyn_filter_receiver_plan(
         &server.initial_remote_dyn_filter_registrations,
         &query_id,
         &initial_regs,
-        origin.schema().as_arrow().as_ref(),
+        origin.schema().as_arrow(),
     );
 
     if dyn_filters.is_empty() {
@@ -2254,31 +2254,21 @@ mod tests {
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
     use datafusion::arrow::datatypes::Schema as ArrowSchema;
-    use datafusion::physical_expr::expressions::Column;
-    use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
-    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+    use datafusion::physical_plan::PhysicalExpr;
     use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
-    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-    use datafusion::physical_plan::sorts::sort::SortExec;
-    use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures_util::StreamExt;
     use mito2::test_util::CreateRequestBuilder;
     use query::options::FLOW_RETURN_REGION_SEQ;
-    use session::context::REMOTE_QUERY_ID_EXTENSION_KEY;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
-    use store_api::region_engine::{
-        PrepareRequest, QueryScanContext, RegionEngine, RegionScanner, ScannerProperties,
-        SinglePartitionScanner,
-    };
+    use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
         PathType, RegionCompactRequest, RegionDeleteRequest, RegionDropRequest, RegionOpenRequest,
         RegionPutRequest, RegionTruncateRequest,
     };
-    use store_api::storage::{RegionId, ScanRequest};
-    use table::table::scan::RegionScanExec;
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::error::Result;
@@ -3544,80 +3534,6 @@ mod tests {
 
         assert_eq!(exprs.len(), 1);
         assert_eq!(format!("{}", exprs[0]), "DynamicFilter [ false ]");
-    }
-
-    struct DynFilterAcceptingScanner {
-        inner: SinglePartitionScanner,
-    }
-
-    impl std::fmt::Debug for DynFilterAcceptingScanner {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "DynFilterAcceptingScanner")
-        }
-    }
-
-    impl DisplayAs for DynFilterAcceptingScanner {
-        fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            self.inner.fmt_as(t, f)
-        }
-    }
-
-    impl RegionScanner for DynFilterAcceptingScanner {
-        fn name(&self) -> &str {
-            self.inner.name()
-        }
-
-        fn properties(&self) -> &ScannerProperties {
-            self.inner.properties()
-        }
-
-        fn schema(&self) -> Arc<Schema> {
-            self.inner.schema()
-        }
-
-        fn metadata(&self) -> Arc<RegionMetadata> {
-            self.inner.metadata()
-        }
-
-        fn prepare(&mut self, request: PrepareRequest) -> std::result::Result<(), BoxedError> {
-            self.inner.prepare(request)
-        }
-
-        fn scan_partition(
-            &self,
-            ctx: &QueryScanContext,
-            metrics_set: &ExecutionPlanMetricsSet,
-            partition: usize,
-        ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-            self.inner.scan_partition(ctx, metrics_set, partition)
-        }
-
-        fn has_predicate_without_region(&self) -> bool {
-            self.inner.has_predicate_without_region()
-        }
-
-        fn add_dyn_filter_to_predicate(
-            &mut self,
-            filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
-        ) -> Vec<bool> {
-            vec![true; filter_exprs.len()]
-        }
-
-        fn set_logical_region(&mut self, logical_region: bool) {
-            self.inner.set_logical_region(logical_region)
-        }
-    }
-
-    fn region_scan_exec(region_id: RegionId) -> Arc<RegionScanExec> {
-        let scanner = Box::new(DynFilterAcceptingScanner {
-            inner: SinglePartitionScanner::new(
-                single_value_stream(),
-                false,
-                Arc::new(mock_region_metadata(region_id)),
-                None,
-            ),
-        });
-        Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap())
     }
 
     fn only_remote_dyn_filter(
