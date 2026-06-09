@@ -1186,26 +1186,32 @@ impl ManifestContext {
             }
         }
 
-        // Now we can update the manifest.
         // If a region hook is registered, clone the action list before it is consumed
         // so we can pass a reference to the hook after a successful update.
         let hook = self.hook.clone();
         let action_list_for_hook = hook.as_ref().map(|_| action_list.clone());
-        let version = manager.update(action_list, is_staging).await.inspect_err(
-            |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
-        )?;
+        let region_id = manifest.metadata.region_id;
+        let version = manager
+            .update(action_list, is_staging)
+            .await
+            .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
+
+        // Drop the write lock before invoking the hook. Hook implementations may
+        // read the manifest or send region requests that acquire this lock;
+        // holding it would deadlock. Slow hooks also must not block manifest updates.
+        drop(manager);
 
         if self.state.load() == RegionRoleState::Follower {
             warn!(
                 "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
-                manifest.metadata.region_id
+                region_id
             );
         }
 
         if let Some(hook) = hook
             && let Some(action_list) = action_list_for_hook
         {
-            hook.on_manifest_updated(manifest.metadata.region_id, &action_list, version)
+            hook.on_manifest_updated(region_id, &action_list, version)
                 .await;
         }
 
