@@ -30,7 +30,6 @@ pub mod optimizer;
 pub mod options;
 pub mod parser;
 mod part_sort;
-pub mod physical_wrapper;
 pub mod plan;
 pub mod planner;
 pub mod promql;

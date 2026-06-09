@@ -127,7 +127,6 @@ impl PendingDynFilterUpdate {
                 generation: snapshot.generation,
                 is_complete: snapshot.is_complete,
             }),
-            #[allow(unreachable_patterns)]
             _ => None,
         }
     }
