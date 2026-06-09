@@ -450,7 +450,6 @@ impl DatanodeBuilder {
             .table_provider_factory
             .clone()
             .unwrap_or_else(|| Arc::new(DummyTableProviderFactory));
-
         let mut region_server = RegionServer::with_table_provider(
             query_engine,
             common_runtime::global_runtime(),

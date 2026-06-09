@@ -49,7 +49,10 @@ pub struct GreptimeOptions<T> {
     pub component: T,
 }
 
-impl<T: Configurable> Configurable for GreptimeOptions<T> {
+impl<T> Configurable for GreptimeOptions<T>
+where
+    T: Configurable,
+{
     fn env_list_keys() -> Option<&'static [&'static str]> {
         T::env_list_keys()
     }

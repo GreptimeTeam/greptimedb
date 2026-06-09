@@ -19,6 +19,7 @@ use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_runtime::JoinError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::error::Error as TableError;
@@ -63,6 +64,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to join datanode runtime task, request_type: {}", request_type))]
+    RuntimeJoin {
+        request_type: &'static str,
+        #[snafu(source)]
+        error: JoinError,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to create plan decoder"))]
@@ -448,9 +458,11 @@ impl ErrorExt for Error {
 
             AsyncTaskExecute { source, .. } => source.status_code(),
 
-            CreateDir { .. } | RemoveDir { .. } | ShutdownInstance { .. } | DataFusion { .. } => {
-                StatusCode::Internal
-            }
+            CreateDir { .. }
+            | RemoveDir { .. }
+            | ShutdownInstance { .. }
+            | DataFusion { .. }
+            | RuntimeJoin { .. } => StatusCode::Internal,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,

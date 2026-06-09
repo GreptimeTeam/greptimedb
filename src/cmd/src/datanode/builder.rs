@@ -62,6 +62,7 @@ impl InstanceBuilder {
 
     async fn init(opts: &mut DatanodeOptions, plugins: &mut Plugins) -> Result<Vec<WorkerGuard>> {
         common_runtime::init_global_runtimes(&opts.runtime);
+        common_runtime::init_datanode_runtimes(&opts.runtime);
 
         let dn_opts = &mut opts.component;
         let guard = common_telemetry::init_global_logging(
