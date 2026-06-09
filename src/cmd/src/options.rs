@@ -16,7 +16,6 @@ use clap::Parser;
 use common_config::Configurable;
 use common_runtime::global::RuntimeOptions;
 use plugins::PluginOptions;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Default, Debug, Clone)]
@@ -39,9 +38,9 @@ pub struct GlobalOptions {
 /// All the options of GreptimeDB.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct GreptimeOptions<T, R = RuntimeOptions> {
+pub struct GreptimeOptions<T> {
     /// The runtime options.
-    pub runtime: R,
+    pub runtime: RuntimeOptions,
     /// The plugin options.
     pub plugins: Vec<PluginOptions>,
 
@@ -50,10 +49,9 @@ pub struct GreptimeOptions<T, R = RuntimeOptions> {
     pub component: T,
 }
 
-impl<T, R> Configurable for GreptimeOptions<T, R>
+impl<T> Configurable for GreptimeOptions<T>
 where
     T: Configurable,
-    R: Serialize + DeserializeOwned + Default,
 {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         T::env_list_keys()

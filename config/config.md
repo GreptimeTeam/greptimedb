@@ -473,7 +473,7 @@
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
 | `runtime.query_rt_size` | Integer | `7` | The number of threads to execute datanode query operations.<br/>Defaults to max(num_cpus - 1, 1). |
-| `runtime.ingest_rt_size` | Integer | `1` | The number of threads to execute datanode ingestion operations. |
+| `runtime.ingest_rt_size` | Integer | `8` | The number of threads to execute datanode ingestion operations. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |

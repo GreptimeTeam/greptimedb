@@ -28,6 +28,5 @@ pub use global::{
     spawn_ingest, spawn_query,
 };
 
-pub use crate::global::DatanodeRuntimeOptions;
 pub use crate::repeated_task::{BoxedTaskFunction, RepeatedTask, TaskFunction};
 pub use crate::runtime::{Builder, JoinError, JoinHandle, Runtime};

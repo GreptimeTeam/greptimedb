@@ -86,7 +86,7 @@ watch = false
 ## Defaults to max(num_cpus - 1, 1).
 #+ query_rt_size = 7
 ## The number of threads to execute datanode ingestion operations.
-#+ ingest_rt_size = 1
+#+ ingest_rt_size = 8
 
 ## The metasrv client options.
 [meta_client]

@@ -30,11 +30,16 @@ const HB_WORKERS: usize = 2;
 
 /// The options for the global runtimes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct RuntimeOptions {
     /// The number of threads for the global default runtime.
     pub global_rt_size: usize,
     /// The number of threads to execute the runtime for compact operations.
     pub compact_rt_size: usize,
+    /// The number of threads to execute datanode query operations.
+    pub query_rt_size: usize,
+    /// The number of threads to execute datanode ingestion operations.
+    pub ingest_rt_size: usize,
 }
 
 impl Default for RuntimeOptions {
@@ -43,27 +48,6 @@ impl Default for RuntimeOptions {
         Self {
             global_rt_size: cpus,
             compact_rt_size: usize::max(cpus / 2, 1),
-        }
-    }
-}
-
-/// The options for datanode-specific global runtimes.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct DatanodeRuntimeOptions {
-    #[serde(flatten)]
-    pub base: RuntimeOptions,
-    /// The number of threads to execute datanode query operations.
-    pub query_rt_size: usize,
-    /// The number of threads to execute datanode ingestion operations.
-    pub ingest_rt_size: usize,
-}
-
-impl Default for DatanodeRuntimeOptions {
-    fn default() -> Self {
-        let cpus = num_cpus::get();
-        Self {
-            base: RuntimeOptions::default(),
             query_rt_size: usize::max(cpus.saturating_sub(1), 1),
             ingest_rt_size: cpus,
         }
@@ -202,7 +186,7 @@ pub fn init_global_runtimes(options: &RuntimeOptions) {
 /// # Panics
 /// Panics when the global runtimes are already initialized.
 /// You should call this function before using any runtime functions.
-pub fn init_datanode_runtimes(options: &DatanodeRuntimeOptions) {
+pub fn init_datanode_runtimes(options: &RuntimeOptions) {
     static START: Once = Once::new();
     START.call_once(move || {
         let mut c = CONFIG_RUNTIMES.lock().unwrap();
@@ -267,11 +251,11 @@ mod tests {
 
     #[test]
     fn test_datanode_runtime_options_default() {
-        let options = DatanodeRuntimeOptions::default();
+        let options = RuntimeOptions::default();
         let cpus = num_cpus::get();
 
-        assert_eq!(cpus, options.base.global_rt_size);
-        assert_eq!(usize::max(cpus / 2, 1), options.base.compact_rt_size);
+        assert_eq!(cpus, options.global_rt_size);
+        assert_eq!(usize::max(cpus / 2, 1), options.compact_rt_size);
         assert_eq!(usize::max(cpus.saturating_sub(1), 1), options.query_rt_size);
         assert_eq!(cpus, options.ingest_rt_size);
     }

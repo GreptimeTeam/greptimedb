@@ -24,7 +24,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::Parser;
 use common_config::Configurable;
-use common_runtime::DatanodeRuntimeOptions;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_telemetry::{info, warn};
 use common_wal::config::DatanodeWalConfig;
@@ -46,7 +45,7 @@ use crate::options::{GlobalOptions, GreptimeOptions};
 
 pub const APP_NAME: &str = "greptime-datanode";
 
-type DatanodeOptions = GreptimeOptions<datanode::config::DatanodeOptions, DatanodeRuntimeOptions>;
+type DatanodeOptions = GreptimeOptions<datanode::config::DatanodeOptions>;
 
 pub struct Instance {
     datanode: Datanode,

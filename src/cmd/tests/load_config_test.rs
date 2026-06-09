@@ -18,7 +18,6 @@ use cmd::options::GreptimeOptions;
 use common_base::memory_limit::MemoryLimit;
 use common_config::{Configurable, DEFAULT_DATA_HOME, ENV_VAR_SEP};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
-use common_runtime::global::DatanodeRuntimeOptions;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
@@ -48,11 +47,10 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
         query_rt_size = 7
     "#;
 
-    let options: GreptimeOptions<DatanodeOptions, DatanodeRuntimeOptions> =
-        toml::from_str(toml).unwrap();
+    let options: GreptimeOptions<DatanodeOptions> = toml::from_str(toml).unwrap();
 
-    assert_eq!(8, options.runtime.base.global_rt_size);
-    assert_eq!(4, options.runtime.base.compact_rt_size);
+    assert_eq!(8, options.runtime.global_rt_size);
+    assert_eq!(4, options.runtime.compact_rt_size);
     assert_eq!(8, options.runtime.ingest_rt_size);
     assert_eq!(7, options.runtime.query_rt_size);
 }
@@ -61,13 +59,11 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
 #[test]
 fn test_load_datanode_example_config() {
     let example_config = common_test_util::find_workspace_path("config/datanode.example.toml");
-    let options = GreptimeOptions::<DatanodeOptions, DatanodeRuntimeOptions>::load_layered_options(
-        example_config.to_str(),
-        "",
-    )
-    .unwrap();
+    let options =
+        GreptimeOptions::<DatanodeOptions>::load_layered_options(example_config.to_str(), "")
+            .unwrap();
 
-    let expected = GreptimeOptions::<DatanodeOptions, DatanodeRuntimeOptions> {
+    let expected = GreptimeOptions::<DatanodeOptions> {
         component: DatanodeOptions {
             node_id: Some(42),
             default_column_prefix: Some("greptime".to_string()),
@@ -371,10 +367,7 @@ fn test_load_heartbeat_env_vars_from_env() {
         let expected = vec!["AZ".to_string(), "REGION".to_string()];
 
         let datanode =
-            GreptimeOptions::<DatanodeOptions, DatanodeRuntimeOptions>::load_layered_options(
-                None, env_prefix,
-            )
-            .unwrap();
+            GreptimeOptions::<DatanodeOptions>::load_layered_options(None, env_prefix).unwrap();
         similar_asserts::assert_eq!(datanode.component.heartbeat_env_vars, expected);
 
         let frontend =
