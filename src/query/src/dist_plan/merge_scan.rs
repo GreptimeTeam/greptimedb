@@ -59,12 +59,17 @@ use crate::dist_plan::dyn_filter_bridge::{
 };
 use crate::dist_plan::{RemoteDynFilterProducerId, RemoteDynFilterRegistryLease};
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
-use crate::options::FlowQueryExtensions;
+use crate::options::{FlowQueryExtensions, remote_dyn_filter_pushdown_enabled_from_extensions};
 use crate::query_engine::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
     context.session_config().get_extension()
+}
+
+fn remote_dyn_filter_enabled(query_ctx: &QueryContextRef) -> Result<bool> {
+    remote_dyn_filter_pushdown_enabled_from_extensions(&query_ctx.extensions())
+        .map_err(|err| DataFusionError::External(Box::new(err)))
 }
 
 fn acquire_remote_dyn_filter_registry_lease(
@@ -334,7 +339,12 @@ impl MergeScanExec {
         let partition_metrics_moved = self.partition_metrics.clone();
         let plan = self.plan.clone();
         let target_partition = self.target_partition;
-        let captured_remote_dyn_filters = self.captured_remote_dyn_filters();
+        let remote_dyn_filter_enabled = remote_dyn_filter_enabled(&self.query_ctx)?;
+        let captured_remote_dyn_filters = if remote_dyn_filter_enabled {
+            self.captured_remote_dyn_filters()
+        } else {
+            Vec::new()
+        };
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
@@ -738,6 +748,20 @@ impl ExecutionPlan for MergeScanExec {
             .into_iter()
             .map(|filter| filter.filter)
             .collect::<Vec<_>>();
+
+        if !remote_dyn_filter_enabled(&self.query_ctx)? {
+            // Reject remote pushdown instead of pretending success: this keeps
+            // DataFusion/local dynamic filter semantics intact while disabling
+            // only FE -> DN remote dynamic filter propagation.
+            self.captured_remote_dyn_filters.lock().unwrap().clear();
+            let new_self = Arc::new(self.clone());
+
+            return Ok(FilterPushdownPropagation {
+                filters: parent_filters.into_iter().map(|_| PushedDown::No).collect(),
+                updated_node: Some(new_self),
+            });
+        }
+
         let Some(remote_dyn_filter_producer_id) = self.remote_dyn_filter_producer_id else {
             // Missing RDF identity disables only RDF, not normal execution.
             common_telemetry::warn!(

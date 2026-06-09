@@ -25,6 +25,9 @@ pub const FLOW_INCREMENTAL_AFTER_SEQS: &str = "flow.incremental_after_seqs";
 pub const FLOW_INCREMENTAL_MODE: &str = "flow.incremental_mode";
 pub const FLOW_RETURN_REGION_SEQ: &str = "flow.return_region_seq";
 pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
+/// Enable by default, set to false to explictly disable.
+pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
+    "query.enable_remote_dynamic_filter_pushdown";
 
 pub const FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY: &str = "memtable_only";
 
@@ -106,7 +109,7 @@ impl FlowQueryExtensions {
 
         let return_region_seq = extensions
             .get(FLOW_RETURN_REGION_SEQ)
-            .map(|value| parse_bool(value.as_str()))
+            .map(|value| parse_bool(FLOW_RETURN_REGION_SEQ, value.as_str()))
             .transpose()?
             .unwrap_or(false);
 
@@ -184,6 +187,22 @@ impl FlowQueryExtensions {
     }
 }
 
+/// Returns whether query-level remote dynamic filter propagation is enabled.
+///
+/// The option defaults to enabled to preserve existing behavior. Callers may set
+/// `query.enable_remote_dynamic_filter_pushdown=false` in query context
+/// extensions to disable FE->DN remote dynamic filter propagation for a single
+/// query.
+pub fn remote_dyn_filter_pushdown_enabled_from_extensions(
+    extensions: &HashMap<String, String>,
+) -> Result<bool> {
+    extensions
+        .get(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN)
+        .map(|value| parse_bool(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, value.as_str()))
+        .transpose()
+        .map(|value| value.unwrap_or(true))
+}
+
 /// Returns whether raw Flow query extensions request terminal region watermark collection.
 ///
 /// This is only an intent/presence check for transport/scan plumbing; callers that need
@@ -249,13 +268,13 @@ fn parse_incremental_after_seqs(value: &str) -> Result<HashMap<u64, u64>> {
         .collect()
 }
 
-fn parse_bool(value: &str) -> Result<bool> {
+fn parse_bool(option_name: &str, value: &str) -> Result<bool> {
     match value {
         v if v.eq_ignore_ascii_case("true") => Ok(true),
         v if v.eq_ignore_ascii_case("false") => Ok(false),
         _ => Err(invalid_query_context_extension(format!(
             "Invalid value for {}: {}",
-            FLOW_RETURN_REGION_SEQ, value
+            option_name, value
         ))),
     }
 }
@@ -274,6 +293,37 @@ mod flow_extension_tests {
         let parsed = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap();
 
         assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_pushdown_enabled_from_extensions_defaults_true() {
+        assert!(remote_dyn_filter_pushdown_enabled_from_extensions(&HashMap::new()).unwrap());
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_pushdown_enabled_from_extensions_parses_bool() {
+        let exts = HashMap::from([(
+            QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+            "false".to_string(),
+        )]);
+        assert!(!remote_dyn_filter_pushdown_enabled_from_extensions(&exts).unwrap());
+
+        let exts = HashMap::from([(
+            QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+            "true".to_string(),
+        )]);
+        assert!(remote_dyn_filter_pushdown_enabled_from_extensions(&exts).unwrap());
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_pushdown_enabled_from_extensions_rejects_invalid_bool() {
+        let exts = HashMap::from([(
+            QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+            "invalid".to_string(),
+        )]);
+
+        let err = remote_dyn_filter_pushdown_enabled_from_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN));
     }
 
     #[test]
