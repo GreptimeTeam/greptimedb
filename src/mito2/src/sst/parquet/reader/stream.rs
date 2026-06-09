@@ -44,7 +44,9 @@ use crate::error::{CastColumnSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu
 ///   inserting root-level null arrays.
 /// - Nested struct alignment aligns struct arrays to the expected nested field
 ///   layout.
+#[derive(derive_more::Debug)]
 pub struct NestedSchemaAligner<S> {
+    #[debug(skip)]
     inner: S,
     /// Output schema expected by the upper reader.
     output_schema: SchemaRef,

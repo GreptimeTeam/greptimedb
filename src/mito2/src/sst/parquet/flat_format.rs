@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use arrow_schema::{DataType as ArrowDataType, FieldRef};
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array,
 };
@@ -45,7 +46,7 @@ use parquet::file::metadata::RowGroupMetaData;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, NestedPath, SequenceNumber};
 
 use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, InvalidParquetSnafu, InvalidRecordBatchSnafu,
@@ -295,11 +296,17 @@ impl FlatReadFormat {
 
     /// Gets the projected output schema produced by parquet reading.
     pub(crate) fn output_arrow_schema(&self) -> Result<SchemaRef> {
-        let projection = self.parquet_read_columns().root_indices();
-        let schema = self
+        let read_columns = self.parquet_read_columns();
+        let projection = read_columns.root_indices();
+        let mut schema = self
             .arrow_schema()
             .project(projection)
             .context(ComputeArrowSnafu)?;
+        if read_columns.has_nested() {
+            debug_assert_eq!(schema.fields().len(), read_columns.columns().len());
+            let nested_paths = read_columns.columns().iter().map(|x| x.nested_paths());
+            prune_schema_by_nested_paths(&mut schema, nested_paths);
+        }
         Ok(Arc::new(schema))
     }
 
@@ -435,6 +442,75 @@ impl FlatReadFormat {
             Ok(true)
         }
     }
+}
+
+fn prune_schema_by_nested_paths<'a, I>(schema: &mut Schema, nested_paths: I)
+where
+    I: IntoIterator<Item = &'a [NestedPath]>,
+{
+    let fields = schema
+        .fields
+        .into_iter()
+        .zip(nested_paths)
+        .map(|(field, nested_paths)| {
+            let nested_paths = nested_paths.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            prune_field_by_nested_paths(field, &nested_paths)
+        })
+        .collect::<Vec<_>>();
+    schema.fields = fields.into()
+}
+
+fn prune_field_by_nested_paths(field: &FieldRef, nested_paths: &[&[String]]) -> FieldRef {
+    let ArrowDataType::Struct(fields) = field.data_type() else {
+        return field.clone();
+    };
+
+    if nested_paths.is_empty() {
+        return field.clone();
+    }
+
+    let child_paths = nested_paths
+        .iter()
+        .map(|path| {
+            if path.first().is_some_and(|root| root == field.name()) {
+                &path[1..]
+            } else {
+                *path
+            }
+        })
+        .collect::<Vec<_>>();
+    if child_paths.iter().any(|path| path.is_empty()) {
+        return field.clone();
+    }
+
+    let pruned_fields = fields
+        .iter()
+        .filter_map(|field| {
+            let child_paths = child_paths
+                .iter()
+                .filter_map(|path| {
+                    path.first()
+                        .is_some_and(|name| name.as_str() == field.name().as_str())
+                        .then_some(&path[1..])
+                })
+                .collect::<Vec<_>>();
+
+            if child_paths.is_empty() {
+                None
+            } else if child_paths.iter().any(|path| path.is_empty()) {
+                Some(field.clone())
+            } else {
+                Some(prune_field_by_nested_paths(field, &child_paths))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Arc::new(
+        field
+            .as_ref()
+            .clone()
+            .with_data_type(ArrowDataType::Struct(pruned_fields.into())),
+    )
 }
 
 /// Wraps the parquet helper for different formats.
@@ -850,6 +926,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
+    use arrow_schema::Field;
     use datatypes::arrow::array::{
         ArrayRef, BinaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
     };
@@ -1042,5 +1119,101 @@ mod tests {
         );
 
         assert_eq!(expected, output_schema);
+    }
+
+    #[test]
+    fn test_prune_schema_by_nested_paths() {
+        fn new_field(name: &str, data_type: ArrowDataType) -> FieldRef {
+            Arc::new(Field::new(name, data_type, true))
+        }
+
+        fn struct_field(name: &str, fields: impl IntoIterator<Item = FieldRef>) -> FieldRef {
+            new_field(name, ArrowDataType::Struct(fields.into_iter().collect()))
+        }
+
+        let mut schema = Schema::new([
+            struct_field(
+                "j",
+                [
+                    struct_field(
+                        "a",
+                        [
+                            new_field("x", ArrowDataType::Int64),
+                            new_field("y", ArrowDataType::Utf8),
+                            struct_field(
+                                "z",
+                                [
+                                    new_field("q", ArrowDataType::Boolean),
+                                    new_field("r", ArrowDataType::Float64),
+                                ],
+                            ),
+                        ],
+                    ),
+                    new_field("b", ArrowDataType::Utf8),
+                    struct_field(
+                        "c",
+                        vec![
+                            new_field("d", ArrowDataType::Int64),
+                            new_field("e", ArrowDataType::Utf8),
+                        ],
+                    ),
+                ],
+            ),
+            new_field("tag", ArrowDataType::Utf8),
+            struct_field(
+                "k",
+                [
+                    new_field("k_0", ArrowDataType::Int64),
+                    new_field("k_1", ArrowDataType::Utf8),
+                ],
+            ),
+        ]);
+
+        let nested_paths = [
+            vec![
+                ["j", "a", "x"].iter().map(|x| x.to_string()).collect(),
+                ["j", "a", "z", "q"].iter().map(|x| x.to_string()).collect(),
+                ["j", "c"].iter().map(|x| x.to_string()).collect(),
+            ],
+            vec![],
+            vec![],
+        ];
+
+        prune_schema_by_nested_paths(
+            &mut schema,
+            nested_paths.iter().map(|paths| paths.as_slice()),
+        );
+
+        let expected = Schema::new([
+            struct_field(
+                "j",
+                [
+                    struct_field(
+                        "a",
+                        [
+                            new_field("x", ArrowDataType::Int64),
+                            struct_field("z", vec![new_field("q", ArrowDataType::Boolean)]),
+                        ],
+                    ),
+                    struct_field(
+                        "c",
+                        [
+                            new_field("d", ArrowDataType::Int64),
+                            new_field("e", ArrowDataType::Utf8),
+                        ],
+                    ),
+                ],
+            ),
+            new_field("tag", ArrowDataType::Utf8),
+            struct_field(
+                "k",
+                [
+                    new_field("k_0", ArrowDataType::Int64),
+                    new_field("k_1", ArrowDataType::Utf8),
+                ],
+            ),
+        ]);
+
+        assert_eq!(schema, expected);
     }
 }

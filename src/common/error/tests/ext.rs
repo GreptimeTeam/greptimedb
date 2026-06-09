@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::ext::{ErrorExt, PlainError, StackError};
+use common_error::ext::{ErrorExt, PlainError, StackError, WhateverResult};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, ResultExt, Snafu};
@@ -58,6 +58,34 @@ fn normal_error() -> Result<(), MyError> {
 fn transparent_error() -> Result<(), MyError> {
     let plain_error = PlainError::new("<root cause>".to_string(), StatusCode::Unexpected);
     Err(plain_error)?
+}
+
+#[test]
+fn test_into_whatever_error() {
+    fn f(g: fn() -> Result<(), MyError>) -> WhateverResult<()> {
+        g()?;
+        Ok(())
+    }
+
+    let whatever = f(normal_error).unwrap_err();
+    assert_eq!(
+        normalize_path(&whatever.to_string()),
+        format!(
+            r#"0: A normal error with "display" attribute, message "blabla", at {}:55:22
+1: PlainError {{ msg: "<root cause>", status_code: Unexpected }}"#,
+            normalize_path(file!())
+        )
+    );
+
+    let whatever = f(transparent_error).unwrap_err();
+    assert_eq!(
+        normalize_path(&whatever.to_string()),
+        format!(
+            r#"0: <transparent>, at {}:60:5
+1: PlainError {{ msg: "<root cause>", status_code: Unexpected }}"#,
+            normalize_path(file!())
+        )
+    );
 }
 
 #[test]
