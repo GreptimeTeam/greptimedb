@@ -249,6 +249,7 @@ impl FlowDualEngine {
     async fn try_sync_with_check_task(
         &self,
         flow_id: FlowId,
+        allow_create: bool,
         allow_drop: bool,
     ) -> Result<(), Error> {
         // this function rarely get called so adding some log is helpful
@@ -258,7 +259,7 @@ impl FlowDualEngine {
         // keep trying to trigger consistent check
         while retry < max_retry {
             if let Some(task) = self.check_task.lock().await.as_ref() {
-                task.trigger(false, allow_drop).await?;
+                task.trigger(allow_create, allow_drop).await?;
                 break;
             }
             retry += 1;
@@ -704,7 +705,7 @@ impl FlowEngine for FlowDualEngine {
                     "Flow {} is not exist in the underlying engine, but exist in metadata",
                     flow_id
                 );
-                self.try_sync_with_check_task(flow_id, true).await?;
+                self.try_sync_with_check_task(flow_id, false, true).await?;
 
                 Ok(())
             }
@@ -716,7 +717,7 @@ impl FlowEngine for FlowDualEngine {
 
     async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
         // sync with check task
-        self.try_sync_with_check_task(flow_id, false).await?;
+        self.try_sync_with_check_task(flow_id, true, false).await?;
         let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.flush_flow(flow_id).await,
