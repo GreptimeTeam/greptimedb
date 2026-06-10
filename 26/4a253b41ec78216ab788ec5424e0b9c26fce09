@@ -1,0 +1,69 @@
+tests-fuzz/src/utils.rs
+  s_c230139cef7d3f::t_6006300b0b63ba 21
+tests-fuzz/utils/README.md
+  s_c230139cef7d3f::t_8c966f67d44f73 78,85,91,118
+  s_c230139cef7d3f::t_02c9a701ca95fa 25,47,54,57,59,61-62
+  s_c230139cef7d3f::t_17329f2d4dea22 75
+  s_c230139cef7d3f::t_1083de29110790 1-24,26-46,48-53,55-56,58,60,63-74,76-77,79-84,86-90,92-117,119-141
+tests-fuzz/src/error.rs
+  s_c230139cef7d3f::t_1803cbe3df4489 84-106
+src/meta-srv/src/procedure/wal_prune/manager.rs
+  h_623774b620da8e 245-248
+src/common/meta/src/region_registry.rs
+  h_623774b620da8e 19,244-248
+docker/ci/ubuntu/Dockerfile.kafka-wal-helper
+  s_c230139cef7d3f::t_170a13bde01949 17
+  s_c230139cef7d3f::t_a9ffb1f652086d 1-16,18
+tests-fuzz/src/utils/kafka_wal_http.rs
+  s_c230139cef7d3f::t_1803cbe3df4489 17,113-116,120-122,138-141,145-147,152,159-162
+  s_c230139cef7d3f::t_00719e44da9869 69-77,81,84-89
+  s_c230139cef7d3f::t_6006300b0b63ba 1-16,18-68,78-80,82-83,90-112,117-119,123-137,142-144,148-151,153-158,163-165
+.github/actions/setup-greptimedb-cluster/kafka-wal-helper.yaml
+  h_623774b620da8e 19
+  s_c230139cef7d3f::t_6ebbc204c0df28 1-18,20-53
+src/meta-srv/src/procedure/region_migration.rs
+  h_623774b620da8e 55,694-697
+src/mito2/src/worker.rs
+  h_623774b620da8e 1209-1215
+tests-fuzz/Cargo.toml
+  s_c230139cef7d3f::t_01da8dd0d438ae 22,181-186
+  s_c230139cef7d3f::t_da97a6a9f86453 177-180,188-190
+  h_623774b620da8e 187
+  s_c230139cef7d3f::t_b2611652be19ca 20
+  s_c230139cef7d3f::t_e6c508c65392be 51
+tests-fuzz/utils/kafka_wal_helper.rs
+  s_c230139cef7d3f::t_00d5ede716dff9 24-28
+  s_c230139cef7d3f::t_3f55e880c0f435 104-138
+tests-fuzz/targets/wal/fuzz_remote_wal_logical_prune.rs
+  s_c230139cef7d3f::t_e85dbd30f379e6 411-415,441-455,458,496-500,550-573,575-582
+  s_c230139cef7d3f::t_c35447cf106ff5 17,49,66-71,182-215,674
+  s_c230139cef7d3f::t_ff45b543a73aa4 104-107
+  s_c230139cef7d3f::t_f101d2d4c8036a 1-16,19-32,37-48,50-61,64,72-89,91-103,112-118,120-143,148-152,157-158,167-179,216-222,227-391,393-395,402-403,405-407,409-410,502-513,516,522-526,528-549,583-584,590-603,618,623,628-629,631,649-673,675,677-678,680-681
+  s_c230139cef7d3f::t_e733326a37d019 585-589,605,639-641,676
+  s_c230139cef7d3f::t_a5b7f74f3465fd 614-617,619-622,624-627,630,632,648
+  s_c230139cef7d3f::t_3d5fce55082f85 110-111
+  s_c230139cef7d3f::t_9e601b41d6469e 392,396-401,404,408,416-440,456-457,459-495,501,514-515,517-521,527
+  s_c230139cef7d3f::t_218e8b4da21785 63,65,90,108-109,119,159-161,165-166,180-181
+  h_623774b620da8e 62,144-146,153-156,162-164,574,679
+  s_c230139cef7d3f::t_588048d5233a9f 604,606-611,633-638,642-647
+  s_c230139cef7d3f::t_5a8d61b18d2075 18
+  s_c230139cef7d3f::t_6efe3ae1c98559 33-36,223-226
+  s_c230139cef7d3f::t_9f9a3d229f222b 147
+  s_c230139cef7d3f::t_e7a02a95d02372 612-613
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "264a253b41ec78216ab788ec5424e0b9c26fce09",
+  "prompts": {},
+  "sessions": {
+    "s_c230139cef7d3f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_16e375a80ffeqVm4ShzIwI76v7",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
