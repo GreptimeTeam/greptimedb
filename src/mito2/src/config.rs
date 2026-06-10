@@ -173,6 +173,8 @@ pub struct MitoConfig {
     /// To align with the old behavior, the default value is 0 (no restrictions).
     #[serde(with = "humantime_serde")]
     pub min_compaction_interval: Duration,
+    /// Whether to schedule compaction after applying a region edit.
+    pub schedule_compaction_after_edit: bool,
 
     /// Whether to enable flat format as the default SST format.
     /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
@@ -226,6 +228,7 @@ impl Default for MitoConfig {
             #[cfg(feature = "vector_index")]
             vector_index: VectorIndexConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
+            schedule_compaction_after_edit: true,
             default_flat_format: true,
             gc: GcConfig::default(),
         };
