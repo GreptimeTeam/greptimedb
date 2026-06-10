@@ -64,8 +64,8 @@
 //!
 //! `on_manifest_updated` is centralized in [`ManifestContext::update_manifest_with_state_check`],
 //! so it automatically covers all manifest write paths that go through `ManifestContext`.
-//! The sole exception is [`MitoRegion::exit_staging_on_success`], which invokes the hook
-//! inline because it receives a pre-acquired manifest write lock from the caller.
+//! The sole exception is [`MitoRegion::exit_staging_on_success`], which returns the hook
+//! payload to the caller so the hook can be invoked after dropping the manifest write lock.
 //!
 //! ## Future work
 //!

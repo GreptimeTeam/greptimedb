@@ -152,12 +152,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     return;
                 };
                 let mut manager = region.manifest_ctx.manifest_manager.write().await;
-                match region.exit_staging_on_success(&mut manager).await {
-                    Ok(()) => {
-                        sender.send(Ok(0));
+                let hook_payload = match region.exit_staging_on_success(&mut manager).await {
+                    Ok(payload) => payload,
+                    Err(e) => {
+                        sender.send(Err(e));
+                        return;
                     }
-                    Err(e) => sender.send(Err(e)),
+                };
+                // Drop the write lock before invoking the hook to avoid deadlock.
+                drop(manager);
+                if let Some((action_list, version)) = hook_payload
+                    && let Some(hook) = region.manifest_ctx.hook()
+                {
+                    hook.on_manifest_updated(region.region_id, &action_list, version)
+                        .await;
                 }
+                sender.send(Ok(0));
             } else {
                 sender.send(
                     UnexpectedSnafu {
