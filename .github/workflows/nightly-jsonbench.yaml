@@ -140,6 +140,7 @@ jobs:
 
           export JSONBENCH_DATA_DIR="/root/data/bluesky"
           echo "Use JSONBench data directory ${JSONBENCH_DATA_DIR}"
+          echo "${JSONBENCH_DATASET}" > jsonbench.dataset
 
           echo "Cloning JSONBench"
           git clone --branch greptimedb-new-json --depth 1 https://github.com/GreptimeTeam/JSONBench.git JSONBench
@@ -186,6 +187,7 @@ jobs:
           name: jsonbench-results
           path: |
             ./greptimedb.log
+            ./jsonbench.dataset
             ./JSONBench/greptimedb/*.log
             ./JSONBench/greptimedb/*.total_size
             ./JSONBench/greptimedb/*.data_size
@@ -198,7 +200,7 @@ jobs:
 
   stop-linux-arm64-runner:
     name: Stop Linux ARM64 runner
-    # It's always run as the last job in the workflow to make sure that the runner is released.
+    # It always runs after JSONBench to make sure that the runner is released.
     if: ${{ always() && needs.allocate-runner.outputs.linux-arm64-ec2-runner-instance-id != '' }}
     runs-on: ubuntu-latest
     needs: [
@@ -221,3 +223,89 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+
+  notification:
+    name: Send JSONBench notification
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }}
+    needs: [ jsonbench, stop-linux-arm64-runner ]
+    runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_JSON_CHANNEL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download JSONBench results
+        if: ${{ needs.jsonbench.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: jsonbench-results
+          path: jsonbench-results
+
+      - name: Find previous JSONBench results
+        id: previous_jsonbench
+        if: ${{ needs.jsonbench.result == 'success' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          JSONBENCH_PREVIOUS_RESULT_DEBUG: ${{ vars.JSONBENCH_PREVIOUS_RESULT_DEBUG }}
+        run: |
+          set -euo pipefail
+
+          debug_args=()
+          if [[ "${JSONBENCH_PREVIOUS_RESULT_DEBUG:-false}" == "true" ]]; then
+            debug_args+=(--debug)
+          fi
+
+          previous_run_id=$(
+            bash .github/scripts/find-previous-workflow-artifact.sh \
+              --repo "${GITHUB_REPOSITORY}" \
+              --current-run-id "${CURRENT_RUN_ID}" \
+              --workflow-path ".github/workflows/nightly-jsonbench.yaml" \
+              --artifact-name "jsonbench-results" \
+              "${debug_args[@]}" \
+              --run-id-only
+          )
+
+          echo "run_id=${previous_run_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download previous JSONBench results
+        if: ${{ steps.previous_jsonbench.outputs.run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: jsonbench-results
+          path: previous-jsonbench-results
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ steps.previous_jsonbench.outputs.run_id }}
+
+      - name: Prepare JSONBench summary
+        id: jsonbench-summary
+        shell: bash
+        env:
+          JSONBENCH_RESULT: ${{ needs.jsonbench.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          payload=$(
+            python3 .github/scripts/jsonbench-summary.py \
+              --result-dir jsonbench-results \
+              --previous-result-dir previous-jsonbench-results \
+              --result "${JSONBENCH_RESULT}" \
+              --run-url "${RUN_URL}"
+          )
+          delimiter="jsonbench_payload_${RANDOM}_${RANDOM}"
+          {
+            echo "payload<<${delimiter}"
+            echo "${payload}"
+            echo "${delimiter}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Notify JSONBench result
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          payload: ${{ steps.jsonbench-summary.outputs.payload }}
