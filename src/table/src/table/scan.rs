@@ -52,6 +52,9 @@ use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
 
+/// The name of [`RegionScanExec`] plan node.
+pub const REGION_SCAN_EXEC_NAME: &str = "RegionScanExec";
+
 /// A plan to read multiple partitions from a region of a table.
 #[derive(Clone)]
 pub struct RegionScanExec {
@@ -436,7 +439,7 @@ impl ExecutionPlan for RegionScanExec {
     }
 
     fn name(&self) -> &str {
-        "RegionScanExec"
+        REGION_SCAN_EXEC_NAME
     }
 
     fn handle_child_pushdown_result(
@@ -506,8 +509,9 @@ impl Stream for StreamWithMetricWrapper {
                     Ok(record_batch) => {
                         // we don't record elapsed time here
                         // since it's calling storage api involving I/O ops
-                        this.metric
-                            .record_mem_usage(record_batch.buffer_memory_size());
+                        let batch_bytes = record_batch.buffer_memory_size();
+                        this.metric.record_mem_usage(batch_bytes);
+                        this.metric.record_output_bytes(batch_bytes);
                         this.metric.record_output(record_batch.num_rows());
                         Poll::Ready(Some(Ok(record_batch.into_df_record_batch())))
                     }

@@ -47,6 +47,7 @@ use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
+use table::table::scan::REGION_SCAN_EXEC_NAME;
 use table::table_name::TableName;
 use tokio::time::Instant;
 use tracing::{Instrument, Span};
@@ -471,17 +472,19 @@ impl MergeScanExec {
 
                 // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
-                    let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
-                    let value = read_meter!(
-                        c,
-                        s,
-                        ReadItem {
-                            cpu_time: metrics.elapsed_compute as u64,
-                            table_scan: metrics.memory_usage as u64
-                        },
-                        current_channel as u8
-                    );
-                    metric.record_greptime_exec_cost(value as usize);
+                    if let Some(output_bytes) = scan_output_bytes(&metrics) {
+                        let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
+                        let value = read_meter!(
+                            c,
+                            s,
+                            ReadItem {
+                                cpu_time: metrics.elapsed_compute as u64,
+                                table_scan: output_bytes as u64,
+                            },
+                            current_channel as u8
+                        );
+                        metric.record_greptime_exec_cost(value as usize);
+                    }
 
                     // record metrics from sub sgates
                     let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
@@ -830,6 +833,17 @@ impl DisplayAs for MergeScanExec {
 
         Ok(())
     }
+}
+
+/// Extract the `output_bytes` metric from the [`RegionScanExec`] plan node, if present.
+fn scan_output_bytes(metrics: &RecordBatchMetrics) -> Option<usize> {
+    metrics
+        .plan_metrics
+        .iter()
+        .filter(|pm| pm.plan.starts_with(REGION_SCAN_EXEC_NAME))
+        .flat_map(|pm| &pm.metrics)
+        .find(|(name, _)| name == "output_bytes")
+        .map(|(_, value)| *value)
 }
 
 #[derive(Debug, Clone)]
