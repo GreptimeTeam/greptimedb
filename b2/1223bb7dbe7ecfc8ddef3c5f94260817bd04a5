@@ -1,0 +1,14 @@
+src/mito2/src/worker/handle_flush.rs
+  h_623774b620da8e 276-278
+src/meta-srv/src/region/flush_trigger.rs
+  h_623774b620da8e 42-44,240-248
+  s_c9a37f2d9d2643::t_4fc657ad963eea 119-120,122,233,295
+  s_2b25efe168bd16::t_157f8d34b2066f 864
+  s_2b25efe168bd16::t_1e2eef0bc29a4a 382
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "b21223bb7dbe7ecfc8ddef3c5f94260817bd04a5",
+  "prompts": {}
+}
