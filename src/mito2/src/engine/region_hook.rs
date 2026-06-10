@@ -37,14 +37,21 @@
 //! |------------------------------|:----------------------:|:---------------------:|
 //! | Flush (memtable → SST)       | ✅ Yes                 | ✅ Yes                |
 //! | Local compaction             | ✅ Yes                 | ✅ Yes                |
-//! | Remote compaction            | ✅ (on compactor node)  | ✅ (on compactor node) |
+//! | Remote compaction            | ✅ (compactor node) ¹     | ✅ (compactor node) ¹    |
 //! | RegionEdit / bulk ingestion  | ❌ (files pre-written)  | ✅ Yes                |
 //! | Copy region                  | ❌ (object-store copy)  | ✅ Yes                |
-//! | Apply staging                | ❌ (delegates to edit)  | ✅ Yes                |
+//! | Apply staging                | ❌ (delegates to edit)  | ✅ Yes ²               |
 //! | Alter (schema change)        | ❌ (no SST files)       | ✅ Yes                |
 //! | Truncate                     | ❌ (removes files)      | ✅ Yes                |
 //! | Enter staging                | ❌ (no SST files)       | ✅ Yes                |
 //! | Async index build            | ❌ (index files only)   | ✅ Yes                |
+//!
+//! ¹ Remote compaction runs on a dedicated compactor node via `open_compaction_region()`.
+//!   The caller must pass plugins via `OpenCompactionRegionRequest` to enable hooks on the
+//!   compactor node.
+//! ² Apply staging fires `on_manifest_updated` twice: once when the staging SST files are
+//!   committed via `RegionEdit`, and once when `exit_staging_on_success` merges all staged
+//!   manifest actions into the live manifest.
 //!
 //! The following paths do **not** trigger any hook:
 //! - Follower region sync / catchup (manifest read-only; followers don't author changes)
@@ -57,6 +64,8 @@
 //!
 //! `on_manifest_updated` is centralized in [`ManifestContext::update_manifest_with_state_check`],
 //! so it automatically covers all manifest write paths that go through `ManifestContext`.
+//! The sole exception is [`MitoRegion::exit_staging_on_success`], which invokes the hook
+//! inline because it receives a pre-acquired manifest write lock from the caller.
 //!
 //! ## Future work
 //!

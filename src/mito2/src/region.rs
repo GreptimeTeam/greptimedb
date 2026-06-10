@@ -852,13 +852,28 @@ impl MitoRegion {
             );
         }
 
-        // Submit merged actions using the manifest manager's update method
-        // Pass the `false` so it saves to normal directory, not staging
+        // Submit merged actions using the manifest manager's update method.
+        // Pass `false` so it saves to normal directory, not staging.
+        //
+        // Unlike the centralized `update_manifest_with_state_check` path, we invoke
+        // the hook inline here because the caller already holds the manifest write lock
+        // and we cannot release it mid-method. This is acceptable because staging exit
+        // is infrequent and callers manage the lock scope tightly.
+        let hook = self.manifest_ctx.hook();
+        let action_list_for_hook = hook.as_ref().map(|_| merged_actions.clone());
         let new_version = manager.update(merged_actions, false).await?;
         info!(
             "Successfully submitted merged staged manifests for region {}, new version: {}",
             self.region_id, new_version
         );
+
+        // Invoke the on_manifest_updated hook for the merged staging actions.
+        if let Some(hook) = hook
+            && let Some(action_list) = action_list_for_hook
+        {
+            hook.on_manifest_updated(self.region_id, &action_list, new_version)
+                .await;
+        }
 
         // Apply the merged changes to in-memory version control
         if let Some(change) = merged_partition_expr_change {

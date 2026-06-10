@@ -114,13 +114,15 @@ pub struct CompactionRegion {
 }
 
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenCompactionRegionRequest {
     pub region_id: RegionId,
     pub table_dir: String,
     pub path_type: PathType,
     pub region_options: RegionOptions,
     pub max_parallelism: usize,
+    /// Plugins for the compaction region, used to look up the [`RegionHook`](crate::engine::region_hook::RegionHook).
+    pub plugins: Plugins,
 }
 
 /// Open a compaction region from a compaction request.
@@ -179,10 +181,11 @@ pub async fn open_compaction_region(
 
     let manifest = manifest_manager.manifest();
     let region_metadata = manifest.metadata.clone();
+    let hook: Option<RegionHookRef> = req.plugins.get();
     let manifest_ctx = Arc::new(ManifestContext::new(
         manifest_manager,
         RegionRoleState::Leader(RegionLeaderState::Writable),
-        None,
+        hook,
     ));
 
     let file_purger = {
@@ -236,7 +239,7 @@ pub async fn open_compaction_region(
         file_purger: Some(file_purger),
         ttl: Some(ttl),
         max_parallelism: req.max_parallelism,
-        plugins: Plugins::new(),
+        plugins: req.plugins.clone(),
     })
 }
 
