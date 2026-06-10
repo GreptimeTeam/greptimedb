@@ -412,10 +412,17 @@ impl FlowDualEngine {
                 }
                 if errors.is_empty() {
                     info!("Recover flows successfully, flows: {:?}", to_be_created);
-                }
-
-                for (flow_id, err) in errors {
-                    warn!("Failed to recreate flow {}, err={:#?}", flow_id, err);
+                } else {
+                    let failed_flow_ids = errors.iter().map(|(flow_id, _)| *flow_id).join(", ");
+                    for (flow_id, err) in errors {
+                        warn!("Failed to recreate flow {}, err={:#?}", flow_id, err);
+                    }
+                    return InternalSnafu {
+                        reason: format!(
+                            "Failed to recreate flows during consistency check: [{failed_flow_ids}]"
+                        ),
+                    }
+                    .fail();
                 }
             } else {
                 warn!(
