@@ -86,7 +86,7 @@ impl RemoteDynFilterReceiverLogicalPlan {
     }
 
     fn ord_key(&self) -> String {
-        format!("{self:?}")
+        format!("input={:?}, dyn_filters={:?}", self.input, self.dyn_filters)
     }
 }
 

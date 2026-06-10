@@ -29,6 +29,7 @@ use query::dist_plan::{
     RemoteDynFilterReceiverInjector, RemoteDynFilterReceiverInjectorRef,
     RemoteDynFilterReceiverLogicalPlan,
 };
+use query::options::remote_dyn_filter_pushdown_enabled_from_extensions;
 use session::context::QueryContextRef;
 use session::query_id::QueryId;
 use snafu::OptionExt;
@@ -48,6 +49,10 @@ fn remote_dyn_filter_receiver_plan(
     origin: LogicalPlan,
     ctx: QueryContextRef,
 ) -> LogicalPlan {
+    if !remote_dyn_filter_pushdown_enabled(&ctx) {
+        return origin;
+    }
+
     let Some(query_id) = ctx.remote_query_id_value() else {
         return origin;
     };
@@ -74,6 +79,16 @@ fn remote_dyn_filter_receiver_plan(
     RemoteDynFilterReceiverLogicalPlan::new(origin, dyn_filters).into_logical_plan()
 }
 
+fn remote_dyn_filter_pushdown_enabled(query_ctx: &QueryContextRef) -> bool {
+    match remote_dyn_filter_pushdown_enabled_from_extensions(&query_ctx.extensions()) {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            warn!(error; "Remote dynamic filter pushdown is disabled because the query option is invalid");
+            false
+        }
+    }
+}
+
 impl RegionServer {
     pub fn install_remote_dyn_filter_receiver_injector(&self, plugins: &Plugins) {
         let server = Arc::downgrade(&self.inner);
@@ -89,6 +104,10 @@ impl RegionServer {
         query_ctx: &QueryContextRef,
         region_id: RegionId,
     ) -> Option<RemoteDynFilterRegistrationGuard> {
+        if !remote_dyn_filter_pushdown_enabled(query_ctx) {
+            return None;
+        }
+
         let initial_dyn_filter_regs = initial_dyn_filter_regs_from_query_ctx(query_ctx);
         let query_id = query_ctx.remote_query_id_value();
         let registered_filter_ids = if let (Some(query_id), Some(regs)) =
@@ -331,11 +350,15 @@ mod tests {
     use datafusion::arrow::datatypes::Schema as ArrowSchema;
     use datafusion::physical_plan::PhysicalExpr;
     use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
+    use datafusion_common::DFSchema;
+    use datafusion_expr::EmptyRelation;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures_util::StreamExt;
+    use query::options::QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN;
     use session::context::QueryContext;
+    use session::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
     use session::query_id::QueryId;
     use store_api::storage::RegionId;
 
@@ -365,6 +388,65 @@ mod tests {
             .unwrap()
             .as_stream()
     }
+
+    fn empty_logical_plan() -> LogicalPlan {
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::empty()),
+        })
+    }
+
+    fn query_context_with_initial_regs(query_id: QueryId) -> QueryContext {
+        let mut query_ctx = QueryContext::with("greptime", "public");
+        query_ctx.set_extension(REMOTE_QUERY_ID_EXTENSION_KEY, query_id.to_string());
+        query_ctx.set_extension(
+            INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+            InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])])
+                .to_extension_value()
+                .unwrap(),
+        );
+        query_ctx
+    }
+
+    #[test]
+    fn remote_dyn_filter_receiver_plan_respects_disabled_query_option() {
+        let mock_region_server = mock_region_server();
+        let query_id = test_remote_query_id();
+        let mut query_ctx = query_context_with_initial_regs(query_id);
+        query_ctx.set_extension(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, "false");
+
+        let plan = remote_dyn_filter_receiver_plan(
+            &Arc::downgrade(&mock_region_server.inner),
+            empty_logical_plan(),
+            Arc::new(query_ctx),
+        );
+
+        assert!(matches!(plan, LogicalPlan::EmptyRelation(_)));
+    }
+
+    #[test]
+    fn remote_dyn_filter_cleanup_registration_respects_disabled_query_option() {
+        let mock_region_server = mock_region_server();
+        let query_id = test_remote_query_id();
+        let mut query_ctx = query_context_with_initial_regs(query_id);
+        query_ctx.set_extension(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, "false");
+        let query_ctx = Arc::new(query_ctx);
+
+        let cleanup = mock_region_server.register_initial_remote_dyn_filter_cleanup(
+            &query_ctx,
+            test_remote_dyn_filter_region_id(),
+        );
+
+        assert!(cleanup.is_none());
+        assert!(
+            mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations
+                .get(&query_id)
+                .is_none()
+        );
+    }
+
     #[test]
     fn initial_dyn_filter_regs_can_be_read_from_query_context() {
         let mut query_ctx = QueryContext::with("greptime", "public");
