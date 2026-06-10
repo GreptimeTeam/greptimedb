@@ -425,7 +425,7 @@ impl ScanRegion {
                 ReadColumns::from_deduped_column_ids(read_col_ids)
             }
         };
-        fill_json_nested_paths_from_hint(
+        narrow_read_columns_by_json_type_hint(
             &mut read_cols,
             &self.request.json_type_hint,
             &self.version.metadata,
@@ -1320,7 +1320,7 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
-fn fill_json_nested_paths_from_hint(
+fn narrow_read_columns_by_json_type_hint(
     read_columns: &mut ReadColumns,
     json_type_hint: &HashMap<String, JsonNativeType>,
     metadata: &RegionMetadata,
@@ -1954,7 +1954,7 @@ mod tests {
         let mut read_columns = ReadColumns {
             cols: vec![ReadColumn::new(1, vec![]), ReadColumn::new(0, vec![])],
         };
-        fill_json_nested_paths_from_hint(&mut read_columns, &hint, metadata.as_ref());
+        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
         assert_eq!(
             read_columns,
             ReadColumns {
@@ -1971,7 +1971,7 @@ mod tests {
         let mut read_columns = ReadColumns {
             cols: vec![ReadColumn::new(0, vec![])],
         };
-        fill_json_nested_paths_from_hint(&mut read_columns, &hint, metadata.as_ref());
+        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
         assert_eq!(
             read_columns,
             ReadColumns {
