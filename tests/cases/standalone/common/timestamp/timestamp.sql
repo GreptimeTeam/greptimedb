@@ -39,3 +39,26 @@ SELECT * FROM plain_timestamp;
 SELECT * FROM plain_timestamp where ts = '1970-01-01 00:00:00.001000';
 
 DROP TABLE plain_timestamp;
+
+-- Regression test for https://github.com/GreptimeTeam/greptimedb/issues/8214:
+CREATE TABLE ts_precision_bug (ts TIMESTAMP(3) TIME INDEX, v INT, PRIMARY KEY (v));
+
+INSERT INTO ts_precision_bug VALUES
+('2026-06-02 03:49:59.999', 1),
+('2026-06-02 03:50:00.000', 2),
+('2026-06-02 03:50:00.195', 3),
+('2026-06-02 03:50:01.000', 4);
+
+SELECT ts, v
+FROM ts_precision_bug
+WHERE ts <= '2026-06-02 03:50:00'
+ORDER BY ts DESC
+LIMIT 1;
+
+SELECT date_format(ts, '%Y-%m-%d %H:%M:%S:%3f') AS ts, v
+FROM ts_precision_bug
+WHERE ts <= '2026-06-02 03:50:00'
+ORDER BY ts DESC
+LIMIT 1;
+
+DROP TABLE ts_precision_bug;

@@ -30,4 +30,40 @@ SELECT TIMESTAMP '2020-01-01 01:23:45.12345'::TIMESTAMP(6);
 
 SELECT TIMESTAMP '2020-01-01 01:23:45.12345678'::TIMESTAMP(9);
 
+CREATE TABLE ts_precision_predicate(
+    ts TIMESTAMP(3) TIME INDEX,
+    v INT,
+    PRIMARY KEY (v)
+);
+
+INSERT INTO ts_precision_predicate VALUES
+    ('2026-06-02 03:49:59.999+00:00', 1),
+    ('2026-06-02 03:50:00.000+00:00', 2),
+    ('2026-06-02 03:50:00.195+00:00', 3),
+    ('2026-06-02 03:50:01.000+00:00', 4);
+
+SELECT ts, v
+FROM ts_precision_predicate
+WHERE ts <= '2026-06-02 03:50:00+00:00'
+ORDER BY ts DESC
+LIMIT 1;
+
+SELECT ts, v
+FROM ts_precision_predicate
+WHERE ts < '2026-06-02 03:50:00.195100+00:00'
+ORDER BY ts DESC
+LIMIT 1;
+
+SELECT ts, v
+FROM ts_precision_predicate
+WHERE ts BETWEEN '2026-06-02 03:50:00.000100+00:00'
+    AND '2026-06-02 03:50:00.195100+00:00'
+ORDER BY ts;
+
+SELECT COUNT(*)
+FROM ts_precision_predicate
+WHERE ts IN ('2026-06-02 03:50:00.195100+00:00');
+
+DROP TABLE ts_precision_predicate;
+
 DROP TABLE ts_precision;

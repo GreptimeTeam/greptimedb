@@ -87,6 +87,72 @@ SELECT TIMESTAMP '2020-01-01 01:23:45.12345678'::TIMESTAMP(9);
 | 2020-01-01T01:23:45.123456780                                          |
 +------------------------------------------------------------------------+
 
+CREATE TABLE ts_precision_predicate(
+    ts TIMESTAMP(3) TIME INDEX,
+    v INT,
+    PRIMARY KEY (v)
+);
+
+Affected Rows: 0
+
+INSERT INTO ts_precision_predicate VALUES
+    ('2026-06-02 03:49:59.999+00:00', 1),
+    ('2026-06-02 03:50:00.000+00:00', 2),
+    ('2026-06-02 03:50:00.195+00:00', 3),
+    ('2026-06-02 03:50:01.000+00:00', 4);
+
+Affected Rows: 4
+
+SELECT ts, v
+FROM ts_precision_predicate
+WHERE ts <= '2026-06-02 03:50:00+00:00'
+ORDER BY ts DESC
+LIMIT 1;
+
++---------------------+---+
+| ts                  | v |
++---------------------+---+
+| 2026-06-02T03:50:00 | 2 |
++---------------------+---+
+
+SELECT ts, v
+FROM ts_precision_predicate
+WHERE ts < '2026-06-02 03:50:00.195100+00:00'
+ORDER BY ts DESC
+LIMIT 1;
+
++-------------------------+---+
+| ts                      | v |
++-------------------------+---+
+| 2026-06-02T03:50:00.195 | 3 |
++-------------------------+---+
+
+SELECT ts, v
+FROM ts_precision_predicate
+WHERE ts BETWEEN '2026-06-02 03:50:00.000100+00:00'
+    AND '2026-06-02 03:50:00.195100+00:00'
+ORDER BY ts;
+
++-------------------------+---+
+| ts                      | v |
++-------------------------+---+
+| 2026-06-02T03:50:00.195 | 3 |
++-------------------------+---+
+
+SELECT COUNT(*)
+FROM ts_precision_predicate
+WHERE ts IN ('2026-06-02 03:50:00.195100+00:00');
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+DROP TABLE ts_precision_predicate;
+
+Affected Rows: 0
+
 DROP TABLE ts_precision;
 
 Affected Rows: 0
