@@ -46,7 +46,7 @@ const TICKER_INTERVAL: Duration = Duration::from_secs(60);
 const RECENT_DURATION: Duration = Duration::from_secs(300);
 
 /// The interval to periodically persist region checkpoints regardless of replay size.
-const PERIODIC_CHECKPOINT_PERSIST_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const PERIODIC_CHECKPOINT_PERSIST_INTERVAL: Duration = Duration::from_mins(60);
 
 /// [`Event`] represents various types of events that can be processed by the region flush ticker.
 ///
