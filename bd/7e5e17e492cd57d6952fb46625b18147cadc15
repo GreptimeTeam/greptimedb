@@ -1,0 +1,10 @@
+src/meta-srv/src/region/flush_trigger.rs
+  s_4c26062267d0d1::t_8905118c867eb1 42-44,268,372,381-401
+  s_c9a37f2d9d2643::t_4fc657ad963eea 119-120,122,233,287
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "bd7e5e17e492cd57d6952fb46625b18147cadc15",
+  "prompts": {}
+}
