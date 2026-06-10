@@ -21,6 +21,7 @@ mod greptimedb_telemetry;
 pub mod heartbeat;
 pub mod metrics;
 mod partition_expr_fetcher;
+pub mod query_stream;
 pub mod region_server;
 pub mod service;
 pub mod store;

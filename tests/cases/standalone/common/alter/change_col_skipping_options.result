@@ -144,9 +144,9 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| test  | 1          | SKIPPING INDEX | 3            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
 | test  | 1          | SKIPPING INDEX | 1            | value       | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 2            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        |      |                          |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test modifying existing skipping index options
@@ -176,9 +176,9 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| test  | 1          | SKIPPING INDEX | 3            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
 | test  | 1          | SKIPPING INDEX | 1            | value       | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 2            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        |      |                          |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test modifying existing skipping index options
@@ -208,9 +208,9 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| test  | 1          | SKIPPING INDEX | 3            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
 | test  | 1          | SKIPPING INDEX | 1            | value       | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 2            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        |      |                          |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test removing skipping index
@@ -240,8 +240,8 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| test  | 1          | SKIPPING INDEX | 3            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 1            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        |      |                          |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test adding back with different options
@@ -271,9 +271,9 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| test  | 1          | SKIPPING INDEX | 3            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
 | test  | 1          | SKIPPING INDEX | 1            | value       | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 2            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        |      |                          |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test removing all skipping indexes
@@ -307,7 +307,7 @@ SHOW INDEX FROM test;
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| test  | 1          | TIME INDEX | 1            | time        | A         |             |          |        | NO   |            |         |               | YES     |            |
+| test  | 1          | TIME INDEX | 1            | time        | A         |             |          |        |      |            |         |               | YES     |            |
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 -- Test invalid operations and error cases
@@ -364,10 +364,10 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| test  | 1          | SKIPPING INDEX | 2            | category    | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
-| test  | 1          | SKIPPING INDEX | 4            | time        | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
 | test  | 1          | SKIPPING INDEX | 1            | value       | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 2            | category    | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 3            | time        | A         |             |          |        |      | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        |      |                          |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Clean up

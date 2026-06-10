@@ -146,15 +146,14 @@ impl ParserContext<'_> {
         // Parse the main query
         let main_query = self.parser.parse_query().context(error::SyntaxSnafu)?;
 
-        // Convert the hybrid CTEs to a standard query with hybrid metadata
-        let hybrid_cte = HybridCteWith {
-            recursive,
-            cte_tables: tql_cte_tables,
-        };
-
         // Create a Query statement with hybrid CTE metadata
         let mut query = Query::try_from(*main_query)?;
-        query.hybrid_cte = Some(hybrid_cte);
+        if !tql_cte_tables.is_empty() {
+            query.hybrid_cte = Some(HybridCteWith {
+                recursive,
+                cte_tables: tql_cte_tables,
+            });
+        }
         query.inner.with = Some(With {
             recursive,
             cte_tables: sql_cte_tables,

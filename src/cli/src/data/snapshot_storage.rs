@@ -580,6 +580,34 @@ impl OpenDalStorage {
         }
     }
 
+    /// Iterates files recursively under a relative prefix without materializing
+    /// the full listing first.
+    pub(crate) async fn for_each_file_recursive<F>(&self, prefix: &str, mut f: F) -> Result<()>
+    where
+        F: FnMut(String) -> Result<()>,
+    {
+        let mut lister = match self.object_store.lister_with(prefix).recursive(true).await {
+            Ok(lister) => lister,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).context(StorageOperationSnafu {
+                    operation: format!("list {}", prefix),
+                });
+            }
+        };
+
+        while let Some(entry) = lister.try_next().await.context(StorageOperationSnafu {
+            operation: format!("list {}", prefix),
+        })? {
+            if entry.metadata().is_dir() {
+                continue;
+            }
+            f(entry.path().to_string())?;
+        }
+
+        Ok(())
+    }
+
     /// Lists direct child directory names under the storage root.
     pub(crate) async fn list_direct_child_dirs(&self) -> Result<Vec<String>> {
         let mut lister = match self.object_store.lister_with("/").recursive(false).await {
@@ -669,25 +697,12 @@ impl SnapshotStorage for OpenDalStorage {
     }
 
     async fn list_files_recursive(&self, prefix: &str) -> Result<Vec<String>> {
-        let mut lister = match self.object_store.lister_with(prefix).recursive(true).await {
-            Ok(lister) => lister,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => {
-                return Err(error).context(StorageOperationSnafu {
-                    operation: format!("list {}", prefix),
-                });
-            }
-        };
-
         let mut files = Vec::new();
-        while let Some(entry) = lister.try_next().await.context(StorageOperationSnafu {
-            operation: format!("list {}", prefix),
-        })? {
-            if entry.metadata().is_dir() {
-                continue;
-            }
-            files.push(entry.path().to_string());
-        }
+        self.for_each_file_recursive(prefix, |path| {
+            files.push(path);
+            Ok(())
+        })
+        .await?;
         Ok(files)
     }
 

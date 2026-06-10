@@ -117,6 +117,8 @@ pub(crate) struct WalPruneManager {
     tracker: WalPruneProcedureTracker,
     /// Semaphore to limit the number of concurrent [WalPruneProcedure]s.
     semaphore: Arc<Semaphore>,
+    /// Whether pruning only updates metadata and skips Kafka DeleteRecords.
+    logical_delete: bool,
 
     /// Context for [WalPruneProcedure].
     wal_prune_context: WalPruneContext,
@@ -126,6 +128,7 @@ impl WalPruneManager {
     /// Returns a new empty [`WalPruneManager`].
     pub fn new(
         parallelism: usize,
+        logical_delete: bool,
         receiver: Receiver<Event>,
         procedure_manager: ProcedureManagerRef,
         wal_prune_context: WalPruneContext,
@@ -138,6 +141,7 @@ impl WalPruneManager {
                 running_procedures: Arc::new(RwLock::new(HashSet::new())),
             },
             semaphore: Arc::new(Semaphore::new(parallelism)),
+            logical_delete,
         }
     }
 
@@ -197,6 +201,7 @@ impl WalPruneManager {
             Some(guard),
             topic_name.to_string(),
             prunable_entry_id,
+            self.logical_delete,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
@@ -350,6 +355,7 @@ mod test {
             tx,
             WalPruneManager::new(
                 limit,
+                false,
                 rx,
                 test_env.procedure_manager.clone(),
                 wal_prune_context,

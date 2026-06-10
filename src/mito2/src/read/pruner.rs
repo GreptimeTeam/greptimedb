@@ -214,7 +214,7 @@ impl Pruner {
         // Spawn worker tasks with their receivers
         for (worker_id, rx) in receivers.into_iter().enumerate() {
             let inner_clone = inner.clone();
-            common_runtime::spawn_global(async move {
+            common_runtime::spawn_query(async move {
                 Self::worker_loop(worker_id, rx, inner_clone).await;
             });
         }

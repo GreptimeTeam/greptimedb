@@ -883,7 +883,7 @@ async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
         .unwrap();
     // Wait until flush is finished.
     listener.wait().await;
-    assert_eq!(region.topic_latest_entry_id.load(Ordering::Relaxed), 0);
+    assert_eq!(region.topic_latest_entry_id.load(Ordering::Relaxed), 1);
 
     engine
         .handle_request(region_id, RegionRequest::Flush(request.clone()))

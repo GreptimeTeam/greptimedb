@@ -51,8 +51,8 @@ use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::schema::SchemaRef;
 use either::Either;
-use futures_util::Stream;
 use futures_util::future::try_join_all;
+use futures_util::{Stream, StreamExt};
 use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
 use prost::Message;
@@ -83,7 +83,7 @@ use store_api::region_request::{
     RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::timeout;
 use tonic::{Request, Response, Result as TonicResult};
 
@@ -93,11 +93,13 @@ use crate::error::{
     ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, GetRegionMetadataSnafu,
     HandleBatchDdlRequestSnafu, HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu,
     NewPlanDecoderSnafu, NotYetImplementedSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu,
-    RegionNotReadySnafu, Result, SerializeJsonSnafu, StopRegionEngineSnafu, UnexpectedSnafu,
-    UnsupportedOutputSnafu,
+    RegionNotReadySnafu, Result, RuntimeJoinSnafu, SerializeJsonSnafu, StopRegionEngineSnafu,
+    UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
+use crate::query_stream::QueryRuntimeStream;
 use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
+const QUERY_RUNTIME_STREAM_BUFFER_SIZE: usize = 8;
 
 #[derive(Clone)]
 pub struct RegionServer {
@@ -225,6 +227,16 @@ impl RegionServer {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<RegionResponse> {
+        if RegionServerInner::is_ingest_request(&request) {
+            let inner = self.inner.clone();
+            let request_type = request.request_type();
+            return common_runtime::spawn_ingest(async move {
+                inner.handle_request(region_id, request).await
+            })
+            .await
+            .context(RuntimeJoinSnafu { request_type })?;
+        }
+
         self.inner.handle_request(region_id, request).await
     }
 
@@ -254,6 +266,14 @@ impl RegionServer {
 
     /// Handle reads from remote. They're often query requests received by our Arrow Flight service.
     pub async fn handle_remote_read(
+        &self,
+        request: api::v1::region::QueryRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<SendableRecordBatchStream> {
+        self.handle_remote_read_inner(request, query_ctx).await
+    }
+
+    async fn handle_remote_read_inner(
         &self,
         request: api::v1::region::QueryRequest,
         query_ctx: QueryContextRef,
@@ -304,6 +324,10 @@ impl RegionServer {
 
     #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+        self.handle_read_inner(request).await
+    }
+
+    async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
@@ -601,13 +625,13 @@ impl RegionServer {
         });
 
         // Downcast to MetricEngine and call batch API
-        let metric_engine =
-            engine
-                .as_any()
-                .downcast_ref::<MetricEngine>()
-                .context(UnexpectedSnafu {
-                    violated: "Failed to downcast to MetricEngine",
-                })?;
+        let metric_engine = engine
+            .as_any()
+            .downcast_ref::<MetricEngine>()
+            .context(UnexpectedSnafu {
+                violated: "Failed to downcast to MetricEngine",
+            })?
+            .clone();
 
         let tracing_context = TracingContext::from_current_span();
         let batch_size = put_requests.len();
@@ -615,14 +639,18 @@ impl RegionServer {
             "RegionServer::handle_metric_batch_puts",
             batch_size = batch_size,
         ));
-        let result = metric_engine
-            .put_regions_batch(put_requests)
-            .trace(span)
-            .await
-            .map_err(BoxedError::new)
-            .context(HandleRegionRequestSnafu {
-                region_id: first_region_id,
-            });
+        let result = common_runtime::spawn_ingest(async move {
+            metric_engine
+                .put_regions_batch(put_requests)
+                .trace(span)
+                .await
+        })
+        .await
+        .context(RuntimeJoinSnafu { request_type })?
+        .map_err(BoxedError::new)
+        .context(HandleRegionRequestSnafu {
+            region_id: first_region_id,
+        });
 
         match result {
             Ok(total_affected) => {
@@ -1190,6 +1218,13 @@ impl RegionServerInner {
     pub fn set_topic_stats_reporter(&self, topic_stats_reporter: Box<dyn TopicStatsReporter>) {
         info!("Set topic stats reporter");
         *self.topic_stats_reporter.write().unwrap() = Some(topic_stats_reporter);
+    }
+
+    fn is_ingest_request(request: &RegionRequest) -> bool {
+        matches!(
+            request,
+            RegionRequest::Put(_) | RegionRequest::Delete(_) | RegionRequest::BulkInserts(_)
+        )
     }
 
     fn get_engine(
@@ -1781,6 +1816,37 @@ impl RegionServerInner {
     }
 
     pub async fn handle_read(
+        self: &Arc<Self>,
+        request: QueryRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<SendableRecordBatchStream> {
+        let mut stream = self.handle_read_inner(request, query_ctx).await?;
+        let schema = stream.schema();
+        let output_ordering = stream.output_ordering().map(|ordering| ordering.to_vec());
+
+        let (sender, receiver) = mpsc::channel(QUERY_RUNTIME_STREAM_BUFFER_SIZE);
+        let metrics = QueryRuntimeStream::metrics_store();
+        let producer_metrics = metrics.clone();
+
+        let producer_handle = common_runtime::spawn_query(async move {
+            while let Some(batch) = stream.next().await {
+                *producer_metrics.write().unwrap() = stream.metrics();
+                if sender.send(batch).await.is_err() {
+                    break;
+                }
+            }
+            *producer_metrics.write().unwrap() = stream.metrics();
+        });
+
+        Ok(Box::pin(
+            QueryRuntimeStream::new(schema, receiver)
+                .with_output_ordering(output_ordering)
+                .with_metrics_store(metrics)
+                .with_producer_handle(producer_handle),
+        ))
+    }
+
+    async fn handle_read_inner(
         &self,
         request: QueryRequest,
         query_ctx: QueryContextRef,
@@ -1898,11 +1964,11 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use api::v1::SemanticType;
     use api::v1::region::{
         RemoteDynFilterRequest, RemoteDynFilterUnregister, RemoteDynFilterUpdate,
         remote_dyn_filter_request,
     };
+    use api::v1::{Rows, SemanticType};
     use common_error::ext::ErrorExt;
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
@@ -1915,13 +1981,40 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
-        PathType, RegionDropRequest, RegionOpenRequest, RegionTruncateRequest,
+        PathType, RegionCompactRequest, RegionDeleteRequest, RegionDropRequest, RegionOpenRequest,
+        RegionPutRequest, RegionTruncateRequest,
     };
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::error::Result;
     use crate::tests::{MockRegionEngine, mock_region_server};
+
+    #[test]
+    fn test_is_ingest_request() {
+        let rows = || Rows {
+            schema: Vec::new(),
+            rows: Vec::new(),
+        };
+
+        assert!(RegionServerInner::is_ingest_request(&RegionRequest::Put(
+            RegionPutRequest {
+                rows: rows(),
+                hint: None,
+                partition_expr_version: None,
+            },
+        )));
+        assert!(RegionServerInner::is_ingest_request(
+            &RegionRequest::Delete(RegionDeleteRequest {
+                rows: rows(),
+                hint: None,
+                partition_expr_version: None,
+            },)
+        ));
+        assert!(!RegionServerInner::is_ingest_request(
+            &RegionRequest::Compact(RegionCompactRequest::default()),
+        ));
+    }
 
     fn single_value_stream() -> SendableRecordBatchStream {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(

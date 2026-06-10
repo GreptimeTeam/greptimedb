@@ -1076,10 +1076,20 @@ async fn verify_snapshot(storage: &OpenDalStorage) -> Result<VerifyReport> {
                 chunk_count
             ));
         }
-        let data_files = storage.list_files_recursive("data/").await?;
-        // Report the lexicographically smallest path so the message is stable
-        // regardless of listing order across backends.
-        if let Some(path) = data_files.iter().min() {
+        let mut first_data_file: Option<String> = None;
+        storage
+            .for_each_file_recursive("data/", |path| {
+                let should_update = match &first_data_file {
+                    Some(current) => path.as_str() < current.as_str(),
+                    None => true,
+                };
+                if should_update {
+                    first_data_file = Some(path);
+                }
+                Ok(())
+            })
+            .await?;
+        if let Some(path) = first_data_file {
             report.push_error(format!(
                 "Schema-only snapshot should not contain data files (found '{}')",
                 path
@@ -1130,11 +1140,12 @@ struct VerifyPlan {
     problems: Vec<VerifyProblem>,
 }
 
-/// Actual data files discovered under `data/` (the only object-store IO in
-/// chunk/data-file verification).
+/// Data-file scan result. Claimed files are kept only when they are relevant to
+/// manifest verification; unexpected files are kept separately for reporting.
 #[derive(Debug)]
 struct VerifyDataScan {
-    existing_data_files: HashSet<String>,
+    existing_claimed_data_files: HashSet<String>,
+    unexpected_data_files: Vec<String>,
 }
 
 /// Result of reconciling the manifest plan against the storage scan.
@@ -1150,8 +1161,8 @@ async fn verify_chunks_and_data_files(
     report: &mut VerifyReport,
 ) -> Result<()> {
     let plan = build_verify_plan(&report.manifest);
-    let scan = scan_data_files(storage).await?;
-    let outcome = reconcile_plan_with_scan(plan, &scan);
+    let scan = scan_data_files(storage, &plan).await?;
+    let outcome = reconcile_plan_with_scan(plan, scan);
 
     report.data_files_total = outcome.data_files_total;
     report.data_files_verified = outcome.data_files_verified;
@@ -1245,17 +1256,25 @@ fn build_verify_plan(manifest: &Manifest) -> VerifyPlan {
     plan
 }
 
-/// Lists all data files under `data/`. This is the only object-store IO in
-/// chunk/data-file verification.
-async fn scan_data_files(storage: &OpenDalStorage) -> Result<VerifyDataScan> {
-    let existing_data_files = storage
-        .list_files_recursive("data/")
-        .await?
-        .into_iter()
-        .collect();
-    Ok(VerifyDataScan {
-        existing_data_files,
-    })
+/// Streams data files under `data/` and classifies each path against the plan.
+async fn scan_data_files(storage: &OpenDalStorage, plan: &VerifyPlan) -> Result<VerifyDataScan> {
+    let mut scan = VerifyDataScan {
+        existing_claimed_data_files: HashSet::new(),
+        unexpected_data_files: Vec::new(),
+    };
+
+    storage
+        .for_each_file_recursive("data/", |path| {
+            if plan.claimed_data_files.contains(&path) {
+                scan.existing_claimed_data_files.insert(path);
+            } else {
+                scan.unexpected_data_files.push(path);
+            }
+            Ok(())
+        })
+        .await?;
+
+    Ok(scan)
 }
 
 /// Reconciles the manifest plan against the storage scan. Pure; performs no IO.
@@ -1263,12 +1282,12 @@ async fn scan_data_files(storage: &OpenDalStorage) -> Result<VerifyDataScan> {
 /// Emits missing-file problems for expected files absent from storage and
 /// unexpected-file problems for storage files no chunk claims. Unexpected files
 /// are sorted by path so output is deterministic regardless of listing order.
-fn reconcile_plan_with_scan(plan: VerifyPlan, scan: &VerifyDataScan) -> VerifyOutcome {
+fn reconcile_plan_with_scan(plan: VerifyPlan, mut scan: VerifyDataScan) -> VerifyOutcome {
     let mut problems = plan.problems;
     let mut data_files_verified = 0;
 
     for file in &plan.files_to_check {
-        if scan.existing_data_files.contains(&file.path) {
+        if scan.existing_claimed_data_files.contains(&file.path) {
             data_files_verified += 1;
         } else {
             problems.push(VerifyProblem {
@@ -1278,13 +1297,8 @@ fn reconcile_plan_with_scan(plan: VerifyPlan, scan: &VerifyDataScan) -> VerifyOu
         }
     }
 
-    let mut orphans: Vec<&String> = scan
-        .existing_data_files
-        .iter()
-        .filter(|path| !plan.claimed_data_files.contains(*path))
-        .collect();
-    orphans.sort();
-    for path in orphans {
+    scan.unexpected_data_files.sort();
+    for path in scan.unexpected_data_files {
         problems.push(VerifyProblem {
             severity: VerifySeverity::Error,
             message: format!("Unexpected data file '{}' is not listed in manifest", path),

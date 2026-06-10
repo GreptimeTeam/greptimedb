@@ -46,9 +46,9 @@ SHOW FULL COLUMNS FROM `test_partitions` FROM `public` LIKE '%';
 +-------+--------------+-----------+------+------------+---------+---------+---------------+-------+----------------------+
 | Field | Type         | Collation | Null | Key        | Default | Comment | Privileges    | Extra | Greptime_type        |
 +-------+--------------+-----------+------+------------+---------+---------+---------------+-------+----------------------+
-| host  | string       | utf8_bin  | Yes  | PRI        |         |         | select,insert |       | String               |
-| ts    | timestamp(3) |           | No   | TIME INDEX |         |         | select,insert |       | TimestampMillisecond |
-| val   | double       |           | Yes  |            |         |         | select,insert |       | Float64              |
+| host  | string       | utf8_bin  | YES  | PRI        |         |         | select,insert |       | String               |
+| ts    | timestamp(3) |           | NO   | TIME INDEX |         |         | select,insert |       | TimestampMillisecond |
+| val   | double       |           | YES  |            |         |         | select,insert |       | Float64              |
 +-------+--------------+-----------+------+------------+---------+---------+---------------+-------+----------------------+
 
 -- ============================================
@@ -86,9 +86,9 @@ ORDER BY ordinal_position;
 +--------------+-----------------+-------------+--------------+-------------+
 | table_schema | table_name      | column_name | data_type    | is_nullable |
 +--------------+-----------------+-------------+--------------+-------------+
-| public       | test_partitions | ts          | timestamp(3) | No          |
-| public       | test_partitions | host        | string       | Yes         |
-| public       | test_partitions | val         | double       | Yes         |
+| public       | test_partitions | ts          | timestamp(3) | NO          |
+| public       | test_partitions | host        | string       | YES         |
+| public       | test_partitions | val         | double       | YES         |
 +--------------+-----------------+-------------+--------------+-------------+
 
 -- ============================================
