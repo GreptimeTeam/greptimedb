@@ -22,7 +22,10 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
+use datafusion_common::ScalarValue;
 use datafusion_expr::expr::Expr;
+use datafusion_expr::{col, lit};
+use datatypes::arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
@@ -133,6 +136,77 @@ impl TimeRangeTester {
     fn take_filters(&self) -> Vec<Expr> {
         std::mem::take(&mut self.filter.write().unwrap())
     }
+}
+
+fn cast_to_ms_col(name: &str) -> Expr {
+    Expr::Cast(datafusion_expr::Cast {
+        expr: Box::new(col(name)),
+        data_type: DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+    })
+}
+
+fn ms_lit(value: i64) -> Expr {
+    lit(ScalarValue::TimestampMillisecond(Some(value), None))
+}
+
+#[test]
+fn test_casted_time_index_precision_boundaries() {
+    let cast_ts = cast_to_ms_col("ts");
+
+    let us_bucket = TimestampRange::with_unit(1_000_000, 1_001_000, TimeUnit::Microsecond).unwrap();
+    assert_eq!(
+        us_bucket,
+        build_time_range_predicate(
+            "ts",
+            TimeUnit::Microsecond,
+            &[cast_ts.clone().eq(ms_lit(1000))],
+        )
+    );
+    assert!(us_bucket.contains(&Timestamp::new(1_000_999, TimeUnit::Microsecond)));
+    assert!(!us_bucket.contains(&Timestamp::new(1_001_000, TimeUnit::Microsecond)));
+
+    assert_eq!(
+        TimestampRange::until_end(Timestamp::new(1_001_000, TimeUnit::Microsecond), false),
+        build_time_range_predicate(
+            "ts",
+            TimeUnit::Microsecond,
+            &[cast_ts.clone().lt_eq(ms_lit(1000))],
+        )
+    );
+
+    let ns_bucket =
+        TimestampRange::with_unit(1_000_000_000, 1_001_000_000, TimeUnit::Nanosecond).unwrap();
+    assert_eq!(
+        ns_bucket,
+        build_time_range_predicate(
+            "ts",
+            TimeUnit::Nanosecond,
+            &[cast_ts.clone().eq(ms_lit(1000))],
+        )
+    );
+    assert!(ns_bucket.contains(&Timestamp::new(1_000_999_999, TimeUnit::Nanosecond)));
+    assert!(!ns_bucket.contains(&Timestamp::new(1_001_000_000, TimeUnit::Nanosecond)));
+
+    assert_eq!(
+        TimestampRange::from_start(Timestamp::new(1_000_000_000, TimeUnit::Nanosecond)),
+        build_time_range_predicate(
+            "ts",
+            TimeUnit::Nanosecond,
+            &[cast_ts.clone().gt_eq(ms_lit(1000))],
+        )
+    );
+    assert_eq!(
+        TimestampRange::from_start(Timestamp::new(1_001_000_000, TimeUnit::Nanosecond)),
+        build_time_range_predicate(
+            "ts",
+            TimeUnit::Nanosecond,
+            &[cast_ts.clone().gt(ms_lit(1000))],
+        )
+    );
+    assert_eq!(
+        TimestampRange::until_end(Timestamp::new(1_000_000_000, TimeUnit::Nanosecond), false),
+        build_time_range_predicate("ts", TimeUnit::Nanosecond, &[cast_ts.lt(ms_lit(1000))],)
+    );
 }
 
 #[tokio::test]
