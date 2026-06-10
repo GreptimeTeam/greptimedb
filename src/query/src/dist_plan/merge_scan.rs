@@ -840,7 +840,7 @@ fn scan_output_bytes(metrics: &RecordBatchMetrics) -> Option<usize> {
     metrics
         .plan_metrics
         .iter()
-        .filter(|pm| pm.plan.starts_with(REGION_SCAN_EXEC_NAME))
+        .filter(|pm| pm.plan_name == REGION_SCAN_EXEC_NAME)
         .flat_map(|pm| &pm.metrics)
         .find(|(name, _)| name == "output_bytes")
         .map(|(_, value)| *value)
@@ -899,6 +899,7 @@ mod tests {
 
     use async_trait::async_trait;
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
+    use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
@@ -1139,5 +1140,20 @@ mod tests {
 
         assert_eq!(exec.captured_remote_dyn_filters().len(), 1);
         assert!(matches!(propagation.filters.as_slice(), [PushedDown::No]));
+    }
+
+    #[test]
+    fn scan_output_bytes_uses_plan_name() {
+        let metrics = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "SeqScan: region=1".to_string(),
+                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 42)],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(scan_output_bytes(&metrics), Some(42));
     }
 }
