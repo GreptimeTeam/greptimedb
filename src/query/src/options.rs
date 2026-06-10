@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use common_base::memory_limit::MemoryLimit;
 use serde::{Deserialize, Serialize};
+use session::context::QueryContextRef;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
@@ -201,6 +203,13 @@ pub fn remote_dyn_filter_pushdown_enabled_from_extensions(
         .map(|value| parse_bool(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, value.as_str()))
         .transpose()
         .map(|value| value.unwrap_or(true))
+}
+
+/// Returns a cloned query context with remote dynamic filter pushdown disabled.
+pub fn with_remote_dyn_filter_pushdown_disabled(query_ctx: &QueryContextRef) -> QueryContextRef {
+    let mut query_ctx = query_ctx.as_ref().clone();
+    query_ctx.set_extension(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, "false");
+    Arc::new(query_ctx)
 }
 
 /// Returns whether raw Flow query extensions request terminal region watermark collection.
