@@ -130,10 +130,9 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -172,10 +171,9 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -217,17 +215,15 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (ts
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -265,10 +261,9 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -306,10 +301,9 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, job@4 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, job@3 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -348,10 +342,9 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -389,10 +382,9 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -436,17 +428,15 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > tsid_binary_join_right) / tsi
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -494,24 +484,21 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -560,10 +547,9 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -607,17 +593,15 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left / ignoring(host) group_left tsid
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@4 as host, job@5 as job, __tsid@3 as __tsid, ts@0 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|

@@ -66,6 +66,7 @@ use prometheus::HistogramTimer;
 use promql_parser::label::Matcher;
 use query::QueryEngineRef;
 use query::metrics::OnDone;
+use query::options::QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
@@ -340,9 +341,14 @@ impl Instance {
         query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
         tql: Tql,
     ) -> Result<Output> {
+        let mut tql_query_ctx = query_ctx.as_ref().clone();
+        // tql usually know the exactly data range so no need for remote dyn filters
+        tql_query_ctx.set_extension(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, "false");
+        let query_ctx = Arc::new(tql_query_ctx);
+
         let plan = self
             .statement_executor
-            .plan_tql(tql.clone(), query_ctx)
+            .plan_tql(tql.clone(), &query_ctx)
             .await?;
         query_interceptor.pre_execute(
             Some(&Statement::Tql(tql)),
