@@ -55,26 +55,6 @@ impl StaticUserProvider {
                 .fail(),
         }
     }
-
-    /// Return one plain-text username/password pair.
-    /// This is useful for invoking from other components in the cluster.
-    ///
-    /// Only plain-text verifiers can be exported: hashed verifiers (e.g. pbkdf2)
-    /// are irreversible. Non-plain users are skipped; if none is plain-text,
-    /// configure `frontend_auth` instead.
-    pub fn get_one_user_pwd(&self) -> Result<(String, String)> {
-        self.users
-            .iter()
-            .find_map(|(username, (verifier, _))| {
-                verifier
-                    .as_plain_text()
-                    .map(|pwd| (username.clone(), pwd.to_string()))
-            })
-            .context(InvalidConfigSnafu {
-                value: "",
-                msg: "No plain-text credential to export; configure `frontend_auth` or add a plain-text user",
-            })
-    }
 }
 
 #[async_trait]
@@ -169,30 +149,6 @@ pub mod test {
 
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate_fails(&provider, "root", "654321").await;
-    }
-
-    #[test]
-    fn test_get_one_user_pwd_rejects_non_plain_verifier() {
-        let provider =
-            StaticUserProvider::new(&format!("cmd:root={}", pbkdf2_sha256_verifier("123456")))
-                .unwrap();
-
-        assert!(provider.get_one_user_pwd().is_err());
-    }
-
-    #[test]
-    fn test_get_one_user_pwd_skips_non_plain_verifier() {
-        let provider = StaticUserProvider::new(&format!(
-            "cmd:hashed={},plainer=plain_pwd",
-            pbkdf2_sha256_verifier("123456")
-        ))
-        .unwrap();
-
-        let (username, pwd) = provider.get_one_user_pwd().unwrap();
-        assert_eq!(
-            ("plainer".to_string(), "plain_pwd".to_string()),
-            (username, pwd)
-        );
     }
 
     #[tokio::test]

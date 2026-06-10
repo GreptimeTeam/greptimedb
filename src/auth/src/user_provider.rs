@@ -167,14 +167,6 @@ impl PasswordVerifier {
         }
     }
 
-    pub(crate) fn as_plain_text(&self) -> Option<&str> {
-        match self {
-            PasswordVerifier::PlainText(password) => Some(password),
-            PasswordVerifier::Pbkdf2Sha256 { .. }
-            | PasswordVerifier::MysqlNativePassword { .. } => None,
-        }
-    }
-
     fn verify_mysql_native_password(
         &self,
         auth_data: &[u8],
