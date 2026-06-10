@@ -1637,6 +1637,7 @@ max_concurrent_scan_files = 384
 allow_stale_entries = false
 scan_memory_on_exhausted = "fail"
 min_compaction_interval = "0s"
+schedule_compaction_after_edit = false
 default_flat_format = true
 
 [region_engine.mito.index]
