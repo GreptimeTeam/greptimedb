@@ -75,12 +75,13 @@ impl RemoteDynFilterRegistry {
     }
 
     #[cfg(test)]
-    pub(super) fn get(
+    pub(super) fn inspect_query<R>(
         &self,
         query_id: &QueryId,
-    ) -> Option<HashMap<RemoteDynFilterId, RegisteredDynFilter>> {
+        inspect: impl FnOnce(&QueryRemoteDynFilterRegs) -> R,
+    ) -> Option<R> {
         self.get_query(query_id)
-            .map(|query_regs| query_regs.lock().unwrap().clone())
+            .map(|query_regs| inspect(&query_regs.lock().unwrap()))
     }
 }
 
@@ -214,7 +215,7 @@ impl RemoteDynFilterState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct RegisteredDynFilter {
     pub(super) filter_id: RemoteDynFilterId,
     pub(super) child_exprs_datafusion_proto: Vec<Vec<u8>>,
@@ -386,6 +387,12 @@ impl RegisteredDynFilter {
     }
 }
 
+impl Drop for RegisteredDynFilter {
+    fn drop(&mut self) {
+        self.deactivate();
+    }
+}
+
 pub(super) fn initial_dyn_filter_regs_from_query_ctx(
     query_ctx: &QueryContextRef,
 ) -> Option<InitialDynFilterRegs> {
@@ -543,7 +550,7 @@ pub(super) fn unregister_remote_dyn_filter(
         (registered, should_remove_query)
     };
 
-    registered.deactivate();
+    drop(registered);
     if should_remove_query {
         regs_by_query.remove_query_if_empty(query_id, &query_regs);
     }
@@ -584,10 +591,7 @@ pub(super) fn remove_initial_dyn_filter_regs(
         (removed_filters, should_remove_query)
     };
 
-    for registered in removed_filters {
-        registered.deactivate();
-    }
-
+    drop(removed_filters);
     if should_remove_query {
         regs_by_query.remove_query_if_empty(query_id, &query_regs);
     }
@@ -671,7 +675,8 @@ mod tests {
         register_initial_dyn_filter_regs(&regs_by_query, &query_id, first_region_id, &regs);
         register_initial_dyn_filter_regs(&regs_by_query, &query_id, second_region_id, &regs);
 
-        let query_regs = regs_by_query.get(&query_id).unwrap();
+        let query_regs = regs_by_query.get_query(&query_id).unwrap();
+        let query_regs = query_regs.lock().unwrap();
         assert_eq!(query_regs.len(), 1);
         let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
         assert_eq!(registered.subscriber_regions.len(), 2);

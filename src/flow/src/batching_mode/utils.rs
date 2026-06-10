@@ -39,7 +39,6 @@ use datafusion_expr::{
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use query::QueryEngineRef;
-use query::options::with_remote_dyn_filter_pushdown_disabled;
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -895,12 +894,9 @@ pub async fn sql_to_df_plan(
         }
     );
     let stmt = &stmts[0];
-    let mut plan_query_ctx = query_ctx.clone();
     let query_stmt = match stmt {
         Statement::Tql(tql) => match tql {
             Tql::Eval(eval) => {
-                plan_query_ctx = with_remote_dyn_filter_pushdown_disabled(&query_ctx);
-
                 let eval = eval.clone();
                 let promql = PromQuery {
                     start: eval.start,
@@ -913,7 +909,7 @@ pub async fn sql_to_df_plan(
                     alias: eval.alias.clone(),
                 };
 
-                QueryLanguageParser::parse_promql(&promql, &plan_query_ctx)
+                QueryLanguageParser::parse_promql(&promql, &query_ctx)
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?
             }
@@ -926,13 +922,13 @@ pub async fn sql_to_df_plan(
     };
     let plan = engine
         .planner()
-        .plan(&query_stmt, plan_query_ctx.clone())
+        .plan(&query_stmt, query_ctx.clone())
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
     let plan = if optimize {
-        apply_df_optimizer(plan, &plan_query_ctx).await?
+        apply_df_optimizer(plan, &query_ctx).await?
     } else {
         plan
     };

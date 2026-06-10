@@ -30,6 +30,7 @@ use query::dist_plan::{
     RemoteDynFilterReceiverLogicalPlan,
 };
 use query::options::remote_dyn_filter_pushdown_enabled_from_extensions;
+use query::promql::plan_contains_promql_extension;
 use session::context::QueryContextRef;
 use session::query_id::QueryId;
 use snafu::OptionExt;
@@ -50,6 +51,10 @@ fn remote_dyn_filter_receiver_plan(
     ctx: QueryContextRef,
 ) -> LogicalPlan {
     if !remote_dyn_filter_pushdown_enabled(&ctx) {
+        return origin;
+    }
+
+    if plan_contains_promql_extension(&origin) {
         return origin;
     }
 
@@ -336,6 +341,7 @@ impl Stream for RemoteDynFilterGuardedStream {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use api::v1::region::{
@@ -367,6 +373,36 @@ mod tests {
         REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES, RemoteDynFilterRegistry,
     };
     use crate::tests::mock_region_server;
+
+    #[derive(Debug, Clone)]
+    struct RegisteredDynFilterSnapshot {
+        filter_id: RemoteDynFilterId,
+        child_exprs_datafusion_proto: Vec<Vec<u8>>,
+        subscriber_regions: HashSet<RegionId>,
+    }
+
+    fn query_regs(
+        regs_by_query: &RemoteDynFilterRegistry,
+        query_id: &QueryId,
+    ) -> Option<HashMap<RemoteDynFilterId, RegisteredDynFilterSnapshot>> {
+        regs_by_query.inspect_query(query_id, |query_regs| {
+            query_regs
+                .iter()
+                .map(|(filter_id, registered)| {
+                    (
+                        filter_id.clone(),
+                        RegisteredDynFilterSnapshot {
+                            filter_id: registered.filter_id.clone(),
+                            child_exprs_datafusion_proto: registered
+                                .child_exprs_datafusion_proto
+                                .clone(),
+                            subscriber_regions: registered.subscriber_regions.clone(),
+                        },
+                    )
+                })
+                .collect()
+        })
+    }
 
     fn test_remote_query_id() -> QueryId {
         QueryId::new()
@@ -442,7 +478,7 @@ mod tests {
             mock_region_server
                 .inner
                 .initial_remote_dyn_filter_registrations
-                .get(&query_id)
+                .inspect_query(&query_id, |_| ())
                 .is_none()
         );
     }
@@ -497,7 +533,7 @@ mod tests {
         let registered_filter_ids =
             register_initial_dyn_filter_regs(&regs_by_query, &query_id, region_id, &regs);
 
-        let query_regs = regs_by_query.get(&query_id).unwrap();
+        let query_regs = query_regs(&regs_by_query, &query_id).unwrap();
         assert_eq!(query_regs.len(), 2);
         assert_eq!(
             registered_filter_ids,
@@ -527,7 +563,7 @@ mod tests {
         let duplicate =
             register_initial_dyn_filter_regs(&regs_by_query, &query_id, region_id, &regs);
 
-        let query_regs = regs_by_query.get(&query_id).unwrap();
+        let query_regs = query_regs(&regs_by_query, &query_id).unwrap();
         assert_eq!(query_regs.len(), 1);
         assert_eq!(first, vec![RemoteDynFilterId::new("filter-1")]);
         assert!(duplicate.is_empty());
@@ -548,7 +584,7 @@ mod tests {
 
         register_initial_dyn_filter_regs(&regs_by_query, &query_id, region_id, &regs);
 
-        assert!(regs_by_query.get(&query_id).is_none());
+        assert!(query_regs(&regs_by_query, &query_id).is_none());
     }
 
     #[test]
@@ -565,7 +601,7 @@ mod tests {
         register_initial_dyn_filter_regs(&regs_by_query, &query_id, first_region_id, &regs);
         register_initial_dyn_filter_regs(&regs_by_query, &query_id, second_region_id, &regs);
 
-        let query_regs = regs_by_query.get(&query_id).unwrap();
+        let query_regs = query_regs(&regs_by_query, &query_id).unwrap();
         assert_eq!(query_regs.len(), 1);
         let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
         assert_eq!(registered.subscriber_regions.len(), 2);
@@ -606,8 +642,8 @@ mod tests {
             &registered_filter_ids,
         );
 
-        assert!(regs_by_query.get(&query_id).is_none());
-        let other_query_regs = regs_by_query.get(&other_query_id).unwrap();
+        assert!(query_regs(&regs_by_query, &query_id).is_none());
+        let other_query_regs = query_regs(&regs_by_query, &other_query_id).unwrap();
         assert_eq!(other_query_regs.len(), 1);
     }
 
@@ -633,7 +669,7 @@ mod tests {
             &first_subscription,
         );
 
-        let query_regs = regs_by_query.get(&query_id).unwrap();
+        let query_regs = query_regs(&regs_by_query, &query_id).unwrap();
         assert_eq!(query_regs.len(), 1);
         let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
         assert_eq!(registered.subscriber_regions.len(), 1);
@@ -954,7 +990,7 @@ mod tests {
 
         let outcome = unregister_remote_dyn_filter(&regs_by_query, &query_id, &filter_id);
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
-        assert!(regs_by_query.get(&query_id).is_none());
+        assert!(query_regs(&regs_by_query, &query_id).is_none());
         assert_eq!(format!("{}", dyn_filter.current().unwrap()), "false");
     }
 
@@ -986,7 +1022,7 @@ mod tests {
 
         let outcome = unregister_remote_dyn_filter(&regs_by_query, &query_id, &filter_id);
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
-        assert!(regs_by_query.get(&query_id).is_none());
+        assert!(query_regs(&regs_by_query, &query_id).is_none());
         assert_eq!(format!("{}", dyn_filter.current().unwrap()), "false");
 
         // Stream-local cleanup may run after FE's peer-deduplicated unregister. It should be benign.
@@ -1002,7 +1038,7 @@ mod tests {
             second_region_id,
             &second_subscription,
         );
-        assert!(regs_by_query.get(&query_id).is_none());
+        assert!(query_regs(&regs_by_query, &query_id).is_none());
     }
 
     #[test]
@@ -1031,7 +1067,7 @@ mod tests {
         );
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
 
-        let query_regs = regs_by_query.get(&query_id).unwrap();
+        let query_regs = query_regs(&regs_by_query, &query_id).unwrap();
         assert!(!query_regs.contains_key(&RemoteDynFilterId::new("filter-1")));
         assert!(query_regs.contains_key(&RemoteDynFilterId::new("filter-2")));
     }
@@ -1062,7 +1098,7 @@ mod tests {
             mock_region_server
                 .inner
                 .initial_remote_dyn_filter_registrations
-                .get(&query_id)
+                .inspect_query(&query_id, |_| ())
                 .is_none()
         );
     }
@@ -1086,7 +1122,7 @@ mod tests {
 
         // Verify only one filter entry exists and both region subscribers are tracked explicitly.
         {
-            let query_regs = regs_by_query.get(&query_id).unwrap();
+            let query_regs = query_regs(&regs_by_query, &query_id).unwrap();
             assert_eq!(query_regs.len(), 1);
             let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
             assert_eq!(registered.subscriber_regions.len(), 2);
@@ -1101,9 +1137,9 @@ mod tests {
             first_region_id,
             &first_subscription,
         );
-        assert!(regs_by_query.get(&query_id).is_some());
+        assert!(query_regs(&regs_by_query, &query_id).is_some());
         {
-            let query_regs = regs_by_query.get(&query_id).unwrap();
+            let query_regs = query_regs(&regs_by_query, &query_id).unwrap();
             let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
             assert_eq!(registered.subscriber_regions.len(), 1);
             assert!(registered.subscriber_regions.contains(&second_region_id));
@@ -1116,6 +1152,6 @@ mod tests {
             second_region_id,
             &second_subscription,
         );
-        assert!(regs_by_query.get(&query_id).is_none());
+        assert!(query_regs(&regs_by_query, &query_id).is_none());
     }
 }
