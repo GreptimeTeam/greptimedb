@@ -29,6 +29,7 @@ use datafusion_expr::{
     Expr, Extension, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore,
 };
 use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::utils::collect_columns;
 use session::context::QueryContextRef;
 
 type InjectRemoteDynFilterReceiver =
@@ -133,6 +134,22 @@ impl UserDefinedLogicalNodeCore for RemoteDynFilterReceiverLogicalPlan {
         Vec::new()
     }
 
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        let mut required = output_columns.to_vec();
+
+        for filter in &self.dyn_filters {
+            required.extend(
+                collect_columns(filter)
+                    .into_iter()
+                    .map(|column| column.index()),
+            );
+        }
+
+        required.sort_unstable();
+        required.dedup();
+        Some(vec![required])
+    }
+
     fn fmt_for_explain(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: filters={}", Self::name(), self.dyn_filters.len())
     }
@@ -183,5 +200,57 @@ impl ExtensionPlanner for RemoteDynFilterReceiverExtensionPlanner {
 impl RemoteDynFilterReceiverExtensionPlanner {
     fn name() -> &'static str {
         RemoteDynFilterReceiverLogicalPlan::name()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::physical_plan::expressions::{Column, DynamicFilterPhysicalExpr, lit};
+    use datafusion_common::DFSchema;
+    use datafusion_expr::{EmptyRelation, UserDefinedLogicalNodeCore};
+
+    use super::*;
+
+    fn empty_input() -> LogicalPlan {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+            Field::new("instance", DataType::Utf8, true),
+            Field::new("job", DataType::Utf8, true),
+        ]));
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::try_from(schema).unwrap()),
+        })
+    }
+
+    #[test]
+    fn necessary_children_exprs_keeps_parent_and_filter_columns() {
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("ts", 0)) as Arc<_>],
+            lit(true) as _,
+        ));
+        let plan = RemoteDynFilterReceiverLogicalPlan::new(empty_input(), vec![dyn_filter]);
+
+        // Parent only needs `value`, but the receiver must still keep `ts` for
+        // evaluating its dynamic filter after logical projection pruning.
+        let required = UserDefinedLogicalNodeCore::necessary_children_exprs(&plan, &[1]).unwrap();
+        assert_eq!(required, vec![vec![0, 1]]);
+    }
+
+    #[test]
+    fn necessary_children_exprs_is_transparent_without_filters() {
+        let plan = RemoteDynFilterReceiverLogicalPlan::new(empty_input(), vec![]);
+
+        let required =
+            UserDefinedLogicalNodeCore::necessary_children_exprs(&plan, &[1, 3]).unwrap();
+        assert_eq!(required, vec![vec![1, 3]]);
     }
 }

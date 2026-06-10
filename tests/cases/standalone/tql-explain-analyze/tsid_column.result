@@ -122,7 +122,9 @@ TQL ANALYZE (0, 10, '5s')  sum(irate(tsid_metric[1h])) / scalar(count(count(tsid
 |_|_|_ProjectionExec: expr=[val@1 as val, job@3 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
+| 1_| 0_|_FilterExec: DynamicFilter [ ts@0 >= 0 AND ts@0 <= 10000 AND ts@0 IN (SET) ([0, 5000, 10000]) ] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[sum(prom_irate(ts_range,val))] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
@@ -175,7 +177,9 @@ TQL ANALYZE (0, 10, '5s')  sum(irate(tsid_metric[1h])) / scalar(count(sum(tsid_m
 |_|_|_ProjectionExec: expr=[val@1 as val, job@3 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
+| 1_| 0_|_FilterExec: DynamicFilter [ ts@0 >= 0 AND ts@0 <= 10000 AND ts@0 IN (SET) ([0, 5000, 10000]) ] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[sum(prom_irate(ts_range,val))] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
