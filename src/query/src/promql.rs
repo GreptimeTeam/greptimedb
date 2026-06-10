@@ -52,3 +52,41 @@ fn is_promql_extension_plan(plan: &LogicalPlan) -> bool {
         || node.as_any().is::<SeriesNormalize>()
         || node.as_any().is::<UnionDistinctOn>()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion_common::DFSchema;
+    use datafusion_expr::{EmptyRelation, Extension};
+
+    use super::*;
+
+    #[test]
+    fn plan_contains_promql_extension_returns_true_for_promql_extension() {
+        let empty_metric = EmptyMetric::new(
+            0,
+            10_000,
+            5_000,
+            "ts".to_string(),
+            "greptime_value".to_string(),
+            None,
+        )
+        .unwrap();
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(empty_metric),
+        });
+
+        assert!(plan_contains_promql_extension(&plan));
+    }
+
+    #[test]
+    fn plan_contains_promql_extension_returns_false_for_non_promql_plan() {
+        let plan = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::empty()),
+        });
+
+        assert!(!plan_contains_promql_extension(&plan));
+    }
+}
