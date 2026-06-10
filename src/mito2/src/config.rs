@@ -228,7 +228,7 @@ impl Default for MitoConfig {
             #[cfg(feature = "vector_index")]
             vector_index: VectorIndexConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
-            schedule_compaction_after_edit: false,
+            schedule_compaction_after_edit: true,
             default_flat_format: true,
             gc: GcConfig::default(),
         };

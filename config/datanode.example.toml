@@ -559,7 +559,7 @@ min_compaction_interval = "0m"
 ## Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.
 ## Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.
 ## Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit.
-schedule_compaction_after_edit = false
+schedule_compaction_after_edit = true
 
 ## Whether to enable flat format as the default SST format.
 default_flat_format = true
