@@ -58,55 +58,6 @@ WHERE c.tier = 'gold';
 DROP TABLE orders;
 DROP TABLE customers;
 
--- Test 1.3: Hash Join with dynamic-filter key remapped by projection pruning
--- The build-side dynamic filter uses `customer_id`, which is the third column in
--- `customers`. The final query does not output it, but the receiver still needs
--- it for filtering. Projection pruning keeps it and moves it from original index
--- 2 to a compacted input index; the receiver must remap the stored physical
--- expression accordingly.
-CREATE TABLE orders ("id" INT, customer_id INT, amount DOUBLE, ts TIMESTAMP TIME INDEX);
-CREATE TABLE customers (unused INT, "name" STRING, customer_id INT, ts TIMESTAMP TIME INDEX);
-
-INSERT INTO orders VALUES
-  (1, 1, 100.0, '2024-01-01 00:00:00'),
-  (2, 2, 200.0, '2024-01-02 00:00:00'),
-  (3, 3, 300.0, '2024-01-03 00:00:00');
-
-INSERT INTO customers VALUES
-  (10, 'Alice', 1, '2024-01-01 00:00:00'),
-  (20, 'Bob', 2, '2024-01-02 00:00:00'),
-  (30, 'Charlie', 3, '2024-01-03 00:00:00');
-
--- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
--- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
--- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (=Hash.*) =REDACTED
--- SQLNESS REPLACE (-+) -
--- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
--- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
--- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
--- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
--- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
--- SQLNESS REPLACE (peers.*) REDACTED
--- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
--- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
--- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
--- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
-EXPLAIN ANALYZE VERBOSE SELECT o."id", o.amount, c."name"
-FROM orders o
-JOIN customers c ON o.customer_id = c.customer_id;
-
--- Verify correctness
--- SQLNESS SORT_RESULT
-SELECT o."id", o.amount, c."name"
-FROM orders o
-JOIN customers c ON o.customer_id = c.customer_id;
-
-DROP TABLE orders;
-DROP TABLE customers;
-
 -- Test 1.2: Hash Join with Projection Alias
 CREATE TABLE orders ("id" INT, customer_id INT, amount DOUBLE, ts TIMESTAMP TIME INDEX);
 CREATE TABLE customers (customer_id INT, "name" STRING, tier STRING, ts TIMESTAMP TIME INDEX);

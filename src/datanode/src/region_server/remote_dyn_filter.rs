@@ -343,6 +343,7 @@ mod tests {
     use std::assert_matches;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use api::v1::region::{
         RemoteDynFilterRequest, RemoteDynFilterUnregister, RemoteDynFilterUpdate,
@@ -968,8 +969,8 @@ mod tests {
         assert_eq!(format!("{}", dyn_filter.current().unwrap()), "false");
     }
 
-    #[test]
-    fn test_unregister_completes_installed_remote_dyn_filter_without_relaxing() {
+    #[tokio::test]
+    async fn test_unregister_completes_installed_remote_dyn_filter_without_relaxing() {
         let regs_by_query = RemoteDynFilterRegistry::new();
         let query_id = test_remote_query_id();
         let filter_id = RemoteDynFilterId::new("filter-1");
@@ -991,11 +992,14 @@ mod tests {
         let outcome = unregister_remote_dyn_filter(&regs_by_query, &query_id, &filter_id);
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
         assert!(query_regs(&regs_by_query, &query_id).is_none());
+        tokio::time::timeout(Duration::from_secs(1), dyn_filter.wait_complete())
+            .await
+            .unwrap();
         assert_eq!(format!("{}", dyn_filter.current().unwrap()), "false");
     }
 
-    #[test]
-    fn test_remote_dyn_filter_unregister_removes_all_region_subscribers_for_filter() {
+    #[tokio::test]
+    async fn test_remote_dyn_filter_unregister_removes_all_region_subscribers_for_filter() {
         let regs_by_query = RemoteDynFilterRegistry::new();
         let query_id = test_remote_query_id();
         let filter_id = RemoteDynFilterId::new("filter-1");
@@ -1023,6 +1027,9 @@ mod tests {
         let outcome = unregister_remote_dyn_filter(&regs_by_query, &query_id, &filter_id);
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Applied);
         assert!(query_regs(&regs_by_query, &query_id).is_none());
+        tokio::time::timeout(Duration::from_secs(1), dyn_filter.wait_complete())
+            .await
+            .unwrap();
         assert_eq!(format!("{}", dyn_filter.current().unwrap()), "false");
 
         // Stream-local cleanup may run after FE's peer-deduplicated unregister. It should be benign.
@@ -1103,13 +1110,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_remote_dyn_filter_multi_region_subscription_cleanup() {
+    #[tokio::test]
+    async fn test_remote_dyn_filter_multi_region_subscription_cleanup() {
         let regs_by_query = RemoteDynFilterRegistry::new();
-        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
-            "filter-1",
-            vec![vec![1, 2, 3]],
-        )]);
+        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]);
         let query_id = test_remote_query_id();
         let first_region_id = RegionId::new(1024, 7);
         let second_region_id = RegionId::new(1024, 8);
@@ -1119,6 +1123,7 @@ mod tests {
             register_initial_dyn_filter_regs(&regs_by_query, &query_id, first_region_id, &regs);
         let second_subscription =
             register_initial_dyn_filter_regs(&regs_by_query, &query_id, second_region_id, &regs);
+        let dyn_filter = only_remote_dyn_filter(&regs_by_query, &query_id);
 
         // Verify only one filter entry exists and both region subscribers are tracked explicitly.
         {
@@ -1138,6 +1143,11 @@ mod tests {
             &first_subscription,
         );
         assert!(query_regs(&regs_by_query, &query_id).is_some());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), dyn_filter.wait_complete())
+                .await
+                .is_err()
+        );
         {
             let query_regs = query_regs(&regs_by_query, &query_id).unwrap();
             let registered = query_regs.get(&RemoteDynFilterId::new("filter-1")).unwrap();
@@ -1153,5 +1163,8 @@ mod tests {
             &second_subscription,
         );
         assert!(query_regs(&regs_by_query, &query_id).is_none());
+        tokio::time::timeout(Duration::from_secs(1), dyn_filter.wait_complete())
+            .await
+            .unwrap();
     }
 }

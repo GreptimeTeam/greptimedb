@@ -58,24 +58,24 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion_common::DFSchema;
-    use datafusion_expr::{EmptyRelation, Extension};
+    use datafusion_expr::{EmptyRelation, Extension, LogicalPlanBuilder, col};
 
     use super::*;
 
     #[test]
     fn plan_contains_promql_extension_returns_true_for_promql_extension() {
-        let empty_metric = EmptyMetric::new(
-            0,
-            10_000,
-            5_000,
-            "ts".to_string(),
-            "greptime_value".to_string(),
-            None,
-        )
-        .unwrap();
-        let plan = LogicalPlan::Extension(Extension {
-            node: Arc::new(empty_metric),
-        });
+        let plan = empty_metric_plan();
+
+        assert!(plan_contains_promql_extension(&plan));
+    }
+
+    #[test]
+    fn plan_contains_promql_extension_returns_true_for_nested_promql_extension() {
+        let plan = LogicalPlanBuilder::from(empty_metric_plan())
+            .project(vec![col("ts")])
+            .unwrap()
+            .build()
+            .unwrap();
 
         assert!(plan_contains_promql_extension(&plan));
     }
@@ -88,5 +88,21 @@ mod tests {
         });
 
         assert!(!plan_contains_promql_extension(&plan));
+    }
+
+    fn empty_metric_plan() -> LogicalPlan {
+        let empty_metric = EmptyMetric::new(
+            0,
+            10_000,
+            5_000,
+            "ts".to_string(),
+            "greptime_value".to_string(),
+            None,
+        )
+        .unwrap();
+
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(empty_metric),
+        })
     }
 }
