@@ -35,7 +35,9 @@ use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::system_schema::information_schema::{InformationTable, KEY_COLUMN_USAGE, Predicates};
+use crate::system_schema::information_schema::{
+    InformationTable, KEY_COLUMN_USAGE, Predicates, primary_key_encoding_index_type,
+};
 
 pub const CONSTRAINT_SCHEMA: &str = "constraint_schema";
 pub const CONSTRAINT_NAME: &str = "constraint_name";
@@ -56,25 +58,15 @@ pub(crate) const CONSTRAINT_NAME_TIME_INDEX: &str = "TIME INDEX";
 
 /// Primary key constraint name
 pub(crate) const CONSTRAINT_NAME_PRI: &str = "PRIMARY";
-/// Primary key index type
-pub(crate) const INDEX_TYPE_PRI: &str = "greptime-primary-key-v1";
 
 /// Inverted index name
 pub(crate) const CONSTRAINT_NAME_INVERTED_INDEX: &str = "INVERTED INDEX";
-/// Inverted index type
-pub(crate) const INDEX_TYPE_INVERTED_INDEX: &str = "greptime-inverted-index-v1";
 
 /// Fulltext index name
 pub(crate) const CONSTRAINT_NAME_FULLTEXT_INDEX: &str = "FULLTEXT INDEX";
-/// Fulltext index v1 type
-pub(crate) const INDEX_TYPE_FULLTEXT_TANTIVY: &str = "greptime-fulltext-index-v1";
-/// Fulltext index bloom type
-pub(crate) const INDEX_TYPE_FULLTEXT_BLOOM: &str = "greptime-fulltext-index-bloom";
 
 /// Skipping index name
 pub(crate) const CONSTRAINT_NAME_SKIPPING_INDEX: &str = "SKIPPING INDEX";
-/// Skipping index type
-pub(crate) const INDEX_TYPE_SKIPPING_INDEX: &str = "greptime-bloom-filter-v1";
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
 ///
@@ -251,6 +243,8 @@ impl InformationSchemaKeyColumnUsageBuilder {
                 let table_name = &table_info.name;
                 let keys = &table_info.meta.primary_key_indices;
                 let schema = table.schema();
+                let primary_key_encoding =
+                    primary_key_encoding_index_type(&table_info.meta.options.extra_options);
 
                 for (idx, column) in schema.column_schemas().iter().enumerate() {
                     if column.is_time_index() {
@@ -276,7 +270,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
                             table_name,
                             &column.name,
                             pk_seq as u32 + 1,
-                            INDEX_TYPE_PRI,
+                            primary_key_encoding,
                         );
                     }
                 }

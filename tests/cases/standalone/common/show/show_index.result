@@ -60,53 +60,53 @@ Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expect
 
 SHOW INDEX FROM test;
 
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| test  | 0          | PRIMARY        | 1            | a           | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
-| test  | 0          | PRIMARY        | 2            | b           | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
-| test  | 1          | SKIPPING INDEX | 1            | b           | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                          |         |               | YES     |            |
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
++-------+------------+------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name         | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++-------+------------+------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| test  | 0          | PRIMARY          | 1            | a           | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| test  | 0          | PRIMARY          | 2            | b           | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| test  | 1          | SKIPPING_INDEX_b | 1            | b           | A         |             |          |        | YES  | SKIPPING   |         |               | YES     |            |
+| test  | 1          | TIME INDEX       | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
++-------+------------+------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 SHOW INDEX FROM test_no_inverted_index;
 
-+------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| Table                  | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
-+------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| test_no_inverted_index | 0          | PRIMARY        | 1            | a           | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
-| test_no_inverted_index | 0          | PRIMARY        | 2            | b           | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
-| test_no_inverted_index | 1          | SKIPPING INDEX | 1            | b           | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| test_no_inverted_index | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                          |         |               | YES     |            |
-+------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
++------------------------+------------+------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table                  | Non_unique | Key_name         | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++------------------------+------------+------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| test_no_inverted_index | 0          | PRIMARY          | 1            | a           | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| test_no_inverted_index | 0          | PRIMARY          | 2            | b           | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| test_no_inverted_index | 1          | SKIPPING_INDEX_b | 1            | b           | A         |             |          |        | YES  | SKIPPING   |         |               | YES     |            |
+| test_no_inverted_index | 1          | TIME INDEX       | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
++------------------------+------------+------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 SHOW INDEX FROM system_metrics;
 
-+----------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| Table          | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
-+----------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| system_metrics | 1          | FULLTEXT INDEX | 1            | idc         | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
-| system_metrics | 1          | FULLTEXT INDEX | 2            | desc2       | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
-| system_metrics | 1          | FULLTEXT INDEX | 3            | desc3       | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
-| system_metrics | 1          | INVERTED INDEX | 1            | idc         | A         |             |          |        | YES  | greptime-inverted-index-v1    |         |               | YES     |            |
-| system_metrics | 0          | PRIMARY        | 1            | host        | A         |             |          |        | YES  | greptime-primary-key-v1       |         |               | YES     |            |
-| system_metrics | 0          | PRIMARY        | 2            | idc         | A         |             |          |        | YES  | greptime-primary-key-v1       |         |               | YES     |            |
-| system_metrics | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                               |         |               | YES     |            |
-+----------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
++----------------+------------+----------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table          | Non_unique | Key_name             | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++----------------+------------+----------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| system_metrics | 1          | FULLTEXT_INDEX_desc2 | 1            | desc2       | A         |             |          |        | YES  | FULLTEXT   |         |               | YES     |            |
+| system_metrics | 1          | FULLTEXT_INDEX_desc3 | 1            | desc3       | A         |             |          |        | YES  | FULLTEXT   |         |               | YES     |            |
+| system_metrics | 1          | FULLTEXT_INDEX_idc   | 1            | idc         | A         |             |          |        | YES  | FULLTEXT   |         |               | YES     |            |
+| system_metrics | 1          | INVERTED_INDEX_idc   | 1            | idc         | A         |             |          |        | YES  | INVERTED   |         |               | YES     |            |
+| system_metrics | 0          | PRIMARY              | 1            | host        | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| system_metrics | 0          | PRIMARY              | 2            | idc         | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| system_metrics | 1          | TIME INDEX           | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
++----------------+------------+----------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 SHOW INDEX FROM system_metrics in public;
 
-+----------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| Table          | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
-+----------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| system_metrics | 1          | FULLTEXT INDEX | 1            | idc         | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
-| system_metrics | 1          | FULLTEXT INDEX | 2            | desc2       | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
-| system_metrics | 1          | FULLTEXT INDEX | 3            | desc3       | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
-| system_metrics | 1          | INVERTED INDEX | 1            | idc         | A         |             |          |        | YES  | greptime-inverted-index-v1    |         |               | YES     |            |
-| system_metrics | 0          | PRIMARY        | 1            | host        | A         |             |          |        | YES  | greptime-primary-key-v1       |         |               | YES     |            |
-| system_metrics | 0          | PRIMARY        | 2            | idc         | A         |             |          |        | YES  | greptime-primary-key-v1       |         |               | YES     |            |
-| system_metrics | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                               |         |               | YES     |            |
-+----------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
++----------------+------------+----------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table          | Non_unique | Key_name             | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++----------------+------------+----------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| system_metrics | 1          | FULLTEXT_INDEX_desc2 | 1            | desc2       | A         |             |          |        | YES  | FULLTEXT   |         |               | YES     |            |
+| system_metrics | 1          | FULLTEXT_INDEX_desc3 | 1            | desc3       | A         |             |          |        | YES  | FULLTEXT   |         |               | YES     |            |
+| system_metrics | 1          | FULLTEXT_INDEX_idc   | 1            | idc         | A         |             |          |        | YES  | FULLTEXT   |         |               | YES     |            |
+| system_metrics | 1          | INVERTED_INDEX_idc   | 1            | idc         | A         |             |          |        | YES  | INVERTED   |         |               | YES     |            |
+| system_metrics | 0          | PRIMARY              | 1            | host        | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| system_metrics | 0          | PRIMARY              | 2            | idc         | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| system_metrics | 1          | TIME INDEX           | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
++----------------+------------+----------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 SHOW INDEX FROM system_metrics like '%util%';
 
@@ -117,7 +117,7 @@ SHOW INDEX FROM system_metrics WHERE Key_name = 'TIME INDEX';
 +----------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 | Table          | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
 +----------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| system_metrics | 1          | TIME INDEX | 1            | ts          | A         |             |          |        |      |            |         |               | YES     |            |
+| system_metrics | 1          | TIME INDEX | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
 +----------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 SELECT table_schema,
@@ -133,21 +133,21 @@ WHERE table_schema = 'public'
   AND table_name IN ('system_metrics', 'test')
 ORDER BY table_name, index_name, seq_in_index, column_name;
 
-+--------------+----------------+------------+----------------+--------------+-------------+------------+-------------------------------+
-| table_schema | table_name     | non_unique | index_name     | seq_in_index | column_name | index_type | greptime_index_type           |
-+--------------+----------------+------------+----------------+--------------+-------------+------------+-------------------------------+
-| public       | system_metrics | 1          | FULLTEXT INDEX | 1            | idc         | FULLTEXT   | greptime-fulltext-index-bloom |
-| public       | system_metrics | 1          | FULLTEXT INDEX | 2            | desc2       | FULLTEXT   | greptime-fulltext-index-bloom |
-| public       | system_metrics | 1          | FULLTEXT INDEX | 3            | desc3       | FULLTEXT   | greptime-fulltext-index-bloom |
-| public       | system_metrics | 1          | INVERTED INDEX | 1            | idc         | INVERTED   | greptime-inverted-index-v1    |
-| public       | system_metrics | 0          | PRIMARY        | 1            | host        | BTREE      | greptime-primary-key-v1       |
-| public       | system_metrics | 0          | PRIMARY        | 2            | idc         | BTREE      | greptime-primary-key-v1       |
-| public       | system_metrics | 1          | TIME INDEX     | 1            | ts          | BTREE      |                               |
-| public       | test           | 0          | PRIMARY        | 1            | a           | BTREE      | greptime-primary-key-v1       |
-| public       | test           | 0          | PRIMARY        | 2            | b           | BTREE      | greptime-primary-key-v1       |
-| public       | test           | 1          | SKIPPING INDEX | 1            | b           | BLOOM      | greptime-bloom-filter-v1      |
-| public       | test           | 1          | TIME INDEX     | 1            | ts          | BTREE      |                               |
-+--------------+----------------+------------+----------------+--------------+-------------+------------+-------------------------------+
++--------------+----------------+------------+----------------------+--------------+-------------+------------+---------------------+
+| table_schema | table_name     | non_unique | index_name           | seq_in_index | column_name | index_type | greptime_index_type |
++--------------+----------------+------------+----------------------+--------------+-------------+------------+---------------------+
+| public       | system_metrics | 1          | FULLTEXT_INDEX_desc2 | 1            | desc2       | FULLTEXT   | fulltext_bloom      |
+| public       | system_metrics | 1          | FULLTEXT_INDEX_desc3 | 1            | desc3       | FULLTEXT   | fulltext_bloom      |
+| public       | system_metrics | 1          | FULLTEXT_INDEX_idc   | 1            | idc         | FULLTEXT   | fulltext_bloom      |
+| public       | system_metrics | 1          | INVERTED_INDEX_idc   | 1            | idc         | INVERTED   | inverted            |
+| public       | system_metrics | 0          | PRIMARY              | 1            | host        | PRIMARY    | dense               |
+| public       | system_metrics | 0          | PRIMARY              | 2            | idc         | PRIMARY    | dense               |
+| public       | system_metrics | 1          | TIME INDEX           | 1            | ts          | TIME       |                     |
+| public       | test           | 0          | PRIMARY              | 1            | a           | PRIMARY    | dense               |
+| public       | test           | 0          | PRIMARY              | 2            | b           | PRIMARY    | dense               |
+| public       | test           | 1          | SKIPPING_INDEX_b     | 1            | b           | SKIPPING   | bloom_filter        |
+| public       | test           | 1          | TIME INDEX           | 1            | ts          | TIME       |                     |
++--------------+----------------+------------+----------------------+--------------+-------------+------------+---------------------+
 
 DROP TABLE system_metrics;
 

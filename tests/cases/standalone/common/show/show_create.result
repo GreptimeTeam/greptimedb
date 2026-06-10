@@ -271,18 +271,18 @@ Affected Rows: 0
 
 show index from phy;
 
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
-| phy   | 0          | PRIMARY        | 1            | host        | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
-| phy   | 0          | PRIMARY        | 2            | __table_id  | A         |             |          |        |      | greptime-primary-key-v1  |         |               | YES     |            |
-| phy   | 0          | PRIMARY        | 3            | __tsid      | A         |             |          |        |      | greptime-primary-key-v1  |         |               | YES     |            |
-| phy   | 0          | PRIMARY        | 4            | job         | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
-| phy   | 1          | SKIPPING INDEX | 1            | host        | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| phy   | 1          | SKIPPING INDEX | 2            | __table_id  | A         |             |          |        |      | greptime-bloom-filter-v1 |         |               | YES     |            |
-| phy   | 1          | SKIPPING INDEX | 3            | job         | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
-| phy   | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                          |         |               | YES     |            |
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
++-------+------------+---------------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name                  | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++-------+------------+---------------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| phy   | 0          | PRIMARY                   | 1            | host        | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| phy   | 0          | PRIMARY                   | 2            | __table_id  | A         |             |          |        |      | PRIMARY    |         |               | YES     |            |
+| phy   | 0          | PRIMARY                   | 3            | __tsid      | A         |             |          |        |      | PRIMARY    |         |               | YES     |            |
+| phy   | 0          | PRIMARY                   | 4            | job         | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| phy   | 1          | SKIPPING_INDEX___table_id | 1            | __table_id  | A         |             |          |        |      | SKIPPING   |         |               | YES     |            |
+| phy   | 1          | SKIPPING_INDEX_host       | 1            | host        | A         |             |          |        | YES  | SKIPPING   |         |               | YES     |            |
+| phy   | 1          | SKIPPING_INDEX_job        | 1            | job         | A         |             |          |        | YES  | SKIPPING   |         |               | YES     |            |
+| phy   | 1          | TIME INDEX                | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
++-------+------------+---------------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 drop table t1;
 
