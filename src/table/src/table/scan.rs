@@ -40,7 +40,9 @@ use datafusion::physical_plan::{
 use datafusion_common::stats::Precision;
 use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
 use datafusion_physical_expr::expressions::Column;
-use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
+use datafusion_physical_expr::{
+    EquivalenceProperties, Partitioning, PhysicalExpr, PhysicalSortExpr,
+};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
@@ -339,6 +341,21 @@ impl RegionScanExec {
     pub fn set_explain_verbose(&mut self, explain_verbose: bool) {
         self.explain_verbose = explain_verbose;
     }
+
+    /// Adds dynamic filters directly to the underlying region scanner predicate.
+    ///
+    /// This is the same mutation path used by DataFusion child-filter pushdown. Remote dynamic
+    /// filter updates install their shared runtime wrapper through this method at scan build time
+    /// and later update the wrapper state out-of-band.
+    pub fn add_dyn_filters_to_predicate(
+        &self,
+        filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> Vec<bool> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .add_dyn_filter_to_predicate(filter_exprs)
+    }
 }
 
 impl ExecutionPlan for RegionScanExec {
@@ -451,11 +468,7 @@ impl ExecutionPlan for RegionScanExec {
             .map(|f| f.filter)
             .collect::<Vec<_>>();
 
-        let supported = self
-            .scanner
-            .lock()
-            .unwrap()
-            .add_dyn_filter_to_predicate(parent_filters);
+        let supported = self.add_dyn_filters_to_predicate(parent_filters);
         // datafusion api require to clone self after mutate, even though we are only mutate inside mutex
         let new_self = Arc::new(self.clone());
 

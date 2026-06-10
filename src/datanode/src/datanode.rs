@@ -459,6 +459,7 @@ impl DatanodeBuilder {
             opts.concurrent_query_limiter_timeout,
             opts.grpc.flight_compression,
         );
+        region_server.install_remote_dyn_filter_receiver_injector(&self.plugins);
 
         let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
         let engines = self
