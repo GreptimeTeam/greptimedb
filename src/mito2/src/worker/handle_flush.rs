@@ -273,6 +273,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         region.update_flush_millis();
+        // Update topic latest entry id as soon as possible after flush to make sure the prunable entry id is updated timely,
+        // which is important for remote WAL pruning.
+        self.update_topic_latest_entry_id(&region);
 
         // Delete wal.
         info!(
