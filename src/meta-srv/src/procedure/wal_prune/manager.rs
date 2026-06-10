@@ -242,6 +242,10 @@ impl WalPruneManager {
             .await
             .context(error::TableMetadataManagerSnafu)?
             .map(|v| v.into_inner().pruned_entry_id);
+        debug!(
+            "Found prunable entry id {} for topic {}, current pruned entry id: {:?}",
+            prunable_entry_id, topic_name, current
+        );
         if !should_trigger_prune(current, prunable_entry_id) {
             debug!(
                 "No need to prune topic {}, current pruned entry id: {:?}, prunable entry id: {}",

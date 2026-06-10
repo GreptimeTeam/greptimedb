@@ -1206,6 +1206,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .elapsed_since(self.last_periodical_check_millis)
             < interval
         {
+            info!(
+                "Skip periodical check for worker {} as last check is {} seconds ago",
+                self.id,
+                (self.time_provider.current_time_millis() - self.last_periodical_check_millis)
+                    as f64
+                    / 1000.0
+            );
             return;
         }
 

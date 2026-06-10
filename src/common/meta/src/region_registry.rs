@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::{Arc, RwLock};
 
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use store_api::storage::RegionId;
 
 use crate::datanode::{RegionManifestInfo, RegionStat};
@@ -241,6 +241,11 @@ impl LeaderRegionRegistry {
                             leader_region.manifest.manifest_version()
                         );
                     } else {
+                        debug!(
+                            "Updating leader region for region {}, pruned entry id: {}",
+                            region_id,
+                            leader_region.manifest.prunable_entry_id(),
+                        );
                         entry.insert(leader_region);
                     }
                 }

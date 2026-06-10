@@ -52,7 +52,7 @@ use common_procedure::error::{
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Status, StringKey, UserMetadata,
 };
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use manager::RegionMigrationProcedureGuard;
 pub use manager::{
     RegionMigrationManagerRef, RegionMigrationProcedureTask, RegionMigrationProcedureTracker,
@@ -708,6 +708,10 @@ impl Context {
             .batch_get(topic_name_keys)
             .await
             .context(error::TableMetadataManagerSnafu)?;
+        debug!(
+            "Fetched topic region values: {:?}, topic name values: {:?}",
+            topic_region_values, topic_name_values
+        );
 
         let replay_checkpoints = region_topics
             .iter()

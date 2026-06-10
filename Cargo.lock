@@ -14520,7 +14520,9 @@ version = "1.1.0"
 dependencies = [
  "arbitrary",
  "async-trait",
+ "axum 0.8.4",
  "chrono",
+ "clap",
  "common-base",
  "common-error",
  "common-macro",
@@ -14544,6 +14546,7 @@ dependencies = [
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "reqwest 0.13.4",
+ "rskafka",
  "rustls",
  "schemars",
  "serde",
