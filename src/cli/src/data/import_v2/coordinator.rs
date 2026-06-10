@@ -28,6 +28,7 @@ use crate::data::import_v2::state::{
     delete_import_state, load_import_state, save_import_state, try_acquire_import_state_lock,
 };
 use crate::data::path::data_dir_for_schema_chunk;
+use crate::data::progress::{NoopProgress, ProgressPhase, ProgressReporter};
 
 #[async_trait]
 pub(crate) trait ImportTaskExecutor {
@@ -133,6 +134,20 @@ pub(crate) async fn import_with_resume_session<E>(
 where
     E: ImportTaskExecutor + Sync,
 {
+    // Production callers do not care about progress yet; keep their call site
+    // unchanged and route them through the no-op reporter.
+    let progress = NoopProgress;
+    import_with_resume_session_with_progress(session, executor, &progress).await
+}
+
+pub(crate) async fn import_with_resume_session_with_progress<E>(
+    session: ImportResumeSession,
+    executor: &E,
+    progress: &dyn ProgressReporter,
+) -> Result<()>
+where
+    E: ImportTaskExecutor + Sync,
+{
     let ImportResumeSession {
         config,
         mut state,
@@ -162,6 +177,14 @@ where
         config.state_path.display()
     );
 
+    // One progress unit per import task. Already-completed tasks still count so
+    // the reported total matches the task plan regardless of resume position.
+    let progress_phase = ProgressPhase::start(
+        progress,
+        "Import data tasks",
+        Some(config.tasks.len() as u64),
+    );
+
     let import_start = Instant::now();
     for (idx, task) in config.tasks.iter().enumerate() {
         if state.task_status(task.chunk_id, &task.schema) == Some(ImportTaskStatus::Completed) {
@@ -172,6 +195,7 @@ where
                 task.chunk_id,
                 task.schema
             );
+            progress.inc(1);
             continue;
         }
 
@@ -216,6 +240,7 @@ where
                     task.schema,
                     task_start.elapsed()
                 );
+                progress.inc(1);
             }
             Err(task_error) => {
                 // Persist Failed best-effort, but always surface the original
@@ -240,6 +265,7 @@ where
         }
     }
 
+    progress_phase.finish();
     delete_import_state(&config.state_path).await?;
     info!("Data import finished in {:?}", import_start.elapsed());
     drop(lock);
@@ -365,6 +391,7 @@ mod tests {
     use super::*;
     use crate::data::export_v2::manifest::{ChunkMeta, TimeRange};
     use crate::data::import_v2::error::TestTaskFailedSnafu;
+    use crate::data::progress::test_util::{ProgressEvent, RecordingProgress};
 
     #[derive(Debug, Clone, Copy)]
     enum FailureMode {
@@ -691,5 +718,92 @@ mod tests {
             state.task_status(failed_task.chunk_id, &failed_task.schema),
             Some(ImportTaskStatus::Failed)
         );
+    }
+
+    #[tokio::test]
+    async fn test_import_progress_counts_skipped_and_completed_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("import_state.json");
+        let tasks = vec![
+            ImportTaskKey::new(1, "public"),
+            ImportTaskKey::new(2, "analytics"),
+        ];
+        let mut state = ImportState::new(
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &["public".to_string(), "analytics".to_string()],
+            tasks.clone(),
+        );
+        state.mark_ddl_completed();
+        // First task is already completed: it should still count as one progress
+        // unit so the reported total matches the task plan on resume.
+        state
+            .set_task_status(1, "public", ImportTaskStatus::Completed, None)
+            .unwrap();
+        save_import_state(&path, &state).await.unwrap();
+
+        let imported = Arc::new(Mutex::new(Vec::new()));
+        let executor = recording_executor(imported.clone());
+        let progress = RecordingProgress::default();
+
+        let session = prepare_import_resume(config(path, tasks)).await.unwrap();
+        import_with_resume_session_with_progress(session, &executor, &progress)
+            .await
+            .unwrap();
+
+        // The skipped-completed task is not re-imported.
+        assert_eq!(
+            imported.lock().unwrap().clone(),
+            vec![ImportTaskKey::new(2, "analytics")]
+        );
+
+        let events = progress.events();
+        assert_eq!(
+            events.first(),
+            Some(&ProgressEvent::StartPhase {
+                name: "Import data tasks".to_string(),
+                total: Some(2),
+            })
+        );
+        assert_eq!(events.last(), Some(&ProgressEvent::FinishPhase));
+        // Both the skipped-completed task and the newly imported task increment.
+        assert_eq!(progress.total_inc(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_import_progress_stops_incrementing_on_task_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("import_state.json");
+        let failed_task = ImportTaskKey::new(1, "public");
+        let tasks = vec![failed_task.clone(), ImportTaskKey::new(2, "analytics")];
+        let executor = RecordingExecutor {
+            imported: Arc::new(Mutex::new(Vec::new())),
+            fail_task: Some(failed_task.clone()),
+            failure_mode: Some(FailureMode::Fatal),
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut state = ImportState::new(
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &["public".to_string(), "analytics".to_string()],
+            tasks.clone(),
+        );
+        state.mark_ddl_completed();
+        save_import_state(&path, &state).await.unwrap();
+
+        let progress = RecordingProgress::default();
+        let session = prepare_import_resume(config(path, tasks)).await.unwrap();
+        import_with_resume_session_with_progress(session, &executor, &progress)
+            .await
+            .unwrap_err();
+
+        // The first task fails, so neither task increments. The phase is still
+        // finished before returning the task error so future UI reporters can
+        // clean up their state.
+        assert_eq!(progress.total_inc(), 0);
+        assert!(progress.events().contains(&ProgressEvent::FinishPhase));
     }
 }
