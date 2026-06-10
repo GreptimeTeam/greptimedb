@@ -22,6 +22,7 @@ use datafusion::common::Result;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_expr::utils::conjunction;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::{DFSchemaRef, DataFusionError};
@@ -162,8 +163,36 @@ impl UserDefinedLogicalNodeCore for RemoteDynFilterReceiverLogicalPlan {
         let input = inputs.pop().ok_or_else(|| {
             DataFusionError::Internal(format!("Expected exactly one input with {}", Self::name()))
         })?;
-        Ok(Self::new(input, self.dyn_filters.clone()))
+        let dyn_filters = self
+            .dyn_filters
+            .iter()
+            .map(|filter| remap_physical_expr_columns(filter.clone(), input.schema().as_arrow()))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self::new(input, dyn_filters))
     }
+}
+
+fn remap_physical_expr_columns(
+    expr: Arc<dyn PhysicalExpr>,
+    input_schema: &datafusion::arrow::datatypes::Schema,
+) -> Result<Arc<dyn PhysicalExpr>> {
+    if let Some(column) = expr.as_any().downcast_ref::<Column>() {
+        return Ok(Arc::new(Column::new_with_schema(
+            column.name(),
+            input_schema,
+        )?));
+    }
+
+    let children = expr.children();
+    if children.is_empty() {
+        return Ok(expr);
+    }
+
+    let new_children = children
+        .into_iter()
+        .map(|child| remap_physical_expr_columns(child.clone(), input_schema))
+        .collect::<Result<Vec<_>>>()?;
+    expr.with_new_children(new_children)
 }
 
 pub struct RemoteDynFilterReceiverExtensionPlanner;
@@ -231,6 +260,21 @@ mod tests {
         })
     }
 
+    fn pruned_input() -> LogicalPlan {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("instance", DataType::Utf8, true),
+        ]));
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::try_from(schema).unwrap()),
+        })
+    }
+
     #[test]
     fn necessary_children_exprs_keeps_parent_and_filter_columns() {
         let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
@@ -252,5 +296,24 @@ mod tests {
         let required =
             UserDefinedLogicalNodeCore::necessary_children_exprs(&plan, &[1, 3]).unwrap();
         assert_eq!(required, vec![vec![1, 3]]);
+    }
+
+    #[test]
+    fn with_exprs_and_inputs_remaps_dyn_filter_columns_to_pruned_input() {
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("instance", 2)) as Arc<_>],
+            lit(true) as _,
+        ));
+        let plan = RemoteDynFilterReceiverLogicalPlan::new(empty_input(), vec![dyn_filter]);
+
+        let remapped =
+            UserDefinedLogicalNodeCore::with_exprs_and_inputs(&plan, vec![], vec![pruned_input()])
+                .unwrap();
+
+        let columns = collect_columns(&remapped.dyn_filters()[0]);
+        assert_eq!(columns.len(), 1);
+        let column = columns.iter().next().unwrap();
+        assert_eq!(column.name(), "instance");
+        assert_eq!(column.index(), 1);
     }
 }

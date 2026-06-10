@@ -126,6 +126,97 @@ DROP TABLE customers;
 
 Affected Rows: 0
 
+-- Test 1.3: Hash Join with dynamic-filter key remapped by projection pruning
+-- The build-side dynamic filter uses `customer_id`, which is the third column in
+-- `customers`. The final query does not output it, but the receiver still needs
+-- it for filtering. Projection pruning keeps it and moves it from original index
+-- 2 to a compacted input index; the receiver must remap the stored physical
+-- expression accordingly.
+CREATE TABLE orders ("id" INT, customer_id INT, amount DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE customers (unused INT, "name" STRING, customer_id INT, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO orders VALUES
+  (1, 1, 100.0, '2024-01-01 00:00:00'),
+  (2, 2, 200.0, '2024-01-02 00:00:00'),
+  (3, 3, 300.0, '2024-01-03 00:00:00');
+
+Affected Rows: 3
+
+INSERT INTO customers VALUES
+  (10, 'Alice', 1, '2024-01-01 00:00:00'),
+  (20, 'Bob', 2, '2024-01-02 00:00:00'),
+  (30, 'Charlie', 3, '2024-01-03 00:00:00');
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
+-- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
+EXPLAIN ANALYZE VERBOSE SELECT o."id", o.amount, c."name"
+FROM orders o
+JOIN customers c ON o.customer_id = c.customer_id;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@1)], projection=[id@0, amount@2, name@3] metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount] metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_ProjectionExec: expr=[name@1 as name, customer_id@2 as customer_id] metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["id", "customer_id", "amount", "ts"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["unused", "name", "customer_id", "ts"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- Verify correctness
+-- SQLNESS SORT_RESULT
+SELECT o."id", o.amount, c."name"
+FROM orders o
+JOIN customers c ON o.customer_id = c.customer_id;
+
++----+--------+---------+
++----+--------+---------+
++----+--------+---------+
+| 1  | 100.0  | Alice   |
+| 2  | 200.0  | Bob     |
+| 3  | 300.0  | Charlie |
+| id | amount | name    |
+
+DROP TABLE orders;
+
+Affected Rows: 0
+
+DROP TABLE customers;
+
+Affected Rows: 0
+
 -- Test 1.2: Hash Join with Projection Alias
 CREATE TABLE orders ("id" INT, customer_id INT, amount DOUBLE, ts TIMESTAMP TIME INDEX);
 
