@@ -21,7 +21,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_telemetry::info;
 use store_api::storage::{FileId, RegionId};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
 use crate::sst::file::RegionFileId;
 
@@ -394,6 +394,11 @@ impl IndexBuildListener {
     pub fn begin_count(&self) -> usize {
         self.begin_count.load(Ordering::Relaxed)
     }
+
+    /// Returns the abort count.
+    pub fn abort_count(&self) -> usize {
+        self.abort_count.load(Ordering::Relaxed)
+    }
 }
 
 #[async_trait]
@@ -409,6 +414,135 @@ impl EventListener for IndexBuildListener {
         info!("Region {} index build begin", region_file_id);
         self.begin_count.fetch_add(1, Ordering::Relaxed);
         self.begin_notify.notify_one();
+    }
+
+    async fn on_index_build_abort(&self, region_file_id: RegionFileId) {
+        info!("Region {} index build aborted", region_file_id);
+        self.abort_count.fetch_add(1, Ordering::Relaxed);
+        self.abort_notify.notify_one();
+        self.stop_notify.notify_one();
+    }
+}
+
+/// A listener that can gate (pause) index build at the begin stage.
+///
+/// Like [`IndexBuildListener`], it tracks begin/finish/abort counts and exposes
+/// wait methods. Additionally, [`GateIndexBuildListener::on_index_build_begin`]
+/// blocks until the test calls [`GateIndexBuildListener::release_begin`],
+/// enabling deterministic race-condition tests without sleep/flakiness.
+///
+/// # Usage
+///
+/// ```ignore
+/// let gate = Arc::new(GateIndexBuildListener::default());
+/// // pass gate as listener to engine
+/// // ... trigger index build ...
+/// gate.wait_begin(1).await;       // wait for begin to arrive
+/// // ... do something while begin is blocked ...
+/// gate.release_begin();           // let begin proceed
+/// ```
+pub struct GateIndexBuildListener {
+    begin_count: AtomicUsize,
+    begin_notify: Notify,
+    /// Blocks `on_index_build_begin` until released by the test.
+    begin_blocker: Semaphore,
+    finish_count: AtomicUsize,
+    finish_notify: Notify,
+    abort_count: AtomicUsize,
+    abort_notify: Notify,
+    /// stop = finish or abort
+    stop_notify: Notify,
+}
+
+impl Default for GateIndexBuildListener {
+    fn default() -> Self {
+        Self {
+            begin_count: AtomicUsize::new(0),
+            begin_notify: Notify::new(),
+            begin_blocker: Semaphore::new(0),
+            finish_count: AtomicUsize::new(0),
+            finish_notify: Notify::new(),
+            abort_count: AtomicUsize::new(0),
+            abort_notify: Notify::new(),
+            stop_notify: Notify::new(),
+        }
+    }
+}
+
+impl GateIndexBuildListener {
+    /// Wait until index build begin is reached for `times` times.
+    pub async fn wait_begin(&self, times: usize) {
+        while self.begin_count.load(Ordering::Relaxed) < times {
+            self.begin_notify.notified().await;
+        }
+    }
+
+    /// Wait until index build finish is done for `times` times.
+    pub async fn wait_finish(&self, times: usize) {
+        while self.finish_count.load(Ordering::Relaxed) < times {
+            self.finish_notify.notified().await;
+        }
+    }
+
+    /// Wait until index build is stopped (finished or aborted) for `times` times.
+    pub async fn wait_stop(&self, times: usize) {
+        while self.finish_count.load(Ordering::Relaxed) + self.abort_count.load(Ordering::Relaxed)
+            < times
+        {
+            self.stop_notify.notified().await;
+        }
+    }
+
+    /// Release one blocked `on_index_build_begin` invocation.
+    ///
+    /// This adds one semaphore permit, so each call releases at most one blocked
+    /// begin hook. If a test blocks multiple index build tasks, call this method
+    /// once per task. Permits are accumulated if release happens before a task
+    /// reaches the gate, but the release order still cannot target a specific
+    /// region/file.
+    ///
+    /// Tests should generally call [`Self::wait_begin`] first and then release
+    /// the gate, so the build is known to be blocked before the test performs
+    /// the operation under test.
+    pub fn release_begin(&self) {
+        self.begin_blocker.add_permits(1);
+    }
+
+    /// Returns the begin count.
+    pub fn begin_count(&self) -> usize {
+        self.begin_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns the finish count.
+    pub fn finish_count(&self) -> usize {
+        self.finish_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns the abort count.
+    pub fn abort_count(&self) -> usize {
+        self.abort_count.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl EventListener for GateIndexBuildListener {
+    async fn on_index_build_begin(&self, region_file_id: RegionFileId) {
+        info!("Region {} index build begin (gated)", region_file_id);
+        self.begin_count.fetch_add(1, Ordering::Relaxed);
+        self.begin_notify.notify_one();
+        // Block until the test releases the gate.
+        let _permit = self
+            .begin_blocker
+            .acquire()
+            .await
+            .expect("gate semaphore should not be closed");
+    }
+
+    async fn on_index_build_finish(&self, region_file_id: RegionFileId) {
+        info!("Region {} index build successfully", region_file_id);
+        self.finish_count.fetch_add(1, Ordering::Relaxed);
+        self.finish_notify.notify_one();
+        self.stop_notify.notify_one();
     }
 
     async fn on_index_build_abort(&self, region_file_id: RegionFileId) {
