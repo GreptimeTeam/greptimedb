@@ -32,8 +32,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::json::value::{JsonValue, JsonVariant};
 use crate::schema::ColumnDefaultConstraint;
-use crate::types::JsonType;
-use crate::types::json_type::{JsonNativeType, JsonNumberType, JsonObjectType};
+use crate::types::json_type::JsonNativeType;
 use crate::value::{ListValue, StructValue, Value};
 
 /// JSON2 settings stored in column schema metadata and represented through
@@ -109,20 +108,7 @@ impl JsonSettings {
             path: Vec::new(),
             settings: self,
         };
-        encode_json_with_context(json, None, &context).map(|v| Value::Json(Box::new(v)))
-    }
-
-    /// Encode a serde_json::Value into a Value::Json with given data type.
-    pub fn encode_with_type(
-        &self,
-        json: Json,
-        data_type: Option<&JsonNativeType>,
-    ) -> Result<Value> {
-        let context = JsonContext {
-            path: Vec::new(),
-            settings: self,
-        };
-        encode_json_with_context(json, data_type, &context).map(|v| Value::Json(Box::new(v)))
+        encode_json_with_context(json, &context).map(|v| Value::Json(Box::new(v)))
     }
 }
 
@@ -146,98 +132,26 @@ impl<'a> JsonContext<'a> {
 }
 
 /// Main encoding function with key path tracking
-pub fn encode_json_with_context<'a>(
-    json: Json,
-    data_type: Option<&JsonNativeType>,
-    context: &JsonContext<'a>,
-) -> Result<JsonValue> {
+pub fn encode_json_with_context<'a>(json: Json, context: &JsonContext<'a>) -> Result<JsonValue> {
     match json {
-        Json::Object(json_object) => {
-            let object_type = match data_type.as_ref() {
-                Some(JsonNativeType::Object(x)) => Some(x),
-                None => None,
-                _ => {
-                    return error::InvalidJsonSnafu {
-                        value: "JSON object value must be encoded with object type",
-                    }
-                    .fail();
-                }
-            };
-            encode_json_object_with_context(json_object, object_type, context)
-        }
-        Json::Array(json_array) => {
-            let item_type = match data_type.as_ref() {
-                Some(JsonNativeType::Array(x)) => Some(x.as_ref()),
-                None => None,
-                _ => {
-                    return error::InvalidJsonSnafu {
-                        value: "JSON array value must be encoded with array type",
-                    }
-                    .fail();
-                }
-            };
-            encode_json_array_with_context(json_array, item_type, context)
-        }
-        _ => {
-            // For non-collection types, verify type compatibility
-            if let Some(expected_type) = data_type {
-                let value = encode_json_value_with_context(json, Some(expected_type), context)?;
-                let actual_type = value.json_type().native_type();
-                if actual_type == expected_type {
-                    Ok(value)
-                } else {
-                    Err(error::InvalidJsonSnafu {
-                        value: format!(
-                            "JSON value type {:?} does not match expected type {}",
-                            actual_type, expected_type
-                        ),
-                    }
-                    .build())
-                }
-            } else {
-                encode_json_value_with_context(json, None, context)
-            }
-        }
+        Json::Object(json_object) => encode_json_object_with_context(json_object, context),
+        Json::Array(json_array) => encode_json_array_with_context(json_array, context),
+        _ => encode_json_value_with_context(json, context),
     }
 }
 
 fn encode_json_object_with_context<'a>(
-    mut json_object: Map<String, Json>,
-    fields: Option<&JsonObjectType>,
+    json_object: Map<String, Json>,
     context: &JsonContext<'a>,
 ) -> Result<JsonValue> {
     let mut object = BTreeMap::new();
-    // First, process fields from the provided schema in their original order
-    if let Some(fields) = fields {
-        for (field_name, field_type) in fields {
-            if let Some(value) = json_object.remove(field_name) {
-                let field_context = context.with_key(field_name);
-                let value = if let Some(hint) = field_context.type_hint() {
-                    encode_json_value_with_hint(value, hint, &field_context)?
-                } else {
-                    encode_json_value_with_context(value, Some(field_type), &field_context)?
-                };
-                object.insert(field_name.clone(), value.into_variant());
-            } else {
-                let field_context = context.with_key(field_name);
-                // If this missing field is covered by a type hint, let the
-                // hint logic apply default/null/error rules.
-                if !has_type_hint_under(&field_context) {
-                    // Field exists in schema but not in JSON - add null value.
-                    object.insert(field_name.clone(), ().into());
-                }
-            }
-        }
-    }
-
-    // Then, process any remaining JSON fields that weren't in the schema
     for (key, value) in json_object {
         let field_context = context.with_key(&key);
 
         let value = if let Some(hint) = field_context.type_hint() {
             encode_json_value_with_hint(value, hint, &field_context)?
         } else {
-            encode_json_value_with_context(value, None, &field_context)?
+            encode_json_value_with_context(value, &field_context)?
         };
 
         object.insert(key, value.into_variant());
@@ -258,14 +172,6 @@ fn apply_missing_type_hints(
         }
     }
     Ok(())
-}
-
-fn has_type_hint_under(context: &JsonContext) -> bool {
-    context
-        .settings
-        .type_hints
-        .iter()
-        .any(|hint| hint.path.starts_with(&context.path))
 }
 
 fn insert_missing_type_hint(
@@ -384,7 +290,6 @@ fn encode_json_value_with_hint(
 
 fn encode_json_array_with_context<'a>(
     json_array: Vec<Json>,
-    item_type: Option<&JsonNativeType>,
     context: &JsonContext<'a>,
 ) -> Result<JsonValue> {
     let json_array_len = json_array.len();
@@ -392,7 +297,7 @@ fn encode_json_array_with_context<'a>(
 
     for (index, value) in json_array.into_iter().enumerate() {
         let array_context = context.with_key(&index.to_string());
-        let item_value = encode_json_value_with_context(value, None, &array_context)?;
+        let item_value = encode_json_value_with_context(value, &array_context)?;
         items.push(item_value);
     }
 
@@ -401,7 +306,6 @@ fn encode_json_array_with_context<'a>(
     // array, which requires all items have exactly the same type. So we merge out the maybe
     // different item types to a unified type, and align all the item values to it.
 
-    let provided_item_type = item_type.map(|x| JsonType::new_json2(x.clone()));
     let merged_item_type = if let Some((first, rests)) = items.split_first() {
         let mut merged = first.json_type().clone();
         for rest in rests.iter().map(|x| x.json_type()) {
@@ -414,13 +318,7 @@ fn encode_json_array_with_context<'a>(
     } else {
         None
     };
-    let unified_item_type = match (provided_item_type, merged_item_type) {
-        (Some(mut x), Some(y)) => {
-            x.merge(&y)?;
-            Some(x)
-        }
-        (x, y) => x.or(y),
-    };
+    let unified_item_type = merged_item_type;
     if let Some(unified_item_type) = unified_item_type {
         for item in &mut items {
             item.try_align(&unified_item_type)?;
@@ -434,60 +332,29 @@ fn encode_json_array_with_context<'a>(
 }
 
 /// Helper function to encode a JSON value to a Value and determine its ConcreteDataType with context
-fn encode_json_value_with_context<'a>(
-    json: Json,
-    expected_type: Option<&JsonNativeType>,
-    context: &JsonContext<'a>,
-) -> Result<JsonValue> {
+fn encode_json_value_with_context<'a>(json: Json, context: &JsonContext<'a>) -> Result<JsonValue> {
     match json {
         Json::Null => Ok(JsonValue::null()),
         Json::Bool(b) => Ok(b.into()),
         Json::Number(n) => {
             if let Some(i) = n.as_i64() {
-                // Use int64 for all integer numbers when possible
-                if let Some(expected) = expected_type
-                    && let Ok(value) = try_convert_to_expected_type(i, expected)
-                {
-                    return Ok(value.into());
-                }
                 Ok(i.into())
             } else if let Some(u) = n.as_u64() {
-                // Use int64 for unsigned integers that fit, otherwise use u64
-                if let Some(expected) = expected_type
-                    && let Ok(value) = try_convert_to_expected_type(u, expected)
-                {
-                    return Ok(value.into());
-                }
                 if u <= i64::MAX as u64 {
                     Ok((u as i64).into())
                 } else {
                     Ok(u.into())
                 }
             } else if let Some(f) = n.as_f64() {
-                // Try to use the expected type if provided
-                if let Some(expected) = expected_type
-                    && let Ok(value) = try_convert_to_expected_type(f, expected)
-                {
-                    return Ok(value.into());
-                }
-
-                // Default to f64 for floating point numbers
                 Ok(f.into())
             } else {
                 // Fallback to string representation
                 Ok(n.to_string().into())
             }
         }
-        Json::String(s) => {
-            if let Some(expected) = expected_type
-                && let Ok(value) = try_convert_to_expected_type(s.as_str(), expected)
-            {
-                return Ok(value.into());
-            }
-            Ok(s.into())
-        }
-        Json::Array(arr) => encode_json_array_with_context(arr, expected_type, context),
-        Json::Object(obj) => encode_json_object_with_context(obj, None, context),
+        Json::String(s) => Ok(s.into()),
+        Json::Array(arr) => encode_json_array_with_context(arr, context),
+        Json::Object(obj) => encode_json_object_with_context(obj, context),
     }
 }
 
@@ -583,50 +450,6 @@ fn decode_struct_with_settings<'a>(
     Ok(struct_value)
 }
 
-/// Helper function to try converting a value to an expected type
-fn try_convert_to_expected_type<T>(value: T, expected_type: &JsonNativeType) -> Result<JsonVariant>
-where
-    T: Into<JsonVariant>,
-{
-    let value = value.into();
-    let cast_error = || {
-        error::CastTypeSnafu {
-            msg: format!("Cannot cast value {value} to {expected_type}"),
-        }
-        .fail()
-    };
-    let actual_type = value.native_type();
-    match (actual_type, expected_type) {
-        (x, y) if x == *y => Ok(value),
-        (JsonNativeType::Number(x), JsonNativeType::Number(y)) => match (x, y) {
-            (JsonNumberType::U64, JsonNumberType::I64) => {
-                if let Some(i) = value.as_i64() {
-                    Ok(i.into())
-                } else {
-                    cast_error()
-                }
-            }
-            (JsonNumberType::I64, JsonNumberType::U64) => {
-                if let Some(i) = value.as_u64() {
-                    Ok(i.into())
-                } else {
-                    cast_error()
-                }
-            }
-            (_, JsonNumberType::F64) => {
-                if let Some(f) = value.as_f64() {
-                    Ok(f.into())
-                } else {
-                    cast_error()
-                }
-            }
-            _ => cast_error(),
-        },
-        (_, JsonNativeType::String) => Ok(value.to_string().into()),
-        _ => cast_error(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -652,11 +475,7 @@ mod tests {
     fn test_encode_json_null() {
         let json = Json::Null;
         let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
         assert_eq!(result, Value::Null);
     }
 
@@ -664,11 +483,7 @@ mod tests {
     fn test_encode_json_boolean() {
         let json = Json::Bool(true);
         let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
         assert_eq!(result, Value::Boolean(true));
     }
 
@@ -676,11 +491,7 @@ mod tests {
     fn test_encode_json_number_integer() {
         let json = Json::from(42);
         let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
         assert_eq!(result, Value::Int64(42));
     }
 
@@ -688,11 +499,7 @@ mod tests {
     fn test_encode_json_number_float() {
         let json = Json::from(3.15);
         let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
         match result {
             Value::Float64(f) => assert_eq!(f.0, 3.15),
             _ => panic!("Expected Float64"),
@@ -703,11 +510,7 @@ mod tests {
     fn test_encode_json_string() {
         let json = Json::String("hello".to_string());
         let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
         assert_eq!(result, Value::String("hello".into()));
     }
 
@@ -715,11 +518,7 @@ mod tests {
     fn test_encode_json_array() {
         let json = json!([1, 2, 3]);
         let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
 
         if let Value::List(list_value) = result {
             assert_eq!(list_value.items().len(), 3);
@@ -740,11 +539,7 @@ mod tests {
         });
 
         let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
         let Value::Struct(result) = result else {
             panic!("Expected Struct value");
         };
@@ -791,11 +586,7 @@ mod tests {
         });
 
         let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
         let Value::Struct(result) = result else {
             panic!("Expected Struct value");
         };
@@ -837,31 +628,10 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_with_expected_type() {
-        // Test encoding JSON number with expected int8 type
-        let json = Json::from(42);
-        let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json.clone(), Some(&JsonNativeType::u64()))
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-        assert_eq!(result, Value::UInt64(42));
-
-        // Test with expected string type
-        let result = settings
-            .encode_with_type(json, Some(&JsonNativeType::String))
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-        assert_eq!(result, Value::String("42".into()));
-    }
-
-    #[test]
     fn test_encode_json_array_mixed_types() {
         let json = json!([1, "hello", true, 3.15]);
         let settings = JsonSettings::default();
-        let value = settings.encode_with_type(json, None).unwrap();
+        let value = settings.encode(json).unwrap();
         assert_eq!(value.data_type().to_string(), r#"Json2["<Variant>"]"#);
     }
 
@@ -869,11 +639,7 @@ mod tests {
     fn test_encode_json_empty_array() {
         let json = json!([]);
         let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
 
         if let Value::List(list_value) = result {
             assert_eq!(list_value.items().len(), 0);
@@ -966,32 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_type_hint_default_overrides_schema_missing_null() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
-            path: vec!["age".to_string()],
-            data_type: ConcreteDataType::int64_datatype(),
-            nullable: false,
-            default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(7))),
-            inverted_index: false,
-        }]);
-        let json_type = JsonNativeType::Object(JsonObjectType::from([(
-            "age".to_string(),
-            JsonNativeType::i64(),
-        )]));
-
-        let result = settings
-            .encode_with_type(json!({}), Some(&json_type))
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-
-        let Value::Struct(root) = result else {
-            panic!("Expected Struct value");
-        };
-        assert_eq!(struct_field_value(&root, "age"), &Value::Int64(7));
-    }
-
-    #[test]
     fn test_encode_json_fills_missing_nullable_type_hint_with_null() {
         let settings = JsonSettings::new(vec![JsonTypeHint {
             path: vec!["user".to_string(), "name".to_string()],
@@ -1074,162 +814,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_structured_with_fields() {
-        let json = json!({
-            "name": "Carol",
-            "age": 28
-        });
-
-        // Define expected struct type
-        let concrete_type = JsonNativeType::Object(JsonObjectType::from([
-            ("name".to_string(), JsonNativeType::String),
-            ("age".to_string(), JsonNativeType::i64()),
-        ]));
-
-        let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, Some(&concrete_type))
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-
-        if let Value::Struct(struct_value) = result {
-            assert_eq!(struct_value.items().len(), 2);
-            let struct_fields = struct_value.struct_type().fields();
-            assert_eq!(struct_fields[0].name(), "age");
-            assert_eq!(
-                struct_fields[0].data_type(),
-                &ConcreteDataType::int64_datatype()
-            );
-            assert_eq!(struct_fields[1].name(), "name");
-            assert_eq!(
-                struct_fields[1].data_type(),
-                &ConcreteDataType::string_datatype()
-            );
-        } else {
-            panic!("Expected Struct value");
-        }
-    }
-
-    #[test]
-    fn test_encode_json_object_field_order_preservation() {
-        let json = json!({
-            "z_field": "last",
-            "a_field": "first",
-            "m_field": "middle"
-        });
-
-        // Define schema with specific field order
-        let json_type = JsonObjectType::from([
-            ("a_field".to_string(), JsonNativeType::String),
-            ("m_field".to_string(), JsonNativeType::String),
-            ("z_field".to_string(), JsonNativeType::String),
-        ]);
-
-        let Value::Struct(result) = encode_json_object_with_context(
-            json.as_object().unwrap().clone(),
-            Some(&json_type),
-            &JsonContext {
-                path: Vec::new(),
-                settings: &JsonSettings::default(),
-            },
-        )
-        .map(|x| x.into_value())
-        .unwrap() else {
-            unreachable!()
-        };
-
-        // Verify field order is preserved from schema
-        let struct_fields = result.struct_type().fields();
-        assert_eq!(struct_fields[0].name(), "a_field");
-        assert_eq!(struct_fields[1].name(), "m_field");
-        assert_eq!(struct_fields[2].name(), "z_field");
-
-        // Verify values are correct
-        let items = result.items();
-        assert_eq!(items[0], Value::String("first".into()));
-        assert_eq!(items[1], Value::String("middle".into()));
-        assert_eq!(items[2], Value::String("last".into()));
-    }
-
-    #[test]
-    fn test_encode_json_object_schema_reuse_with_extra_fields() {
-        let json = json!({
-            "name": "Alice",
-            "age": 25,
-            "active": true                 // Extra field not in schema
-        });
-
-        // Define schema with only name and age
-        let json_type = JsonObjectType::from([
-            ("name".to_string(), JsonNativeType::String),
-            ("age".to_string(), JsonNativeType::i64()),
-        ]);
-
-        let Value::Struct(result) = encode_json_object_with_context(
-            json.as_object().unwrap().clone(),
-            Some(&json_type),
-            &JsonContext {
-                path: Vec::new(),
-                settings: &JsonSettings::default(),
-            },
-        )
-        .map(|x| x.into_value())
-        .unwrap() else {
-            unreachable!()
-        };
-
-        // verify fields are sorted in json value
-        let struct_fields = result.struct_type().fields();
-        assert_eq!(struct_fields[0].name(), "active");
-        assert_eq!(struct_fields[1].name(), "age");
-        assert_eq!(struct_fields[2].name(), "name");
-
-        // Verify values are correct
-        let items = result.items();
-        assert_eq!(items[0], Value::Boolean(true));
-        assert_eq!(items[1], Value::Int64(25));
-        assert_eq!(items[2], Value::String("Alice".into()));
-    }
-
-    #[test]
-    fn test_encode_json_object_missing_schema_fields() {
-        let json = json!({
-            "name": "Bob"
-            // age field is missing from JSON but present in schema
-        });
-
-        // Define schema with name and age
-        let json_type = JsonObjectType::from([
-            ("name".to_string(), JsonNativeType::String),
-            ("age".to_string(), JsonNativeType::i64()),
-        ]);
-
-        let Value::Struct(result) = encode_json_object_with_context(
-            json.as_object().unwrap().clone(),
-            Some(&json_type),
-            &JsonContext {
-                path: Vec::new(),
-                settings: &JsonSettings::default(),
-            },
-        )
-        .map(|x| x.into_value())
-        .unwrap() else {
-            unreachable!()
-        };
-
-        // Verify both schema fields are present
-        let struct_fields = result.struct_type().fields();
-        assert_eq!(struct_fields[0].name(), "age");
-        assert_eq!(struct_fields[1].name(), "name");
-
-        // Verify values - name has value, age is null
-        let items = result.items();
-        assert_eq!(items[0], Value::Null);
-        assert_eq!(items[1], Value::String("Bob".into()));
-    }
-
-    #[test]
     fn test_json_settings_structured() {
         let json = json!({
             "name": "Eve",
@@ -1243,53 +827,6 @@ mod tests {
             assert_eq!(struct_value.items().len(), 2);
         } else {
             panic!("Expected Struct value");
-        }
-    }
-
-    #[test]
-    fn test_encode_json_array_with_item_type() {
-        let json = json!([1, 2, 3]);
-        let item_type = Arc::new(ConcreteDataType::int64_datatype());
-        let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(
-                json,
-                Some(&JsonNativeType::Array(Box::new(JsonNativeType::i64()))),
-            )
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-
-        if let Value::List(list_value) = result {
-            assert_eq!(list_value.items().len(), 3);
-            assert_eq!(list_value.items()[0], Value::Int64(1));
-            assert_eq!(list_value.items()[1], Value::Int64(2));
-            assert_eq!(list_value.items()[2], Value::Int64(3));
-            assert_eq!(list_value.datatype(), item_type);
-        } else {
-            panic!("Expected List value");
-        }
-    }
-
-    #[test]
-    fn test_encode_json_array_empty_with_item_type() {
-        let json = json!([]);
-        let item_type = Arc::new(ConcreteDataType::null_datatype());
-        let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(
-                json,
-                Some(&JsonNativeType::Array(Box::new(JsonNativeType::Null))),
-            )
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-
-        if let Value::List(list_value) = result {
-            assert_eq!(list_value.items().len(), 0);
-            assert_eq!(list_value.datatype(), item_type);
-        } else {
-            panic!("Expected List value");
         }
     }
 
@@ -1544,121 +1081,16 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_with_concrete_type() {
-        let settings = JsonSettings::default();
-
-        // Test encoding JSON number with expected int64 type
-        let json = Json::from(42);
-        let result = settings
-            .encode_with_type(json, Some(&JsonNativeType::i64()))
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-        assert_eq!(result, Value::Int64(42));
-
-        // Test encoding JSON string with expected string type
-        let json = Json::String("hello".to_string());
-        let result = settings
-            .encode_with_type(json, Some(&JsonNativeType::String))
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-        assert_eq!(result, Value::String("hello".into()));
-
-        // Test encoding JSON boolean with expected boolean type
-        let json = Json::Bool(true);
-        let result = settings
-            .encode_with_type(json, Some(&JsonNativeType::Bool))
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-        assert_eq!(result, Value::Boolean(true));
-    }
-
-    #[test]
-    fn test_encode_json_with_mismatched_type() {
-        // Test encoding JSON number with mismatched string type
-        let json = Json::from(42);
-        let settings = JsonSettings::default();
-        let result = settings.encode_with_type(json, Some(&JsonNativeType::String));
-        assert!(result.is_ok()); // Should succeed due to type conversion
-
-        // Test encoding JSON object with mismatched non-struct type
-        let json = json!({"name": "test"});
-        let result = settings.encode_with_type(json, Some(&JsonNativeType::i64()));
-        assert!(result.is_err()); // Should fail - object can't be converted to int64
-    }
-
-    #[test]
-    fn test_encode_json_array_with_list_type() {
-        let json = json!([1, 2, 3]);
-        let item_type = Arc::new(ConcreteDataType::int64_datatype());
-
-        let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(
-                json,
-                Some(&JsonNativeType::Array(Box::new(JsonNativeType::i64()))),
-            )
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-
-        if let Value::List(list_value) = result {
-            assert_eq!(list_value.items().len(), 3);
-            assert_eq!(list_value.items()[0], Value::Int64(1));
-            assert_eq!(list_value.items()[1], Value::Int64(2));
-            assert_eq!(list_value.items()[2], Value::Int64(3));
-            assert_eq!(list_value.datatype(), item_type);
-        } else {
-            panic!("Expected List value");
-        }
-    }
-
-    #[test]
-    fn test_encode_json_non_collection_with_type() {
-        // Null values carry no native type but can be encoded without an expected type.
-        let json = Json::Null;
-        let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json.clone(), None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-        assert_eq!(result, Value::Null);
-
-        // Test float with float64 type
-        let json = Json::from(3.15);
-        let result = settings
-            .encode_with_type(json, Some(&JsonNativeType::f64()))
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-        match result {
-            Value::Float64(f) => assert_eq!(f.0, 3.15),
-            _ => panic!("Expected Float64"),
-        }
-    }
-
-    #[test]
     fn test_encode_json_large_unsigned_integer() {
         // Test unsigned integer that fits in i64
         let json = Json::from(u64::MAX / 2);
         let settings = JsonSettings::default();
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
         assert_eq!(result, Value::Int64((u64::MAX / 2) as i64));
 
         // Test unsigned integer that exceeds i64 range
         let json = Json::from(u64::MAX);
-        let result = settings
-            .encode_with_type(json, None)
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
         assert_eq!(result, Value::UInt64(u64::MAX));
     }
 
@@ -1721,31 +1153,6 @@ mod tests {
             }
         } else {
             panic!("Expected Struct value for encode");
-        }
-
-        // Test with encode_with_type (with type)
-        let concrete_type = JsonNativeType::Object(JsonObjectType::from([
-            ("name".to_string(), JsonNativeType::String),
-            ("age".to_string(), JsonNativeType::i64()),
-            ("active".to_string(), JsonNativeType::Bool),
-        ]));
-
-        let result2 = settings
-            .encode_with_type(json, Some(&concrete_type))
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
-        if let Value::Struct(s) = result2 {
-            if let Value::String(json_str) = &s.items()[0] {
-                let json_str = json_str.as_utf8();
-                assert!(json_str.contains("\"name\":\"Grace\""));
-                assert!(json_str.contains("\"age\":30"));
-                assert!(json_str.contains("\"active\":true"));
-            } else {
-                panic!("Expected String value for _raw field");
-            }
-        } else {
-            panic!("Expected String value for encode_with_type");
         }
 
         // Test with nested objects

@@ -144,13 +144,6 @@ impl JsonVariant {
         }
     }
 
-    pub(crate) fn as_f64(&self) -> Option<f64> {
-        match self {
-            JsonVariant::Number(n) => Some(n.as_f64()),
-            _ => None,
-        }
-    }
-
     pub(crate) fn native_type(&self) -> JsonNativeType {
         match self {
             JsonVariant::Null => JsonNativeType::Null,

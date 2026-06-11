@@ -183,12 +183,8 @@ impl Display for Column {
         if !self.extensions.json_type_hints.is_empty() {
             write!(
                 f,
-                "({})",
-                self.extensions
-                    .json_type_hints
-                    .iter()
-                    .map(format_json_type_hint)
-                    .join(COMMA_SEP)
+                "{}",
+                format_json_type_hints(&self.extensions.json_type_hints)
             )?;
         }
         for option in &self.column_def.options {
@@ -483,6 +479,13 @@ fn format_json_type_hint(hint: &JsonTypeHint) -> String {
     format!(
         "{} {}{}{}{}",
         path, hint.data_type, nullability, default, inverted_index
+    )
+}
+
+fn format_json_type_hints(hints: &[JsonTypeHint]) -> String {
+    format!(
+        "(\n    {}\n  )",
+        hints.iter().map(format_json_type_hint).join(",\n    ")
     )
 }
 
@@ -967,7 +970,11 @@ ENGINE=mito
                 assert_eq!(
                     r#"
 CREATE TABLE traces (
-  log_json_data JSON2("service.name" STRING NULL, "a.b"."c" BIGINT NOT NULL, "a"."b.c" STRING NULL),
+  log_json_data JSON2(
+    "service.name" STRING NULL,
+    "a.b"."c" BIGINT NOT NULL,
+    "a"."b.c" STRING NULL
+  ),
   ts TIMESTAMP NOT NULL,
   TIME INDEX (ts)
 )
@@ -1007,7 +1014,10 @@ ENGINE=mito
                 assert_eq!(
                     r#"
 CREATE TABLE traces (
-  log_json_data JSON2("1abc" STRING NULL, "a"."2b" BIGINT NOT NULL),
+  log_json_data JSON2(
+    "1abc" STRING NULL,
+    "a"."2b" BIGINT NOT NULL
+  ),
   ts TIMESTAMP NOT NULL,
   TIME INDEX (ts)
 )

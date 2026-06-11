@@ -12,18 +12,23 @@ Affected Rows: 0
 
 SHOW CREATE TABLE json2_type_hints;
 
-+------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| Table            | Create Table                                                                                                                                                           |
-+------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| json2_type_hints | CREATE TABLE IF NOT EXISTS "json2_type_hints" (                                                                                                                        |
-|                  |   "ts" TIMESTAMP(3) NOT NULL,                                                                                                                                          |
-|                  |   "j" JSON2("user"."age" BIGINT NOT NULL DEFAULT 18, "user"."name" STRING NULL DEFAULT 'unknown', "user"."active" BOOLEAN NULL, "score" DOUBLE NULL DEFAULT 1.5) NULL, |
-|                  |   TIME INDEX ("ts")                                                                                                                                                    |
-|                  | )                                                                                                                                                                      |
-|                  |                                                                                                                                                                        |
-|                  | ENGINE=mito                                                                                                                                                            |
-|                  |                                                                                                                                                                        |
-+------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++------------------+--------------------------------------------------+
+| Table            | Create Table                                     |
++------------------+--------------------------------------------------+
+| json2_type_hints | CREATE TABLE IF NOT EXISTS "json2_type_hints" (  |
+|                  |   "ts" TIMESTAMP(3) NOT NULL,                    |
+|                  |   "j" JSON2(                                     |
+|                  |     "user"."age" BIGINT NOT NULL DEFAULT 18,     |
+|                  |     "user"."name" STRING NULL DEFAULT 'unknown', |
+|                  |     "user"."active" BOOLEAN NULL,                |
+|                  |     "score" DOUBLE NULL DEFAULT 1.5              |
+|                  |   ) NULL,                                        |
+|                  |   TIME INDEX ("ts")                              |
+|                  | )                                                |
+|                  |                                                  |
+|                  | ENGINE=mito                                      |
+|                  |                                                  |
++------------------+--------------------------------------------------+
 
 INSERT INTO json2_type_hints
 VALUES
