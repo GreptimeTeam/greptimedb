@@ -29,7 +29,7 @@ SHOW INDEX FROM build_index_restart_test;
 +--------------------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 | Table                    | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
 +--------------------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| build_index_restart_test | 1          | TIME INDEX | 1            | ts          | A         |             |          |        | NO   |            |         |               | YES     |            |
+| build_index_restart_test | 1          | TIME INDEX | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
 +--------------------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 -- No physical fulltext index metadata yet.
@@ -84,12 +84,12 @@ SELECT msg FROM build_index_restart_test WHERE MATCHES(msg, 'fox') ORDER BY ts;
 -- Verify index metadata
 SHOW INDEX FROM build_index_restart_test;
 
-+--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| Table                    | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
-+--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| build_index_restart_test | 1          | FULLTEXT INDEX | 2            | msg         | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
-| build_index_restart_test | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                               |         |               | YES     |            |
-+--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
++--------------------------+------------+--------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table                    | Non_unique | Key_name           | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++--------------------------+------------+--------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| build_index_restart_test | 1          | FULLTEXT_INDEX_msg | 1            | msg         | A         |             |          |        | YES  | FULLTEXT   |         |               | YES     |            |
+| build_index_restart_test | 1          | TIME INDEX         | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
++--------------------------+------------+--------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 -- Verify physical fulltext index metadata before restart
 SELECT COUNT(*) AS fulltext_index_meta_count
@@ -125,12 +125,12 @@ SELECT msg FROM build_index_restart_test WHERE MATCHES(msg, 'fox') ORDER BY ts;
 -- Verify index metadata persists
 SHOW INDEX FROM build_index_restart_test;
 
-+--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| Table                    | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
-+--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| build_index_restart_test | 1          | FULLTEXT INDEX | 2            | msg         | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
-| build_index_restart_test | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                               |         |               | YES     |            |
-+--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
++--------------------------+------------+--------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table                    | Non_unique | Key_name           | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++--------------------------+------------+--------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| build_index_restart_test | 1          | FULLTEXT_INDEX_msg | 1            | msg         | A         |             |          |        | YES  | FULLTEXT   |         |               | YES     |            |
+| build_index_restart_test | 1          | TIME INDEX         | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
++--------------------------+------------+--------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 -- Verify physical fulltext index metadata persists
 SELECT COUNT(*) AS fulltext_index_meta_count
@@ -175,12 +175,12 @@ SELECT msg FROM build_index_restart_test WHERE MATCHES(msg, 'fox') ORDER BY ts;
 -- Verify index metadata still present
 SHOW INDEX FROM build_index_restart_test;
 
-+--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| Table                    | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
-+--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| build_index_restart_test | 1          | FULLTEXT INDEX | 2            | msg         | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
-| build_index_restart_test | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        | NO   |                               |         |               | YES     |            |
-+--------------------------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
++--------------------------+------------+--------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table                    | Non_unique | Key_name           | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++--------------------------+------------+--------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| build_index_restart_test | 1          | FULLTEXT_INDEX_msg | 1            | msg         | A         |             |          |        | YES  | FULLTEXT   |         |               | YES     |            |
+| build_index_restart_test | 1          | TIME INDEX         | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
++--------------------------+------------+--------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 -- Verify idempotent rebuild did not duplicate physical fulltext index metadata
 SELECT COUNT(*) AS fulltext_index_meta_count
