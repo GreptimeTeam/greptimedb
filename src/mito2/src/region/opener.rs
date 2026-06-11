@@ -30,6 +30,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::ObjectStore;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{is_object_storage, normalize_dir};
+use parquet::file::metadata::PageIndexPolicy;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
@@ -1079,7 +1080,7 @@ async fn preload_parquet_meta_cache_for_files(
         let file_id = file_handle.file_id();
         let mut cache_metrics = MetadataCacheMetrics::default();
         if let Some(metadata) = cache_manager
-            .get_parquet_meta_data(file_id, &mut cache_metrics, Default::default())
+            .get_parquet_meta_data(file_id, &mut cache_metrics, PageIndexPolicy::Optional)
             .await
         {
             if file_handle.primary_key_range().is_none()
@@ -1101,7 +1102,8 @@ async fn preload_parquet_meta_cache_for_files(
 
         let file_size = file_handle.meta_ref().file_size;
         let file_path = file_handle.file_path(&table_dir, path_type);
-        let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
+        let mut loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
+        loader.with_page_index_policy(PageIndexPolicy::Optional);
         match loader.load(&mut cache_metrics).await {
             Ok(metadata) => {
                 if let Some(primary_key_range) =
@@ -1437,6 +1439,16 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .is_some()
+        );
+        // The cached entry must carry the page index so that later `Optional` queries hit
+        // the in-memory cache instead of reloading metadata on demand.
+        assert!(
+            cache_manager
+                .get_sst_meta_data_from_mem_cache(
+                    region_file_id,
+                    parquet::file::metadata::PageIndexPolicy::Optional,
+                )
                 .is_some()
         );
         assert!(file_handle.primary_key_range().is_some());
