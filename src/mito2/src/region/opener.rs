@@ -217,8 +217,11 @@ impl RegionOpener {
         Ok(self)
     }
 
-    /// Ensures the current region open request satisfies its requirements.
-    pub(crate) fn ensure_open_requirements(&self, requirements: RegionRequirements) -> Result<()> {
+    /// Ensures the current region request satisfies its requirements.
+    pub(crate) fn ensure_region_requirements(
+        &self,
+        requirements: RegionRequirements,
+    ) -> Result<()> {
         if !requirements.object_storage {
             return Ok(());
         }
@@ -230,7 +233,7 @@ impl RegionOpener {
 
         ensure!(
             supports_open_region_object_storage_requirement(&object_store),
-            error::OpenRegionRequirementSnafu {
+            error::RegionRequirementSnafu {
                 region_id: self.region_id,
                 requirement: "object storage",
                 reason: "region data must be accessible from another datanode",

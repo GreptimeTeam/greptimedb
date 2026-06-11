@@ -261,6 +261,10 @@ fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateR
             table_dir,
             path_type: PathType::Bare,
             partition_expr_json,
+            requirements: create
+                .requirements
+                .map(RegionRequirements::from)
+                .unwrap_or_default(),
         },
     ))
 }
@@ -500,6 +504,8 @@ pub struct RegionCreateRequest {
     /// Partition expression JSON from table metadata. Set to empty string for a region without partition.
     /// `Option` to keep compatibility with old clients.
     pub partition_expr_json: Option<String>,
+    /// Requirements for creating the region.
+    pub requirements: RegionRequirements,
 }
 
 impl RegionCreateRequest {
@@ -587,6 +593,22 @@ impl RegionRequirements {
     pub fn object_storage() -> Self {
         Self {
             object_storage: true,
+        }
+    }
+}
+
+impl From<api::v1::region::RegionRequirements> for RegionRequirements {
+    fn from(value: api::v1::region::RegionRequirements) -> Self {
+        Self {
+            object_storage: value.object_storage,
+        }
+    }
+}
+
+impl From<RegionRequirements> for api::v1::region::RegionRequirements {
+    fn from(value: RegionRequirements) -> Self {
+        Self {
+            object_storage: value.object_storage,
         }
     }
 }
@@ -2065,9 +2087,56 @@ mod tests {
             table_dir: "path".to_string(),
             path_type: PathType::Bare,
             partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
         };
 
         assert!(create.validate().is_err());
+    }
+
+    #[test]
+    fn test_parse_create_region_requirements_defaults_to_empty() {
+        let create = CreateRequest {
+            region_id: RegionId::new(42, 0).as_u64(),
+            engine: "mito".to_string(),
+            column_defs: vec![],
+            primary_key: vec![],
+            path: "test".to_string(),
+            options: HashMap::new(),
+            partition: None,
+            requirements: None,
+        };
+
+        let requests =
+            RegionRequest::try_from_request_body(region_request::Body::Create(create)).unwrap();
+        let RegionRequest::Create(request) = &requests[0].1 else {
+            unreachable!()
+        };
+
+        assert_eq!(request.requirements, RegionRequirements::empty());
+    }
+
+    #[test]
+    fn test_parse_create_region_requirements_from_proto() {
+        let create = CreateRequest {
+            region_id: RegionId::new(42, 0).as_u64(),
+            engine: "mito".to_string(),
+            column_defs: vec![],
+            primary_key: vec![],
+            path: "test".to_string(),
+            options: HashMap::new(),
+            partition: None,
+            requirements: Some(api::v1::region::RegionRequirements {
+                object_storage: true,
+            }),
+        };
+
+        let requests =
+            RegionRequest::try_from_request_body(region_request::Body::Create(create)).unwrap();
+        let RegionRequest::Create(request) = &requests[0].1 else {
+            unreachable!()
+        };
+
+        assert_eq!(request.requirements, RegionRequirements::object_storage());
     }
 
     #[test]

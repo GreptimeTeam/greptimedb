@@ -21,6 +21,7 @@ use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
+use store_api::region_request::RegionRequirements;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
@@ -70,6 +71,7 @@ pub fn build_template_from_raw_table_info(table_info: &TableInfo) -> Result<Crea
         path: String::new(),
         options,
         partition: None,
+        requirements: None,
     };
 
     Ok(template)
@@ -126,6 +128,7 @@ pub fn build_template_from_raw_table_info_for_physical_table(
         path: String::new(),
         options,
         partition: None,
+        requirements: None,
     };
 
     Ok(template)
@@ -188,6 +191,7 @@ pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<Crea
         path: String::new(),
         options: create_table_expr.table_options.clone(),
         partition: None,
+        requirements: None,
     };
 
     Ok(template)
@@ -198,6 +202,7 @@ pub struct CreateRequestBuilder {
     template: CreateRequest,
     /// Optional. Only for metric engine.
     physical_table_id: Option<TableId>,
+    requirements: RegionRequirements,
 }
 
 impl CreateRequestBuilder {
@@ -205,11 +210,17 @@ impl CreateRequestBuilder {
         Self {
             template,
             physical_table_id,
+            requirements: RegionRequirements::empty(),
         }
     }
 
     pub fn template(&self) -> &CreateRequest {
         &self.template
+    }
+
+    pub fn with_requirements(mut self, requirements: RegionRequirements) -> Self {
+        self.requirements = requirements;
+        self
     }
 
     pub fn build_one(
@@ -223,6 +234,7 @@ impl CreateRequestBuilder {
 
         request.region_id = region_id.as_u64();
         request.path = storage_path;
+        request.requirements = Some(self.requirements.into());
         // Stores the encoded wal options into the request options.
         prepare_wal_options(&mut request.options, region_id, region_wal_options);
         request.partition = Some(prepare_partition_expr(region_id, partition_exprs));
@@ -278,6 +290,7 @@ mod tests {
             path: String::new(),
             options: Default::default(),
             partition: None,
+            requirements: None,
         };
         let builder = CreateRequestBuilder::new(template, None);
 
@@ -293,6 +306,38 @@ mod tests {
             &partition_exprs,
         );
         assert_eq!(r0.partition.as_ref().unwrap().expression, expr_a);
+        assert_eq!(
+            r0.requirements.map(RegionRequirements::from),
+            Some(RegionRequirements::empty())
+        );
+    }
+
+    #[test]
+    fn test_build_one_sets_explicit_requirements() {
+        let template = CreateRequest {
+            region_id: 0,
+            engine: "mito".to_string(),
+            column_defs: vec![],
+            primary_key: vec![],
+            path: String::new(),
+            options: Default::default(),
+            partition: None,
+            requirements: None,
+        };
+        let builder = CreateRequestBuilder::new(template, None)
+            .with_requirements(RegionRequirements::object_storage());
+
+        let request = builder.build_one(
+            RegionId::new(42, 0),
+            "/p".to_string(),
+            &Default::default(),
+            &Default::default(),
+        );
+
+        assert_eq!(
+            request.requirements.map(RegionRequirements::from),
+            Some(RegionRequirements::object_storage())
+        );
     }
 
     #[test]
