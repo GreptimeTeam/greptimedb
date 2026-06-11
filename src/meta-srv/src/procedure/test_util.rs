@@ -31,6 +31,7 @@ use common_meta::region_registry::{
 };
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::Sequence;
+use common_meta::wal_provider::RegionWalOptions;
 use common_time::util::current_time_millis;
 use common_wal::options::{KafkaWalOptions, WalOptions};
 use store_api::logstore::EntryId;
@@ -320,8 +321,7 @@ pub async fn new_wal_prune_metadata(
         let wal_options = WalOptions::Kafka(KafkaWalOptions {
             topic: topic.clone(),
         });
-        let wal_options = serde_json::to_string(&wal_options).unwrap();
-        let region_wal_options: HashMap<u32, String> = (0..n_region)
+        let region_wal_options: RegionWalOptions = (0..n_region)
             .map(|region_number| (region_number, wal_options.clone()))
             .collect();
 

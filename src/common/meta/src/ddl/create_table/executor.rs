@@ -22,7 +22,7 @@ use futures::future::join_all;
 use snafu::ensure;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionId;
 use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
 
@@ -38,6 +38,7 @@ use crate::key::table_name::TableNameKey;
 use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use crate::node_manager::NodeManagerRef;
 use crate::rpc::router::{RegionRoute, find_leader_regions, find_leaders};
+use crate::wal_provider::RegionWalOptions;
 
 /// [CreateTableExecutor] performs:
 /// - Creates the metadata of the table.
@@ -101,7 +102,7 @@ impl CreateTableExecutor {
         node_manager: &NodeManagerRef,
         table_id: TableId,
         region_routes: &[RegionRoute],
-        region_wal_options: &HashMap<RegionNumber, String>,
+        region_wal_options: &RegionWalOptions,
     ) -> Result<Vec<ColumnMetadata>> {
         let storage_path =
             region_storage_path(&self.table_name.catalog_name, &self.table_name.schema_name);
@@ -124,7 +125,7 @@ impl CreateTableExecutor {
                     storage_path.clone(),
                     region_wal_options,
                     &partition_exprs,
-                );
+                )?;
                 requests.push(PbRegionRequest::Create(create_region_request));
             }
 
@@ -178,7 +179,7 @@ impl CreateTableExecutor {
         mut table_info: TableInfo,
         column_metadatas: &[ColumnMetadata],
         table_route: PhysicalTableRouteValue,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
     ) -> Result<()> {
         if !column_metadatas.is_empty() {
             update_table_info_column_ids(&mut table_info, column_metadatas);

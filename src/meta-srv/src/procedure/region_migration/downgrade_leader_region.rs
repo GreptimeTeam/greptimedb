@@ -379,6 +379,7 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::wal_provider::RegionWalOptions;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
 
@@ -402,7 +403,7 @@ mod tests {
         )
     }
 
-    async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {
+    async fn prepare_table_metadata(ctx: &Context, wal_options: RegionWalOptions) {
         let region_id = ctx.persistent_ctx.region_ids[0];
         let table_info = new_test_table_info(region_id.table_id());
         let region_routes = vec![RegionRoute {

@@ -27,7 +27,7 @@ use table::metadata::{TableId, TableInfo};
 
 use crate::error::{self, Result};
 use crate::reconciliation::utils::build_column_metadata_from_table_info;
-use crate::wal_provider::prepare_wal_options;
+use crate::wal_provider::{RegionWalOptions, prepare_wal_options};
 
 /// Constructs a [CreateRequest] based on the provided [TableInfo].
 ///
@@ -227,16 +227,16 @@ impl CreateRequestBuilder {
         &self,
         region_id: RegionId,
         storage_path: String,
-        region_wal_options: &HashMap<RegionNumber, String>,
+        region_wal_options: &RegionWalOptions,
         partition_exprs: &HashMap<RegionNumber, String>,
-    ) -> CreateRequest {
+    ) -> Result<CreateRequest> {
         let mut request = self.template.clone();
 
         request.region_id = region_id.as_u64();
         request.path = storage_path;
         request.requirements = Some(self.requirements.into());
         // Stores the encoded wal options into the request options.
-        prepare_wal_options(&mut request.options, region_id, region_wal_options);
+        prepare_wal_options(&mut request.options, region_id, region_wal_options)?;
         request.partition = Some(prepare_partition_expr(region_id, partition_exprs));
 
         if let Some(physical_table_id) = self.physical_table_id {
@@ -251,7 +251,7 @@ impl CreateRequestBuilder {
             );
         }
 
-        request
+        Ok(request)
     }
 }
 
@@ -299,12 +299,14 @@ mod tests {
             r#"{"Expr":{"lhs":{"Column":"a"},"op":"Eq","rhs":{"Value":{"UInt32":1}}}}"#.to_string();
         partition_exprs.insert(0, expr_a.clone());
 
-        let r0 = builder.build_one(
-            RegionId::new(42, 0),
-            "/p".to_string(),
-            &Default::default(),
-            &partition_exprs,
-        );
+        let r0 = builder
+            .build_one(
+                RegionId::new(42, 0),
+                "/p".to_string(),
+                &Default::default(),
+                &partition_exprs,
+            )
+            .unwrap();
         assert_eq!(r0.partition.as_ref().unwrap().expression, expr_a);
         assert_eq!(
             r0.requirements.map(RegionRequirements::from),

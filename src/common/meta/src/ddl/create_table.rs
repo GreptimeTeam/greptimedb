@@ -15,8 +15,6 @@
 pub mod executor;
 pub mod template;
 
-use std::collections::HashMap;
-
 use api::v1::CreateTableExpr;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
@@ -28,7 +26,6 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
-use store_api::storage::RegionNumber;
 use strum::AsRefStr;
 use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
@@ -47,6 +44,7 @@ use crate::peer::PeerAllocContext;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::{CreateTableTask, QueryContext};
 use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
+use crate::wal_provider::RegionWalOptions;
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -120,7 +118,7 @@ impl CreateTableProcedure {
         self.table_info().ident.table_id
     }
 
-    fn region_wal_options(&self) -> Result<&HashMap<RegionNumber, String>> {
+    fn region_wal_options(&self) -> Result<&RegionWalOptions> {
         self.data
             .region_wal_options
             .as_ref()
@@ -294,7 +292,7 @@ impl CreateTableProcedure {
         &mut self,
         table_id: TableId,
         table_route: PhysicalTableRouteValue,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
     ) {
         self.data.task.table_info.ident.table_id = table_id;
         self.data.table_route = Some(table_route);
@@ -376,7 +374,7 @@ pub struct CreateTableData {
     /// None stands for not allocated yet.
     pub(crate) table_route: Option<PhysicalTableRouteValue>,
     /// None stands for not allocated yet.
-    pub region_wal_options: Option<HashMap<RegionNumber, String>>,
+    pub region_wal_options: Option<RegionWalOptions>,
 }
 
 impl CreateTableData {
