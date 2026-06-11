@@ -472,19 +472,18 @@ impl MergeScanExec {
 
                 // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
-                    if let Some(output_bytes) = scan_output_bytes(&metrics) {
-                        let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
-                        let value = read_meter!(
-                            c,
-                            s,
-                            ReadItem {
-                                cpu_time: metrics.elapsed_compute as u64,
-                                table_scan: output_bytes as u64,
-                            },
-                            current_channel as u8
-                        );
-                        metric.record_greptime_exec_cost(value as usize);
-                    }
+                    let output_bytes = scan_output_bytes(&metrics);
+                    let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
+                    let value = read_meter!(
+                        c,
+                        s,
+                        ReadItem {
+                            cpu_time: metrics.elapsed_compute as u64,
+                            table_scan: output_bytes as u64,
+                        },
+                        current_channel as u8
+                    );
+                    metric.record_greptime_exec_cost(value as usize);
 
                     // record metrics from sub sgates
                     let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
@@ -835,15 +834,15 @@ impl DisplayAs for MergeScanExec {
     }
 }
 
-/// Extract the `output_bytes` metric from the [`RegionScanExec`] plan node, if present.
-fn scan_output_bytes(metrics: &RecordBatchMetrics) -> Option<usize> {
+/// Extract total `output_bytes` from [`RegionScanExec`] plan nodes.
+fn scan_output_bytes(metrics: &RecordBatchMetrics) -> usize {
     metrics
         .plan_metrics
         .iter()
         .filter(|pm| pm.plan_name == REGION_SCAN_EXEC_NAME)
         .flat_map(|pm| &pm.metrics)
-        .find(|(name, _)| name == "output_bytes")
-        .map(|(_, value)| *value)
+        .filter_map(|(name, value)| (name == "output_bytes").then_some(*value))
+        .sum()
 }
 
 #[derive(Debug, Clone)]
@@ -1154,6 +1153,44 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(scan_output_bytes(&metrics), Some(42));
+        assert_eq!(scan_output_bytes(&metrics), 42);
+    }
+
+    #[test]
+    fn scan_output_bytes_defaults_to_zero_without_region_scan() {
+        let metrics = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "ProjectionExec".to_string(),
+                plan_name: "ProjectionExec".to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 42)],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(scan_output_bytes(&metrics), 0);
+    }
+
+    #[test]
+    fn scan_output_bytes_sums_multiple_region_scans() {
+        let metrics = RecordBatchMetrics {
+            plan_metrics: vec![
+                PlanMetrics {
+                    plan: "RegionScanExec: region=1".to_string(),
+                    plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                    level: 0,
+                    metrics: vec![("output_bytes".to_string(), 42)],
+                },
+                PlanMetrics {
+                    plan: "RegionScanExec: region=2".to_string(),
+                    plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                    level: 0,
+                    metrics: vec![("output_bytes".to_string(), 18)],
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(scan_output_bytes(&metrics), 60);
     }
 }
