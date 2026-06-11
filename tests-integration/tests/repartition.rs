@@ -267,14 +267,14 @@ pub async fn test_repartition_on_columns_metadata_mito(store_type: StorageType) 
     let instance = cluster.fe_instance();
 
     assert_on_columns_metadata_overwrite(
-        &instance,
+        instance,
         "repartition_on_columns_metadata_table",
         &repartition_on_columns_sql("repartition_on_columns_metadata_table"),
         query_ctx.clone(),
     )
     .await;
     assert_on_columns_metadata_overwrite(
-        &instance,
+        instance,
         "split_on_columns_metadata_table",
         &split_on_columns_sql("split_on_columns_metadata_table"),
         query_ctx.clone(),
@@ -282,14 +282,14 @@ pub async fn test_repartition_on_columns_metadata_mito(store_type: StorageType) 
     .await;
 
     assert_on_columns_rejects_removed_remaining_column(
-        &instance,
+        instance,
         "repartition_on_columns_error_table",
         &repartition_on_columns_removed_column_sql("repartition_on_columns_error_table"),
         query_ctx.clone(),
     )
     .await;
     assert_on_columns_rejects_removed_remaining_column(
-        &instance,
+        instance,
         "split_on_columns_error_table",
         &split_on_columns_removed_column_sql("split_on_columns_error_table"),
         query_ctx.clone(),
@@ -297,28 +297,28 @@ pub async fn test_repartition_on_columns_metadata_mito(store_type: StorageType) 
     .await;
 
     run_sql(
-        &instance,
+        instance,
         "DROP TABLE `repartition_on_columns_metadata_table`",
         query_ctx.clone(),
     )
     .await
     .unwrap();
     run_sql(
-        &instance,
+        instance,
         "DROP TABLE `split_on_columns_metadata_table`",
         query_ctx.clone(),
     )
     .await
     .unwrap();
     run_sql(
-        &instance,
+        instance,
         "DROP TABLE `repartition_on_columns_error_table`",
         query_ctx.clone(),
     )
     .await
     .unwrap();
     run_sql(
-        &instance,
+        instance,
         "DROP TABLE `split_on_columns_error_table`",
         query_ctx.clone(),
     )
@@ -352,14 +352,14 @@ pub async fn test_repartition_on_columns_data_correctness_mito(store_type: Stora
     let instance = cluster.fe_instance();
 
     assert_on_columns_data_correctness(
-        &instance,
+        instance,
         "repartition_on_columns_data_table",
         &repartition_on_columns_sql("repartition_on_columns_data_table"),
         query_ctx.clone(),
     )
     .await;
     assert_on_columns_data_correctness(
-        &instance,
+        instance,
         "split_on_columns_data_table",
         &split_on_columns_sql("split_on_columns_data_table"),
         query_ctx.clone(),
@@ -367,14 +367,14 @@ pub async fn test_repartition_on_columns_data_correctness_mito(store_type: Stora
     .await;
 
     run_sql(
-        &instance,
+        instance,
         "DROP TABLE `repartition_on_columns_data_table`",
         query_ctx.clone(),
     )
     .await
     .unwrap();
     run_sql(
-        &instance,
+        instance,
         "DROP TABLE `split_on_columns_data_table`",
         query_ctx.clone(),
     )
