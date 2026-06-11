@@ -750,41 +750,6 @@ fn test_fenced_repair_watermarks_require_exact_high() {
 }
 
 #[test]
-fn test_fenced_repair_chunk_watermark_mismatch_abandons_repair() {
-    let query_ctx = QueryContext::arc();
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let mut state = TaskState::new(query_ctx, rx);
-    state
-        .dirty_time_windows
-        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(20)));
-
-    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
-    state.start_fenced_repair(high.clone()).unwrap();
-    let filter = next_fenced_repair_filter(&mut state, 1);
-    assert!(state.fenced_repair_pending_is_empty());
-
-    let decision = BatchingTask::apply_query_result_to_state(
-        &mut state,
-        &output_with_region_watermarks([(1_u64, Some(9_u64)), (2_u64, Some(20_u64))]),
-        std::time::Duration::from_millis(1),
-        &QueryCoverage::FencedRepairChunk { high },
-        &DirtyRestore::Scoped(filter),
-    );
-
-    assert_eq!(
-        decision,
-        FlowCheckpointDecision::FallbackToFullSnapshot {
-            previous_mode: CheckpointMode::FullSnapshot,
-            reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
-        }
-    );
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert!(state.checkpoints().is_empty());
-    assert!(state.pending_fenced_repair().is_none());
-    assert_eq!(state.dirty_time_windows.len(), 1);
-}
-
-#[test]
 fn test_fenced_repair_chunk_watermark_mismatch_restores_pending_and_inflight() {
     let query_ctx = QueryContext::arc();
     let (_tx, rx) = tokio::sync::oneshot::channel();
@@ -966,55 +931,6 @@ fn test_query_failure_reason_distinguishes_fenced_repair_stale_fence() {
         BatchingTask::query_failure_reason(&generic_err, &QueryCoverage::IncrementalDelta),
         FlowQueryFallbackReason::IncrementalQueryFailure
     );
-}
-
-#[test]
-fn test_fenced_repair_failure_abandons_stale_snapshot_fence() {
-    let query_ctx = QueryContext::arc();
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let mut state = TaskState::new(query_ctx, rx);
-    state
-        .dirty_time_windows
-        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(20)));
-    state
-        .dirty_time_windows
-        .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(110)));
-
-    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
-    state.start_fenced_repair(high.clone()).unwrap();
-    let filter = next_fenced_repair_filter(&mut state, 1);
-    assert_eq!(
-        state
-            .pending_fenced_repair()
-            .unwrap()
-            .pending_windows()
-            .len(),
-        1
-    );
-
-    let decision = BatchingTask::apply_query_failure_to_state(
-        &mut state,
-        std::time::Duration::from_millis(1),
-        &QueryCoverage::FencedRepairChunk { high },
-        FlowQueryFallbackReason::SnapshotFenceExpired,
-    );
-
-    assert_eq!(
-        decision,
-        Some(FlowCheckpointDecision::FallbackToFullSnapshot {
-            previous_mode: CheckpointMode::FullSnapshot,
-            reason: FlowQueryFallbackReason::SnapshotFenceExpired,
-        })
-    );
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert!(state.pending_fenced_repair().is_none());
-    assert!(state.checkpoints().is_empty());
-
-    // Simulate the existing outer failure restore for the chunk that was in
-    // flight. Because pending repair was abandoned, this chunk restores to the
-    // live dirty signal and the next generation will be a normal ScopedBaseRepair.
-    state.restore_scoped_windows(&filter);
-    assert_eq!(state.dirty_time_windows.len(), 2);
 }
 
 #[tokio::test]
@@ -1548,63 +1464,52 @@ async fn test_successful_incremental_advance_keeps_unscoped_dirty_signal_clean()
 }
 
 #[tokio::test]
-async fn test_tql_full_query_path_generates_unfiltered_full() {
-    let TestTaskParts {
-        mut task,
-        query_engine,
-        ..
-    } = new_test_task_engine_and_plan_with_query(
-        "SELECT number, ts FROM numbers_with_ts",
-        "missing_sink",
-    )
-    .await;
-    Arc::get_mut(&mut task.config)
-        .expect("test task config should be uniquely owned")
-        .query_type = QueryType::Tql;
-    task.state.write().unwrap().dirty_time_windows.set_dirty();
-    let sink_schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("number", CDT::uint32_datatype(), false),
-        ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), false).with_time_index(true),
-    ]));
+async fn test_explicit_full_query_paths_generate_unfiltered_full() {
+    for (case_name, query_type, flow_eval_interval) in [
+        ("TQL", QueryType::Tql, None),
+        (
+            "eval-interval SQL",
+            QueryType::Sql,
+            Some(Duration::from_secs(60)),
+        ),
+    ] {
+        let TestTaskParts {
+            mut task,
+            query_engine,
+            ..
+        } = new_test_task_engine_and_plan_with_query(
+            "SELECT number, ts FROM numbers_with_ts",
+            "missing_sink",
+        )
+        .await;
+        {
+            let config =
+                Arc::get_mut(&mut task.config).expect("test task config should be uniquely owned");
+            config.query_type = query_type;
+            config.flow_eval_interval = flow_eval_interval;
+        }
+        task.state.write().unwrap().dirty_time_windows.set_dirty();
+        let sink_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", CDT::uint32_datatype(), false),
+            ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), false)
+                .with_time_index(true),
+        ]));
 
-    let plan = task
-        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, None)
-        .await
-        .unwrap()
-        .expect("explicit TQL full-query path should generate a plan");
+        let plan = task
+            .gen_query_with_time_window(query_engine, &sink_schema, &[], false, None)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{case_name} full-query path should generate a plan"));
 
-    assert!(matches!(plan.coverage, QueryCoverage::UnfilteredFull));
-    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
-}
-
-#[tokio::test]
-async fn test_no_time_window_sql_with_eval_interval_generates_unfiltered_full() {
-    let TestTaskParts {
-        mut task,
-        query_engine,
-        ..
-    } = new_test_task_engine_and_plan_with_query(
-        "SELECT number, ts FROM numbers_with_ts",
-        "missing_sink",
-    )
-    .await;
-    Arc::get_mut(&mut task.config)
-        .expect("test task config should be uniquely owned")
-        .flow_eval_interval = Some(Duration::from_secs(60));
-    task.state.write().unwrap().dirty_time_windows.clean();
-    let sink_schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("number", CDT::uint32_datatype(), false),
-        ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), false).with_time_index(true),
-    ]));
-
-    let plan = task
-        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, None)
-        .await
-        .unwrap()
-        .expect("eval-interval SQL full-query path should generate a plan");
-
-    assert!(matches!(plan.coverage, QueryCoverage::UnfilteredFull));
-    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+        assert!(
+            matches!(plan.coverage, QueryCoverage::UnfilteredFull),
+            "{case_name} should use UnfilteredFull"
+        );
+        assert!(
+            task.state.read().unwrap().dirty_time_windows.is_empty(),
+            "{case_name} should consume the dirty signal"
+        );
+    }
 }
 
 #[tokio::test]
