@@ -197,10 +197,7 @@ async fn test_region_replay_with_format(factory: Option<LogStoreFactory>, flat_f
     if let Some(topic) = &topic {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            }))
-            .unwrap(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic.clone()))).unwrap(),
         );
     };
 

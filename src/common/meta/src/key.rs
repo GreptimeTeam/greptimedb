@@ -1752,11 +1752,7 @@ mod tests {
             .collect::<Vec<_>>();
         let wal_options = topics
             .iter()
-            .map(|topic| {
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: topic.clone(),
-                })
-            })
+            .map(|topic| WalOptions::Kafka(KafkaWalOptions::new(topic.clone())))
             .collect::<Vec<_>>();
 
         (0..16)
@@ -1769,17 +1765,13 @@ mod tests {
         HashMap::from([
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "greptimedb_topic0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("greptimedb_topic0".to_string())),
             ),
             (1, WalOptions::RaftEngine),
             (2, WalOptions::Noop),
             (
                 3,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "greptimedb_topic1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("greptimedb_topic1".to_string())),
             ),
         ])
     }
@@ -2556,15 +2548,11 @@ mod tests {
         let old_region_wal_options: RegionWalOptions = vec![
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
             (
                 2,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_2".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_2".to_string())),
             ),
         ]
         .into_iter()
@@ -2614,21 +2602,15 @@ mod tests {
         let new_region_wal_options: RegionWalOptions = vec![
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(), // Unchanged
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())), // Unchanged
             ),
             (
                 2,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_2".to_string(), // Unchanged
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_2".to_string())), // Unchanged
             ),
             (
                 3,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_3".to_string(), // New topic
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_3".to_string())), // New topic
             ),
         ]
         .into_iter()
@@ -2675,15 +2657,11 @@ mod tests {
         let newer_region_wal_options: RegionWalOptions = vec![
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(), // Unchanged
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())), // Unchanged
             ),
             (
                 3,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_3_new".to_string(), // Changed topic
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_3_new".to_string())), // Changed topic
             ),
         ]
         .into_iter()

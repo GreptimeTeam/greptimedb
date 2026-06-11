@@ -199,9 +199,7 @@ mod tests {
 
     /// Helper function to create a Kafka WAL option from a topic name.
     fn kafka_wal_option(topic: &str) -> WalOptions {
-        WalOptions::Kafka(KafkaWalOptions {
-            topic: topic.to_string(),
-        })
+        WalOptions::Kafka(KafkaWalOptions::new(topic.to_string()))
     }
 
     fn new_region_route(region_id: u64, datanode_id: u64) -> RegionRoute {

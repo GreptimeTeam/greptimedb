@@ -383,9 +383,7 @@ mod tests {
     fn kafka_wal_options(topic: &str) -> RegionWalOptions {
         RegionWalOptions::from([(
             1,
-            WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
-            }),
+            WalOptions::Kafka(KafkaWalOptions::new(topic.to_string())),
         )])
     }
 

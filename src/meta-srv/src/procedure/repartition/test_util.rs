@@ -165,9 +165,7 @@ pub fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
 }
 
 pub fn test_region_wal_options(region_numbers: &[RegionNumber]) -> RegionWalOptions {
-    let wal_options = WalOptions::Kafka(KafkaWalOptions {
-        topic: "test_topic".to_string(),
-    });
+    let wal_options = WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string()));
 
     region_numbers
         .iter()

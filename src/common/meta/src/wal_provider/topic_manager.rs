@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::Result;
-use crate::key::topic_name::{TopicNameKey, TopicNameManager};
+use crate::key::topic_name::{TopicNameKey, TopicNameManager, TopicNameValue};
 use crate::kv_backend::KvBackendRef;
 
 /// Manages topics in kvbackend.
@@ -65,6 +65,14 @@ impl KafkaTopicManager {
             .await?;
         Ok(())
     }
+
+    /// Batch gets values for specific topics.
+    pub async fn batch_get(
+        &self,
+        topics: Vec<TopicNameKey<'_>>,
+    ) -> Result<HashMap<String, TopicNameValue>> {
+        self.topic_name_manager.batch_get(topics).await
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +80,24 @@ impl KafkaTopicManager {
     /// Lists all topics in the key-value backend.
     pub async fn list_topics(&self) -> Result<Vec<String>> {
         self.topic_name_manager.range().await
+    }
+
+    pub async fn get(
+        &self,
+        topic: &str,
+    ) -> Result<Option<crate::key::DeserializedValueWithBytes<TopicNameValue>>> {
+        self.topic_name_manager.get(topic).await
+    }
+
+    pub async fn update(
+        &self,
+        topic: &str,
+        pruned_entry_id: u64,
+        prev: Option<crate::key::DeserializedValueWithBytes<TopicNameValue>>,
+    ) -> Result<()> {
+        self.topic_name_manager
+            .update(topic, pruned_entry_id, prev)
+            .await
     }
 }
 

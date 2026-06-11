@@ -631,9 +631,7 @@ mod tests {
     fn test_with_any_wal_options() {
         let all_wal_options = [
             WalOptions::RaftEngine,
-            WalOptions::Kafka(KafkaWalOptions {
-                topic: "test_topic".to_string(),
-            }),
+            WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string())),
         ];
         all_wal_options.iter().all(test_with_wal_options);
     }
@@ -804,9 +802,7 @@ mod tests {
 
     #[test]
     fn test_with_all() {
-        let wal_options = WalOptions::Kafka(KafkaWalOptions {
-            topic: "test_topic".to_string(),
-        });
+        let wal_options = WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string()));
         let map = make_map(&[
             ("ttl", "7d"),
             ("compaction.twcs.trigger_file_num", "8"),
@@ -877,9 +873,7 @@ mod tests {
             compaction_override: false,
             storage: Some("S3".to_string()),
             append_mode: false,
-            wal_options: WalOptions::Kafka(KafkaWalOptions {
-                topic: "test_topic".to_string(),
-            }),
+            wal_options: WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string())),
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
                     ignore_column_ids: vec![1, 2, 3],
@@ -935,9 +929,7 @@ mod tests {
             compaction_override: false,
             storage: Some("S3".to_string()),
             append_mode: false,
-            wal_options: WalOptions::Kafka(KafkaWalOptions {
-                topic: "test_topic".to_string(),
-            }),
+            wal_options: WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string())),
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
                     ignore_column_ids: vec![],

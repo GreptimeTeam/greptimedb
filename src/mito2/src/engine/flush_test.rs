@@ -382,10 +382,7 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
     if let Some(topic) = &topic {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            }))
-            .unwrap(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic.clone()))).unwrap(),
         );
     };
     reopen_region(&engine, region_id, table_dir, true, options).await;
@@ -623,10 +620,8 @@ fn kafka_wal_options(topic: &Option<String>) -> HashMap<String, String> {
         .map(|topic| {
             HashMap::from([(
                 WAL_OPTIONS_KEY.to_string(),
-                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                    topic: topic.clone(),
-                }))
-                .unwrap(),
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic.clone())))
+                    .unwrap(),
             )])
         })
         .unwrap_or_default()

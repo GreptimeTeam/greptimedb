@@ -318,9 +318,7 @@ pub async fn new_wal_prune_metadata(
                 ..Default::default()
             })
             .collect::<Vec<_>>();
-        let wal_options = WalOptions::Kafka(KafkaWalOptions {
-            topic: topic.clone(),
-        });
+        let wal_options = WalOptions::Kafka(KafkaWalOptions::new(topic.clone()));
         let region_wal_options: RegionWalOptions = (0..n_region)
             .map(|region_number| (region_number, wal_options.clone()))
             .collect();

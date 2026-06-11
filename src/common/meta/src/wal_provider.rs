@@ -112,9 +112,7 @@ impl WalOptionsAllocator for WalProvider {
         region_numbers: &[RegionNumber],
         skip_wal: bool,
     ) -> Result<RegionWalOptions> {
-        let wal_options = self
-            .alloc_batch(region_numbers.len(), skip_wal)?
-            .into_iter();
+        let wal_options = self.alloc_batch(region_numbers.len(), skip_wal).await?;
 
         Ok(region_numbers.iter().copied().zip(wal_options).collect())
     }
@@ -131,7 +129,7 @@ impl WalProvider {
 
     /// Allocates a batch of wal options where each wal options goes to a region.
     /// If skip_wal is true, the wal options will be set to Noop regardless of the provider type.
-    pub fn alloc_batch(&self, num_regions: usize, skip_wal: bool) -> Result<Vec<WalOptions>> {
+    pub async fn alloc_batch(&self, num_regions: usize, skip_wal: bool) -> Result<Vec<WalOptions>> {
         if skip_wal {
             return Ok(vec![WalOptions::Noop; num_regions]);
         }
@@ -139,11 +137,13 @@ impl WalProvider {
             WalProvider::RaftEngine => Ok(vec![WalOptions::RaftEngine; num_regions]),
             WalProvider::Kafka(topic_manager) => {
                 let options_batch = topic_manager
-                    .select_batch(num_regions)?
+                    .select_batch_with_pruned_entry_id(num_regions)
+                    .await?
                     .into_iter()
-                    .map(|topic| {
+                    .map(|(topic, initial_pruned_entry_id)| {
                         WalOptions::Kafka(KafkaWalOptions {
                             topic: topic.clone(),
+                            initial_pruned_entry_id: Some(initial_pruned_entry_id),
                         })
                     })
                     .collect();
@@ -295,6 +295,14 @@ mod tests {
         let provider = WalProvider::Kafka(topic_pool);
         provider.start().await.unwrap();
 
+        if let WalProvider::Kafka(topic_pool) = &provider {
+            for (i, topic) in topics.iter().take(3).enumerate() {
+                let manager = topic_pool.topic_manager();
+                let prev = manager.get(topic).await.unwrap();
+                manager.update(topic, i as u64 + 100, prev).await.unwrap();
+            }
+        }
+
         let num_regions = 3;
         let regions = (0..num_regions).collect::<Vec<_>>();
         let got = provider.allocate(&regions, false).await.unwrap();
@@ -304,6 +312,7 @@ mod tests {
             .map(|i| {
                 let options = WalOptions::Kafka(KafkaWalOptions {
                     topic: topics[i as usize].clone(),
+                    initial_pruned_entry_id: Some(i as u64 + 100),
                 });
                 (i, options)
             })
@@ -336,6 +345,7 @@ mod tests {
                     2,
                     WalOptions::Kafka(KafkaWalOptions {
                         topic: "topic_a".to_string(),
+                        initial_pruned_entry_id: None,
                     }),
                 ),
             ])

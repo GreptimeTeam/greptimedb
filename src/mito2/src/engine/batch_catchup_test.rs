@@ -149,7 +149,7 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
             let mut options = HashMap::new();
             options.insert(
                 WAL_OPTIONS_KEY.to_string(),
-                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions { topic })).unwrap(),
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic))).unwrap(),
             );
             (
                 region_id,

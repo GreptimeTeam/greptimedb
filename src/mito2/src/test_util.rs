@@ -891,9 +891,7 @@ impl CreateRequestBuilder {
         });
         let mut options = self.options.clone();
         if let Some(topic) = &self.kafka_topic {
-            let wal_options = WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            });
+            let wal_options = WalOptions::Kafka(KafkaWalOptions::new(topic.clone()));
             options.insert(
                 WAL_OPTIONS_KEY.to_string(),
                 serde_json::to_string(&wal_options).unwrap(),
@@ -958,9 +956,7 @@ impl CreateRequestBuilder {
         });
         let mut options = self.options.clone();
         if let Some(topic) = &self.kafka_topic {
-            let wal_options = WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            });
+            let wal_options = WalOptions::Kafka(KafkaWalOptions::new(topic.clone()));
             options.insert(
                 WAL_OPTIONS_KEY.to_string(),
                 serde_json::to_string(&wal_options).unwrap(),

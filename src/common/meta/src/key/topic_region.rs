@@ -513,9 +513,7 @@ mod tests {
             .map(|i| {
                 let region_number = i;
                 let wal_options = if i % 2 == 0 {
-                    WalOptions::Kafka(KafkaWalOptions {
-                        topic: format!("topic_{}", i),
-                    })
+                    WalOptions::Kafka(KafkaWalOptions::new(format!("topic_{}", i)))
                 } else {
                     WalOptions::RaftEngine
                 };
@@ -565,15 +563,11 @@ mod tests {
         let region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
             (2, WalOptions::RaftEngine), // Should be ignored
         ]
@@ -623,24 +617,18 @@ mod tests {
         let table_id = 1;
         let old_region_wal_options = vec![(
             0,
-            WalOptions::Kafka(KafkaWalOptions {
-                topic: "topic_0".to_string(),
-            }),
+            WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
         )]
         .into_iter()
         .collect::<HashMap<_, _>>();
         let new_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
         ]
         .into_iter()
@@ -668,24 +656,18 @@ mod tests {
         let old_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
         ]
         .into_iter()
         .collect::<HashMap<_, _>>();
         let new_region_wal_options = vec![(
             0,
-            WalOptions::Kafka(KafkaWalOptions {
-                topic: "topic_0".to_string(),
-            }),
+            WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
         )]
         .into_iter()
         .collect::<HashMap<_, _>>();
@@ -714,17 +696,13 @@ mod tests {
         let table_id = 1;
         let old_region_wal_options = vec![(
             0,
-            WalOptions::Kafka(KafkaWalOptions {
-                topic: "topic_0".to_string(),
-            }),
+            WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
         )]
         .into_iter()
         .collect::<HashMap<_, _>>();
         let new_region_wal_options = vec![(
             0,
-            WalOptions::Kafka(KafkaWalOptions {
-                topic: "topic_0_new".to_string(),
-            }),
+            WalOptions::Kafka(KafkaWalOptions::new("topic_0_new".to_string())),
         )]
         .into_iter()
         .collect::<HashMap<_, _>>();
@@ -769,15 +747,11 @@ mod tests {
         let region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
         ]
         .into_iter()
@@ -798,21 +772,15 @@ mod tests {
         let old_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
             (
                 2,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_2".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_2".to_string())),
             ),
         ]
         .into_iter()
@@ -820,22 +788,16 @@ mod tests {
         let new_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(), // Unchanged
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())), // Unchanged
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1_new".to_string(), // Topic changed
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1_new".to_string())), // Topic changed
             ),
             // Region 2 removed
             (
                 3,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_3".to_string(), // New region
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_3".to_string())), // New region
             ),
         ]
         .into_iter()
@@ -917,9 +879,7 @@ mod tests {
         let old_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (1, WalOptions::RaftEngine), // Should be ignored
         ]
@@ -928,15 +888,11 @@ mod tests {
         let new_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(), // Changed from RaftEngine to Kafka
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())), // Changed from RaftEngine to Kafka
             ),
         ]
         .into_iter()
