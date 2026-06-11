@@ -14,17 +14,62 @@
 
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use snafu::{FromString, Snafu};
 
 use crate::status_code::StatusCode;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryHint {
+    Retryable,
+    NonRetryable,
+}
+
+const RETRY_HINT_RETRYABLE: &str = "retryable";
+const RETRY_HINT_NON_RETRYABLE: &str = "non_retryable";
+
+impl RetryHint {
+    pub fn is_retryable(self) -> bool {
+        matches!(self, RetryHint::Retryable)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RetryHint::Retryable => RETRY_HINT_RETRYABLE,
+            RetryHint::NonRetryable => RETRY_HINT_NON_RETRYABLE,
+        }
+    }
+}
+
+impl FromStr for RetryHint {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            RETRY_HINT_RETRYABLE => Ok(RetryHint::Retryable),
+            RETRY_HINT_NON_RETRYABLE => Ok(RetryHint::NonRetryable),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Extension to [`Error`](std::error::Error) in std.
 pub trait ErrorExt: StackError {
     /// Map this error to [StatusCode].
     fn status_code(&self) -> StatusCode {
         StatusCode::Unknown
+    }
+
+    /// Returns the retry hint for this error.
+    fn retry_hint(&self) -> RetryHint {
+        RetryHint::NonRetryable
+    }
+
+    /// Returns true if this error is retryable.
+    fn is_retryable(&self) -> bool {
+        self.retry_hint().is_retryable()
     }
 
     /// Returns the error as [Any](std::any::Any) so that it can be
@@ -192,6 +237,10 @@ impl std::error::Error for BoxedError {
 impl crate::ext::ErrorExt for BoxedError {
     fn status_code(&self) -> crate::status_code::StatusCode {
         self.inner.status_code()
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        self.inner.retry_hint()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
