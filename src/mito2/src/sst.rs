@@ -72,6 +72,17 @@ pub fn with_field_id(mut field: Field, column_id: u32) -> Field {
     field
 }
 
+/// Parquet field ID base for internal columns (__primary_key, __sequence, __op_type).
+/// Uses bit 30 to distinguish from user column IDs and fit in positive i32 range.
+pub(crate) const INTERNAL_PARQUET_FIELD_ID_BASE: u32 = 1 << 30;
+
+/// Parquet field ID for the __primary_key column.
+pub(crate) const PRIMARY_KEY_PARQUET_FIELD_ID: u32 = INTERNAL_PARQUET_FIELD_ID_BASE;
+/// Parquet field ID for the __sequence column.
+pub(crate) const SEQUENCE_PARQUET_FIELD_ID: u32 = INTERNAL_PARQUET_FIELD_ID_BASE + 1;
+/// Parquet field ID for the __op_type column.
+pub(crate) const OP_TYPE_PARQUET_FIELD_ID: u32 = INTERNAL_PARQUET_FIELD_ID_BASE + 2;
+
 /// Gets the arrow schema to store in parquet.
 pub fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
     let fields = Fields::from_iter(
@@ -255,18 +266,23 @@ pub(crate) fn tag_maybe_to_dictionary_field(
 pub(crate) fn internal_fields() -> [FieldRef; 3] {
     // Internal columns are always not null.
     [
-        Arc::new(Field::new_dictionary(
-            PRIMARY_KEY_COLUMN_NAME,
-            ArrowDataType::UInt32,
-            ArrowDataType::Binary,
-            false,
+        Arc::new(with_field_id(
+            Field::new_dictionary(
+                PRIMARY_KEY_COLUMN_NAME,
+                ArrowDataType::UInt32,
+                ArrowDataType::Binary,
+                false,
+            ),
+            PRIMARY_KEY_PARQUET_FIELD_ID,
         )),
-        Arc::new(Field::new(
-            SEQUENCE_COLUMN_NAME,
-            ArrowDataType::UInt64,
-            false,
+        Arc::new(with_field_id(
+            Field::new(SEQUENCE_COLUMN_NAME, ArrowDataType::UInt64, false),
+            SEQUENCE_PARQUET_FIELD_ID,
         )),
-        Arc::new(Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false)),
+        Arc::new(with_field_id(
+            Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false),
+            OP_TYPE_PARQUET_FIELD_ID,
+        )),
     ]
 }
 
