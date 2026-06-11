@@ -293,11 +293,19 @@ pub(crate) fn override_pk_field_to_binary(schema: &SchemaRef) -> SchemaRef {
         .iter()
         .map(|field| {
             if field.name() == PRIMARY_KEY_COLUMN_NAME {
-                Arc::new(Field::new(
+                let mut new_field = Field::new(
                     PRIMARY_KEY_COLUMN_NAME,
                     ArrowDataType::Binary,
                     field.is_nullable(),
-                ))
+                );
+                // Preserve the field_id metadata so parquet readers that require
+                // all columns to carry a field_id don't fail.
+                if let Some(field_id) = field.metadata().get(PARQUET_FIELD_ID_KEY) {
+                    new_field
+                        .metadata_mut()
+                        .insert(PARQUET_FIELD_ID_KEY.to_string(), field_id.clone());
+                }
+                Arc::new(new_field)
             } else {
                 field.clone()
             }
