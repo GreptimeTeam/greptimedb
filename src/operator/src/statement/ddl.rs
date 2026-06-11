@@ -1542,18 +1542,13 @@ impl StatementExecutor {
                     ensure!(
                         !target_partition_columns.is_empty(),
                         InvalidPartitionRuleSnafu {
-                            reason: "REPARTITION ON COLUMNS requires at least one partition column"
+                            reason: "ON COLUMNS requires at least one partition column"
                         }
                     );
-                    target_partition_columns
-                        .iter()
-                        .map(|column_name| {
-                            column_schemas
-                                .iter()
-                                .find(|column| &column.name == column_name)
-                                .with_context(|| ColumnNotFoundSnafu { msg: column_name })
-                        })
-                        .collect::<Result<Vec<_>>>()?
+                    validate_and_collect_partition_columns(
+                        target_partition_columns,
+                        column_schemas,
+                    )?
                 } else {
                     existing_partition_columns.clone()
                 }
@@ -2408,6 +2403,28 @@ fn column_name_and_type<'a>(
         .collect()
 }
 
+fn validate_and_collect_partition_columns<'a>(
+    column_names: &[String],
+    column_schemas: &'a [ColumnSchema],
+) -> Result<Vec<&'a ColumnSchema>> {
+    let mut seen = HashSet::with_capacity(column_names.len());
+    column_names
+        .iter()
+        .map(|column_name| {
+            ensure!(
+                seen.insert(column_name),
+                InvalidPartitionRuleSnafu {
+                    reason: format!("duplicate partition column '{}'", column_name)
+                }
+            );
+            column_schemas
+                .iter()
+                .find(|column| &column.name == column_name)
+                .with_context(|| ColumnNotFoundSnafu { msg: column_name })
+        })
+        .collect()
+}
+
 fn ensure_partition_expr_columns_in_target(
     partition_exprs: &[PartitionExpr],
     target_partition_columns: &HashSet<&String>,
@@ -2788,6 +2805,20 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
         assert!(err.to_string().contains("device_id"));
         assert!(err.to_string().contains("target partition columns"));
+    }
+
+    #[test]
+    fn test_repartition_rejects_duplicate_target_partition_columns() {
+        let device_id = ColumnSchema::new("device_id", ConcreteDataType::int32_datatype(), true);
+        let column_schemas = vec![device_id];
+        let target_partition_columns = vec!["device_id".to_string(), "device_id".to_string()];
+
+        let err =
+            validate_and_collect_partition_columns(&target_partition_columns, &column_schemas)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("duplicate partition column"));
+        assert!(err.to_string().contains("device_id"));
     }
 
     #[tokio::test]

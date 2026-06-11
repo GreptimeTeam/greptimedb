@@ -258,7 +258,7 @@ impl RepartitionStart {
         ensure!(
             !target_partition_columns.is_empty(),
             error::InvalidArgumentsSnafu {
-                err_msg: "Partitioned repartition expects non-empty target partition columns"
+                err_msg: "Partitioned source expects non-empty target partition columns"
                     .to_string(),
             }
         );
