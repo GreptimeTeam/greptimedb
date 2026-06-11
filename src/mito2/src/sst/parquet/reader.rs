@@ -2305,6 +2305,8 @@ mod tests {
     use std::fmt::{Debug, Formatter};
     use std::sync::{Arc, LazyLock};
 
+    use common_error::ext::WhateverResult;
+    use common_recordbatch::ext::RecordBatchExt;
     use datafusion::arrow::datatypes::DataType;
     use datafusion_common::ScalarValue;
     use datafusion_expr::expr::ScalarFunction;
@@ -2312,8 +2314,10 @@ mod tests {
         ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
         col, lit,
     };
-    use datatypes::arrow::array::{ArrayRef, Int64Array};
+    use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, StructArray};
+    use datatypes::arrow::datatypes::{Fields, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
+    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use object_store::services::Memory;
@@ -2326,7 +2330,123 @@ mod tests {
 
     use super::*;
     use crate::sst::parquet::metadata::MetadataLoader;
+    use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
     use crate::test_util::sst_util::{sst_file_handle, sst_region_metadata};
+
+    #[tokio::test]
+    async fn test_nested_projection_reads_partial_json2_physical_fields() -> WhateverResult<()> {
+        // Write a full JSON2-like Arrow struct:
+        // j: { a: { x: int, y: string }, b: string }.
+        // The test later requests only j.a.x and verifies that the physical Parquet projection
+        // does not materialize j.a.y or j.b.
+
+        let xy_fields = Fields::from(vec![
+            Arc::new(Field::new("x", DataType::Int64, true)),
+            Arc::new(Field::new("y", DataType::Utf8, true)),
+        ]);
+        let a_field = Arc::new(Field::new("a", DataType::Struct(xy_fields.clone()), true));
+        let b_field = Arc::new(Field::new("b", DataType::Utf8, true));
+        let json_fields = Fields::from(vec![a_field, b_field]);
+        let json_field = Field::new("j", DataType::Struct(json_fields.clone()), true)
+            .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())));
+        let schema = Arc::new(Schema::new(vec![json_field]));
+
+        let a_array = Arc::new(StructArray::new(
+            xy_fields,
+            vec![
+                Arc::new(Int64Array::from_iter_values([1, 2, 3])) as ArrayRef,
+                Arc::new(StringArray::from_iter_values(["x1", "x2", "x3"])) as ArrayRef,
+            ],
+            None,
+        )) as ArrayRef;
+        let b_array = Arc::new(StringArray::from_iter_values(["b1", "b2", "b3"])) as ArrayRef;
+        let j_array =
+            Arc::new(StructArray::new(json_fields, vec![a_array, b_array], None)) as ArrayRef;
+        let columns = vec![j_array];
+
+        let batch = RecordBatch::try_new(schema, columns).map_err(|e| e.to_string())?;
+
+        // Persist the complete nested schema to an in-memory Parquet file so the projection is
+        // exercised through parquet-rs rather than a mock.
+
+        let object_store = ObjectStore::new(Memory::default())
+            .map_err(|e| e.to_string())?
+            .finish();
+        let file_handle = sst_file_handle(0, 1);
+        let file_path = file_handle.file_path("test_table", PathType::Bare);
+
+        let mut parquet_bytes = Vec::new();
+        ArrowWriter::try_new(&mut parquet_bytes, batch.schema(), None)
+            .and_then(|mut w| {
+                w.write(&batch)?;
+                Ok(w)
+            })
+            .and_then(|w| w.close())
+            .map_err(|e| e.to_string())?;
+        let file_size = parquet_bytes.len() as u64;
+        object_store
+            .write(&file_path, parquet_bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut cache_metrics = MetadataCacheMetrics::default();
+        let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
+        let parquet_meta = loader.load(&mut cache_metrics).await?;
+        let parquet_schema = parquet_meta.file_metadata().schema_descr();
+        assert_eq!(3, parquet_schema.num_columns());
+
+        // Ask Parquet to read only the deepest requested JSON2 path. This should select the single
+        // leaf j.a.x and avoid both sibling leaves j.a.y and j.b.
+
+        let projection =
+            ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
+                vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
+            )]);
+        let projection_plan = build_projection_plan(&projection, parquet_schema);
+        assert_eq!(vec![true], projection_plan.projected_root_presence);
+        assert_eq!(
+            projection_plan.mask,
+            ProjectionMask::leaves(parquet_schema, vec![0])
+        );
+
+        // Read through the low-level stream directly.
+
+        let arrow_metadata =
+            ArrowReaderMetadata::try_new(Arc::new(parquet_meta), ArrowReaderOptions::new())
+                .map_err(|e| e.to_string())?;
+        let fetcher = SstParquetRangeFetcher::new(
+            file_handle.file_id(),
+            file_path.clone(),
+            object_store,
+            CacheStrategy::Disabled,
+            0,
+            None,
+        );
+        let mut stream = build_sst_parquet_record_batch_stream(
+            arrow_metadata,
+            0,
+            None,
+            projection_plan.mask,
+            fetcher,
+            file_path,
+            1024,
+        )?;
+
+        let Some(batch) = stream.next().await.transpose()? else {
+            unreachable!()
+        };
+        let expected = r#"
++-------------+
+| j           |
++-------------+
+| {a: {x: 1}} |
+| {a: {x: 2}} |
+| {a: {x: 3}} |
++-------------+
+"#;
+        assert_eq!(batch.pretty_print(), expected.trim());
+        Ok(())
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_minmax_predicate_key_not_built_when_index_result_cache_disabled() {

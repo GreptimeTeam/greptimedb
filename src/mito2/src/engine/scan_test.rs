@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
+use api::helper::encode_json_value;
 use api::v1::Rows;
+use api::v1::helper::row;
+use api::v1::value::ValueData;
 use common_base::readable_size::ReadableSize;
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, WhateverResult};
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -24,16 +27,133 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType};
+use datatypes::json::value::JsonValue;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use futures::TryStreamExt;
+use serde_json::json;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::RegionRequest;
-use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
+use store_api::storage::{ProjectionInput, RegionId, ScanRequest, TimeSeriesDistribution};
 
 use crate::config::MitoConfig;
 use crate::error::Error;
+use crate::read::read_columns::{ReadColumn, ReadColumns};
 use crate::read::scan_region::Scanner;
 use crate::test_util;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
+
+#[tokio::test]
+async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResult<()> {
+    // Create a region with a JSON2 field whose physical Parquet representation is a nested struct.
+    // The scan below will only ask for field_0.a.x.
+
+    let request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+            JsonObjectType::from([
+                (
+                    "a".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([
+                        ("x".to_string(), JsonNativeType::i64()),
+                        ("y".to_string(), JsonNativeType::String),
+                    ])),
+                ),
+                ("b".to_string(), JsonNativeType::String),
+            ]),
+        )))
+        .build();
+    let schema = test_util::rows_schema(&request);
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+
+    // Write full JSON objects, then flush them so the scanner has an Parquet file where nested
+    // projection can be pushed down.
+    let rows = Rows {
+        schema,
+        rows: vec![
+            row(vec![
+                ValueData::StringValue("tag-1".to_string()),
+                ValueData::JsonValue(encode_json_value(JsonValue::from(json!({
+                    "a": { "x": 10, "y": "ignored-a" },
+                    "b": "ignored-b"
+                })))),
+                ValueData::TimestampMillisecondValue(1000),
+            ]),
+            row(vec![
+                ValueData::StringValue("tag-2".to_string()),
+                ValueData::JsonValue(encode_json_value(JsonValue::from(json!({
+                    "a": { "x": 20, "y": "ignored-c" },
+                    "b": "ignored-d"
+                })))),
+                ValueData::TimestampMillisecondValue(2000),
+            ]),
+        ],
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Simulate a query expression like json_get(field_0, 'a.x'): the logical projection still
+    // returns the JSON2 root column, while json_type_hint tells scan input construction which
+    // nested physical path is needed.
+
+    let request = ScanRequest {
+        projection_input: Some(ProjectionInput::new(vec![1, 0])),
+        json_type_hint: HashMap::from([(
+            "field_0".to_string(),
+            JsonNativeType::Object(JsonObjectType::from([(
+                "a".to_string(),
+                JsonNativeType::Object(JsonObjectType::from([(
+                    "x".to_string(),
+                    JsonNativeType::i64(),
+                )])),
+            )])),
+        )]),
+        ..Default::default()
+    };
+    let scanner = engine.scanner(region_id, request).await?;
+    let Scanner::Seq(seq_scan) = &scanner else {
+        unreachable!();
+    };
+    // Verify the scan input only asks storage for field_0.a.x instead of the
+    // whole JSON2 struct. tag_0 is still read as a normal root column.
+    assert_eq!(
+        seq_scan.input().read_cols,
+        ReadColumns {
+            cols: vec![
+                ReadColumn::new(0, vec![]),
+                ReadColumn::new(
+                    1,
+                    vec![vec![
+                        "field_0".to_string(),
+                        "a".to_string(),
+                        "x".to_string()
+                    ]]
+                ),
+            ]
+        }
+    );
+
+    // The scanner should still return a valid RecordBatch in the requested logical projection.
+    // Fields outside the pushed-down path are pruned from the returned JSON2 type and value.
+
+    let stream = scanner.scan().await?;
+    let batches = RecordBatches::try_collect(stream).await?;
+    let expected = r#"
++--------------+-------+
+| field_0      | tag_0 |
++--------------+-------+
+| {a: {x: 10}} | tag-1 |
+| {a: {x: 20}} | tag-2 |
++--------------+-------+
+"#;
+    assert_eq!(batches.pretty_print()?, expected.trim());
+    Ok(())
+}
 
 #[tokio::test]
 async fn test_incremental_query_stale_error() {

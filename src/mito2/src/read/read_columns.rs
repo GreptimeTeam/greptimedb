@@ -170,7 +170,7 @@ fn normalize_nested_paths(nested_paths: Vec<NestedPath>) -> Vec<NestedPath> {
     normalized
 }
 
-fn merge_nested_paths(merged: &mut Vec<NestedPath>, incoming: Vec<NestedPath>) {
+pub(crate) fn merge_nested_paths(merged: &mut Vec<NestedPath>, incoming: Vec<NestedPath>) {
     for path in incoming {
         if merged
             .iter()
