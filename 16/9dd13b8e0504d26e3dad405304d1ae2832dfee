@@ -1,0 +1,39 @@
+src/datanode/src/heartbeat/handler/close_region.rs
+  s_abc59d71f18a4d::t_31385211488fa2 16,50,60-62,64-66,74,81
+src/meta-srv/src/procedure/test_util.rs
+  s_abc59d71f18a4d::t_041910075aa4cd 21-22,93-102,113,182
+src/common/meta/src/instruction.rs
+  s_abc59d71f18a4d::t_529f33aa7f90ec 1345,1356-1370
+  s_abc59d71f18a4d::t_0524a6fe2fda2d 101,109,113
+  s_abc59d71f18a4d::t_df75a16788182b 86
+  s_abc59d71f18a4d::t_117e9bc3923c4e 19-20,87-100,102-108,110-112,114-129,134-135,181,197,205-209
+src/meta-srv/src/procedure/region_migration/close_downgraded_region.rs
+  s_abc59d71f18a4d::t_e867a25af09700 142
+  s_abc59d71f18a4d::t_c60b8e9039d485 124-129
+src/datanode/src/heartbeat/handler/open_region.rs
+  s_abc59d71f18a4d::t_be91cd993ddec9 15,71-74,80
+src/common/meta/src/heartbeat/handler/tests.rs
+  s_abc59d71f18a4d::t_77d7a31711f0c5 30
+src/meta-srv/src/procedure/region_migration/open_candidate_region.rs
+  s_abc59d71f18a4d::t_574a05a9c723bf 254-255
+  s_abc59d71f18a4d::t_467ce4d4f6ca20 501-583
+  s_abc59d71f18a4d::t_9ec2e4e21c2c44 185-190,199-217
+src/datanode/src/error.rs
+  s_abc59d71f18a4d::t_c2de28b7be4d6f 22,425-446
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "169dd13b8e0504d26e3dad405304d1ae2832dfee",
+  "prompts": {},
+  "sessions": {
+    "s_abc59d71f18a4d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a7bfa0affeEwe6BgYqF7nPHZ",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
