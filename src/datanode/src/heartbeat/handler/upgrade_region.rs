@@ -130,7 +130,6 @@ impl UpgradeRegionsHandler {
                 let UpgradeRegion {
                     last_entry_id,
                     metadata_last_entry_id,
-                    location_id,
                     replay_entry_id,
                     metadata_replay_entry_id,
                     replay_timeout,
@@ -161,7 +160,6 @@ impl UpgradeRegionsHandler {
                         set_writable: true,
                         entry_id: last_entry_id,
                         metadata_entry_id: metadata_last_entry_id,
-                        location_id,
                         checkpoint,
                     },
                 ));

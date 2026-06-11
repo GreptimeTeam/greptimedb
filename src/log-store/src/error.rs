@@ -19,7 +19,6 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
 use common_wal::kafka::rskafka_client_error_to_retry_hint;
-use object_store::error::retry_hint_from_opendal_error;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -258,39 +257,6 @@ pub enum Error {
         error: tokio::sync::oneshot::error::RecvError,
     },
 
-    #[snafu(display("Failed to wait for result of DumpIndex"))]
-    WaitDumpIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: tokio::sync::oneshot::error::RecvError,
-    },
-
-    #[snafu(display("Failed to create writer"))]
-    CreateWriter {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-    },
-
-    #[snafu(display("Failed to write index"))]
-    WriteIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-    },
-
-    #[snafu(display("Failed to read index, path: {path}"))]
-    ReadIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-        path: String,
-    },
-
     #[snafu(display(
         "The length of meta if exceeded the limit: {}, actual: {}",
         limit,
@@ -350,13 +316,10 @@ impl ErrorExt for Error {
             | DiscontinuousLogIndex { .. }
             | OrderedBatchProducerStopped { .. }
             | WaitProduceResultReceiver { .. }
-            | WaitDumpIndex { .. }
             | MetaLengthExceededLimit { .. } => StatusCode::Internal,
 
             // Object store related errors
-            CreateWriter { .. } | WriteIndex { .. } | ReadIndex { .. } | Io { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            Io { .. } => StatusCode::StorageUnavailable,
             // Raft engine
             FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => {
                 StatusCode::StorageUnavailable
@@ -382,9 +345,6 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateWriter { error, .. } | WriteIndex { error, .. } | ReadIndex { error, .. } => {
-                retry_hint_from_opendal_error(error)
-            }
             Io { error, .. } => retry_hint_from_io_error(error),
             FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {

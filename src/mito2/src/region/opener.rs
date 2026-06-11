@@ -506,7 +506,7 @@ impl RegionOpener {
         let wal_entry_reader = self
             .wal_entry_reader
             .take()
-            .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id, None));
+            .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id));
         let on_region_opened = wal.on_region_opened();
         let object_store = get_object_store(&region_options.storage, &self.object_store_manager)?;
 

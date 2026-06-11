@@ -18,7 +18,9 @@ use std::sync::Arc;
 use rskafka::record::Record as KafkaRecord;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
+use store_api::logstore::entry::{
+    Entry, Id as EntryId, MultiplePartEntry, MultiplePartHeader, NaiveEntry,
+};
 use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::storage::RegionId;
 
@@ -26,7 +28,7 @@ use crate::error::{
     DecodeJsonSnafu, EncodeJsonSnafu, IllegalSequenceSnafu, MetaLengthExceededLimitSnafu,
     MissingKeySnafu, MissingValueSnafu, Result,
 };
-use crate::kafka::{EntryId, NamespaceImpl};
+use crate::kafka::NamespaceImpl;
 
 /// The current version of Record.
 pub(crate) const VERSION: u32 = 0;

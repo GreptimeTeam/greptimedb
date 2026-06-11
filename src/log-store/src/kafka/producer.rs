@@ -23,7 +23,6 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{self, Result};
-use crate::kafka::index::IndexCollector;
 use crate::kafka::log_store::TopicStat;
 use crate::kafka::worker::{BackgroundProducerWorker, ProduceResultHandle, WorkerRequest};
 use crate::metrics::{
@@ -57,7 +56,6 @@ impl OrderedBatchProducer {
         client: Arc<dyn ProducerClient>,
         compression: Compression,
         max_batch_bytes: usize,
-        index_collector: Box<dyn IndexCollector>,
         topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
     ) -> Self {
         let mut worker = BackgroundProducerWorker {
@@ -67,7 +65,6 @@ impl OrderedBatchProducer {
             receiver: rx,
             request_batch_size: REQUEST_BATCH_SIZE,
             max_batch_bytes,
-            index_collector,
             topic_stats,
         };
         tokio::spawn(async move { worker.run().await });
@@ -175,7 +172,6 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::kafka::index::NoopCollector;
     use crate::kafka::producer::OrderedBatchProducer;
     use crate::kafka::test_util::record;
 
@@ -246,7 +242,6 @@ mod tests {
             client.clone(),
             Compression::NoCompression,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
-            Box::new(NoopCollector),
             Arc::new(DashMap::new()),
         );
 
@@ -295,7 +290,6 @@ mod tests {
             client.clone(),
             Compression::NoCompression,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
-            Box::new(NoopCollector),
             Arc::new(DashMap::new()),
         );
 
@@ -348,7 +342,6 @@ mod tests {
             client.clone(),
             Compression::NoCompression,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
-            Box::new(NoopCollector),
             Arc::new(DashMap::new()),
         );
 

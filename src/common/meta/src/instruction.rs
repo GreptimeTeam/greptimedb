@@ -366,9 +366,6 @@ pub struct UpgradeRegion {
     /// it's helpful to verify whether the leader region is ready.
     #[serde(with = "humantime_serde")]
     pub replay_timeout: Duration,
-    /// The hint for replaying memtable.
-    #[serde(default)]
-    pub location_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_entry_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1333,14 +1330,13 @@ mod tests {
             last_entry_id: None,
             metadata_last_entry_id: None,
             replay_timeout: Duration::from_millis(1000),
-            location_id: None,
             replay_entry_id: None,
             metadata_replay_entry_id: None,
         }]);
 
         let serialized = serde_json::to_string(&upgrade_region).unwrap();
         assert_eq!(
-            r#"{"UpgradeRegions":[{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"replay_timeout":"1s","location_id":null}]}"#,
+            r#"{"UpgradeRegions":[{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"replay_timeout":"1s"}]}"#,
             serialized
         );
     }
@@ -1422,7 +1418,7 @@ mod tests {
         assert_eq!(downgrade_region_instruction, downgrade_region);
 
         // legacy upgrade region instruction
-        let upgrade_region_instruction = r#"{"UpgradeRegion":{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"replay_timeout":"1s","location_id":null,"replay_entry_id":null,"metadata_replay_entry_id":null}}"#;
+        let upgrade_region_instruction = r#"{"UpgradeRegion":{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"replay_timeout":"1s","replay_entry_id":null,"metadata_replay_entry_id":null}}"#;
         let upgrade_region_instruction: Instruction =
             serde_json::from_str(upgrade_region_instruction).unwrap();
         let upgrade_region = Instruction::UpgradeRegions(vec![UpgradeRegion {
@@ -1430,7 +1426,6 @@ mod tests {
             last_entry_id: None,
             metadata_last_entry_id: None,
             replay_timeout: Duration::from_millis(1000),
-            location_id: None,
             replay_entry_id: None,
             metadata_replay_entry_id: None,
         }]);

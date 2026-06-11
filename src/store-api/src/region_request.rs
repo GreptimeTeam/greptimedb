@@ -1541,15 +1541,13 @@ pub enum RegionTruncateRequest {
 pub struct RegionCatchupRequest {
     /// Sets it to writable if it's available after it has caught up with all changes.
     pub set_writable: bool,
-    /// The `entry_id` that was expected to reply to.
+    /// The `entry_id` that was expected to replay to.
     /// `None` stands replaying to latest.
     pub entry_id: Option<entry::Id>,
     /// Used for metrics metadata region.
-    /// The `entry_id` that was expected to reply to.
+    /// The `entry_id` that was expected to replay to.
     /// `None` stands replaying to latest.
     pub metadata_entry_id: Option<entry::Id>,
-    /// The hint for replaying memtable.
-    pub location_id: Option<u64>,
     /// Replay checkpoint.
     pub checkpoint: Option<ReplayCheckpoint>,
 }

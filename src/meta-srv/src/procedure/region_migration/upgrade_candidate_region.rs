@@ -159,7 +159,6 @@ impl UpgradeCandidateRegion {
                 last_entry_id,
                 metadata_last_entry_id,
                 replay_timeout,
-                location_id: Some(ctx.persistent_ctx.from_peer.id),
                 replay_entry_id: checkpoint.map(|c| c.entry_id),
                 metadata_replay_entry_id: checkpoint.and_then(|c| c.metadata_entry_id),
             });

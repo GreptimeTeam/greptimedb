@@ -25,7 +25,6 @@ use store_api::logstore::provider::KafkaProvider;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::error::{BuildClientSnafu, BuildPartitionClientSnafu, Result, TlsConfigSnafu};
-use crate::kafka::index::{GlobalIndexCollector, NoopCollector};
 use crate::kafka::log_store::TopicStat;
 use crate::kafka::producer::{OrderedBatchProducer, OrderedBatchProducerRef};
 
@@ -60,7 +59,6 @@ pub(crate) struct ClientManager {
     /// Used to initialize a new [Client].
     mutex: Mutex<()>,
     instances: RwLock<HashMap<Arc<KafkaProvider>, Client>>,
-    global_index_collector: Option<GlobalIndexCollector>,
 
     flush_batch_size: usize,
     compression: Compression,
@@ -73,7 +71,6 @@ impl ClientManager {
     /// Tries to create a ClientManager.
     pub(crate) async fn try_new(
         config: &DatanodeKafkaConfig,
-        global_index_collector: Option<GlobalIndexCollector>,
         topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
     ) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
@@ -98,7 +95,6 @@ impl ClientManager {
             instances: RwLock::new(HashMap::new()),
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: Compression::Lz4,
-            global_index_collector,
             topic_stats,
         })
     }
@@ -151,28 +147,16 @@ impl ClientManager {
             .map(Arc::new)?;
 
         let (tx, rx) = OrderedBatchProducer::channel();
-        let index_collector = if let Some(global_collector) = self.global_index_collector.as_ref() {
-            global_collector
-                .provider_level_index_collector(provider.clone(), tx.clone())
-                .await
-        } else {
-            Box::new(NoopCollector)
-        };
         let producer = Arc::new(OrderedBatchProducer::new(
             (tx, rx),
             provider.clone(),
             client.clone(),
             self.compression,
             self.flush_batch_size,
-            index_collector,
             self.topic_stats.clone(),
         ));
 
         Ok(Client { client, producer })
-    }
-
-    pub(crate) fn global_index_collector(&self) -> Option<&GlobalIndexCollector> {
-        self.global_index_collector.as_ref()
     }
 
     /// Lists all topics.

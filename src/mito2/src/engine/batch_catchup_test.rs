@@ -184,7 +184,6 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
                     set_writable: true,
                     entry_id: None,
                     metadata_entry_id: None,
-                    location_id: None,
                     checkpoint: None,
                 },
             )
@@ -231,7 +230,6 @@ async fn test_batch_catchup_err_with_format(factory: Option<LogStoreFactory>, fl
                     set_writable: true,
                     entry_id: None,
                     metadata_entry_id: None,
-                    location_id: None,
                     checkpoint: None,
                 },
             )

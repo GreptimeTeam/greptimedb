@@ -4515,15 +4515,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "delta-encoding"
-version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cabe72c7de5725dcd4597e7d2bc8a4b7a4698879481607385fbc50a23203eeb9"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7874,7 +7865,6 @@ dependencies = [
  "common-time",
  "common-wal",
  "dashmap",
- "delta-encoding",
  "derive_builder 0.20.2",
  "futures",
  "futures-util",

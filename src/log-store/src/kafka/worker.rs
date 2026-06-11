@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod dump_index;
 pub(crate) mod fetch_latest_offset;
 pub(crate) mod flush;
 pub(crate) mod produce;
@@ -25,21 +24,17 @@ use futures::future::try_join_all;
 use rskafka::client::partition::Compression;
 use rskafka::record::Record;
 use snafu::{OptionExt, ResultExt};
-use store_api::logstore::EntryId;
 use store_api::logstore::provider::KafkaProvider;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot::{self};
 
 use crate::error::{self, NoMaxValueSnafu, Result};
-use crate::kafka::index::{IndexCollector, IndexEncoder};
 use crate::kafka::log_store::TopicStat;
 use crate::kafka::producer::ProducerClient;
 
 pub(crate) enum WorkerRequest {
     Produce(ProduceRequest),
-    TruncateIndex(TruncateIndexRequest),
-    DumpIndex(DumpIndexRequest),
     FetchLatestOffset,
 }
 
@@ -58,38 +53,6 @@ impl WorkerRequest {
             }),
             ProduceResultHandle { receiver: rx },
         )
-    }
-}
-
-pub(crate) struct DumpIndexRequest {
-    encoder: Arc<dyn IndexEncoder>,
-    sender: oneshot::Sender<()>,
-}
-
-impl DumpIndexRequest {
-    pub fn new(encoder: Arc<dyn IndexEncoder>) -> (DumpIndexRequest, oneshot::Receiver<()>) {
-        let (tx, rx) = oneshot::channel();
-        (
-            DumpIndexRequest {
-                encoder,
-                sender: tx,
-            },
-            rx,
-        )
-    }
-}
-
-pub(crate) struct TruncateIndexRequest {
-    region_id: RegionId,
-    entry_id: EntryId,
-}
-
-impl TruncateIndexRequest {
-    pub fn new(region_id: RegionId, entry_id: EntryId) -> Self {
-        Self {
-            region_id,
-            entry_id,
-        }
     }
 }
 
@@ -159,8 +122,6 @@ pub(crate) struct BackgroundProducerWorker {
     pub(crate) request_batch_size: usize,
     /// Max bytes size for a single flush.
     pub(crate) max_batch_bytes: usize,
-    /// Collecting ids of WAL entries.
-    pub(crate) index_collector: Box<dyn IndexCollector>,
     /// The stats of each topic.
     pub(crate) topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
 }
@@ -195,11 +156,6 @@ impl BackgroundProducerWorker {
         for req in buffer.drain(..) {
             match req {
                 WorkerRequest::Produce(req) => produce_requests.push(req),
-                WorkerRequest::TruncateIndex(TruncateIndexRequest {
-                    region_id,
-                    entry_id,
-                }) => self.index_collector.truncate(region_id, entry_id),
-                WorkerRequest::DumpIndex(req) => self.dump_index(req).await,
                 WorkerRequest::FetchLatestOffset => {
                     self.fetch_latest_offset().await;
                 }

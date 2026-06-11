@@ -183,14 +183,6 @@ max_batch_bytes = "1MB"
 ## **It's only used when the provider is `kafka`**.
 consumer_wait_timeout = "100ms"
 
-## Whether to enable WAL index creation.
-## **It's only used when the provider is `kafka`**.
-create_index = true
-
-## The interval for dumping WAL indexes.
-## **It's only used when the provider is `kafka`**.
-dump_index_interval = "60s"
-
 ## Ignore missing entries during read WAL.
 ## **It's only used when the provider is `kafka`**.
 ##

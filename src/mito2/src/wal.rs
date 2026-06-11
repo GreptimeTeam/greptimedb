@@ -33,7 +33,7 @@ use futures::stream::BoxStream;
 use snafu::ResultExt;
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
-use store_api::logstore::{AppendBatchResponse, LogStore, WalIndex};
+use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
 
 use crate::error::{BuildEntrySnafu, DeleteWalSnafu, Result, WriteWalSnafu};
@@ -109,24 +109,15 @@ impl<S: LogStore> Wal<S> {
         &self,
         provider: &Provider,
         region_id: RegionId,
-        location_id: Option<u64>,
     ) -> Box<dyn WalEntryReader> {
         match provider {
             Provider::RaftEngine(_) => Box::new(LogStoreEntryReader::new(
                 LogStoreRawEntryReader::new(self.store.clone()),
             )),
-            Provider::Kafka(_) => {
-                let reader = if let Some(location_id) = location_id {
-                    LogStoreRawEntryReader::new(self.store.clone())
-                        .with_wal_index(WalIndex::new(region_id, location_id))
-                } else {
-                    LogStoreRawEntryReader::new(self.store.clone())
-                };
-
-                Box::new(LogStoreEntryReader::new(RegionRawEntryReader::new(
-                    reader, region_id,
-                )))
-            }
+            Provider::Kafka(_) => Box::new(LogStoreEntryReader::new(RegionRawEntryReader::new(
+                LogStoreRawEntryReader::new(self.store.clone()),
+                region_id,
+            ))),
             Provider::Noop => Box::new(NoopEntryReader),
         }
     }
@@ -139,7 +130,7 @@ impl<S: LogStore> Wal<S> {
         start_id: EntryId,
         provider: &'a Provider,
     ) -> Result<WalEntryStream<'a>> {
-        let mut reader = self.wal_entry_reader(provider, region_id, None);
+        let mut reader = self.wal_entry_reader(provider, region_id);
         reader.read(provider, start_id)
     }
 

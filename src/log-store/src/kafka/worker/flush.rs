@@ -38,9 +38,7 @@ impl BackgroundProducerWorker {
 
         if let Ok(result) = &result {
             let total_record_size = result.encoded_request_size as u64;
-            for (idx, region_id) in result.offsets.iter().zip(region_ids) {
-                self.index_collector.append(region_id, *idx as u64);
-            }
+            let _ = region_ids;
 
             let max_offset = result.offsets.iter().max().cloned().unwrap_or_default() as u64;
             self.topic_stats

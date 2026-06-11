@@ -14,8 +14,8 @@
 
 pub(crate) mod client_manager;
 pub(crate) mod consumer;
-pub(crate) mod index;
 pub mod log_store;
+pub(crate) mod offset;
 mod periodic_offset_fetcher;
 pub(crate) mod producer;
 #[cfg(test)]
@@ -24,24 +24,11 @@ pub(crate) mod util;
 pub(crate) mod worker;
 
 pub use client_manager::DEFAULT_PARTITION;
-pub use index::{GlobalIndexCollector, default_index_file};
 use serde::{Deserialize, Serialize};
-use store_api::logstore::entry::Id as EntryId;
 
 /// Kafka Namespace implementation.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub struct NamespaceImpl {
     pub region_id: u64,
     pub topic: String,
-}
-
-/// Kafka Entry implementation.
-#[derive(Debug, PartialEq, Clone)]
-pub struct EntryImpl {
-    /// Entry payload.
-    pub data: Vec<u8>,
-    /// The logical entry id.
-    pub id: EntryId,
-    /// The namespace used to identify and isolate log entries from different regions.
-    pub ns: NamespaceImpl,
 }

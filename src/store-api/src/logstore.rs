@@ -30,22 +30,6 @@ pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::provider::Provider;
 use crate::storage::RegionId;
 
-// The information used to locate WAL index for the specified region.
-#[derive(Debug, Clone, Copy)]
-pub struct WalIndex {
-    pub region_id: RegionId,
-    pub location_id: u64,
-}
-
-impl WalIndex {
-    pub fn new(region_id: RegionId, location_id: u64) -> Self {
-        Self {
-            region_id,
-            location_id,
-        }
-    }
-}
-
 /// `LogStore` serves as a Write-Ahead-Log for storage engine.
 #[async_trait::async_trait]
 pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
@@ -64,19 +48,18 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         &self,
         provider: &Provider,
         id: EntryId,
-        index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error>;
 
-    /// Creates a new `Namespace` from the given ref.
+    /// Creates a new namespace for the given provider.
     async fn create_namespace(&self, ns: &Provider) -> Result<(), Self::Error>;
 
-    /// Deletes an existing `Namespace` specified by the given ref.
+    /// Deletes the namespace for the given provider.
     async fn delete_namespace(&self, ns: &Provider) -> Result<(), Self::Error>;
 
-    /// Lists all existing namespaces.
+    /// Lists all existing providers.
     async fn list_namespaces(&self) -> Result<Vec<Provider>, Self::Error>;
 
-    /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
+    /// Marks all entries with ids `<=entry_id` of the given provider as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
     async fn obsolete(

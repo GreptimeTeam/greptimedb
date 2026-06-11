@@ -26,7 +26,7 @@ use pin_project::pin_project;
 use rskafka::client::partition::PartitionClient;
 use rskafka::record::RecordAndOffset;
 
-use crate::kafka::index::{NextBatchHint, RegionWalIndexIterator};
+use crate::kafka::offset::{NextBatchHint, RegionWalOffsetIterator};
 
 pub struct FetchResult {
     /// The offsets of the fetched records.
@@ -88,7 +88,7 @@ const MAX_BATCH_SIZE: usize = 52428800;
 const AVG_RECORD_SIZE: usize = 256 * 1024;
 
 /// The [`Consumer`] struct represents a Kafka consumer that fetches messages from
-/// a Kafka cluster. Yielding records respecting the [`RegionWalIndexIterator`].
+/// a Kafka cluster. Yielding records respecting the [`RegionWalOffsetIterator`].
 #[pin_project]
 #[derive(Builder)]
 #[builder(pattern = "owned")]
@@ -142,25 +142,25 @@ impl Consumer {
 pub(crate) struct RecordsBuffer {
     buffer: VecDeque<RecordAndOffset>,
 
-    index: Box<dyn RegionWalIndexIterator>,
+    offset_iter: Box<dyn RegionWalOffsetIterator>,
 }
 
 impl RecordsBuffer {
     /// Creates an empty [`RecordsBuffer`]
-    pub fn new(index: Box<dyn RegionWalIndexIterator>) -> Self {
+    pub fn new(offset_iter: Box<dyn RegionWalOffsetIterator>) -> Self {
         RecordsBuffer {
             buffer: VecDeque::new(),
-            index,
+            offset_iter,
         }
     }
 }
 
 impl RecordsBuffer {
     fn pop_front(&mut self) -> Option<RecordAndOffset> {
-        while let Some(index) = self.index.peek() {
+        while let Some(offset) = self.offset_iter.peek() {
             if let Some(record_and_offset) = self.buffer.pop_front() {
-                if index == record_and_offset.offset as u64 {
-                    self.index.next();
+                if offset == record_and_offset.offset as u64 {
+                    self.offset_iter.next();
                     return Some(record_and_offset);
                 }
             } else {
@@ -173,11 +173,11 @@ impl RecordsBuffer {
     }
 
     fn extend(&mut self, records: Vec<RecordAndOffset>) {
-        if let (Some(first), Some(index)) = (records.first(), self.index.peek()) {
+        if let (Some(first), Some(offset)) = (records.first(), self.offset_iter.peek()) {
             // TODO(weny): throw an error?
             assert!(
-                index <= first.offset as u64,
-                "index: {index}, first offset: {}",
+                offset <= first.offset as u64,
+                "offset: {offset}, first offset: {}",
                 first.offset
             );
         }
@@ -196,7 +196,7 @@ impl Stream for Consumer {
                 return Poll::Ready(None);
             }
 
-            if this.buffer.index.peek().is_none() {
+            if this.buffer.offset_iter.peek().is_none() {
                 return Poll::Ready(None);
             }
 
@@ -206,14 +206,14 @@ impl Stream for Consumer {
             }
 
             if this.fetch_fut.is_terminated() {
-                match this.buffer.index.peek() {
+                match this.buffer.offset_iter.peek() {
                     Some(next_offset) => {
                         let client = Arc::clone(this.client);
                         let max_wait_ms = *this.max_wait_ms as i32;
                         let offset = next_offset as i64;
                         let NextBatchHint { bytes, len } = this
                             .buffer
-                            .index
+                            .offset_iter
                             .next_batch_hint(*this.avg_record_size)
                             .unwrap_or(NextBatchHint {
                                 bytes: *this.avg_record_size,
@@ -300,7 +300,7 @@ mod tests {
 
     use super::*;
     use crate::kafka::consumer::{Consumer, RecordsBuffer};
-    use crate::kafka::index::{MultipleRegionWalIndexIterator, RegionWalRange, RegionWalVecIndex};
+    use crate::kafka::offset::RegionWalRange;
 
     #[derive(Debug)]
     struct MockFetchClient {
@@ -349,47 +349,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_consumer_with_index() {
-        common_telemetry::init_default_ut_logging();
-        let record = test_record();
-        let record_size = record.approximate_size();
-        let mock_client = MockFetchClient {
-            record: record.clone(),
-        };
-        let index = RegionWalVecIndex::new([1, 3, 4, 8, 10, 12], record_size * 3);
-        let consumer = Consumer {
-            last_high_watermark: -1,
-            client: Arc::new(mock_client),
-            max_batch_size: usize::MAX,
-            max_wait_ms: 500,
-            avg_record_size: record_size,
-            terminated: false,
-            buffer: RecordsBuffer {
-                buffer: VecDeque::new(),
-                index: Box::new(index),
-            },
-            fetch_fut: Fuse::terminated(),
-            total_fetched_bytes: 0,
-        };
-
-        let records = consumer.try_collect::<Vec<_>>().await.unwrap();
-        assert_eq!(
-            records
-                .into_iter()
-                .map(|(x, _)| x.offset)
-                .collect::<Vec<_>>(),
-            vec![1, 3, 4, 8, 10, 12]
-        )
-    }
-
-    #[tokio::test]
-    async fn test_consumer_without_index() {
+    async fn test_consumer_with_offset_range() {
         common_telemetry::init_default_ut_logging();
         let record = test_record();
         let mock_client = MockFetchClient {
             record: record.clone(),
         };
-        let index = RegionWalRange::new(0..30, 1024);
+        let offset_iter = RegionWalRange::new(0..30, 1024);
         let consumer = Consumer {
             last_high_watermark: -1,
             client: Arc::new(mock_client),
@@ -399,7 +365,7 @@ mod tests {
             terminated: false,
             buffer: RecordsBuffer {
                 buffer: VecDeque::new(),
-                index: Box::new(index),
+                offset_iter: Box::new(offset_iter),
             },
             fetch_fut: Fuse::terminated(),
             total_fetched_bytes: 0,
@@ -412,48 +378,6 @@ mod tests {
                 .map(|(x, _)| x.offset)
                 .collect::<Vec<_>>(),
             (0..30).collect::<Vec<_>>()
-        )
-    }
-
-    #[tokio::test]
-    async fn test_consumer_with_multiple_index() {
-        common_telemetry::init_default_ut_logging();
-        let record = test_record();
-        let mock_client = MockFetchClient {
-            record: record.clone(),
-        };
-
-        let iter0 = Box::new(RegionWalRange::new(0..0, 1024)) as _;
-        let iter1 = Box::new(RegionWalVecIndex::new(
-            [0, 1, 2, 7, 8, 11],
-            record.approximate_size() * 4,
-        )) as _;
-        let iter2 = Box::new(RegionWalRange::new(12..12, 1024)) as _;
-        let iter3 = Box::new(RegionWalRange::new(1024..1028, 1024)) as _;
-        let iter = MultipleRegionWalIndexIterator::new([iter0, iter1, iter2, iter3]);
-
-        let consumer = Consumer {
-            last_high_watermark: -1,
-            client: Arc::new(mock_client),
-            max_batch_size: usize::MAX,
-            max_wait_ms: 500,
-            avg_record_size: record.approximate_size(),
-            terminated: false,
-            buffer: RecordsBuffer {
-                buffer: VecDeque::new(),
-                index: Box::new(iter),
-            },
-            fetch_fut: Fuse::terminated(),
-            total_fetched_bytes: 0,
-        };
-
-        let records = consumer.try_collect::<Vec<_>>().await.unwrap();
-        assert_eq!(
-            records
-                .into_iter()
-                .map(|(x, _)| x.offset)
-                .collect::<Vec<_>>(),
-            [0, 1, 2, 7, 8, 11, 1024, 1025, 1026, 1027]
         )
     }
 }

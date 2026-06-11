@@ -16,7 +16,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common_base::Plugins;
 use common_error::ext::BoxedError;
@@ -36,7 +36,6 @@ use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
 use log_store::kafka::log_store::KafkaLogStore;
-use log_store::kafka::{GlobalIndexCollector, default_index_file};
 use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
@@ -72,7 +71,7 @@ use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
 use crate::partition_expr_fetcher::MetaPartitionExprFetcher;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
-use crate::store::{self, new_object_store_without_cache};
+use crate::store;
 use crate::utils::{RegionOpenRequests, build_region_open_requests};
 
 /// Datanode service.
@@ -579,29 +578,7 @@ impl DatanodeBuilder {
                 builder.try_build().await.context(BuildMitoEngineSnafu)?
             }
             DatanodeWalConfig::Kafka(kafka_config) => {
-                if kafka_config.create_index && opts.node_id.is_none() {
-                    warn!("The WAL index creation only available in distributed mode.")
-                }
-                let global_index_collector = if kafka_config.create_index
-                    && let Some(node_id) = opts.node_id
-                {
-                    let operator = new_object_store_without_cache(
-                        &opts.storage.store,
-                        &opts.storage.data_home,
-                    )
-                    .await?;
-                    let path = default_index_file(node_id);
-                    Some(Self::build_global_index_collector(
-                        kafka_config.dump_index_interval,
-                        operator,
-                        path,
-                    ))
-                } else {
-                    None
-                };
-
-                let log_store =
-                    Self::build_kafka_log_store(kafka_config, global_index_collector).await?;
+                let log_store = Self::build_kafka_log_store(kafka_config).await?;
                 self.topic_stats_reporter = Some(log_store.topic_stats_reporter());
                 let builder = MitoEngineBuilder::new(
                     &opts.storage.data_home,
@@ -674,24 +651,12 @@ impl DatanodeBuilder {
     }
 
     /// Builds [`KafkaLogStore`].
-    async fn build_kafka_log_store(
-        config: &DatanodeKafkaConfig,
-        global_index_collector: Option<GlobalIndexCollector>,
-    ) -> Result<Arc<KafkaLogStore>> {
-        KafkaLogStore::try_new(config, global_index_collector)
+    async fn build_kafka_log_store(config: &DatanodeKafkaConfig) -> Result<Arc<KafkaLogStore>> {
+        KafkaLogStore::try_new(config)
             .await
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)
             .map(Arc::new)
-    }
-
-    /// Builds [`GlobalIndexCollector`]
-    fn build_global_index_collector(
-        dump_index_interval: Duration,
-        operator: object_store::ObjectStore,
-        path: String,
-    ) -> GlobalIndexCollector {
-        GlobalIndexCollector::new(dump_index_interval, operator, path)
     }
 }
 

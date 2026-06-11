@@ -497,7 +497,7 @@ impl ScanbenchCommand {
             }
             DatanodeWalConfig::Kafka(kafka_config) if self.enable_wal => {
                 let log_store = Arc::new(
-                    KafkaLogStore::try_new(kafka_config, None)
+                    KafkaLogStore::try_new(kafka_config)
                         .await
                         .map_err(BoxedError::new)
                         .context(error::BuildCliSnafu)?,
