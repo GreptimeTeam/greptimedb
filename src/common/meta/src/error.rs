@@ -902,15 +902,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse wal options: {}", wal_options))]
-    ParseWalOptions {
-        wal_options: String,
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: serde_json::Error,
-    },
-
     #[snafu(display("No leader found for table_id: {}", table_id))]
     NoLeader {
         table_id: TableId,
@@ -1186,7 +1177,6 @@ impl ErrorExt for Error {
             | ProcedureOutput { .. }
             | FromUtf8 { .. }
             | MetadataCorruption { .. }
-            | ParseWalOptions { .. }
             | KafkaGetOffset { .. }
             | ReadFlexbuffers { .. }
             | SerializeFlexbuffers { .. }
