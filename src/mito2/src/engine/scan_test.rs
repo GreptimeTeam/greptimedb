@@ -127,9 +127,10 @@ async fn test_scan_with_min_sst_sequence() {
 }
 
 #[tokio::test]
-async fn test_full_snapshot_upper_bound_does_not_constrain_sst_rows() {
+async fn test_full_snapshot_upper_bound_returns_outdated_after_late_flush() {
     let mut env =
-        TestEnv::with_prefix("test_full_snapshot_upper_bound_does_not_constrain_sst_rows").await;
+        TestEnv::with_prefix("test_full_snapshot_upper_bound_returns_outdated_after_late_flush")
+            .await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -157,7 +158,7 @@ async fn test_full_snapshot_upper_bound_does_not_constrain_sst_rows() {
     test_util::put_rows(&engine, region_id, second_rows).await;
     test_util::flush_region(&engine, region_id, None).await;
 
-    let scanner = engine
+    let err = engine
         .scanner(
             region_id,
             ScanRequest {
@@ -166,14 +167,14 @@ async fn test_full_snapshot_upper_bound_does_not_constrain_sst_rows() {
             },
         )
         .await
-        .unwrap();
+        .err()
+        .expect("expect stale snapshot fence error");
 
-    let stream = scanner.scan().await.unwrap();
-    let batches = RecordBatches::try_collect(stream).await.unwrap();
-    let pretty = batches.pretty_print().unwrap();
-
-    assert!(pretty.contains("1970-01-01T00:00:03"));
-    assert!(pretty.contains("1970-01-01T00:00:04"));
+    assert_eq!(StatusCode::RequestOutdated, err.status_code());
+    let err_msg = err.to_string();
+    assert!(err_msg.contains("STALE_SNAPSHOT_FENCE"));
+    assert!(err_msg.contains(&region_id.to_string()));
+    assert!(err_msg.contains(&format!("given_seq: {snapshot_upper_bound}")));
 }
 
 #[tokio::test]

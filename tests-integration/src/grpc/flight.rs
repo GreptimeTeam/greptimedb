@@ -14,11 +14,13 @@
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
 
     use api::v1::auth_header::AuthScheme;
-    use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
+    use api::v1::query_request::Query;
+    use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, QueryRequest, SemanticType};
     use arrow_flight::FlightDescriptor;
     use auth::user_provider_from_option;
     use client::{Client, Database};
@@ -256,6 +258,90 @@ mod test {
         assert_eq!(
             result.region_watermark_map(),
             Some(std::collections::HashMap::from([previous_watermark]))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_distributed_flight_snapshot_seqs_rejects_stale_sst_fence() {
+        common_telemetry::init_default_ut_logging();
+
+        let db = GreptimeDbClusterBuilder::new(
+            "test_distributed_flight_snapshot_seqs_rejects_stale_sst_fence",
+        )
+        .await
+        .build(false)
+        .await;
+
+        let runtime = common_runtime::global_runtime().clone();
+        let greptime_request_handler = GreptimeRequestHandler::new(
+            db.frontend.instance.clone(),
+            user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").ok(),
+            Some(runtime.clone()),
+            FlightCompression::default(),
+        );
+        let mut grpc_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
+            .flight_handler(Arc::new(greptime_request_handler))
+            .build();
+        grpc_server
+            .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .await
+            .unwrap();
+
+        let client = Client::with_urls(vec![grpc_server.bind_addr().unwrap().to_string()]);
+        let mut client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        client.set_auth(AuthScheme::Basic(Basic {
+            username: "greptime_user".to_string(),
+            password: "greptime_pwd".to_string(),
+        }));
+
+        create_table(&client).await;
+        test_put_record_batches(&client, create_record_batches(1)).await;
+        client.sql("admin flush_table('foo')").await.unwrap();
+
+        let regions = db.list_all_regions().await;
+        assert_eq!(regions.len(), 1);
+        let (region_id, region) = regions.into_iter().next().unwrap();
+        let stale_snapshot_seq = region.find_committed_sequence();
+
+        test_put_record_batches(&client, create_record_batches(10)).await;
+        client.sql("admin flush_table('foo')").await.unwrap();
+        assert!(
+            region.find_committed_sequence() > stale_snapshot_seq,
+            "second flush should make the first snapshot sequence stale"
+        );
+
+        let result = client
+            .query_with_terminal_metrics_and_flow_extensions(
+                QueryRequest {
+                    query: Some(Query::Sql(
+                        "select ts, a, `B` from foo order by ts".to_string(),
+                    )),
+                },
+                &[],
+                &[("flow.return_region_seq", "true")],
+                &HashMap::from([(region_id.as_u64(), stale_snapshot_seq)]),
+            )
+            .await
+            .unwrap();
+
+        let OutputData::Stream(mut stream) = result.output.data else {
+            panic!("expected stream output");
+        };
+
+        let mut stale_fence_error = None;
+        while let Some(batch) = stream.next().await {
+            if let Err(err) = batch {
+                stale_fence_error = Some(format!("{err:?}"));
+                break;
+            }
+        }
+
+        let err_msg = stale_fence_error.expect("expected stale snapshot fence rejection");
+        assert!(
+            err_msg.contains("STALE_SNAPSHOT_FENCE")
+                || err_msg.contains("RequestOutdated")
+                || err_msg.contains("snapshot upper bound stale"),
+            "expected stale snapshot fence rejection, got: {err_msg}"
         );
     }
 
