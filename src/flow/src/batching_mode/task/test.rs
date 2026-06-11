@@ -718,6 +718,50 @@ fn test_final_fenced_repair_chunk_advances_to_high() {
 }
 
 #[test]
+fn test_final_fenced_repair_chunk_with_incremental_disabled_finishes_repair_stays_full_snapshot() {
+    // When incremental mode is permanently disabled, a fenced repair must
+    // still drain its backlog and set the checkpoint map to H, but it must
+    // NOT transition to CheckpointMode::Incremental. The final chunk
+    // returns FallbackToFullSnapshot with reason IncrementalDisabled.
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    state
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(20)));
+
+    state.disable_incremental();
+    assert!(state.is_incremental_disabled());
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+
+    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
+    state.start_fenced_repair(high.clone()).unwrap();
+    let filter = next_fenced_repair_filter(&mut state, 1);
+    assert!(state.fenced_repair_pending_is_empty());
+
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]),
+        std::time::Duration::from_millis(1),
+        &QueryCoverage::FencedRepairChunk { high: high.clone() },
+        &DirtyRestore::Scoped(filter),
+    );
+
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: CheckpointMode::FullSnapshot,
+            reason: FlowQueryFallbackReason::IncrementalDisabled,
+        }
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.checkpoints(), &high);
+    assert!(state.pending_fenced_repair().is_none());
+    assert_eq!(state.dirty_time_windows.len(), 1);
+    assert!(state.is_incremental_disabled());
+}
+
+#[test]
 fn test_fenced_repair_watermarks_require_exact_high() {
     let query_ctx = QueryContext::arc();
     let (_tx, rx) = tokio::sync::oneshot::channel();
@@ -933,6 +977,25 @@ fn test_query_failure_reason_distinguishes_fenced_repair_stale_fence() {
     );
 }
 
+#[test]
+fn test_fenced_repair_coverage_produces_snapshot_seq_map_for_distributed_metadata_path() {
+    // Covers the metadata boundary between QueryCoverage and the
+    // frontend/distributed client API: only FencedRepairChunk carries a
+    // non-empty snapshot_seqs map so the datanode can bind per-region
+    // snapshot upper bounds against the frozen high H. Other coverage
+    // variants must produce an empty map.
+    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
+    let coverage = QueryCoverage::FencedRepairChunk { high: high.clone() };
+    assert_eq!(
+        coverage.snapshot_seqs(),
+        HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+    );
+
+    assert!(QueryCoverage::UnfilteredFull.snapshot_seqs().is_empty());
+    assert!(QueryCoverage::ScopedBaseRepair.snapshot_seqs().is_empty());
+    assert!(QueryCoverage::IncrementalDelta.snapshot_seqs().is_empty());
+}
+
 #[tokio::test]
 async fn test_fenced_repair_stale_fence_next_plan_is_scoped_base_repair() {
     let TestTaskParts {
@@ -989,6 +1052,150 @@ async fn test_fenced_repair_stale_fence_next_plan_is_scoped_base_repair() {
         .unwrap()
         .expect("stale fence should restore dirty windows for a fresh scoped repair");
     assert!(matches!(plan.coverage, QueryCoverage::ScopedBaseRepair));
+}
+
+#[test]
+fn test_fenced_repair_transient_non_stale_failure_retries_same_high() {
+    // Opposite of stale-fence abandon: a non-RequestOutdated failure on a
+    // fenced repair chunk should NOT abandon the pending repair. The same
+    // high H is retained, the failed in-flight window goes back into
+    // pending_windows (not live dirty_time_windows), and the next execution
+    // can re-attempt the same fenced repair chunk.
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    state
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+    state
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
+
+    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
+    state.start_fenced_repair(high.clone()).unwrap();
+    let filter = next_fenced_repair_filter(&mut state, 1);
+    assert_eq!(
+        state
+            .pending_fenced_repair()
+            .unwrap()
+            .pending_windows()
+            .len(),
+        1
+    );
+
+    let decision = BatchingTask::apply_query_failure_to_state(
+        &mut state,
+        std::time::Duration::from_millis(1),
+        &QueryCoverage::FencedRepairChunk { high: high.clone() },
+        FlowQueryFallbackReason::QueryFailure,
+    );
+
+    assert_eq!(
+        decision,
+        Some(FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: CheckpointMode::FullSnapshot,
+            reason: FlowQueryFallbackReason::QueryFailure,
+        })
+    );
+    // Pending repair is NOT abandoned: high H is unchanged.
+    let repair = state.pending_fenced_repair().unwrap();
+    assert_eq!(repair.high(), &high);
+    assert_eq!(repair.pending_windows().len(), 1);
+
+    // Simulate the outer execution failure restore for the in-flight chunk.
+    state.restore_scoped_windows(&filter);
+
+    // After restore, the in-flight chunk goes back into pending_windows
+    // (because pending_fenced_repair is still Some), NOT into live
+    // dirty_time_windows.
+    assert_eq!(
+        state
+            .pending_fenced_repair()
+            .unwrap()
+            .pending_windows()
+            .len(),
+        2,
+        "in-flight window restored into pending_windows"
+    );
+    assert_eq!(
+        state.dirty_time_windows.len(),
+        2,
+        "live dirty windows unchanged (not where in-flight was restored)"
+    );
+}
+
+#[test]
+fn test_repeated_abandon_and_new_fenced_repair_has_no_stale_pending_state() {
+    // After abandoning a fenced repair with high H1 and starting a fresh
+    // fenced repair with high H2, the pending state must reflect H2 (not
+    // the stale H1), and pending windows must come from the current dirty
+    // state. This exercises two complete cycles to ensure no stale pending
+    // state leaks across abandon → new repair transitions.
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    // Use windows far enough apart (> 3 * 10s merge threshold) to avoid
+    // `merge_dirty_time_windows` collapsing them into a single window that
+    // would be skipped by `gen_scoped_filter_exprs`.
+    state
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+    state
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
+
+    // --- Cycle 1: fenced repair with H1, mismatch abandon ---
+    let h1 = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
+    state.start_fenced_repair(h1.clone()).unwrap();
+    let filter1 = next_fenced_repair_filter(&mut state, 1);
+    assert_eq!(
+        state
+            .pending_fenced_repair()
+            .unwrap()
+            .pending_windows()
+            .len(),
+        1
+    );
+
+    // Simulate watermark mismatch abandon (explicit abandon + restore
+    // in-flight chunk, just as the stale-fence and mismatch paths do).
+    state.abandon_fenced_repair();
+    assert!(state.pending_fenced_repair().is_none());
+    // The not-yet-in-flight pending window is already restored to live
+    // dirty windows by abandon_fenced_repair.
+    assert_eq!(state.dirty_time_windows.len(), 2);
+    // Restore in-flight chunk into live dirty windows too (no pending
+    // repair exists, so restore_scoped_windows targets dirty_time_windows).
+    state.restore_scoped_windows(&filter1);
+    assert_eq!(state.dirty_time_windows.len(), 2);
+
+    // --- Cycle 2: new fenced repair with H2 ---
+    let h2 = BTreeMap::from([(3_u64, 30_u64), (4_u64, 40_u64)]);
+    state.start_fenced_repair(h2.clone()).unwrap();
+    let repair2 = state.pending_fenced_repair().unwrap();
+    assert_eq!(repair2.high(), &h2, "high must be H2, not stale H1");
+    assert_eq!(
+        repair2.pending_windows().len(),
+        2,
+        "pending windows come from current dirty state"
+    );
+
+    let filter2 = next_fenced_repair_filter(&mut state, 1);
+    assert_eq!(
+        state
+            .pending_fenced_repair()
+            .unwrap()
+            .pending_windows()
+            .len(),
+        1
+    );
+
+    // Abandon the second repair and confirm no stale pending remains.
+    state.abandon_fenced_repair();
+    assert!(state.pending_fenced_repair().is_none());
+    state.restore_scoped_windows(&filter2);
+    assert_eq!(state.dirty_time_windows.len(), 2);
+    assert!(state.pending_fenced_repair().is_none());
 }
 
 #[test]
