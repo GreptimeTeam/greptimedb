@@ -235,6 +235,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "STALE_SNAPSHOT_FENCE: snapshot upper bound stale, region: {}, given_seq: {}, min_enforceable_seq: {}, retry_hint: REBIND_SNAPSHOT_FENCE",
+        region_id,
+        given_seq,
+        min_enforceable_seq
+    ))]
+    SnapshotFenceStale {
+        region_id: RegionId,
+        given_seq: u64,
+        min_enforceable_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Old manifest missing for region {}", region_id))]
     MissingOldManifest {
         region_id: RegionId,
@@ -1356,7 +1370,7 @@ impl ErrorExt for Error {
             | SerializePartitionExpr { .. }
             | InvalidSourceAndTargetRegion { .. } => StatusCode::InvalidArguments,
 
-            IncrementalQueryStale { .. } => StatusCode::RequestOutdated,
+            IncrementalQueryStale { .. } | SnapshotFenceStale { .. } => StatusCode::RequestOutdated,
 
             RegionMetadataNotFound { .. }
             | Join { .. }

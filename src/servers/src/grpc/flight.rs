@@ -14,6 +14,7 @@
 
 mod stream;
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -30,6 +31,7 @@ use common_error::ext::ErrorExt;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{
     FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightEncoder, FlightMessage,
+    SNAPSHOT_SEQS_METADATA_KEY,
 };
 use common_memory_manager::MemoryGuard;
 use common_query::{Output, OutputData};
@@ -195,12 +197,13 @@ impl FlightCraft for GreptimeRequestHandler {
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
         let mut hints = hint_headers::extract_hints(request.metadata());
         hints.extend(extract_flow_extensions(request.metadata())?);
+        let snapshot_seqs = extract_snapshot_seqs(request.metadata())?;
 
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
         let query_ctx =
-            create_query_context(Channel::Grpc, request.header.as_ref(), hints.clone())?;
+            create_query_context(Channel::Grpc, request.header.as_ref(), hints, snapshot_seqs)?;
         // Validate flow hint syntax at the transport boundary before dispatching the request.
         // This does not authorize or execute anything; `handle_request()` below still performs
         // the normal frontend handling and auth checks before query execution.
@@ -218,7 +221,9 @@ impl FlightCraft for GreptimeRequestHandler {
         );
         let flight_compression = self.flight_compression;
         async {
-            let output = self.handle_request(request, hints).await?;
+            let output = self
+                .handle_request_with_query_ctx(request, query_ctx.clone())
+                .await?;
             let stream = to_flight_data_stream(
                 output,
                 TracingContext::from_current_span(),
@@ -542,21 +547,30 @@ impl Stream for PutRecordBatchRequestStream {
 fn extract_flow_extensions(
     metadata: &tonic::metadata::MetadataMap,
 ) -> TonicResult<Vec<(String, String)>> {
-    let Some(value) = metadata.get(FLOW_EXTENSIONS_METADATA_KEY) else {
-        return Ok(vec![]);
+    Ok(extract_json_metadata(metadata, FLOW_EXTENSIONS_METADATA_KEY)?.unwrap_or_default())
+}
+
+fn extract_snapshot_seqs(
+    metadata: &tonic::metadata::MetadataMap,
+) -> TonicResult<HashMap<u64, u64>> {
+    Ok(extract_json_metadata(metadata, SNAPSHOT_SEQS_METADATA_KEY)?.unwrap_or_default())
+}
+
+fn extract_json_metadata<T: serde::de::DeserializeOwned>(
+    metadata: &tonic::metadata::MetadataMap,
+    key: &'static str,
+) -> TonicResult<Option<T>> {
+    let Some(value) = metadata.get(key) else {
+        return Ok(None);
     };
 
-    let value = value.to_str().map_err(|e| {
-        Status::invalid_argument(format!(
-            "Invalid {FLOW_EXTENSIONS_METADATA_KEY} metadata value: {e}"
-        ))
-    })?;
+    let value = value
+        .to_str()
+        .map_err(|e| Status::invalid_argument(format!("Invalid {key} metadata value: {e}")))?;
 
-    serde_json::from_str::<Vec<(String, String)>>(value).map_err(|e| {
-        Status::invalid_argument(format!(
-            "Invalid {FLOW_EXTENSIONS_METADATA_KEY} metadata JSON: {e}"
-        ))
-    })
+    let parsed = serde_json::from_str::<T>(value)
+        .map_err(|e| Status::invalid_argument(format!("Invalid {key} metadata JSON: {e}")))?;
+    Ok(Some(parsed))
 }
 
 fn to_flight_data_stream(

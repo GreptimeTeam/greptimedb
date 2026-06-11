@@ -14,7 +14,9 @@
 
 //! Handler for Greptime Database service. It's implemented by frontend.
 
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use api::helper::request_type;
@@ -75,12 +77,21 @@ impl GreptimeRequestHandler {
         request: GreptimeRequest,
         hints: Vec<(String, String)>,
     ) -> Result<Output> {
+        let header = request.header.as_ref();
+        let query_ctx = create_query_context(Channel::Grpc, header, hints, HashMap::new())?;
+        self.handle_request_with_query_ctx(request, query_ctx).await
+    }
+
+    pub(crate) async fn handle_request_with_query_ctx(
+        &self,
+        request: GreptimeRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
 
         let header = request.header.as_ref();
-        let query_ctx = create_query_context(Channel::Grpc, header, hints)?;
         let user_info = context_auth::auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
@@ -181,6 +192,7 @@ pub(crate) fn create_query_context(
     channel: Channel,
     header: Option<&RequestHeader>,
     mut extensions: Vec<(String, String)>,
+    snapshot_seqs: HashMap<u64, u64>,
 ) -> Result<QueryContextRef> {
     let (catalog, schema) = header
         .map(|header| {
@@ -214,7 +226,8 @@ pub(crate) fn create_query_context(
         .current_catalog(catalog)
         .current_schema(schema)
         .timezone(timezone)
-        .channel(channel);
+        .channel(channel)
+        .snapshot_seqs(Arc::new(RwLock::new(snapshot_seqs)));
 
     if let Some(x) = extensions
         .iter()
@@ -314,8 +327,10 @@ mod tests {
                     "spoofed-regs".to_string(),
                 ),
             ],
+            HashMap::from([(7, 88)]),
         )
         .unwrap();
+        assert_eq!(query_context.get_snapshot(7), Some(88));
         assert_eq!(query_context.current_catalog(), "cat-a-log");
         assert_eq!(query_context.current_schema(), DEFAULT_SCHEMA_NAME);
         assert_eq!(
@@ -354,6 +369,7 @@ mod tests {
                 REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
                 "spoofed-query-id".to_string(),
             )],
+            HashMap::new(),
         )
         .unwrap();
 
