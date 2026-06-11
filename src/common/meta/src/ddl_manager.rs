@@ -153,8 +153,18 @@ macro_rules! procedure_loader {
 pub type RepartitionProcedureFactoryRef = Arc<dyn RepartitionProcedureFactory>;
 
 pub enum RepartitionSource {
-    Partitioned { exprs: Vec<String> },
-    Unpartitioned { partition_columns: Vec<String> },
+    Partitioned {
+        exprs: Vec<String>,
+        /// Full target partition columns to overwrite table metadata.
+        ///
+        /// `None` means the repartition keeps using the current table
+        /// partition columns, so the procedure won't update
+        /// `partition_key_indices`.
+        target_partition_columns: Option<Vec<String>>,
+    },
+    Unpartitioned {
+        partition_columns: Vec<String>,
+    },
 }
 
 pub trait RepartitionProcedureFactory: Send + Sync {
@@ -297,7 +307,10 @@ impl DdlManager {
 
         let source = match source {
             Some(PbRepartitionSource::PartitionExprs(PartitionExprs { exprs })) => {
-                RepartitionSource::Partitioned { exprs }
+                RepartitionSource::Partitioned {
+                    exprs,
+                    target_partition_columns: None,
+                }
             }
             Some(PbRepartitionSource::Unpartitioned(source)) => RepartitionSource::Unpartitioned {
                 partition_columns: source.partition_columns,
@@ -307,6 +320,7 @@ impl DdlManager {
                 #[allow(deprecated)]
                 RepartitionSource::Partitioned {
                     exprs: repartition.from_partition_exprs,
+                    target_partition_columns: None,
                 }
             }
         };
