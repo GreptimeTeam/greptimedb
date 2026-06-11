@@ -15,9 +15,13 @@
 //! Minimal internal progress abstraction for Export/Import V2.
 //!
 //! This is intentionally small and log/internal oriented. It does not touch
-//! stdout and is safe for non-interactive runs. A TTY progress bar (e.g.
-//! `indicatif`) and a `--progress` CLI flag are deliberately out of scope; they
-//! can layer on top of this trait later without changing call sites.
+//! stdout and is safe for non-interactive runs. [`LogProgress`] backs the
+//! import-v2 `--progress` flag by routing events to stderr. A TTY progress bar
+//! (e.g. `indicatif`) is deliberately out of scope; it can layer on top of this
+//! trait later without changing call sites.
+
+use std::io::{self, Write};
+use std::sync::Mutex;
 
 /// Receives progress events from long-running Export/Import V2 work.
 ///
@@ -43,6 +47,75 @@ impl ProgressReporter for NoopProgress {
     fn start_phase(&self, _name: &str, _total: Option<u64>) {}
     fn inc(&self, _delta: u64) {}
     fn finish_phase(&self) {}
+}
+
+/// A lightweight reporter that logs phase lifecycle and progress through the
+/// stderr. It never touches stdout, so it is safe for non-interactive runs and
+/// keeps dry-run output clean.
+pub(crate) struct LogProgress {
+    phase: Mutex<Option<PhaseState>>,
+}
+
+struct PhaseState {
+    name: String,
+    total: Option<u64>,
+    done: u64,
+}
+
+impl LogProgress {
+    pub(crate) fn new() -> Self {
+        Self {
+            phase: Mutex::new(None),
+        }
+    }
+}
+
+fn write_progress_line(line: String) {
+    let _ = writeln!(io::stderr().lock(), "{line}");
+}
+
+impl ProgressReporter for LogProgress {
+    fn start_phase(&self, name: &str, total: Option<u64>) {
+        let Ok(mut phase) = self.phase.lock() else {
+            return;
+        };
+        *phase = Some(PhaseState {
+            name: name.to_string(),
+            total,
+            done: 0,
+        });
+        match total {
+            Some(total) => write_progress_line(format!("Starting phase '{name}' ({total} units)")),
+            None => write_progress_line(format!("Starting phase '{name}'")),
+        }
+    }
+
+    fn inc(&self, delta: u64) {
+        let Ok(mut guard) = self.phase.lock() else {
+            return;
+        };
+        if let Some(phase) = guard.as_mut() {
+            phase.done += delta;
+            match phase.total {
+                Some(total) => {
+                    write_progress_line(format!("Phase '{}': {}/{}", phase.name, phase.done, total))
+                }
+                None => write_progress_line(format!("Phase '{}': {}", phase.name, phase.done)),
+            }
+        }
+    }
+
+    fn finish_phase(&self) {
+        let Ok(mut guard) = self.phase.lock() else {
+            return;
+        };
+        if let Some(phase) = guard.take() {
+            write_progress_line(format!(
+                "Finished phase '{}' ({} units)",
+                phase.name, phase.done
+            ));
+        }
+    }
 }
 
 /// RAII guard for a started progress phase.
@@ -84,6 +157,26 @@ impl<'a> ProgressPhase<'a> {
 impl Drop for ProgressPhase<'_> {
     fn drop(&mut self) {
         self.finish_once();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_log_progress_is_safe_across_phase_lifecycle() {
+        // LogProgress takes only `&self`, so it must drive a full phase
+        // lifecycle (including an out-of-phase `inc`) without panicking.
+        let progress = LogProgress::new();
+        let reporter: &dyn ProgressReporter = &progress;
+
+        reporter.inc(1); // No active phase yet: must be a no-op, not a panic.
+        reporter.start_phase("Import data tasks", Some(2));
+        reporter.inc(1);
+        reporter.inc(1);
+        reporter.finish_phase();
+        reporter.finish_phase(); // Idempotent: finishing twice is harmless.
     }
 }
 

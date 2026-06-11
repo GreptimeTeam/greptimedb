@@ -29,7 +29,7 @@ use crate::data::export_v2::data::{build_copy_source, execute_copy_database_from
 use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, DataFormat, MANIFEST_VERSION};
 use crate::data::import_v2::coordinator::{
     ImportResumeConfig, ImportTaskExecutor, build_import_tasks, chunk_has_schema_files,
-    import_with_resume_session, prepare_import_resume,
+    import_with_resume_session_with_progress, prepare_import_resume,
 };
 use crate::data::import_v2::error::{
     ChunkImportFailedSnafu, EmptyChunkManifestSnafu, ImportStatePathUnavailableSnafu,
@@ -39,8 +39,26 @@ use crate::data::import_v2::error::{
 use crate::data::import_v2::executor::{DdlExecutor, DdlStatement};
 use crate::data::import_v2::state::{ImportTaskKey, default_state_path};
 use crate::data::path::{data_dir_for_schema_chunk, ddl_path_for_schema};
+use crate::data::progress::{LogProgress, NoopProgress, ProgressReporter};
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
+
+/// Controls progress reporting for import-v2.
+///
+/// For now `auto` and `always` both emit lightweight log progress; only
+/// `never` is silent. A richer interactive bar can later distinguish `auto`
+/// from `always` without changing call sites.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub(crate) enum ProgressMode {
+    /// Choose automatically (currently lightweight log progress).
+    #[default]
+    Auto,
+    /// Always emit lightweight log progress.
+    Always,
+    /// Never emit progress.
+    Never,
+}
 
 /// Import from a snapshot.
 #[derive(Debug, Parser)]
@@ -65,6 +83,10 @@ pub struct ImportV2Command {
     /// Verify without importing (dry-run).
     #[clap(long)]
     dry_run: bool,
+
+    /// Progress reporting mode.
+    #[clap(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
 
     /// Basic authentication (user:password).
     #[clap(long)]
@@ -126,6 +148,7 @@ impl ImportV2Command {
             catalog: self.catalog.clone(),
             schemas,
             dry_run: self.dry_run,
+            progress: self.progress,
             snapshot_uri: self.from.clone(),
             storage_config: self.storage.clone(),
             storage: Box::new(storage),
@@ -139,6 +162,7 @@ pub struct Import {
     catalog: String,
     schemas: Option<Vec<String>>,
     dry_run: bool,
+    progress: ProgressMode,
     snapshot_uri: String,
     storage_config: ObjectStoreConfig,
     storage: Box<dyn SnapshotStorage>,
@@ -266,7 +290,9 @@ impl Import {
                 import: self,
                 format: manifest.format,
             };
-            import_with_resume_session(resume_session, &executor).await?;
+            let progress = self.progress_reporter();
+            import_with_resume_session_with_progress(resume_session, &executor, progress.as_ref())
+                .await?;
         }
 
         if ddl_executed {
@@ -298,6 +324,15 @@ impl Import {
         }
 
         Ok(statements)
+    }
+
+    /// Builds the progress reporter for this run. `never` is silent; `auto`
+    /// and `always` both use lightweight log progress for now.
+    fn progress_reporter(&self) -> Box<dyn ProgressReporter> {
+        match self.progress {
+            ProgressMode::Never => Box::new(NoopProgress),
+            ProgressMode::Auto | ProgressMode::Always => Box::new(LogProgress::new()),
+        }
     }
 }
 
@@ -675,6 +710,55 @@ mod tests {
         async fn delete_snapshot(&self) -> crate::data::export_v2::error::Result<()> {
             unimplemented!("not needed in import_v2::command tests")
         }
+    }
+
+    fn parse_command(extra: &[&str]) -> ImportV2Command {
+        let mut args = vec![
+            "import-v2",
+            "--addr",
+            "127.0.0.1:4000",
+            "--from",
+            "file:///tmp/snapshot",
+        ];
+        args.extend_from_slice(extra);
+        ImportV2Command::try_parse_from(args).expect("command should parse")
+    }
+
+    #[test]
+    fn test_progress_mode_defaults_to_auto() {
+        assert_eq!(parse_command(&[]).progress, ProgressMode::Auto);
+    }
+
+    #[test]
+    fn test_progress_mode_parses_explicit_values() {
+        assert_eq!(
+            parse_command(&["--progress", "always"]).progress,
+            ProgressMode::Always
+        );
+        assert_eq!(
+            parse_command(&["--progress", "never"]).progress,
+            ProgressMode::Never
+        );
+        assert_eq!(
+            parse_command(&["--progress", "auto"]).progress,
+            ProgressMode::Auto
+        );
+    }
+
+    #[test]
+    fn test_progress_mode_rejects_unknown_value() {
+        assert!(
+            ImportV2Command::try_parse_from([
+                "import-v2",
+                "--addr",
+                "127.0.0.1:4000",
+                "--from",
+                "file:///tmp/snapshot",
+                "--progress",
+                "bogus",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
