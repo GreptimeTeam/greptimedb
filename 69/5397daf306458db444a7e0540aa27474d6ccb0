@@ -1,0 +1,32 @@
+Cargo.toml
+  h_623774b620da8e 161
+src/common/meta/src/ddl_manager.rs
+  s_6b6dffb9a68a1e::t_662f44de2cb278 18,309-314
+src/operator/src/statement/ddl.rs
+  s_6b6dffb9a68a1e::t_ba0b0a57feeeb3 25,1566,1656-1659,1661-1663
+src/operator/src/expr_helper.rs
+  s_6b6dffb9a68a1e::t_cba24d63d71258 1731-1735,1738,1759-1789
+  s_6b6dffb9a68a1e::t_ba0b0a57feeeb3 699-702,726-731
+  s_6b6dffb9a68a1e::t_662f44de2cb278 703-705
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "695397daf306458db444a7e0540aa27474d6ccb0",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_6b6dffb9a68a1e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14f442e41ffe2OLTpvrYG2q5Tl",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
