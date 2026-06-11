@@ -64,12 +64,14 @@ impl BatchingTask {
     /// For incremental-mode SQL queries, attempt to prepare an executable plan
     /// that is safe for incremental scan extensions.
     ///
-    /// Returns `Some(plan)` when incremental extensions are safe, and `None`
-    /// when the caller should execute the original plan without incremental
-    /// extensions. The returned plan may be either a rewritten
-    /// delta-LEFT-JOIN-sink merge plan or the original plan. In particular,
-    /// plain GROUP BY queries with no aggregate merge columns are incremental
-    /// safe without a rewrite, so they return `Some(original_plan)`.
+    /// Returns `Some(plan)` when incremental extensions are safe. For an
+    /// incremental-delta query, `None` means the caller must not execute the
+    /// original plan without incremental extensions, because that would become
+    /// an unfiltered full snapshot; the caller should restore the dirty signal
+    /// and skip the current round instead. The returned plan may be either a
+    /// rewritten delta-LEFT-JOIN-sink merge plan or the original plan. In
+    /// particular, plain GROUP BY queries with no aggregate merge columns are
+    /// incremental safe without a rewrite, so they return `Some(original_plan)`.
     pub(super) async fn prepare_plan_for_incremental(
         &self,
         plan: &LogicalPlan,
@@ -131,8 +133,10 @@ impl BatchingTask {
 
         // Fetch sink table for the merge rewrite.
         // Transient errors (catalog, schema, filter, or rewrite) should not
-        // permanently disable incremental mode. Instead, we fall back to a
-        // full-snapshot plan for this round while keeping incremental retryable.
+        // permanently disable incremental mode. They also must not execute the
+        // original plan without incremental extensions, because that would be an
+        // unfiltered full snapshot. The caller will restore the dirty signal and
+        // skip this round while keeping incremental retryable.
         let sink_table = match get_table_info_df_schema(
             self.config.catalog_manager.clone(),
             self.config.sink_table_name.clone(),
@@ -143,10 +147,9 @@ impl BatchingTask {
             Err(err) => {
                 warn!(
                     "Flow {} failed to fetch sink table for incremental rewrite; \
-                     falling back to full snapshot for this round: {:?}",
+                     skipping this round to avoid unfiltered full snapshot: {:?}",
                     self.config.flow_id, err
                 );
-                self.state.write().unwrap().mark_full_snapshot();
                 return Ok(None);
             }
         };
@@ -163,10 +166,9 @@ impl BatchingTask {
             Err(err) => {
                 warn!(
                     "Flow {} failed to rewrite incremental aggregate with sink merge; \
-                     falling back to full snapshot for this round: {:?}",
+                     skipping this round to avoid unfiltered full snapshot: {:?}",
                     self.config.flow_id, err
                 );
-                self.state.write().unwrap().mark_full_snapshot();
                 return Ok(None);
             }
         };

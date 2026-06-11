@@ -15,7 +15,7 @@
 //! Frontend client to run flow as batching task which is time-window-aware normal query triggered every tick set by user
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
@@ -25,7 +25,6 @@ use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_client_tls_config};
 use common_meta::peer::{Peer, PeerDiscovery};
 use common_query::{Output, OutputData};
-use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
 use common_telemetry::warn;
 use futures::stream::{FuturesUnordered, StreamExt};
 use meta_client::client::MetaClient;
@@ -394,6 +393,7 @@ impl FrontendClient {
         schema: &str,
         request: QueryRequest,
         extensions: &[(&str, &str)],
+        snapshot_seqs: &HashMap<u64, u64>,
         peer_desc: &mut Option<PeerDesc>,
     ) -> Result<OutputWithMetrics, Error> {
         let flow_extensions = build_flow_extensions(extensions)?;
@@ -415,7 +415,7 @@ impl FrontendClient {
                         request,
                         &hints,
                         extensions,
-                        &Default::default(),
+                        snapshot_seqs,
                     )
                     .await
                     .map_err(BoxedError::new)
@@ -437,6 +437,7 @@ impl FrontendClient {
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
                     .extensions(extensions_map)
+                    .snapshot_seqs(Arc::new(RwLock::new(snapshot_seqs.clone())))
                     .build();
                 let ctx = Arc::new(ctx);
                 let database_client = {
@@ -462,7 +463,7 @@ impl FrontendClient {
                     .do_query(Request::Query(request), ctx.clone())
                     .await
                     .map(|output| {
-                        wrap_standalone_output_with_terminal_metrics(output, &flow_extensions, &ctx)
+                        wrap_standalone_output_with_terminal_metrics(output, &flow_extensions)
                     })
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)
@@ -570,7 +571,6 @@ fn build_flow_extensions(extensions: &[(&str, &str)]) -> Result<FlowQueryExtensi
 fn wrap_standalone_output_with_terminal_metrics(
     output: Output,
     flow_extensions: &FlowQueryExtensions,
-    query_ctx: &QueryContextRef,
 ) -> OutputWithMetrics {
     let should_collect_region_watermark = flow_extensions.should_collect_region_watermark();
     let terminal_metrics =
@@ -580,7 +580,6 @@ fn wrap_standalone_output_with_terminal_metrics(
                 .plan
                 .clone()
                 .and_then(terminal_recordbatch_metrics_from_plan)
-                .or_else(|| terminal_recordbatch_metrics_from_snapshots(query_ctx))
         } else {
             None
         };
@@ -589,28 +588,6 @@ fn wrap_standalone_output_with_terminal_metrics(
         result.metrics.update(Some(metrics));
     }
     result
-}
-
-fn terminal_recordbatch_metrics_from_snapshots(
-    query_ctx: &QueryContextRef,
-) -> Option<RecordBatchMetrics> {
-    let mut region_watermarks = query_ctx
-        .snapshots()
-        .into_iter()
-        .map(|(region_id, watermark)| RegionWatermarkEntry {
-            region_id,
-            watermark: Some(watermark),
-        })
-        .collect::<Vec<_>>();
-    if region_watermarks.is_empty() {
-        return None;
-    }
-
-    region_watermarks.sort_by_key(|entry| entry.region_id);
-    Some(RecordBatchMetrics {
-        region_watermarks,
-        ..Default::default()
-    })
 }
 
 /// Describe a peer of frontend
@@ -790,6 +767,7 @@ mod tests {
             ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
             assert_eq!(ctx.extension("flow.return_region_seq"), Some("true"));
+            assert_eq!(ctx.get_snapshot(7), Some(88));
             ctx.set_snapshot(42, 99);
             Ok(Output::new_with_affected_rows(1))
         }
@@ -903,6 +881,7 @@ mod tests {
                     query: Some(Query::Sql("select 1".to_string())),
                 },
                 &[],
+                &HashMap::new(),
                 &mut peer_desc,
             )
             .await
@@ -940,6 +919,7 @@ mod tests {
                     query: Some(Query::Sql("insert into t select 1".to_string())),
                 },
                 &[("flow.return_region_seq", "true")],
+                &HashMap::new(),
                 &mut peer_desc,
             )
             .await
@@ -965,6 +945,7 @@ mod tests {
                     query: Some(Query::Sql("insert into t select * from src".to_string())),
                 },
                 &[("flow.return_region_seq", "true")],
+                &HashMap::from([(7, 88)]),
                 &mut peer_desc,
             )
             .await
@@ -972,10 +953,7 @@ mod tests {
         assert!(matches!(peer_desc, Some(PeerDesc::Standalone)));
 
         assert!(result.metrics.is_ready());
-        assert_eq!(
-            result.region_watermark_map(),
-            Some(HashMap::from([(42, 99)]))
-        );
+        assert_eq!(result.region_watermark_map(), None);
     }
 
     #[tokio::test]
@@ -993,6 +971,7 @@ mod tests {
                     query: Some(Query::Sql("select 1".to_string())),
                 },
                 &[("flow.return_region_seq", "not-a-bool")],
+                &HashMap::new(),
                 &mut peer_desc,
             )
             .await

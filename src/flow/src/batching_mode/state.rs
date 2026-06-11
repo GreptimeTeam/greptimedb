@@ -51,6 +51,7 @@ pub struct TaskState {
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
     checkpoint_mode: CheckpointMode,
+    pending_fenced_repair: Option<FencedRepair>,
     /// Region id -> last consumed watermark sequence. Incremental scans use
     /// this as the next lower sequence bound for each source region.
     checkpoints: BTreeMap<u64, u64>,
@@ -81,6 +82,7 @@ impl TaskState {
             last_exec_time_millis: None,
             dirty_time_windows,
             checkpoint_mode: CheckpointMode::FullSnapshot,
+            pending_fenced_repair: None,
             checkpoints: Default::default(),
             incremental_disabled: false,
             exec_state: ExecState::Idle,
@@ -112,6 +114,10 @@ impl TaskState {
         &self.checkpoints
     }
 
+    pub fn pending_fenced_repair(&self) -> Option<&FencedRepair> {
+        self.pending_fenced_repair.as_ref()
+    }
+
     pub fn is_incremental_disabled(&self) -> bool {
         self.incremental_disabled
     }
@@ -125,10 +131,12 @@ impl TaskState {
 
     pub fn mark_full_snapshot(&mut self) {
         self.checkpoint_mode = CheckpointMode::FullSnapshot;
+        self.pending_fenced_repair = None;
     }
 
     pub fn advance_checkpoints(&mut self, watermark_map: HashMap<u64, u64>) {
         self.checkpoints = watermark_map.into_iter().collect();
+        self.pending_fenced_repair = None;
         if !self.incremental_disabled {
             self.checkpoint_mode = CheckpointMode::Incremental;
         }
@@ -147,6 +155,111 @@ impl TaskState {
         if !self.incremental_disabled {
             self.checkpoint_mode = CheckpointMode::Incremental;
         }
+        self.pending_fenced_repair = None;
+    }
+
+    pub fn start_fenced_repair(&mut self, high: BTreeMap<u64, u64>) -> Option<&FencedRepair> {
+        if self.dirty_time_windows.is_empty() {
+            self.pending_fenced_repair = None;
+            return None;
+        }
+
+        let pending_windows = self.dirty_time_windows.clone();
+        self.pending_fenced_repair = Some(FencedRepair {
+            high,
+            pending_windows,
+        });
+        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+        self.pending_fenced_repair.as_ref()
+    }
+
+    pub fn finish_fenced_repair(&mut self) -> Option<BTreeMap<u64, u64>> {
+        let repair = self.pending_fenced_repair.take()?;
+        self.checkpoints = repair.high;
+        if !self.incremental_disabled {
+            self.checkpoint_mode = CheckpointMode::Incremental;
+        }
+        Some(self.checkpoints.clone())
+    }
+
+    pub fn abandon_fenced_repair(&mut self) -> bool {
+        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+        let Some(repair) = self.pending_fenced_repair.take() else {
+            return false;
+        };
+
+        self.dirty_time_windows
+            .add_dirty_windows(&repair.pending_windows);
+        true
+    }
+
+    pub fn restore_scoped_windows(&mut self, filter: &FilterExprInfo) {
+        if let Some(repair) = self.pending_fenced_repair.as_mut() {
+            repair
+                .pending_windows
+                .add_windows(filter.time_ranges.clone());
+            return;
+        }
+
+        self.dirty_time_windows
+            .add_windows(filter.time_ranges.clone());
+    }
+
+    pub fn gen_scoped_filter_exprs(
+        &mut self,
+        col_name: &str,
+        expire_lower_bound: Option<Timestamp>,
+        window_size: chrono::Duration,
+        window_cnt: usize,
+        flow_id: FlowId,
+        task_ctx: Option<&BatchingTask>,
+    ) -> Result<Option<FilterExprInfo>, Error> {
+        if let Some(repair) = self.pending_fenced_repair.as_mut() {
+            return repair.pending_windows.gen_filter_exprs(
+                col_name,
+                expire_lower_bound,
+                window_size,
+                window_cnt,
+                flow_id,
+                task_ctx,
+            );
+        }
+
+        self.dirty_time_windows.gen_filter_exprs(
+            col_name,
+            expire_lower_bound,
+            window_size,
+            window_cnt,
+            flow_id,
+            task_ctx,
+        )
+    }
+
+    pub fn fenced_repair_watermarks_match_high(
+        &self,
+        participating_regions: &BTreeSet<u64>,
+        watermark_map: &HashMap<u64, u64>,
+    ) -> bool {
+        let Some(repair) = self.pending_fenced_repair.as_ref() else {
+            return false;
+        };
+
+        !participating_regions.is_empty()
+            && participating_regions.len() == repair.high.len()
+            && watermark_map.len() == repair.high.len()
+            && participating_regions.iter().all(|region_id| {
+                repair
+                    .high
+                    .get(region_id)
+                    .zip(watermark_map.get(region_id))
+                    .is_some_and(|(high, watermark)| high == watermark)
+            })
+    }
+
+    pub fn fenced_repair_pending_is_empty(&self) -> bool {
+        self.pending_fenced_repair
+            .as_ref()
+            .is_some_and(|repair| repair.pending_windows.is_empty())
     }
 
     pub fn can_advance_full_snapshot_checkpoints(
@@ -719,6 +832,22 @@ enum ExecState {
 pub enum CheckpointMode {
     FullSnapshot,
     Incremental,
+}
+
+#[derive(Debug, Clone)]
+pub struct FencedRepair {
+    high: BTreeMap<u64, u64>,
+    pending_windows: DirtyTimeWindows,
+}
+
+impl FencedRepair {
+    pub fn high(&self) -> &BTreeMap<u64, u64> {
+        &self.high
+    }
+
+    pub fn pending_windows(&self) -> &DirtyTimeWindows {
+        &self.pending_windows
+    }
 }
 
 /// Filter Expression's information
