@@ -29,6 +29,10 @@ use datatypes::value::Value;
 use datatypes::vectors::{Int64VectorBuilder, StringVectorBuilder};
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
+use store_api::sst_entry::{
+    PUFFIN_INDEX_TYPE_BLOOM_FILTER, PUFFIN_INDEX_TYPE_FULLTEXT_BLOOM,
+    PUFFIN_INDEX_TYPE_FULLTEXT_TANTIVY, PUFFIN_INDEX_TYPE_INVERTED,
+};
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::CatalogManager;
@@ -37,11 +41,11 @@ use crate::error::{
 };
 use crate::system_schema::information_schema::key_column_usage::{
     CONSTRAINT_NAME_FULLTEXT_INDEX, CONSTRAINT_NAME_INVERTED_INDEX, CONSTRAINT_NAME_PRI,
-    CONSTRAINT_NAME_SKIPPING_INDEX, CONSTRAINT_NAME_TIME_INDEX, INDEX_TYPE_FULLTEXT_BLOOM,
-    INDEX_TYPE_FULLTEXT_TANTIVY, INDEX_TYPE_INVERTED_INDEX, INDEX_TYPE_PRI,
-    INDEX_TYPE_SKIPPING_INDEX,
+    CONSTRAINT_NAME_SKIPPING_INDEX, CONSTRAINT_NAME_TIME_INDEX,
 };
-use crate::system_schema::information_schema::{InformationTable, Predicates, STATISTICS};
+use crate::system_schema::information_schema::{
+    InformationTable, Predicates, STATISTICS, primary_key_encoding_index_type,
+};
 
 pub const TABLE_CATALOG: &str = "table_catalog";
 pub const TABLE_SCHEMA: &str = "table_schema";
@@ -68,10 +72,12 @@ const MYSQL_DEFAULT_CATALOG: &str = "def";
 const ASCENDING_COLLATION: &str = "A";
 const YES: &str = "YES";
 const EMPTY: &str = "";
-const BTREE: &str = "BTREE";
+const PRIMARY: &str = "PRIMARY";
+const TIME: &str = "TIME";
 const FULLTEXT: &str = "FULLTEXT";
 const INVERTED: &str = "INVERTED";
-const BLOOM: &str = "BLOOM";
+const SKIPPING: &str = "SKIPPING";
+const SECONDARY_INDEX_SEQ: i64 = 1;
 
 /// The `information_schema.statistics` table provides index metadata in a
 /// MySQL-compatible shape.
@@ -236,6 +242,8 @@ impl InformationSchemaStatisticsBuilder {
                 let table_name = &table_info.name;
                 let keys = &table_info.meta.primary_key_indices;
                 let schema = table.schema();
+                let primary_key_encoding =
+                    primary_key_encoding_index_type(&table_info.meta.options.extra_options);
 
                 for (primary_key_seq, idx) in keys.iter().enumerate() {
                     if let Some(column) = schema.column_schemas().get(*idx) {
@@ -247,15 +255,11 @@ impl InformationSchemaStatisticsBuilder {
                             CONSTRAINT_NAME_PRI,
                             primary_key_seq as i64 + 1,
                             column,
-                            BTREE,
-                            INDEX_TYPE_PRI,
+                            PRIMARY,
+                            primary_key_encoding,
                         );
                     }
                 }
-
-                let mut inverted_seq = 0;
-                let mut fulltext_seq = 0;
-                let mut skipping_seq = 0;
 
                 for column in schema.column_schemas() {
                     if column.is_time_index() {
@@ -267,56 +271,59 @@ impl InformationSchemaStatisticsBuilder {
                             CONSTRAINT_NAME_TIME_INDEX,
                             1,
                             column,
-                            BTREE,
+                            TIME,
                             EMPTY,
                         );
                     }
                     if column.is_inverted_indexed() {
-                        inverted_seq += 1;
+                        let index_name =
+                            column_index_name(CONSTRAINT_NAME_INVERTED_INDEX, &column.name);
                         self.add_statistics(
                             &predicates,
                             &schema_name,
                             table_name,
                             1,
-                            CONSTRAINT_NAME_INVERTED_INDEX,
-                            inverted_seq,
+                            &index_name,
+                            SECONDARY_INDEX_SEQ,
                             column,
                             INVERTED,
-                            INDEX_TYPE_INVERTED_INDEX,
+                            PUFFIN_INDEX_TYPE_INVERTED,
                         );
                     }
                     if let Ok(Some(options)) = column.fulltext_options()
                         && options.enable
                     {
                         let greptime_index_type = match options.backend {
-                            FulltextBackend::Bloom => INDEX_TYPE_FULLTEXT_BLOOM,
-                            FulltextBackend::Tantivy => INDEX_TYPE_FULLTEXT_TANTIVY,
+                            FulltextBackend::Bloom => PUFFIN_INDEX_TYPE_FULLTEXT_BLOOM,
+                            FulltextBackend::Tantivy => PUFFIN_INDEX_TYPE_FULLTEXT_TANTIVY,
                         };
-                        fulltext_seq += 1;
+                        let index_name =
+                            column_index_name(CONSTRAINT_NAME_FULLTEXT_INDEX, &column.name);
                         self.add_statistics(
                             &predicates,
                             &schema_name,
                             table_name,
                             1,
-                            CONSTRAINT_NAME_FULLTEXT_INDEX,
-                            fulltext_seq,
+                            &index_name,
+                            SECONDARY_INDEX_SEQ,
                             column,
                             FULLTEXT,
                             greptime_index_type,
                         );
                     }
                     if column.is_skipping_indexed() {
-                        skipping_seq += 1;
+                        let index_name =
+                            column_index_name(CONSTRAINT_NAME_SKIPPING_INDEX, &column.name);
                         self.add_statistics(
                             &predicates,
                             &schema_name,
                             table_name,
                             1,
-                            CONSTRAINT_NAME_SKIPPING_INDEX,
-                            skipping_seq,
+                            &index_name,
+                            SECONDARY_INDEX_SEQ,
                             column,
-                            BLOOM,
-                            INDEX_TYPE_SKIPPING_INDEX,
+                            SKIPPING,
+                            PUFFIN_INDEX_TYPE_BLOOM_FILTER,
                         );
                     }
                 }
@@ -405,6 +412,10 @@ impl InformationSchemaStatisticsBuilder {
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
+}
+
+fn column_index_name(index_name: &str, column_name: &str) -> String {
+    format!("{}_{}", index_name.replace(' ', "_"), column_name)
 }
 
 impl DfPartitionStream for InformationSchemaStatistics {

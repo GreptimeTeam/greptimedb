@@ -31,6 +31,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::{RegionGroup, RegionId, RegionNumber, RegionSeq, ScanRequest, TableId};
 
+/// Puffin index type for bloom filter indexes.
+pub const PUFFIN_INDEX_TYPE_BLOOM_FILTER: &str = "bloom_filter";
+/// Puffin index type for bloom-backed full-text indexes.
+pub const PUFFIN_INDEX_TYPE_FULLTEXT_BLOOM: &str = "fulltext_bloom";
+/// Puffin index type for Tantivy-backed full-text indexes.
+pub const PUFFIN_INDEX_TYPE_FULLTEXT_TANTIVY: &str = "fulltext_tantivy";
+/// Puffin index type for inverted indexes.
+pub const PUFFIN_INDEX_TYPE_INVERTED: &str = "inverted";
+
 /// An entry describing a SST file known by the engine's manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManifestSstEntry {

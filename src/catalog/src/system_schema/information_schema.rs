@@ -51,6 +51,9 @@ use lazy_static::lazy_static;
 use paste::paste;
 use process_list::InformationSchemaProcessList;
 use region_info::InformationSchemaRegionInfo;
+use store_api::metric_engine_consts::{
+    MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
+};
 use store_api::region_info::RegionInfoEntry;
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{ScanRequest, TableId};
@@ -82,6 +85,23 @@ pub(crate) use crate::system_schema::predicate::Predicates;
 use crate::system_schema::{
     SystemSchemaProvider, SystemSchemaProviderInner, SystemTable, SystemTableRef,
 };
+
+const DENSE_PRIMARY_KEY_ENCODING: &str = "dense";
+const SPARSE_PRIMARY_KEY_ENCODING: &str = "sparse";
+
+pub(crate) fn primary_key_encoding_index_type(options: &HashMap<String, String>) -> &'static str {
+    options
+        .get(PRIMARY_KEY_ENCODING)
+        .or_else(|| options.get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING))
+        .map(|value| {
+            if value.eq_ignore_ascii_case(SPARSE_PRIMARY_KEY_ENCODING) {
+                SPARSE_PRIMARY_KEY_ENCODING
+            } else {
+                DENSE_PRIMARY_KEY_ENCODING
+            }
+        })
+        .unwrap_or(DENSE_PRIMARY_KEY_ENCODING)
+}
 
 lazy_static! {
     // Memory tables in `information_schema`.
