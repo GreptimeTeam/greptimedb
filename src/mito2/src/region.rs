@@ -547,6 +547,7 @@ impl MitoRegion {
         };
 
         // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata.
+        let mut backfill_hook_payload: Option<(RegionMetaActionList, ManifestVersion)> = None;
         if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
             // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr)
             let manifest_meta = &manager.manifest().metadata;
@@ -558,9 +559,10 @@ impl MitoRegion {
                     sst_format: current_version.options.sst_format.unwrap_or_default(),
                     append_mode: None,
                 });
-                let result = manager
-                    .update(RegionMetaActionList::with_action(action), false)
-                    .await;
+                let action_list = RegionMetaActionList::with_action(action);
+                let hook = self.manifest_ctx.hook();
+                let al_for_hook = hook.as_ref().map(|_| action_list.clone());
+                let result = manager.update(action_list, false).await;
 
                 match result {
                     Ok(version) => {
@@ -568,6 +570,7 @@ impl MitoRegion {
                             "Successfully persisted backfilled metadata for region {}, version: {}",
                             self.region_id, version
                         );
+                        backfill_hook_payload = al_for_hook.map(|al| (al, version));
                     }
                     Err(e) => {
                         warn!(e; "Failed to persist backfilled metadata for region {}", self.region_id);
@@ -578,8 +581,21 @@ impl MitoRegion {
 
         drop(manager);
 
-        // Invoke the hook outside the manifest write lock to avoid deadlock.
-        if let Some((action_list, version)) = hook_payload
+        // Merge both payloads into a single hook invocation so consumers see
+        // the complete set of actions and the latest manifest version.
+        let merged = match (hook_payload, backfill_hook_payload) {
+            (Some((al, _v)), Some((backfill_al, backfill_v))) => {
+                // Combine action lists; use the later version (backfill happens after staging merge).
+                let mut combined = al;
+                combined.actions.extend(backfill_al.actions);
+                Some((combined, backfill_v))
+            }
+            (Some(payload), None) => Some(payload),
+            (None, Some(payload)) => Some(payload),
+            (None, None) => None,
+        };
+
+        if let Some((action_list, version)) = merged
             && let Some(hook) = self.manifest_ctx.hook()
         {
             hook.on_manifest_updated(self.region_id, &action_list, version)
