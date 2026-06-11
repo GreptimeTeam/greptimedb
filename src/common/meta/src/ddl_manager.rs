@@ -15,9 +15,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::Repartition;
 use api::v1::alter_table_expr::Kind;
 use api::v1::repartition::Source as PbRepartitionSource;
-use api::v1::{PartitionExprs, Repartition};
 use common_error::ext::BoxedError;
 use common_procedure::{
     BoxedProcedure, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef,
@@ -306,12 +306,12 @@ impl DdlManager {
         let source = repartition.source;
 
         let source = match source {
-            Some(PbRepartitionSource::PartitionExprs(PartitionExprs { exprs })) => {
-                RepartitionSource::Partitioned {
-                    exprs,
-                    target_partition_columns: None,
-                }
-            }
+            Some(PbRepartitionSource::PartitionExprs(source)) => RepartitionSource::Partitioned {
+                exprs: source.exprs,
+                target_partition_columns: source
+                    .target_partition_columns
+                    .map(|columns| columns.columns),
+            },
             Some(PbRepartitionSource::Unpartitioned(source)) => RepartitionSource::Unpartitioned {
                 partition_columns: source.partition_columns,
             },

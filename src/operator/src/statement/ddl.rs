@@ -22,7 +22,7 @@ use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::repartition::Source;
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    PartitionExprs, Repartition, UnpartitionedSource, column_def,
+    PartitionedSource, Repartition, TargetPartitionColumns, UnpartitionedSource, column_def,
 };
 #[cfg(feature = "enterprise")]
 use api::v1::{
@@ -1563,7 +1563,7 @@ impl StatementExecutor {
         let timezone = query_context.timezone();
         // Convert SQL Exprs to PartitionExprs.
         let from_partition_exprs = match &request.source {
-            RepartitionSource::Partitions { from_exprs } => from_exprs
+            RepartitionSource::Partitions { from_exprs, .. } => from_exprs
                 .iter()
                 .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
                 .collect::<Result<Vec<_>>>()?,
@@ -1653,8 +1653,14 @@ impl StatementExecutor {
         let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
         let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
         let source = match &request.source {
-            RepartitionSource::Partitions { .. } => Source::PartitionExprs(PartitionExprs {
+            RepartitionSource::Partitions {
+                target_partition_columns,
+                ..
+            } => Source::PartitionExprs(PartitionedSource {
                 exprs: from_partition_exprs_json,
+                target_partition_columns: target_partition_columns
+                    .clone()
+                    .map(|columns| TargetPartitionColumns { columns }),
             }),
             RepartitionSource::Unpartitioned { partition_columns } => {
                 Source::Unpartitioned(UnpartitionedSource {
