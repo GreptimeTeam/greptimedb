@@ -86,16 +86,11 @@ impl BatchingTask {
 
         if checkpoint_mode == CheckpointMode::Incremental {
             state.mark_full_snapshot();
-            Some(FlowCheckpointDecision::FallbackToFullSnapshot {
-                previous_mode: checkpoint_mode,
-                reason,
-            })
-        } else {
-            Some(FlowCheckpointDecision::FallbackToFullSnapshot {
-                previous_mode: checkpoint_mode,
-                reason,
-            })
         }
+        Some(FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: checkpoint_mode,
+            reason,
+        })
     }
 
     pub(super) fn apply_query_result_to_state(
