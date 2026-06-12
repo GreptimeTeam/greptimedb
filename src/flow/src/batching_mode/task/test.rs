@@ -561,8 +561,10 @@ fn test_scoped_base_repair_with_dirty_backlog_starts_fenced_repair_from_full_sna
         }
     );
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert_eq!(state.dirty_time_windows.len(), 1);
-    assert_eq!(state.pending_fenced_repair().unwrap().high(), &high);
+    assert!(state.dirty_time_windows.is_empty());
+    let repair = state.pending_fenced_repair().unwrap();
+    assert_eq!(repair.high(), &high);
+    assert_eq!(repair.pending_windows().len(), 1);
 }
 
 fn next_fenced_repair_filter(state: &mut TaskState, window_cnt: usize) -> FilterExprInfo {
@@ -627,7 +629,7 @@ fn test_fenced_repair_chunk_with_pending_windows_stays_full_snapshot() {
             .len(),
         1
     );
-    assert_eq!(state.dirty_time_windows.len(), 2);
+    assert!(state.dirty_time_windows.is_empty());
 }
 
 #[test]
@@ -646,8 +648,7 @@ fn test_continued_fenced_repair_uses_pending_snapshot_not_later_live_dirty() {
     state.start_fenced_repair(high.clone()).unwrap();
 
     // Make the two queues distinguishable: the fenced repair should keep using
-    // the pending snapshot captured above, not this later live dirty window.
-    state.dirty_time_windows.clean();
+    // the moved pending backlog captured above, not this later live dirty window.
     state.dirty_time_windows.add_window(
         Timestamp::new_second(1000),
         Some(Timestamp::new_second(1005)),
@@ -714,7 +715,7 @@ fn test_final_fenced_repair_chunk_advances_to_high() {
     assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
     assert_eq!(state.checkpoints(), &high);
     assert!(state.pending_fenced_repair().is_none());
-    assert_eq!(state.dirty_time_windows.len(), 1);
+    assert!(state.dirty_time_windows.is_empty());
 }
 
 #[test]
@@ -759,11 +760,6 @@ fn test_fenced_repair_chunk_watermark_mismatch_restores_pending_but_consumes_inf
 
     let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
     state.start_fenced_repair(high.clone()).unwrap();
-    // Isolate the restore assertions: the real state keeps live dirty windows
-    // during fenced repair, but clearing them here proves mismatch restoration
-    // brings back only the remaining pending window. The successful in-flight
-    // chunk is consumed.
-    state.dirty_time_windows.clean();
 
     let _filter = next_fenced_repair_filter(&mut state, 1);
     assert_eq!(
@@ -810,6 +806,9 @@ async fn test_fenced_repair_mismatch_next_plan_is_scoped_base_repair() {
         state
             .dirty_time_windows
             .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
         state.start_fenced_repair(high.clone()).unwrap();
         next_fenced_repair_filter(&mut state, 1)
     };
@@ -844,6 +843,14 @@ async fn test_fenced_repair_mismatch_next_plan_is_scoped_base_repair() {
         .unwrap()
         .expect("mismatch should keep live dirty backlog for a fresh scoped repair");
     assert!(matches!(plan.coverage, QueryCoverage::ScopedBaseRepair));
+    let DirtyRestore::Scoped(filter) = &plan.dirty_restore else {
+        panic!("scoped base repair should carry scoped dirty restore info");
+    };
+    assert_eq!(
+        filter.time_ranges,
+        vec![(Timestamp::new_second(100), Timestamp::new_second(105))],
+        "executed pre-H repair item should not be requeued; only remaining pending window is retried"
+    );
 }
 
 #[test]
@@ -1070,7 +1077,7 @@ fn test_fenced_repair_transient_non_stale_failure_retries_same_high() {
     );
     assert_eq!(
         state.dirty_time_windows.len(),
-        2,
+        0,
         "live dirty windows unchanged (not where in-flight was restored)"
     );
 }

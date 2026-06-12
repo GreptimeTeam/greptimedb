@@ -167,8 +167,9 @@ impl TaskState {
     }
 
     /// Start repairing the current live dirty windows under a frozen high `H`.
-    /// The live dirty queue is intentionally cloned, not cleared, so post-`H`
-    /// dirty signals remain available for later incremental work.
+    /// The current live backlog is moved into the fenced repair so successful
+    /// chunks are consumed from that backlog. New post-`H` dirty signals can
+    /// still arrive in the live queue while the fenced repair is active.
     pub fn start_fenced_repair(&mut self, high: BTreeMap<u64, u64>) -> Option<&FencedRepair> {
         if self.dirty_time_windows.is_empty() {
             self.pending_fenced_repair = None;
@@ -176,6 +177,7 @@ impl TaskState {
         }
 
         let pending_windows = self.dirty_time_windows.clone();
+        self.dirty_time_windows.clean();
         self.pending_fenced_repair = Some(FencedRepair {
             high,
             pending_windows,

@@ -146,9 +146,12 @@ impl BatchingTask {
                     {
                         // A successful repair chunk whose terminal watermark
                         // differs from the frozen fence `H` cannot prove that
-                        // continuing the same repair is safe. The chunk already
-                        // executed, so consume it; only restore not-yet-in-flight
-                        // pending windows, then start over with a fresh H.
+                        // continuing the same repair is safe. The pre-`H`
+                        // repair work item already executed under the snapshot
+                        // fence, so do not requeue it; restore only
+                        // not-yet-in-flight pending windows, then start over
+                        // with a fresh H. Later/post-`H` writes still rely on
+                        // live dirty notifications.
                         state.abandon_fenced_repair();
                         return FlowCheckpointDecision::FallbackToFullSnapshot {
                             previous_mode: checkpoint_mode,
