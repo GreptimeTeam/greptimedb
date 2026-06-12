@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["acquire_remote_dyn_filter_registry_lease","query_context_for_remote_dyn_filter_region","query_engine_state_from_task_context","remote_dyn_filter_enabled"],"struct":["MergeScanExec","MergeScanLogicalPlan","MergeScanMetric","PartitionMetrics","RegionMetrics"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["constants"],"struct":["AzblobCore","Blob","BlobPrefix","Blobs","ListBlobsOutput","Properties","PutBlockListRequest"]};

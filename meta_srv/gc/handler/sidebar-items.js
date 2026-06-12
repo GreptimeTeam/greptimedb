@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["dropped_candidate","dropped_region_stat"]};

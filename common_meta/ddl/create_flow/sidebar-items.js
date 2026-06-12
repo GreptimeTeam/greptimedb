@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFER_ON_MISSING_SOURCE_KEY","FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY"],"enum":["CreateFlowState","FlowType"],"fn":["defer_on_missing_source","get_flow_type_from_options","metadata_flow_options","user_runtime_flow_options","validate_flow_options"],"mod":["metadata"],"struct":["CreateFlowData","CreateFlowProcedure"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INIT_CAPACITY","METADATA_QUALITY","PIPELINE","SEMANTIC_OPTIONS","SIGNAL_TYPE","SOURCE","TABLE_CATALOG","TABLE_ID","TABLE_NAME","TABLE_SCHEMA"],"fn":["optional_value"],"struct":["InformationSchemaSemanticTablesBuilder","InformationSchemaTableSemantics","SemanticRow"]};

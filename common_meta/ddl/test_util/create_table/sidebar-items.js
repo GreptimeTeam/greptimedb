@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TestCreateTableExprBuilderError"],"fn":["build_raw_table_info_from_expr","test_create_table_task"],"struct":["TestCreateTableExpr","TestCreateTableExprBuilder"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["replicate_decimal128"],"struct":["Decimal128Iter","Decimal128Vector","Decimal128VectorBuilder"]};

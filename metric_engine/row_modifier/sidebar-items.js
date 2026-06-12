@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TableIdInput"],"struct":["IterIndex","RowIter","RowModifier","RowsIter","TsidGenerator","ValueIndex"]};

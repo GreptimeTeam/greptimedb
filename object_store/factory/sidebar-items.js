@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["new_azblob_object_store","new_fs_object_store","new_gcs_object_store","new_oss_object_store","new_raw_object_store","new_s3_object_store"]};

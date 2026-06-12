@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["Env","GreptimeDB","NaiveResourcesManager"],"trait":["DatabaseManager","ResourcesManager"]};

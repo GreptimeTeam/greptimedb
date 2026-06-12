@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MYSQL_CLEAR_PASSWORD","MYSQL_NATIVE_PASSWORD"],"enum":["Params"],"fn":["all_params_have_types","convert_param_value_to_string","dummy_params","format_duration","location_to_byte_offset","prepared_params","replace_params","replace_params_with_exprs","replace_params_with_values","validate_query"],"struct":["MysqlInstanceShim"]};

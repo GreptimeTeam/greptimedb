@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MANIFEST_DIR","MANIFEST_TYPE"],"struct":["IndexValue","ManifestCache"]};

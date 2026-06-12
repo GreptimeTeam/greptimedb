@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["apply_hints","extract_hints"]};

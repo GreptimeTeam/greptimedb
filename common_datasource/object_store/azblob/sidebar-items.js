@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ACCOUNT_KEY","ACCOUNT_NAME","ENDPOINT","SAS_TOKEN"],"fn":["build_azblob_backend","is_supported_in_azblob"]};

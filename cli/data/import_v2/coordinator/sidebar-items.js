@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_import_tasks","chunk_has_schema_files","import_with_resume_session_with_progress","prepare_import_resume","state_mismatch","task_set_from_config","task_set_from_state","update_status_and_save","validate_config_tasks","validate_state_matches"],"struct":["ImportResumeConfig","ImportResumeSession"],"trait":["ImportTaskExecutor"]};

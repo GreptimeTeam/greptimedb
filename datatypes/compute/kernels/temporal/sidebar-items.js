@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DatePart"],"fn":["date_part"]};

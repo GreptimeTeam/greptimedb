@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["BoxedError","PlainError","Whatever","WhateverSnafu"],"trait":["ErrorExt","StackError"],"type":["WhateverResult"]};

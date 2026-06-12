@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DUMMY_COLUMN"],"fn":["args_to_vector","try_get_data_type_for_sql_value","value_to_vector","values_to_vectors_by_exact_types","values_to_vectors_by_valid_types"]};

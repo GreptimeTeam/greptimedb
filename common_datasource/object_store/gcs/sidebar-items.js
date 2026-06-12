@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CREDENTIAL","ENDPOINT","SCOPE"],"fn":["build_gcs_backend","is_supported_in_gcs"]};

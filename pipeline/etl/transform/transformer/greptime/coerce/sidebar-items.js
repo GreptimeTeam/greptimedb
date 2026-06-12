@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_fulltext_index_options","build_skipping_index_options","coerce_bool_value","coerce_columns","coerce_f64_value","coerce_i64_value","coerce_json_value","coerce_options","coerce_semantic_type","coerce_string_value","coerce_u64_value","coerce_value","transform_index_label","validate_transform_index_state"],"macro":["coerce_string_value"]};

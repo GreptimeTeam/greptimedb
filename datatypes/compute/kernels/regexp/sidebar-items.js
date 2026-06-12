@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["regexp_is_match","regexp_is_match_scalar","regexp_match"]};

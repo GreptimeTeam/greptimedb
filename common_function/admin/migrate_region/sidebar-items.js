@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TIMEOUT_SECS"],"fn":["migrate_region","signature"],"struct":["MigrateRegionFunction"]};

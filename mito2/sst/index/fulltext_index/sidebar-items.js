@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INDEX_BLOB_TYPE_BLOOM","INDEX_BLOB_TYPE_TANTIVY"],"mod":["applier","creator"]};

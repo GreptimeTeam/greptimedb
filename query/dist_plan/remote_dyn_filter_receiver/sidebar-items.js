@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["remap_physical_expr_columns"],"struct":["RemoteDynFilterReceiverExtensionPlanner","RemoteDynFilterReceiverInjector","RemoteDynFilterReceiverLogicalPlan"],"type":["InjectRemoteDynFilterReceiver","RemoteDynFilterReceiverInjectorRef"]};

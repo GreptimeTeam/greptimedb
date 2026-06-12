@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AutoCreateTableType"],"fn":["apply_per_table_semantic_options","build_create_table_expr","fill_table_options_for_create","validate_column_count_match"],"struct":["CreateAlterTableResult","FlowMirrorTask","Inserter","InstantAndNormalInsertRequests"],"type":["InserterRef"]};

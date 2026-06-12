@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_BATCH_SIZE"],"struct":["MatrixGenerator","PartitionChecker"]};

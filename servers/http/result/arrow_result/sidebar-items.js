@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["compression_type","write_arrow_bytes"],"struct":["ArrowResponse"]};

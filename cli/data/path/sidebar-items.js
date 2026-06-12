@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["data_dir_for_schema_chunk","ddl_path_for_schema","encode_path_segment","hex_char"]};

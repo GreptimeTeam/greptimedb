@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["StandaloneFlag"],"trait":["PluginOptionsDeserializer","PluginOptionsSerializer"],"type":["PluginOptionsSerializerRef"]};

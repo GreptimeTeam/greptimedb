@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"fn":["ensure"],"struct":["ColumnNotFoundSnafu","DataFusionPlanningSnafu","DeserializeSnafu","EmptyRangeSnafu","IllegalRangeSnafu"],"type":["Result"]};

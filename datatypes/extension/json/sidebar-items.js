@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_json_extension_type"],"struct":["JsonExtensionType","JsonMetadata"]};

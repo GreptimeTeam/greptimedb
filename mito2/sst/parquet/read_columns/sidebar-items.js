@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_parquet_leaves_indices","build_projection_plan"],"struct":["ParquetReadColumn","ParquetReadColumns","ProjectionMaskPlan"],"type":["ParquetNestedPath"]};

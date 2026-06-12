@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["merge","merge_nested_paths","normalize_nested_paths","read_columns_from_predicate","read_columns_from_projection"],"struct":["ReadColumn","ReadColumns"]};

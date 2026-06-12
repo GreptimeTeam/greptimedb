@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["extract_args","find_function_context"],"struct":["FunctionContext"],"trait":["Function"],"type":["FunctionRef"]};

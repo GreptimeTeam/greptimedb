@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["trace_semconv_fixed_type"]};

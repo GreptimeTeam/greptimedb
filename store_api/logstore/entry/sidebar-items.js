@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Entry","MultiplePartHeader"],"struct":["MultiplePartEntry","NaiveEntry"],"type":["Id"]};

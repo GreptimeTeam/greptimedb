@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FileDescriptor"],"fn":["build_copy_file_paths","build_delete_file_path"],"struct":["RegionFileCopier","RegionMetadataLoader"]};

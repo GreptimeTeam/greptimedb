@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fetch_table_options","parse_show_create"]};

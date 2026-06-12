@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CLAMP_MAX_NAME","CLAMP_MIN_NAME","CLAMP_NAME"],"fn":["clamp_impl"],"struct":["ClampFunction","ClampMaxFunction","ClampMinFunction"]};

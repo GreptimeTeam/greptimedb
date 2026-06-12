@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INITIAL_TIME_WINDOW"],"fn":["filter_record_batch","partition_start_timestamp"],"macro":["create_filter_buffer","handle_timestamp_array"],"struct":["PartTimeRange","PartitionToWrite","PartitionsInner","TimePartition","TimePartitions"],"type":["PartitionVec","TimePartitionsRef"]};

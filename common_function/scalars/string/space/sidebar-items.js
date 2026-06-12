@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_SPACE_COUNT","NAME"],"fn":["get_int_value"],"struct":["SpaceFunction"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BULK_ENTRY_TAG","MUTATION_TAG","OP_TYPE_TAG","ROWS_TAG","ROW_TAG","SCHEMA_TAG","SEQUENCE_TAG","VALUE_TAG","WRITE_HINT_TAG"],"fn":["msg_field_len"],"struct":["WalEntryEncoder"]};

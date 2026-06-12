@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["builder"],"struct":["FulltextIndexApplier","FulltextIndexApplyMetrics","IndexSource"],"type":["FulltextIndexApplierRef"]};

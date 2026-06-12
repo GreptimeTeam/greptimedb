@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["LeaderStepDownEvent"],"fn":["get_node_id","handle_ask_leader","handle_request_stream_error","register_pusher","wait_leader_step_down"],"struct":["ElectionLeaderStepDown","HeartbeatSession","TonicHeartbeatRequestStream"],"trait":["HeartbeatRequestStream","LeaderStepDown"],"type":["HeartbeatResponseResult"]};

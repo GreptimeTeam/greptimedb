@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["setup_metasrv_plugins_post_build","setup_metasrv_plugins_pre_build","start_metasrv_plugins"]};

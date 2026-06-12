@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["align_array","align_batch_to_schema","fill_missing_cols"],"struct":["NestedSchemaAligner"],"type":["ProjectedRecordBatchStream"]};

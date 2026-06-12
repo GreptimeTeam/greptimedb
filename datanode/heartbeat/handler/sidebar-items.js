@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["InstructionHandlers"],"macro":["dispatch_instr","impl_from_handler"],"mod":["apply_staging_manifest","close_region","downgrade_region","enter_staging","file_ref","flush_region","gc_worker","open_region","remap_manifest","sync_region","upgrade_region"],"struct":["HandlerContext","RegionHeartbeatResponseHandler"],"trait":["InstructionHandler"]};

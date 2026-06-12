@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["const_normalization","constant_term","count_nest_aggr","count_wildcard","json_type_concretize","parallelize_scan","pass_distribution","promql_tsid_narrow_join","remove_duplicate","scan_hint","string_normalization","transcribe_atat","type_conversion","windowed_sort"],"trait":["ExtensionAnalyzerRule"]};

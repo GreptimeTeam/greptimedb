@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_partitions_from_region_routes"],"struct":["PartitionInfo","PartitionInfoWithVersion","PartitionRuleManager"],"type":["PartitionRuleManagerRef"]};

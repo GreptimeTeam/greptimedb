@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BinaryArrayData","BinaryIter","MutableBinaryArrayData"],"struct":["BinaryVector","BinaryVectorBuilder"]};

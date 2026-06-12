@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SAMPLES_RESPONSE_TYPE"],"fn":["auto_create_table_type_for_prom_remote_write","fill_metric_physical_table_options","is_supported","negotiate_response_type","required_physical_table_for_create_type","to_query_result"],"struct":["ExportMetricHandler"]};
