@@ -458,6 +458,8 @@ impl BatchingEngine {
             .is_some_and(|value| value.eq_ignore_ascii_case("true"))
     }
 
+    /// SQL flows without a usable time-window expression can only run as an
+    /// explicit full-query flow, so require `EVAL INTERVAL` at creation time.
     fn ensure_sql_flow_has_twe_or_eval_interval(
         eval_interval: Option<i64>,
         has_time_window_expr: bool,

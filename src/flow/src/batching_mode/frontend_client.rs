@@ -387,6 +387,8 @@ impl FrontendClient {
         }
     }
 
+    /// Execute a flow query and return terminal metrics. `snapshot_seqs` are
+    /// optional read upper bounds used only by snapshot-fenced repair chunks.
     pub(crate) async fn query_with_terminal_metrics(
         &self,
         catalog: &str,

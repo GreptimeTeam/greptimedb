@@ -173,18 +173,26 @@ pub enum QueryCoverage {
     /// must not be used as an implicit recovery path for scoped repair or an
     /// unsafe incremental rewrite fallback.
     UnfilteredFull,
+    /// Scoped full-snapshot repair over the current dirty windows. A successful
+    /// result may start a fenced repair if new dirty windows appeared meanwhile.
     ScopedBaseRepair,
-    FencedRepairChunk {
-        high: BTreeMap<u64, u64>,
-    },
+    /// A chunk of windows being repaired under the frozen high-watermark `H`.
+    /// The `high` map is sent as snapshot read bounds and must be matched by
+    /// the returned terminal watermarks before checkpoints can advance.
+    FencedRepairChunk { high: BTreeMap<u64, u64> },
+    /// Incremental delta query over `(checkpoint, scan-open snapshot]`.
     IncrementalDelta,
 }
 
 impl QueryCoverage {
+    /// Whether this query should use incremental scan extensions and
+    /// incremental checkpoint advancement rules.
     fn is_incremental_delta(&self) -> bool {
         matches!(self, Self::IncrementalDelta)
     }
 
+    /// Snapshot upper bounds requested from the storage layer. Only fenced
+    /// repair chunks carry bounds; all other coverage relies on normal scans.
     fn snapshot_seqs(&self) -> HashMap<u64, u64> {
         match self {
             Self::FencedRepairChunk { high } => high.iter().map(|(k, v)| (*k, *v)).collect(),
@@ -755,6 +763,8 @@ impl BatchingTask {
         }
     }
 
+    /// Restore the dirty signal for a plan that was generated but failed before
+    /// it could prove any checkpoint advancement.
     fn restore_dirty_windows_after_failure(&self, query: &PlanInfo) {
         self.restore_dirty_windows(&query.dirty_restore);
     }
@@ -785,10 +795,14 @@ impl BatchingTask {
         }
     }
 
+    /// Restore scoped windows through `TaskState` so fenced repair can decide
+    /// whether they go back to pending repair or live dirty state.
     fn restore_scoped_dirty_windows(&self, filter: &FilterExprInfo) {
         self.state.write().unwrap().restore_scoped_windows(filter);
     }
 
+    /// Run a fallible scoped operation and restore its consumed windows if plan
+    /// generation/rewrite fails before execution.
     fn restore_scoped_dirty_windows_on_err<T>(
         &self,
         filter: &FilterExprInfo,
@@ -799,6 +813,8 @@ impl BatchingTask {
         })
     }
 
+    /// Restore an unscoped dirty signal consumed by an explicit full-query or
+    /// incremental-delta plan.
     fn restore_unscoped_dirty_windows(&self, dirty_windows: &DirtyTimeWindows) {
         self.state
             .write()
@@ -807,6 +823,8 @@ impl BatchingTask {
             .add_dirty_windows(dirty_windows);
     }
 
+    /// Run a fallible unscoped operation and restore the dirty signal if it
+    /// fails before a query is executed.
     fn restore_unscoped_dirty_windows_on_err<T>(
         &self,
         dirty_windows: &DirtyTimeWindows,
@@ -817,6 +835,8 @@ impl BatchingTask {
         })
     }
 
+    /// Consume the live dirty signal for an unscoped query while keeping a copy
+    /// that can be restored if planning or execution fails.
     fn drain_dirty_windows_signal(&self) -> (bool, DirtyTimeWindows) {
         let mut state = self.state.write().unwrap();
         let dirty_windows_to_restore = state.dirty_time_windows.clone();
@@ -826,6 +846,8 @@ impl BatchingTask {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Build an unfiltered plan for explicit full-query or incremental-delta
+    /// coverage. Callers pass the consumed dirty signal for failure restoration.
     async fn gen_unfiltered_plan_info(
         &self,
         engine: QueryEngineRef,
@@ -879,6 +901,8 @@ impl BatchingTask {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Build an unfiltered plan only when the live dirty signal was present;
+    /// otherwise skip this round without querying.
     async fn gen_unfiltered_plan_info_if_dirty(
         &self,
         engine: QueryEngineRef,
@@ -1049,6 +1073,8 @@ impl BatchingTask {
         create_table_with_expr(&plan, &self.config.sink_table_name, &self.config.query_type)
     }
 
+    /// Incremental delta scans are unfiltered by dirty windows; the sequence
+    /// range, not a time predicate, defines source correctness.
     fn should_use_unfiltered_incremental_delta(&self) -> bool {
         let state = self.state.read().unwrap();
         state.checkpoint_mode() == CheckpointMode::Incremental
@@ -1056,7 +1082,8 @@ impl BatchingTask {
             && matches!(self.config.query_type, QueryType::Sql)
     }
 
-    /// will merge and use the first ten time window in query
+    /// Generate the next plan and classify its coverage so checkpoint handling
+    /// knows whether it is full-query, scoped repair, fenced repair, or delta.
     async fn gen_query_with_time_window(
         &self,
         engine: QueryEngineRef,

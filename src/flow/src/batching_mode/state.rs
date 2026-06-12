@@ -114,6 +114,8 @@ impl TaskState {
         &self.checkpoints
     }
 
+    /// Returns the in-progress fenced repair, if the task is repairing dirty
+    /// windows under a frozen full-snapshot high watermark.
     pub fn pending_fenced_repair(&self) -> Option<&FencedRepair> {
         self.pending_fenced_repair.as_ref()
     }
@@ -129,11 +131,15 @@ impl TaskState {
         self.mark_full_snapshot();
     }
 
+    /// Move back to top-level FullSnapshot mode and discard any fenced repair
+    /// sub-state tied to an older watermark.
     pub fn mark_full_snapshot(&mut self) {
         self.checkpoint_mode = CheckpointMode::FullSnapshot;
         self.pending_fenced_repair = None;
     }
 
+    /// Replace full-snapshot checkpoints with a complete watermark proof.
+    /// Clears fenced repair state and enters Incremental unless disabled.
     pub fn advance_checkpoints(&mut self, watermark_map: HashMap<u64, u64>) {
         self.checkpoints = watermark_map.into_iter().collect();
         self.pending_fenced_repair = None;
@@ -142,6 +148,8 @@ impl TaskState {
         }
     }
 
+    /// Advance only the participating regions for an incremental delta query.
+    /// This also clears any stale fenced repair sub-state.
     pub fn advance_incremental_checkpoints_with_participation(
         &mut self,
         participating_regions: &BTreeSet<u64>,
@@ -158,6 +166,9 @@ impl TaskState {
         self.pending_fenced_repair = None;
     }
 
+    /// Start repairing the current live dirty windows under a frozen high `H`.
+    /// The live dirty queue is intentionally cloned, not cleared, so post-`H`
+    /// dirty signals remain available for later incremental work.
     pub fn start_fenced_repair(&mut self, high: BTreeMap<u64, u64>) -> Option<&FencedRepair> {
         if self.dirty_time_windows.is_empty() {
             self.pending_fenced_repair = None;
@@ -173,6 +184,8 @@ impl TaskState {
         self.pending_fenced_repair.as_ref()
     }
 
+    /// Finish the fenced repair and promote the frozen high watermark to the
+    /// checkpoint map. Incremental-disabled flows stay in FullSnapshot mode.
     pub fn finish_fenced_repair(&mut self) -> Option<BTreeMap<u64, u64>> {
         let repair = self.pending_fenced_repair.take()?;
         self.checkpoints = repair.high;
@@ -182,6 +195,8 @@ impl TaskState {
         Some(self.checkpoints.clone())
     }
 
+    /// Abandon the current fenced repair and restore all not-yet-in-flight
+    /// pending windows to the live dirty queue for a fresh scoped repair.
     pub fn abandon_fenced_repair(&mut self) -> bool {
         self.checkpoint_mode = CheckpointMode::FullSnapshot;
         let Some(repair) = self.pending_fenced_repair.take() else {
@@ -193,6 +208,9 @@ impl TaskState {
         true
     }
 
+    /// Restore a scoped query's windows after a failed or unproven run. During
+    /// an active fenced repair this requeues into `pending_windows`; otherwise
+    /// it restores to the live dirty queue.
     pub fn restore_scoped_windows(&mut self, filter: &FilterExprInfo) {
         if let Some(repair) = self.pending_fenced_repair.as_mut() {
             repair
@@ -205,6 +223,8 @@ impl TaskState {
             .add_windows(filter.time_ranges.clone());
     }
 
+    /// Generate the next scoped filter from the fenced-repair queue when active;
+    /// otherwise consume windows from the live dirty queue.
     pub fn gen_scoped_filter_exprs(
         &mut self,
         col_name: &str,
@@ -235,6 +255,8 @@ impl TaskState {
         )
     }
 
+    /// Returns true only when the query result's participating regions and
+    /// terminal watermarks exactly match the fenced repair's frozen high `H`.
     pub fn fenced_repair_watermarks_match_high(
         &self,
         participating_regions: &BTreeSet<u64>,
@@ -256,12 +278,15 @@ impl TaskState {
             })
     }
 
+    /// Whether the active fenced repair has drained all pending windows.
     pub fn fenced_repair_pending_is_empty(&self) -> bool {
         self.pending_fenced_repair
             .as_ref()
             .is_some_and(|repair| repair.pending_windows.is_empty())
     }
 
+    /// Full-snapshot checkpoint advances require a watermark for every region
+    /// that participated in the query.
     pub fn can_advance_full_snapshot_checkpoints(
         &self,
         participating_regions: &BTreeSet<u64>,
@@ -274,6 +299,8 @@ impl TaskState {
                 .all(|region_id| watermark_map.contains_key(region_id))
     }
 
+    /// Incremental advances are limited to participating regions whose returned
+    /// watermark is not older than the stored checkpoint.
     pub fn can_advance_incremental_checkpoints_with_participation(
         &self,
         participating_regions: &BTreeSet<u64>,
@@ -834,6 +861,8 @@ pub enum CheckpointMode {
     Incremental,
 }
 
+/// Dirty windows that must be repaired under a frozen full-snapshot watermark.
+/// This is a FullSnapshot sub-state, not a separate checkpoint mode.
 #[derive(Debug, Clone)]
 pub struct FencedRepair {
     high: BTreeMap<u64, u64>,
@@ -841,10 +870,12 @@ pub struct FencedRepair {
 }
 
 impl FencedRepair {
+    /// Frozen high watermark `H` used as the snapshot upper bound for chunks.
     pub fn high(&self) -> &BTreeMap<u64, u64> {
         &self.high
     }
 
+    /// Dirty windows still waiting to be repaired under `high`.
     pub fn pending_windows(&self) -> &DirtyTimeWindows {
         &self.pending_windows
     }

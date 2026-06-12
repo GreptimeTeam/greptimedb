@@ -31,6 +31,8 @@ use crate::metrics::{
 use crate::{Error, FlowId};
 
 impl BatchingTask {
+    /// Restore windows for a query that executed but did not provide enough
+    /// watermark proof to advance checkpoints.
     fn restore_dirty_windows_for_unadvanced_query(
         state: &mut TaskState,
         dirty_restore: &DirtyRestore,
@@ -43,6 +45,8 @@ impl BatchingTask {
         }
     }
 
+    /// Classify execution errors into checkpoint fallback reasons. A stale
+    /// snapshot fence is special only for fenced repair chunks.
     pub(super) fn query_failure_reason(
         err: &Error,
         coverage: &QueryCoverage,
@@ -60,6 +64,9 @@ impl BatchingTask {
         }
     }
 
+    /// Apply the conservative state transition for a failed query. This never
+    /// advances checkpoints; it only decides whether to abandon repair state or
+    /// fall back from incremental mode.
     pub(super) fn apply_query_failure_to_state(
         state: &mut TaskState,
         elapsed: Duration,
@@ -93,6 +100,8 @@ impl BatchingTask {
         })
     }
 
+    /// Apply checkpoint transitions for a successfully executed query using its
+    /// terminal watermark proof and declared coverage.
     pub(super) fn apply_query_result_to_state(
         state: &mut TaskState,
         res: &OutputWithMetrics,
