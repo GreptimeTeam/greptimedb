@@ -325,15 +325,27 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_legacy_region_wal_options() {
-        let json = r#"{
-            "region_wal_options": {
-                "1": "{\"wal.provider\":\"raft_engine\"}",
-                "2": "{\"wal.provider\":\"kafka\",\"wal.kafka.topic\":\"topic_a\"}"
-            }
-        }"#;
+    fn test_deserialize_legacy_region_wal_options_from_encoded_map() {
+        let legacy_region_wal_options = HashMap::from([
+            (1, serde_json::to_string(&WalOptions::RaftEngine).unwrap()),
+            (
+                2,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(
+                    "topic_a".to_string(),
+                )))
+                .unwrap(),
+            ),
+        ]);
+        let legacy_json = serde_json::json!({
+            "region_wal_options": legacy_region_wal_options,
+        });
 
-        let decoded: RegionWalOptionsWrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            legacy_json.to_string(),
+            r#"{"region_wal_options":{"1":"{\"wal.provider\":\"raft_engine\"}","2":"{\"wal.provider\":\"kafka\",\"wal.kafka.topic\":\"topic_a\"}"}}"#
+        );
+
+        let decoded: RegionWalOptionsWrapper = serde_json::from_value(legacy_json).unwrap();
 
         assert_eq!(
             decoded.region_wal_options,
@@ -341,10 +353,7 @@ mod tests {
                 (1, WalOptions::RaftEngine),
                 (
                     2,
-                    WalOptions::Kafka(KafkaWalOptions {
-                        topic: "topic_a".to_string(),
-                        initial_pruned_entry_id: None,
-                    }),
+                    WalOptions::Kafka(KafkaWalOptions::new("topic_a".to_string())),
                 ),
             ])
         );
