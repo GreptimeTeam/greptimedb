@@ -105,15 +105,27 @@ impl HashPasswordCommand {
     }
 
     fn read_password(&self) -> Result<String> {
-        if let Some(password) = self.password.as_ref() {
-            return Ok(password.clone());
+        let password = if let Some(password) = self.password.as_ref() {
+            password.clone()
+        } else {
+            let mut password = String::new();
+            io::stdin()
+                .read_line(&mut password)
+                .context(error::FileIoSnafu)?;
+            password.trim_end_matches(['\r', '\n']).to_string()
+        };
+
+        // A blank password is rejected by the user provider before verifier
+        // comparison, so a verifier built from it would be unusable. Fail fast
+        // instead of emitting a dead verifier (e.g. on EOF or an empty line).
+        if password.is_empty() {
+            return error::IllegalConfigSnafu {
+                msg: "password must not be empty",
+            }
+            .fail();
         }
 
-        let mut password = String::new();
-        io::stdin()
-            .read_line(&mut password)
-            .context(error::FileIoSnafu)?;
-        Ok(password.trim_end_matches(['\r', '\n']).to_string())
+        Ok(password)
     }
 
     fn pbkdf2_salt(&self) -> Result<Vec<u8>> {
@@ -196,6 +208,20 @@ mod tests {
         };
 
         assert!(cmd.pbkdf2_salt().is_err());
+    }
+
+    #[test]
+    fn test_reject_empty_password() {
+        let cmd = HashPasswordCommand {
+            format: PasswordFormat::Pbkdf2Sha256,
+            password: Some(String::new()),
+            password_stdin: false,
+            iterations: 4096,
+            salt_len: 16,
+            salt_hex: Some("73616c74".to_string()),
+        };
+
+        assert!(cmd.read_password().is_err());
     }
 
     #[test]
