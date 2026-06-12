@@ -119,7 +119,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        if let Err(err) = opener.ensure_open_requirements(requirements) {
+        if let Err(err) = opener.ensure_region_requirements(requirements) {
             sender.send(Err(err));
             return;
         }
@@ -141,8 +141,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             match opener.open(&config, &wal).await {
                 Ok(region) => {
                     info!(
-                        "Region {} is opened, worker: {}, elapsed: {:?}",
+                        "Region {} is opened with requirements {:?}, worker: {}, elapsed: {:?}",
                         region_id,
+                        requirements,
                         worker_id,
                         now.elapsed()
                     );

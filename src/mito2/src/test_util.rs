@@ -907,6 +907,7 @@ impl CreateRequestBuilder {
             table_dir: self.table_dir.clone(),
             path_type: PathType::Bare,
             partition_expr_json: self.partition_expr_json.clone(),
+            requirements: Default::default(),
         }
     }
 
@@ -973,6 +974,7 @@ impl CreateRequestBuilder {
             table_dir: self.table_dir.clone(),
             path_type: PathType::Bare,
             partition_expr_json: self.partition_expr_json.clone(),
+            requirements: Default::default(),
         }
     }
 }

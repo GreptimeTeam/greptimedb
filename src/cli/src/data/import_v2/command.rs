@@ -15,6 +15,7 @@
 //! Import V2 CLI command.
 
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -39,25 +40,70 @@ use crate::data::import_v2::error::{
 use crate::data::import_v2::executor::{DdlExecutor, DdlStatement};
 use crate::data::import_v2::state::{ImportTaskKey, default_state_path};
 use crate::data::path::{data_dir_for_schema_chunk, ddl_path_for_schema};
-use crate::data::progress::{LogProgress, NoopProgress, ProgressReporter};
+use crate::data::progress::{IndicatifProgress, LogProgress, NoopProgress, ProgressReporter};
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 
 /// Controls progress reporting for import-v2.
 ///
-/// For now `auto` and `always` both emit lightweight log progress; only
-/// `never` is silent. A richer interactive bar can later distinguish `auto`
-/// from `always` without changing call sites.
+/// `auto` shows an interactive bar only on a TTY and falls back to lightweight
+/// log progress otherwise; `always` always emits progress, using the bar on a
+/// TTY and lightweight logs otherwise; `never` is silent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 #[value(rename_all = "lowercase")]
 pub(crate) enum ProgressMode {
-    /// Choose automatically (currently lightweight log progress).
+    /// Show an interactive bar on a TTY, otherwise log progress.
     #[default]
     Auto,
-    /// Always emit lightweight log progress.
+    /// Always emit progress: a bar on TTY, lightweight logs otherwise.
     Always,
     /// Never emit progress.
     Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProgressOutputKind {
+    Bar,
+    Log,
+    Silent,
+}
+
+/// Selects the progress output style for `mode` given whether stderr is a TTY
+/// and whether the terminal environment is suitable for progress-bar control
+/// sequences.
+///
+/// The interactive `indicatif` stderr target hides itself when redirected or
+/// when the terminal is not user-attended, so forced progress falls back to
+/// [`LogProgress`] instead of a hidden bar in those cases.
+fn progress_output_kind(
+    mode: ProgressMode,
+    stderr_is_tty: bool,
+    term_supports_progress_bar: bool,
+) -> ProgressOutputKind {
+    let can_show_bar = stderr_is_tty && term_supports_progress_bar;
+    match mode {
+        ProgressMode::Never => ProgressOutputKind::Silent,
+        ProgressMode::Always if can_show_bar => ProgressOutputKind::Bar,
+        ProgressMode::Always => ProgressOutputKind::Log,
+        ProgressMode::Auto if can_show_bar => ProgressOutputKind::Bar,
+        ProgressMode::Auto => ProgressOutputKind::Log,
+    }
+}
+
+fn progress_bar_supported(term: Option<&std::ffi::OsStr>, no_color: bool) -> bool {
+    if no_color {
+        return false;
+    }
+
+    term.map(|term| !term.is_empty() && term != "dumb")
+        .unwrap_or(false)
+}
+
+fn term_supports_progress_bar() -> bool {
+    progress_bar_supported(
+        std::env::var_os("TERM").as_deref(),
+        std::env::var_os("NO_COLOR").is_some(),
+    )
 }
 
 /// Import from a snapshot.
@@ -326,12 +372,18 @@ impl Import {
         Ok(statements)
     }
 
-    /// Builds the progress reporter for this run. `never` is silent; `auto`
-    /// and `always` both use lightweight log progress for now.
+    /// Builds the progress reporter for this run. `never` is silent; otherwise
+    /// an interactive bar is used on TTY stderr, falling back to lightweight log
+    /// progress when stderr is redirected.
     fn progress_reporter(&self) -> Box<dyn ProgressReporter> {
-        match self.progress {
-            ProgressMode::Never => Box::new(NoopProgress),
-            ProgressMode::Auto | ProgressMode::Always => Box::new(LogProgress::new()),
+        match progress_output_kind(
+            self.progress,
+            std::io::stderr().is_terminal(),
+            term_supports_progress_bar(),
+        ) {
+            ProgressOutputKind::Bar => Box::new(IndicatifProgress::new()),
+            ProgressOutputKind::Log => Box::new(LogProgress::new()),
+            ProgressOutputKind::Silent => Box::new(NoopProgress),
         }
     }
 }
@@ -743,6 +795,53 @@ mod tests {
             parse_command(&["--progress", "auto"]).progress,
             ProgressMode::Auto
         );
+    }
+
+    #[test]
+    fn test_progress_output_kind_visibility_matrix() {
+        // auto follows the TTY for the bar and falls back to log progress;
+        // always emits progress even when stderr is redirected; never is silent.
+        assert_eq!(
+            ProgressOutputKind::Bar,
+            progress_output_kind(ProgressMode::Auto, true, true)
+        );
+        assert_eq!(
+            ProgressOutputKind::Log,
+            progress_output_kind(ProgressMode::Auto, true, false)
+        );
+        assert_eq!(
+            ProgressOutputKind::Log,
+            progress_output_kind(ProgressMode::Auto, false, true)
+        );
+        assert_eq!(
+            ProgressOutputKind::Log,
+            progress_output_kind(ProgressMode::Always, false, true)
+        );
+        assert_eq!(
+            ProgressOutputKind::Log,
+            progress_output_kind(ProgressMode::Always, true, false)
+        );
+        assert_eq!(
+            ProgressOutputKind::Bar,
+            progress_output_kind(ProgressMode::Always, true, true)
+        );
+        assert_eq!(
+            ProgressOutputKind::Silent,
+            progress_output_kind(ProgressMode::Never, true, true)
+        );
+        assert_eq!(
+            ProgressOutputKind::Silent,
+            progress_output_kind(ProgressMode::Never, false, true)
+        );
+    }
+
+    #[test]
+    fn test_progress_bar_supported_respects_terminal_environment() {
+        assert!(progress_bar_supported(Some("xterm".as_ref()), false));
+        assert!(!progress_bar_supported(Some("dumb".as_ref()), false));
+        assert!(!progress_bar_supported(Some("".as_ref()), false));
+        assert!(!progress_bar_supported(None, false));
+        assert!(!progress_bar_supported(Some("xterm".as_ref()), true));
     }
 
     #[test]
