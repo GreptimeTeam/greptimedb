@@ -271,12 +271,16 @@ macro_rules! define_from_tonic_status {
 
                 let msg = metadata_value(&e, $crate::GREPTIME_DB_HEADER_ERROR_MSG)
                     .unwrap_or_else(|| e.message().to_string());
+                let retry_hint = metadata_value(&e, $crate::GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or($crate::ext::RetryHint::NonRetryable);
 
                 // TODO(LFC): Make the error variant defined automatically.
                 Self::$Variant {
                     code,
                     msg,
                     tonic_code: e.code(),
+                    retry_hint,
                     location: location!(),
                 }
             }
@@ -291,11 +295,13 @@ macro_rules! define_into_tonic_status {
             fn from(err: $Error) -> Self {
                 use tonic::codegen::http::{HeaderMap, HeaderValue};
                 use tonic::metadata::MetadataMap;
-                use $crate::GREPTIME_DB_HEADER_ERROR_CODE;
+                use $crate::{
+                    GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+                };
 
                 common_telemetry::error!(err; "Failed to handle request");
 
-                let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
+                let mut headers = HeaderMap::<HeaderValue>::with_capacity(3);
 
                 // If either of the status_code or error msg cannot convert to valid HTTP header value
                 // (which is a very rare case), just ignore. Client will use Tonic status code and message.
@@ -303,6 +309,10 @@ macro_rules! define_into_tonic_status {
                 headers.insert(
                     GREPTIME_DB_HEADER_ERROR_CODE,
                     HeaderValue::from(status_code as u32),
+                );
+                headers.insert(
+                    GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+                    HeaderValue::from_static(err.retry_hint().as_str()),
                 );
                 let root_error = err.output_msg();
 

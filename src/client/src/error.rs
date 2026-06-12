@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use common_error::define_from_tonic_status;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -130,6 +130,7 @@ pub enum Error {
         code: StatusCode,
         msg: String,
         tonic_code: Code,
+        retry_hint: RetryHint,
         #[snafu(implicit)]
         location: Location,
     },
@@ -167,6 +168,21 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::Tonic { retry_hint, .. } => *retry_hint,
+            Error::FlightGet { source, .. }
+            | Error::RegionServer { source, .. }
+            | Error::FlowServer { source, .. }
+            | Error::External { source, .. } => source.retry_hint(),
+            Error::ConvertFlightData { source, .. }
+            | Error::CreateChannel { source, .. }
+            | Error::CreateTlsChannel { source, .. } => source.retry_hint(),
+            Error::ConvertSchema { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
     }
 }
 
