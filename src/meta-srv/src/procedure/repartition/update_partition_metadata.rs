@@ -18,6 +18,7 @@ use common_meta::lock_key::TableLock;
 use common_procedure::{Context as ProcedureContext, Status};
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
+use store_api::storage::TableId;
 
 use crate::error::{self, Result};
 use crate::procedure::repartition::allocate_region::AllocateRegion;
@@ -26,14 +27,106 @@ use crate::procedure::repartition::{Context, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PartitionMetadataUpdate {
-    pub partition_key_indices: Vec<usize>,
+    #[serde(default)]
+    pub original_partition_key_indices: Vec<usize>,
+    #[serde(alias = "partition_key_indices")]
+    pub target_partition_key_indices: Vec<usize>,
+    #[serde(default)]
+    pub expect_empty_partition_key_indices: bool,
 }
 
 impl PartitionMetadataUpdate {
-    pub fn new(partition_key_indices: Vec<usize>) -> Self {
+    pub fn from_unpartitioned(target_partition_key_indices: Vec<usize>) -> Self {
         Self {
-            partition_key_indices,
+            original_partition_key_indices: vec![],
+            target_partition_key_indices,
+            expect_empty_partition_key_indices: true,
         }
+    }
+
+    pub fn from_partitioned(
+        original_partition_key_indices: Vec<usize>,
+        target_partition_key_indices: Vec<usize>,
+    ) -> Self {
+        Self {
+            original_partition_key_indices,
+            target_partition_key_indices,
+            expect_empty_partition_key_indices: false,
+        }
+    }
+
+    fn validate_target_partition_key_indices(&self) -> Result<()> {
+        ensure!(
+            !self.target_partition_key_indices.is_empty(),
+            error::InvalidArgumentsSnafu {
+                err_msg:
+                    "Repartition partition metadata update expects non-empty target partition key indices"
+                        .to_string(),
+            }
+        );
+
+        Ok(())
+    }
+
+    pub fn target_partition_key_indices(
+        &self,
+        table_id: TableId,
+        current_partition_key_indices: &[usize],
+    ) -> Result<Option<Vec<usize>>> {
+        self.validate_target_partition_key_indices()?;
+        if current_partition_key_indices == self.target_partition_key_indices.as_slice() {
+            return Ok(None);
+        }
+        if current_partition_key_indices == self.original_partition_key_indices.as_slice() {
+            return Ok(Some(self.target_partition_key_indices.clone()));
+        }
+        if self.expect_empty_partition_key_indices {
+            ensure!(
+                current_partition_key_indices.is_empty(),
+                error::InvalidArgumentsSnafu {
+                    err_msg: format!(
+                        "Repartition partition metadata update expects an unpartitioned table, but table {} has partition key indices: {:?}",
+                        table_id, current_partition_key_indices
+                    ),
+                }
+            );
+        }
+
+        error::InvalidArgumentsSnafu {
+            err_msg: format!(
+                "Repartition partition metadata update expects partition key indices {:?} or {:?}, but table {} has partition key indices: {:?}",
+                self.original_partition_key_indices,
+                self.target_partition_key_indices,
+                table_id,
+                current_partition_key_indices
+            ),
+        }
+        .fail()
+    }
+
+    pub fn rollback_partition_key_indices(
+        &self,
+        table_id: TableId,
+        current_partition_key_indices: &[usize],
+    ) -> Result<Option<Vec<usize>>> {
+        self.validate_target_partition_key_indices()?;
+        if current_partition_key_indices == self.original_partition_key_indices.as_slice() {
+            return Ok(None);
+        }
+        if current_partition_key_indices == self.target_partition_key_indices.as_slice() {
+            return Ok(Some(self.original_partition_key_indices.clone()));
+        }
+
+        error::InvalidArgumentsSnafu {
+            err_msg: format!(
+                "Repartition partition metadata rollback expects partition key indices {:?} or {:?}, but table {} has partition key indices: {:?}",
+                self.original_partition_key_indices,
+                self.target_partition_key_indices,
+                table_id,
+                current_partition_key_indices
+            ),
+        }
+        .fail()
     }
 }
 
@@ -62,39 +155,22 @@ impl State for UpdatePartitionMetadata {
                 Status::executing(false),
             ));
         };
-        let partition_key_indices = update.partition_key_indices.clone();
-        ensure!(
-            !partition_key_indices.is_empty(),
-            error::InvalidArgumentsSnafu {
-                err_msg:
-                    "Repartition partition metadata update expects non-empty partition key indices"
-                        .to_string(),
-            }
-        );
-
         let table_id = ctx.persistent_ctx.table_id;
         let table_lock = TableLock::Write(table_id).into();
         let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
         let table_info_value = ctx.get_raw_table_info_value().await?;
         let current_partition_key_indices = &table_info_value.table_info.meta.partition_key_indices;
-        if current_partition_key_indices == &partition_key_indices {
+        let Some(target_partition_key_indices) =
+            update.target_partition_key_indices(table_id, current_partition_key_indices)?
+        else {
             return Ok((
                 Box::new(AllocateRegion::new(self.plan_entries.clone())),
                 Status::executing(true),
             ));
-        }
-        ensure!(
-            current_partition_key_indices.is_empty(),
-            error::InvalidArgumentsSnafu {
-                err_msg: format!(
-                    "Repartition partition metadata update expects an unpartitioned table, but table {} has partition key indices: {:?}",
-                    table_id, current_partition_key_indices
-                ),
-            }
-        );
+        };
 
         let mut new_table_info = table_info_value.table_info.clone();
-        new_table_info.meta.partition_key_indices = partition_key_indices;
+        new_table_info.meta.partition_key_indices = target_partition_key_indices;
         common_telemetry::info!(
             "Update table partition metadata, table_id: {}, partition_key_indices: {:?}, partition_columns: {:?}",
             table_id,
@@ -141,7 +217,8 @@ mod tests {
         .await;
         let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
         let mut ctx = new_parent_context(env, node_manager, table_id);
-        ctx.persistent_ctx.partition_metadata_update = Some(PartitionMetadataUpdate::new(vec![0]));
+        ctx.persistent_ctx.partition_metadata_update =
+            Some(PartitionMetadataUpdate::from_unpartitioned(vec![0]));
         ctx
     }
 
@@ -203,7 +280,8 @@ mod tests {
         let env = TestingEnv::new();
         let table_id = 1024;
         let mut ctx = new_test_context(&env, table_id).await;
-        ctx.persistent_ctx.partition_metadata_update = Some(PartitionMetadataUpdate::new(vec![]));
+        ctx.persistent_ctx.partition_metadata_update =
+            Some(PartitionMetadataUpdate::from_unpartitioned(vec![]));
         let mut state = UpdatePartitionMetadata::new(vec![]);
 
         let err = state
@@ -211,7 +289,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("non-empty partition key indices"));
+        assert!(
+            err.to_string()
+                .contains("non-empty target partition key indices")
+        );
         assert!(partition_key_indices(&ctx).await.is_empty());
     }
 
@@ -255,5 +336,79 @@ mod tests {
             .unwrap();
 
         assert!(next.as_any().is::<AllocateRegion>());
+    }
+
+    #[tokio::test]
+    async fn test_update_partition_metadata_overwrites_partitioned_table() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut ctx = new_test_context(&env, table_id).await;
+        set_partition_key_indices(&ctx, vec![0]).await;
+        ctx.persistent_ctx.partition_metadata_update = Some(
+            PartitionMetadataUpdate::from_partitioned(vec![0], vec![2, 1]),
+        );
+        let mut state = UpdatePartitionMetadata::new(vec![]);
+
+        let (next, status) = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        assert!(status.need_persist());
+        assert!(next.as_any().is::<AllocateRegion>());
+        assert_eq!(partition_key_indices(&ctx).await, vec![2, 1]);
+    }
+
+    #[tokio::test]
+    async fn test_update_partition_metadata_rejects_unexpected_partition_keys() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut ctx = new_test_context(&env, table_id).await;
+        set_partition_key_indices(&ctx, vec![1]).await;
+        ctx.persistent_ctx.partition_metadata_update =
+            Some(PartitionMetadataUpdate::from_partitioned(vec![0], vec![2]));
+        let mut state = UpdatePartitionMetadata::new(vec![]);
+
+        let err = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("expects partition key indices"));
+        assert_eq!(partition_key_indices(&ctx).await, vec![1]);
+    }
+
+    #[test]
+    fn test_partition_metadata_update_rollback_target_to_original() {
+        let update = PartitionMetadataUpdate::from_partitioned(vec![0], vec![2, 1]);
+
+        let rollback_indices = update
+            .rollback_partition_key_indices(1024, &[2, 1])
+            .unwrap();
+
+        assert_eq!(rollback_indices, Some(vec![0]));
+    }
+
+    #[test]
+    fn test_partition_metadata_update_rollback_original_is_noop() {
+        let update = PartitionMetadataUpdate::from_partitioned(vec![0], vec![2, 1]);
+
+        let rollback_indices = update.rollback_partition_key_indices(1024, &[0]).unwrap();
+
+        assert_eq!(rollback_indices, None);
+    }
+
+    #[test]
+    fn test_partition_metadata_update_rollback_rejects_unexpected_state() {
+        let update = PartitionMetadataUpdate::from_partitioned(vec![0], vec![2, 1]);
+
+        let err = update
+            .rollback_partition_key_indices(1024, &[1])
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("rollback expects partition key indices")
+        );
     }
 }
