@@ -34,6 +34,7 @@ use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{
     PathType, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest,
+    RegionRequirements,
 };
 use store_api::storage::RegionId;
 
@@ -81,6 +82,23 @@ async fn test_engine_new_stop_with_format(flat_format: bool) {
         matches!(err.status_code(), StatusCode::Internal),
         "unexpected err: {err}"
     );
+}
+
+#[tokio::test]
+async fn test_create_region_with_empty_requirements() {
+    let mut env = TestEnv::with_prefix("create-empty-requirements").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    request.requirements = RegionRequirements::empty();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    assert!(engine.is_region_exists(region_id));
 }
 
 #[tokio::test]
@@ -807,6 +825,7 @@ async fn test_cache_null_primary_key_with_format(flat_format: bool) {
         table_dir: "test".to_string(),
         path_type: PathType::Bare,
         partition_expr_json: Some("".to_string()),
+        requirements: Default::default(),
     };
 
     let column_schemas = rows_schema(&request);

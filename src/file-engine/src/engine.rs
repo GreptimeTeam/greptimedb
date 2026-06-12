@@ -186,7 +186,7 @@ struct EngineInner {
 
 type EngineInnerRef = Arc<EngineInner>;
 
-fn ensure_open_requirements(
+fn ensure_region_requirements(
     requirements: RegionRequirements,
     object_store: &ObjectStore,
 ) -> EngineResult<()> {
@@ -276,6 +276,8 @@ impl EngineInner {
             return Ok(0);
         }
 
+        ensure_region_requirements(request.requirements, &self.object_store)?;
+
         let res = FileRegion::create(region_id, request, &self.object_store).await;
         let region = res.inspect_err(|err| {
             error!(
@@ -307,7 +309,7 @@ impl EngineInner {
             return Ok(0);
         }
 
-        ensure_open_requirements(request.requirements, &self.object_store)?;
+        ensure_region_requirements(request.requirements, &self.object_store)?;
 
         let res = FileRegion::open(region_id, request, &self.object_store).await;
         let region = res.inspect_err(|err| {
@@ -402,13 +404,13 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_open_requirements_are_supported() {
-        ensure_open_requirements(RegionRequirements::empty(), &build_fs_object_store()).unwrap();
+    fn test_empty_region_requirements_are_supported() {
+        ensure_region_requirements(RegionRequirements::empty(), &build_fs_object_store()).unwrap();
     }
 
     #[test]
-    fn test_object_storage_open_requirement_rejects_fs_object_store() {
-        let err = ensure_open_requirements(
+    fn test_object_storage_region_requirement_rejects_fs_object_store() {
+        let err = ensure_region_requirements(
             RegionRequirements::object_storage(),
             &build_fs_object_store(),
         )
@@ -418,8 +420,8 @@ mod tests {
     }
 
     #[test]
-    fn test_object_storage_open_requirement_accepts_s3_object_store() {
-        ensure_open_requirements(
+    fn test_object_storage_region_requirement_accepts_s3_object_store() {
+        ensure_region_requirements(
             RegionRequirements::object_storage(),
             &build_s3_object_store(),
         )
