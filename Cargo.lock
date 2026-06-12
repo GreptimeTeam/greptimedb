@@ -13948,6 +13948,7 @@ dependencies = [
  "itertools 0.14.0",
  "lazy_static",
  "num_enum 0.7.4",
+ "parquet",
  "prometheus 0.14.0",
  "prost 0.14.1",
  "serde",
