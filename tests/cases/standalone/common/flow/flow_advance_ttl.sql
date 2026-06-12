@@ -8,7 +8,7 @@ CREATE TABLE distinct_basic (
 
 -- should fallback to streaming mode
 -- SQLNESS REPLACE id=\d+ id=REDACTED
-CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
+CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
 SELECT
     DISTINCT number as dis
 FROM
@@ -71,7 +71,7 @@ CREATE TABLE distinct_basic (
     TIME INDEX(ts)
 )WITH ('ttl' = '5s');
 
-CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
+CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
 SELECT
     DISTINCT number as dis
 FROM

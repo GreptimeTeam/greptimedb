@@ -458,6 +458,22 @@ impl BatchingEngine {
             .is_some_and(|value| value.eq_ignore_ascii_case("true"))
     }
 
+    /// SQL flows without a usable time-window expression can only run as an
+    /// explicit full-query flow, so require `EVAL INTERVAL` at creation time.
+    fn ensure_sql_flow_has_twe_or_eval_interval(
+        eval_interval: Option<i64>,
+        has_time_window_expr: bool,
+    ) -> Result<(), Error> {
+        ensure!(
+            eval_interval.is_some() || has_time_window_expr,
+            InvalidQuerySnafu {
+                reason: "SQL batching flow without a time-window expression must specify EVAL INTERVAL to run as an explicit full-query flow"
+                    .to_string(),
+            }
+        );
+        Ok(())
+    }
+
     fn ensure_incremental_source_append_only(
         batch_opts: &BatchingModeOptions,
         table_name: &[String; 3],
@@ -608,6 +624,10 @@ impl BatchingEngine {
                 .map(|phy_expr| phy_expr.to_string())
                 .unwrap_or("None".to_string())
         );
+
+        if !is_tql {
+            Self::ensure_sql_flow_has_twe_or_eval_interval(eval_interval, phy_expr.is_some())?;
+        }
 
         let task_args = TaskArgs {
             flow_id,
@@ -1033,6 +1053,62 @@ mod tests {
         assert!(BatchingEngine::table_options_enable_append_mode(
             &HashMap::from([(APPEND_MODE_KEY.to_string(), "TRUE".to_string())])
         ));
+    }
+
+    #[test]
+    fn test_sql_flow_requires_time_window_or_eval_interval() {
+        BatchingEngine::ensure_sql_flow_has_twe_or_eval_interval(None, true)
+            .expect("SQL flow with a time-window expression should be accepted");
+        BatchingEngine::ensure_sql_flow_has_twe_or_eval_interval(Some(10), false).expect(
+            "SQL flow with EVAL INTERVAL should be accepted as an explicit full-query flow",
+        );
+
+        let err = BatchingEngine::ensure_sql_flow_has_twe_or_eval_interval(None, false)
+            .expect_err("SQL flow without a time-window expression or EVAL INTERVAL should fail");
+        assert!(matches!(err, Error::InvalidQuery { .. }), "{err}");
+        assert!(
+            err.to_string().contains("must specify EVAL INTERVAL"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_complex_sql_without_eval_interval_is_rejected_as_no_twe() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            r#"
+SELECT
+    l.number,
+    date_bin('5 minutes', l.ts) AS time_window
+FROM numbers_with_ts l
+JOIN numbers_with_ts r ON l.number = r.number
+GROUP BY l.number, time_window
+"#,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let (_, time_window_expr, _, _) = find_time_window_expr(
+            &plan,
+            query_engine.engine_state().catalog_manager().clone(),
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            time_window_expr.is_none(),
+            "complex SQL should be classified as having no safe TWE"
+        );
+
+        BatchingEngine::ensure_sql_flow_has_twe_or_eval_interval(Some(10), false)
+            .expect("complex SQL can run as an explicit full-query flow when EVAL INTERVAL is set");
+        let err = BatchingEngine::ensure_sql_flow_has_twe_or_eval_interval(None, false)
+            .expect_err("complex SQL without EVAL INTERVAL should fail creation");
+        assert!(matches!(err, Error::InvalidQuery { .. }), "{err}");
     }
 
     #[test]
