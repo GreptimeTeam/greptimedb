@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Write as FmtWrite;
 use std::io;
 use std::time::Duration;
 
@@ -190,6 +191,9 @@ impl MysqlResultWriter {
     ) -> Result<()> {
         let schema = record_batch.schema.clone();
         let record_batch = record_batch.into_df_record_batch();
+        // Reusable buffer for timestamp formatting — avoids one heap allocation per
+        // timestamp value per row.  Cleared and refilled in the Timestamp arm below.
+        let mut format_buf = String::new();
         for i in 0..record_batch.num_rows() {
             for (j, column) in record_batch.columns().iter().enumerate() {
                 if column.is_null(i) {
@@ -265,8 +269,23 @@ impl MysqlResultWriter {
                     }
                     DataType::Timestamp(_, _) => {
                         let v = datatypes::arrow_array::timestamp_array_value(column, i);
-                        let v = v.to_chrono_datetime_with_timezone(Some(&query_context.timezone()));
-                        row_writer.write_col(v)?;
+                        // Reuse `format_buf` to avoid a per-row heap allocation.
+                        // This mirrors what `Timestamp::as_formatted_string` does
+                        // internally, but writes directly into our pre-allocated buffer.
+                        format_buf.clear();
+                        if let Some(datetime) =
+                            v.to_chrono_datetime_with_timezone(Some(&query_context.timezone()))
+                        {
+                            let _ = write!(
+                                &mut format_buf,
+                                "{}",
+                                datetime.format("%Y-%m-%d %H:%M:%S%.f")
+                            );
+                        } else {
+                            let _ =
+                                write!(&mut format_buf, "[Timestamp{}: {}]", v.unit(), v.value());
+                        }
+                        row_writer.write_col(&*format_buf)?;
                     }
                     DataType::Interval(interval_unit) => match interval_unit {
                         IntervalUnit::YearMonth => {
