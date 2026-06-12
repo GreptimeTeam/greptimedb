@@ -154,24 +154,9 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: queries
-        - title: Node Availability
+        - title: HTTP Request P99 and Avg
           type: timeseries
-          description: Prometheus scrape availability by job and instance. Drops to zero indicate unavailable or unscraped nodes.
-          unit: short
-          queries:
-            - expr: sum by (job) (up)
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '{{job}}'
-            - expr: up
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{job}}]-[{{instance}}]-[{{pod}}]'
-        - title: Request P99 and Avg
-          type: timeseries
-          description: Tail and average latency for HTTP and gRPC requests served by frontends. HTTP excludes health and metrics endpoints.
+          description: Tail and average latency for HTTP requests served by frontends. Excludes health and metrics endpoints.
           unit: s
           queries:
             - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_requests_elapsed_bucket{instance=~"$frontend",path!~"/health|/metrics"}[$__rate_interval])))
@@ -179,16 +164,21 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: http-p99
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_grpc_requests_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: grpc-p99
             - expr: sum(rate(greptime_servers_http_requests_elapsed_sum{instance=~"$frontend",path!~"/health|/metrics"}[$__rate_interval])) / sum(rate(greptime_servers_http_requests_elapsed_count{instance=~"$frontend",path!~"/health|/metrics"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: http-avg
+        - title: gRPC Request P99 and Avg
+          type: timeseries
+          description: Tail and average latency for gRPC requests served by frontends.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_grpc_requests_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: grpc-p99
             - expr: sum(rate(greptime_servers_grpc_requests_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_grpc_requests_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
               datasource:
                 type: prometheus
