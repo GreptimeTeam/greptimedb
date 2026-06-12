@@ -327,7 +327,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "queries",
@@ -1149,7 +1149,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Ingestion throughput by protocol near the top of the dashboard for quick traffic context.",
+      "description": "Total ingestion throughput trend across frontends. Protocol breakdown is in the Ingestion row.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1238,103 +1238,12 @@
           "expr": "sum(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))",
           "hide": false,
           "instant": false,
-          "legendFormat": "table-operator",
+          "legendFormat": "ingestion",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_prometheus_remote_write_samples{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "prometheus-remote-write",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_logs_ingestion_counter{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "http-logs",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_loki_logs_ingestion_counter{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "loki-logs",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_elasticsearch_logs_docs_count{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "elasticsearch-docs",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_frontend_otlp_metrics_rows{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "otlp-metrics",
-          "range": true,
-          "refId": "F"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_frontend_otlp_logs_rows{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "otlp-logs",
-          "range": true,
-          "refId": "G"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_frontend_otlp_traces_rows{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "otlp-traces",
-          "range": true,
-          "refId": "H"
         }
       ],
-      "title": "Ingestion Rate",
+      "title": "Total Ingestion Rate Trend",
       "type": "timeseries"
     },
     {
@@ -1342,7 +1251,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Query throughput by frontend protocol near the top of the dashboard for quick traffic context.",
+      "description": "Total query API call rate trend across frontend protocols. Protocol breakdown is in the Queries row.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1428,67 +1337,15 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))",
           "hide": false,
           "instant": false,
-          "legendFormat": "mysql",
+          "legendFormat": "queries",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "postgres",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "promql",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "http-sql",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "grpc-query",
-          "range": true,
-          "refId": "E"
         }
       ],
-      "title": "Query Rate",
+      "title": "Total Query Rate Trend",
       "type": "timeseries"
     },
     {
@@ -2251,7 +2108,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Storage-engine write rejects, write stalls, flush/compaction failures, scan memory pressure, and GC errors on datanodes.",
+      "description": "Storage-engine write rejects, write stalls, flush failures, and compaction failures on datanodes.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2382,32 +2239,6 @@
           "legendFormat": "compaction-failure",
           "range": true,
           "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_scan_requests_rejected_total{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "scan-rejected",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_gc_errors_total{}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "gc-errors",
-          "range": true,
-          "refId": "F"
         }
       ],
       "title": "Mito Backpressure and Failures",
@@ -9431,106 +9262,6 @@
             "type": "prometheus",
             "uid": "${metrics}"
           },
-          "description": "Write Stall per Instance.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 8,
-            "y": 130
-          },
-          "id": 487,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "pluginVersion": "11.6.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "sum by(instance, pod) (greptime_mito_write_stall_total{})",
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]",
-              "range": true,
-              "refId": "A"
-            }
-          ],
-          "title": "Write Stall per Instance",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
           "description": "Read Stage OPS per Instance.",
           "fieldConfig": {
             "defaults": {
@@ -9590,7 +9321,7 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 16,
+            "x": 8,
             "y": 130
           },
           "id": 488,
@@ -9716,8 +9447,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 0,
-            "y": 138
+            "x": 16,
+            "y": 130
           },
           "id": 489,
           "options": {
@@ -9830,7 +9561,7 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 8,
+            "x": 0,
             "y": 138
           },
           "id": 490,
@@ -9946,7 +9677,7 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 16,
+            "x": 8,
             "y": 138
           },
           "id": 491,
@@ -10047,8 +9778,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 0,
-            "y": 146
+            "x": 16,
+            "y": 138
           },
           "id": 492,
           "options": {
@@ -10161,7 +9892,7 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 8,
+            "x": 0,
             "y": 146
           },
           "id": 493,
@@ -10209,133 +9940,6 @@
             }
           ],
           "title": "Compaction P99 and Avg per Instance",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "description": "Write-ahead logs write size as bytes. This chart includes stats of p95 and p99 size by instance, total WAL write rate.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "bytes"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 16,
-            "y": 146
-          },
-          "id": 494,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "11.6.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by(le,instance, pod) (rate(raft_engine_write_size_bucket[$__rate_interval])))",
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-req-size-p95",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(le,instance,pod) (rate(raft_engine_write_size_bucket[$__rate_interval])))",
-              "hide": false,
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-req-size-p99",
-              "range": true,
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "sum by (instance, pod)(rate(raft_engine_write_size_sum[$__rate_interval]))",
-              "hide": false,
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-throughput",
-              "range": true,
-              "refId": "C"
-            }
-          ],
-          "title": "WAL write size",
           "type": "timeseries"
         },
         {
@@ -10427,8 +10031,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 0,
-            "y": 154
+            "x": 8,
+            "y": 146
           },
           "id": 495,
           "options": {
@@ -10526,8 +10130,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 8,
-            "y": 154
+            "x": 16,
+            "y": 146
           },
           "id": 496,
           "options": {
@@ -10561,208 +10165,6 @@
             }
           ],
           "title": "Inflight Compaction",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "description": "Raft engine (local disk) log store sync latency, p99",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "points",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "s"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 16,
-            "y": 154
-          },
-          "id": 497,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "11.6.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(le, type, node, instance, pod) (rate(raft_engine_sync_log_duration_seconds_bucket[$__rate_interval])))",
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-p99",
-              "range": true,
-              "refId": "A"
-            }
-          ],
-          "title": "WAL sync duration seconds",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "description": "Write-ahead log operations latency at p99",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "points",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "s"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 0,
-            "y": 162
-          },
-          "id": 498,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "11.6.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(le,logstore,optype,instance, pod) (rate(greptime_logstore_op_elapsed_bucket[$__rate_interval])))",
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-[{{logstore}}]-[{{optype}}]-p99",
-              "range": true,
-              "refId": "A"
-            }
-          ],
-          "title": "Log Store op duration seconds",
           "type": "timeseries"
         },
         {
@@ -10829,8 +10231,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 8,
-            "y": 162
+            "x": 0,
+            "y": 154
           },
           "id": 499,
           "options": {
@@ -10930,8 +10332,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 16,
-            "y": 162
+            "x": 8,
+            "y": 154
           },
           "id": 500,
           "options": {
@@ -11073,8 +10475,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 0,
-            "y": 170
+            "x": 16,
+            "y": 154
           },
           "id": 501,
           "options": {
@@ -11187,8 +10589,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 8,
-            "y": 170
+            "x": 0,
+            "y": 162
           },
           "id": 502,
           "options": {
@@ -11301,8 +10703,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 16,
-            "y": 170
+            "x": 8,
+            "y": 162
           },
           "id": 503,
           "options": {
@@ -11418,8 +10820,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 0,
-            "y": 178
+            "x": 16,
+            "y": 162
           },
           "id": 504,
           "options": {
@@ -16131,7 +15533,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation!~\"read|write|list|stat\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]",
               "range": true,
@@ -16231,7 +15633,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{ operation!~\"read|write|list|Writer::write|Writer::close|Reader::read\"}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{ operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]",
               "range": true,
@@ -16243,7 +15645,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{ operation!~\"read|write|list|stat\"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation!~\"read|write|list|stat\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{ operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-avg",
@@ -16456,6 +15858,349 @@
           ],
           "title": "OpenDAL errors per Instance",
           "type": "timeseries"
+        }
+      ],
+      "title": "Object Store",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 117
+      },
+      "id": 552,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "description": "Write-ahead logs write size as bytes. This chart includes stats of p95 and p99 size by instance, total WAL write rate.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 118
+          },
+          "id": 494,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "11.6.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${metrics}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by(le,instance, pod) (rate(raft_engine_write_size_bucket[$__rate_interval])))",
+              "instant": false,
+              "legendFormat": "[{{instance}}]-[{{pod}}]-req-size-p95",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${metrics}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by(le,instance,pod) (rate(raft_engine_write_size_bucket[$__rate_interval])))",
+              "hide": false,
+              "instant": false,
+              "legendFormat": "[{{instance}}]-[{{pod}}]-req-size-p99",
+              "range": true,
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${metrics}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (instance, pod)(rate(raft_engine_write_size_sum[$__rate_interval]))",
+              "hide": false,
+              "instant": false,
+              "legendFormat": "[{{instance}}]-[{{pod}}]-throughput",
+              "range": true,
+              "refId": "C"
+            }
+          ],
+          "title": "WAL write size",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "description": "Raft engine (local disk) log store sync latency, p99",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "points",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 118
+          },
+          "id": 497,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "11.6.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${metrics}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by(le, type, node, instance, pod) (rate(raft_engine_sync_log_duration_seconds_bucket[$__rate_interval])))",
+              "instant": false,
+              "legendFormat": "[{{instance}}]-[{{pod}}]-p99",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "WAL sync duration seconds",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${metrics}"
+          },
+          "description": "Write-ahead log operations latency at p99",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "points",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 118
+          },
+          "id": 498,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "11.6.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${metrics}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by(le,logstore,optype,instance, pod) (rate(greptime_logstore_op_elapsed_bucket[$__rate_interval])))",
+              "instant": false,
+              "legendFormat": "[{{instance}}]-[{{pod}}]-[{{logstore}}]-[{{optype}}]-p99",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Log Store op duration seconds",
+          "type": "timeseries"
         },
         {
           "datasource": {
@@ -16521,8 +16266,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 8,
-            "y": 148
+            "x": 0,
+            "y": 126
           },
           "id": 516,
           "options": {
@@ -16620,8 +16365,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 16,
-            "y": 148
+            "x": 8,
+            "y": 126
           },
           "id": 517,
           "options": {
@@ -16719,8 +16464,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 0,
-            "y": 156
+            "x": 16,
+            "y": 126
           },
           "id": 518,
           "options": {
@@ -16818,8 +16563,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 8,
-            "y": 156
+            "x": 0,
+            "y": 134
           },
           "id": 519,
           "options": {
@@ -16854,7 +16599,7 @@
           "type": "timeseries"
         }
       ],
-      "title": "Object Store and WAL",
+      "title": "WAL",
       "type": "row"
     },
     {
@@ -16863,7 +16608,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 117
+        "y": 118
       },
       "id": 453,
       "panels": [
@@ -16930,7 +16675,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 118
+            "y": 119
           },
           "id": 520,
           "options": {
@@ -17025,7 +16770,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 118
+            "y": 119
           },
           "id": 521,
           "options": {
@@ -17146,7 +16891,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 118
+            "y": 119
           },
           "id": 522,
           "options": {
@@ -17254,7 +16999,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 126
+            "y": 127
           },
           "id": 523,
           "options": {
@@ -17349,7 +17094,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 126
+            "y": 127
           },
           "id": 524,
           "options": {
@@ -17391,7 +17136,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 118
+        "y": 119
       },
       "id": 461,
       "panels": [
@@ -17457,7 +17202,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 119,
+            "y": 120,
             "w": 8,
             "h": 6
           },
@@ -17555,7 +17300,7 @@
           },
           "gridPos": {
             "x": 8,
-            "y": 119,
+            "y": 120,
             "w": 8,
             "h": 6
           },
@@ -17581,10 +17326,10 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, \n  rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])\n)",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-p99",
+              "legendFormat": "p99",
               "range": true,
               "refId": "A"
             },
@@ -17594,10 +17339,10 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.75, \n  rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])\n)",
+              "expr": "histogram_quantile(0.75, sum by (le) (rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-p75",
+              "legendFormat": "p75",
               "range": true,
               "refId": "B"
             },
@@ -17681,7 +17426,7 @@
           },
           "gridPos": {
             "x": 16,
-            "y": 119,
+            "y": 120,
             "w": 8,
             "h": 6
           },
@@ -17781,7 +17526,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 125,
+            "y": 126,
             "w": 8,
             "h": 6
           },
@@ -17807,10 +17552,10 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, \n  rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])\n)",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-[{{channel_type}}]-p99",
+              "legendFormat": "p99",
               "range": true,
               "refId": "A"
             },
@@ -17820,10 +17565,10 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.75, \n  rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])\n)",
+              "expr": "histogram_quantile(0.75, sum by (le) (rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-[{{channel_type}}]-p75",
+              "legendFormat": "p75",
               "range": true,
               "refId": "B"
             },
@@ -17907,7 +17652,7 @@
           },
           "gridPos": {
             "x": 8,
-            "y": 125,
+            "y": 126,
             "w": 8,
             "h": 6
           },
@@ -18007,7 +17752,7 @@
           },
           "gridPos": {
             "x": 16,
-            "y": 125,
+            "y": 126,
             "w": 8,
             "h": 6
           },
@@ -18033,10 +17778,10 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, \n  rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])\n)",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-[{{storage_type}}]-p99",
+              "legendFormat": "p99",
               "range": true,
               "refId": "A"
             },
@@ -18046,10 +17791,10 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.75, \n  rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])\n)",
+              "expr": "histogram_quantile(0.75, sum by (le) (rate(greptime_trigger_save_alert_record_elapsed_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-[{{storage_type}}]-p75",
+              "legendFormat": "p75",
               "range": true,
               "refId": "B"
             },
@@ -18133,7 +17878,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 131,
+            "y": 132,
             "w": 8,
             "h": 6
           },

@@ -238,20 +238,28 @@ Purpose: diagnose index creation, index application, and index IO after storage 
 | Index memory and IO | `greptime_index_apply_memory_usage`, `greptime_index_create_memory_usage`, `greptime_index_io_bytes_total`, `greptime_index_io_op_total` | bytes, ops/s | Diagnose indexing memory pressure and puffin/intermediate-file IO. |
 | Index cache | Existing Mito cache hit/miss/eviction metrics filtered to index-related cache types. | ops/s | Diagnose index metadata/content/result cache effectiveness. |
 
-### 8. Object Store and WAL
+### 8. Object Store
 
-Purpose: identify whether storage dependencies are slowing the database.
+Purpose: identify whether object-store dependencies are slowing the database.
 
 | Panel | Query sketch | Unit | Notes |
 | --- | --- | --- | --- |
 | OpenDAL QPS/latency/errors by operation | Existing OpenDAL request and error panels. | req/s, s, eps | Move errors before detailed latency. |
 | OpenDAL traffic | Existing traffic panel. | bytes/s | Split read/write if available. |
+
+### 9. WAL
+
+Purpose: identify whether local or remote WAL dependencies are slowing the database.
+
+| Panel | Query sketch | Unit | Notes |
+| --- | --- | --- | --- |
+| WAL write size | `raft_engine_write_size` histogram and sum. | bytes | Local WAL write size distribution and write throughput. |
 | WAL fsync p99 | `raft_engine_sync_log_duration_seconds` p99. | s | Local WAL dependency. |
 | Log-store op latency and bytes | Existing `greptime_logstore_op_elapsed` and `greptime_logstore_op_bytes_total`. | s, bytes/s | WAL abstraction health. |
 | Kafka produce latency/traffic | `greptime_logstore_kafka_client_produce_elapsed`, Kafka bytes/traffic totals. | s, bytes/s | Remote WAL dependency. |
 | Remote WAL checkpoint/flush triggers | Existing meta-triggered counters. | ops/s | Confirm maintenance activity. |
 
-### 9. Metasrv
+### 10. Metasrv
 
 Purpose: diagnose routing, metadata, region health, and automated balancing.
 
@@ -270,7 +278,7 @@ Purpose: diagnose routing, metadata, region health, and automated balancing.
 ## Concrete dashboard editing plan
 
 1. **Keep the generated-dashboard workflow.** Update `grafana/dashboards/metrics/cluster/dashboard.json`, then regenerate JSON/YAML/Markdown with `grafana/scripts/gen-dashboards.sh`.
-2. **Use concise row titles.** Prefer Overview, Health, Capacity, Ingestion, Queries, Datanode, Storage, Metasrv, and Object Store and WAL.
+2. **Use concise row titles.** Prefer Overview, Health, Capacity, Ingestion, Queries, Datanode, Storage, Metasrv, Object Store, and WAL.
 3. **Keep summary stats first, then time-series ingestion and query rates.** Operators should see compact cluster totals first, then traffic context before node availability and request p99.
 4. **Add a `Health` group** immediately after overview. Use mostly rate panels with red thresholds on non-zero critical counters.
 5. **Split the current `Resources` group into `Resources` and `Capacity`.** CPU/memory stay in Resources; request/query/scan/compaction memory, write stalling, runtime threads, and pending-row backlog move to Capacity.
@@ -279,9 +287,9 @@ Purpose: diagnose routing, metadata, region health, and automated balancing.
 8. **Create a compact `Datanode` row before deep `Storage`.** Include region failures, failed inserts, write reject/stall, flush/compaction failures, scan/compaction memory rejects, and GC errors.
 9. **Deepen `Storage`.** Add flush elapsed/throughput panels near Mito flush and compaction panels.
 10. **Create an `Index` row.** Move index apply/create/memory/IO/cache panels into a dedicated row after Storage.
-11. **Keep metasrv health above object-store details.** Move heartbeat, inactive region, lease-expiry, metadata KV, migration failures, and reconciliation errors before detailed OpenDAL/WAL panels.
+11. **Keep metasrv health above object-store and WAL details.** Move heartbeat, inactive region, lease-expiry, metadata KV, migration failures, and reconciliation errors before detailed OpenDAL/WAL panels.
 12. **Keep existing deep-dive groups but improve descriptions.** Each panel should answer: symptom shown, likely cause, and next drill-down panel.
-13. **Collapse deep-dive rows by default.** Keep Overview, Health, Capacity, Ingestion, Queries, and Datanode open; collapse Resources, Frontend Requests, Frontend to Datanode, Storage, Index, Metasrv, Object Store and WAL, Flownode, and Trigger.
+13. **Collapse deep-dive rows by default.** Keep Overview, Health, Capacity, Ingestion, Queries, and Datanode open; collapse Resources, Frontend Requests, Frontend to Datanode, Storage, Index, Metasrv, Object Store, WAL, Flownode, and Trigger.
 14. **Show average request cost beside p99 where histogram sum/count exists.** Use matching labels for numerator and denominator so request, storage, object-store, Metasrv, flow, and trigger panels can compare average and tail latency directly.
 15. **Use repeated panels sparingly.** For cluster dashboards, keep role variables (`$frontend`, `$datanode`, `$metasrv`, `$flownode`). For standalone dashboards, remove instance filters as the current script already does.
 
