@@ -29,8 +29,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::{TableId, TableMeta};
 use table::requests::{
-    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetDefaultRequest,
-    SetIndexOption, UnsetIndexOption,
+    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest,
+    REPARTITION_COLUMN_HINT_KEY, SetDefaultRequest, SetIndexOption, UnsetIndexOption,
 };
 
 use crate::error::{
@@ -164,21 +164,53 @@ pub fn alter_expr_to_request(
             AlterKind::RenameTable { new_table_name }
         }
         Kind::SetTableOptions(api::v1::SetTableOptions { table_options }) => {
-            AlterKind::SetTableOptions {
-                options: table_options
-                    .iter()
-                    .map(SetRegionOption::try_from)
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .context(InvalidSetTableOptionRequestSnafu)?,
+            let repartition_column_hint = table_options
+                .iter()
+                .find(|option| option.key == REPARTITION_COLUMN_HINT_KEY);
+            if let Some(option) = repartition_column_hint {
+                ensure!(
+                    table_options.len() == 1,
+                    error::InvalidTableOptionRequestSnafu {
+                        err_msg: format!(
+                            "{REPARTITION_COLUMN_HINT_KEY} must be altered separately"
+                        ),
+                    }
+                );
+                AlterKind::SetRepartitionColumnHint {
+                    column_name: option.value.clone(),
+                }
+            } else {
+                AlterKind::SetTableOptions {
+                    options: table_options
+                        .iter()
+                        .map(SetRegionOption::try_from)
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .context(InvalidSetTableOptionRequestSnafu)?,
+                }
             }
         }
         Kind::UnsetTableOptions(api::v1::UnsetTableOptions { keys }) => {
-            AlterKind::UnsetTableOptions {
-                keys: keys
-                    .iter()
-                    .map(|key| UnsetRegionOption::try_from(key.as_str()))
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .context(InvalidUnsetTableOptionRequestSnafu)?,
+            let unset_repartition_column_hint = keys
+                .iter()
+                .any(|key| key.as_str() == REPARTITION_COLUMN_HINT_KEY);
+            if unset_repartition_column_hint {
+                ensure!(
+                    keys.len() == 1,
+                    error::InvalidTableOptionRequestSnafu {
+                        err_msg: format!(
+                            "{REPARTITION_COLUMN_HINT_KEY} must be altered separately"
+                        ),
+                    }
+                );
+                AlterKind::UnsetRepartitionColumnHint
+            } else {
+                AlterKind::UnsetTableOptions {
+                    keys: keys
+                        .iter()
+                        .map(|key| UnsetRegionOption::try_from(key.as_str()))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .context(InvalidUnsetTableOptionRequestSnafu)?,
+                }
             }
         }
         Kind::SetIndex(o) => {
@@ -324,7 +356,7 @@ fn parse_location(location: Option<Location>) -> Result<Option<AddColumnLocation
 mod tests {
     use api::v1::{
         AddColumn, AddColumns, ColumnDataType, ColumnDef, DropColumn, ModifyColumnType,
-        SemanticType,
+        Option as PbOption, SemanticType, SetTableOptions, UnsetTableOptions,
     };
     use datatypes::prelude::ConcreteDataType;
 
@@ -513,5 +545,73 @@ mod tests {
         };
         assert_eq!(1, drop_names.len());
         assert_eq!("mem_usage".to_string(), drop_names.pop().unwrap());
+    }
+
+    #[test]
+    fn test_set_repartition_column_hint_expr() {
+        let expr = AlterTableExpr {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "monitor".to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![PbOption {
+                    key: REPARTITION_COLUMN_HINT_KEY.to_string(),
+                    value: "host".to_string(),
+                }],
+            })),
+        };
+
+        let alter_request = alter_expr_to_request(1, expr, None).unwrap();
+        match alter_request.alter_kind {
+            AlterKind::SetRepartitionColumnHint { column_name } => {
+                assert_eq!("host", column_name);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_set_repartition_column_hint_rejects_mixed_options() {
+        let expr = AlterTableExpr {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "monitor".to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![
+                    PbOption {
+                        key: REPARTITION_COLUMN_HINT_KEY.to_string(),
+                        value: "host".to_string(),
+                    },
+                    PbOption {
+                        key: table::requests::TTL_KEY.to_string(),
+                        value: "7d".to_string(),
+                    },
+                ],
+            })),
+        };
+
+        let err = alter_expr_to_request(1, expr, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("repartition.column.hint must be altered separately")
+        );
+    }
+
+    #[test]
+    fn test_unset_repartition_column_hint_expr() {
+        let expr = AlterTableExpr {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "monitor".to_string(),
+            kind: Some(Kind::UnsetTableOptions(UnsetTableOptions {
+                keys: vec![REPARTITION_COLUMN_HINT_KEY.to_string()],
+            })),
+        };
+
+        let alter_request = alter_expr_to_request(1, expr, None).unwrap();
+        assert!(matches!(
+            alter_request.alter_kind,
+            AlterKind::UnsetRepartitionColumnHint
+        ));
     }
 }

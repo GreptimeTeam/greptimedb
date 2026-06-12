@@ -32,6 +32,35 @@ show create table table_without_partition;
 
 drop table table_without_partition;
 
+CREATE TABLE hint_table (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'host');
+
+SHOW CREATE TABLE hint_table;
+
+DROP TABLE hint_table;
+
+CREATE TABLE alter_hint_table (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+);
+
+ALTER TABLE alter_hint_table SET 'repartition.column.hint' = 'host';
+
+SHOW CREATE TABLE alter_hint_table;
+
+ALTER TABLE alter_hint_table UNSET 'repartition.column.hint';
+
+SHOW CREATE TABLE alter_hint_table;
+
+DROP TABLE alter_hint_table;
+
 CREATE TABLE not_supported_table_storage_option (
   `id` INT UNSIGNED,
   host STRING,

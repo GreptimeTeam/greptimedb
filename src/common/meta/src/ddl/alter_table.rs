@@ -19,8 +19,8 @@ mod region_request;
 use std::vec;
 
 use api::region::RegionResponse;
-use api::v1::RenameTable;
 use api::v1::alter_table_expr::Kind;
+use api::v1::{RenameTable, SetTableOptions, UnsetTableOptions};
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
@@ -35,6 +35,7 @@ use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
 use strum::AsRefStr;
 use table::metadata::{TableId, TableInfo};
+use table::requests::REPARTITION_COLUMN_HINT_KEY;
 use table::table_reference::TableReference;
 
 use crate::ddl::DdlContext;
@@ -126,7 +127,7 @@ impl AlterTableProcedure {
 
         // Safety: Checked in `AlterTableProcedure::new`.
         let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
-        if matches!(alter_kind, Kind::RenameTable { .. }) {
+        if matches!(alter_kind, Kind::RenameTable { .. }) || is_metadata_only_alter(alter_kind) {
             self.data.state = AlterTableState::UpdateMetadata;
         } else {
             self.data.state = AlterTableState::SubmitAlterRegionRequests;
@@ -268,6 +269,7 @@ impl AlterTableProcedure {
         let table_info_value = self.data.table_info_value.as_ref().unwrap();
         // Safety: Checked in `AlterTableProcedure::new`.
         let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
+        let metadata_only_alter = is_metadata_only_alter(alter_kind);
 
         // Gets the table info from the cache or builds it.
         let  new_info = match &self.new_table_info {
@@ -290,6 +292,7 @@ impl AlterTableProcedure {
                 self.data.region_distribution.as_ref(),
                 new_info,
                 &self.data.column_metadatas,
+                metadata_only_alter,
             )
             .await?;
 
@@ -335,6 +338,18 @@ impl AlterTableProcedure {
     #[cfg(test)]
     pub(crate) fn mut_data(&mut self) -> &mut AlterTableData {
         &mut self.data
+    }
+}
+
+fn is_metadata_only_alter(alter_kind: &Kind) -> bool {
+    match alter_kind {
+        Kind::SetTableOptions(SetTableOptions { table_options }) => {
+            table_options.len() == 1 && table_options[0].key.as_str() == REPARTITION_COLUMN_HINT_KEY
+        }
+        Kind::UnsetTableOptions(UnsetTableOptions { keys }) => {
+            keys.len() == 1 && keys[0].as_str() == REPARTITION_COLUMN_HINT_KEY
+        }
+        _ => false,
     }
 }
 
