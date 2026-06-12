@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand};
 use cmd::datanode::builder::InstanceBuilder;
 use cmd::error::{InitTlsProviderSnafu, Result};
 use cmd::options::GlobalOptions;
-use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone};
+use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone, user};
 use common_base::Plugins;
 use common_version::{product_name, verbose_version, version};
 use servers::install_default_crypto_provider;
@@ -60,6 +60,10 @@ enum SubCommand {
     /// Execute the cli tools.
     #[clap(name = "cli")]
     Cli(cli::Command),
+
+    /// Manage user credentials.
+    #[clap(name = "user")]
+    User(user::Command),
 }
 
 #[cfg(not(windows))]
@@ -146,6 +150,7 @@ async fn start(cli: Command) -> Result<()> {
                 .run()
                 .await
         }
+        SubCommand::User(cmd) => cmd.run(),
     }
 }
 

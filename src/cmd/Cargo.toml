@@ -67,6 +67,7 @@ etcd-client.workspace = true
 flow.workspace = true
 frontend = { workspace = true, default-features = false }
 futures.workspace = true
+hex.workspace = true
 human-panic = "2.0"
 humantime.workspace = true
 lazy_static.workspace = true
