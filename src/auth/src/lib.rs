@@ -22,8 +22,11 @@ mod user_provider;
 pub mod tests;
 
 pub use common::{
-    HashedPassword, Identity, Password, auth_mysql, static_user_provider_from_option,
-    user_provider_from_option, userinfo_by_name,
+    DEFAULT_PBKDF2_SHA256_ITERATIONS, HashedPassword, Identity, MAX_PBKDF2_SHA256_ITERATIONS,
+    MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN, Password, auth_mysql,
+    format_mysql_native_password_verifier, format_pbkdf2_sha256_password_verifier,
+    mysql_native_password_hash, static_user_provider_from_option, user_provider_from_option,
+    userinfo_by_name,
 };
 pub use permission::{DefaultPermissionChecker, PermissionChecker, PermissionReq, PermissionResp};
 pub use user_info::UserInfo;

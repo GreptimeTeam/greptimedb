@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use common_base::secrets::SecretString;
 use digest::Digest;
+use pbkdf2::pbkdf2_hmac;
 use sha1::Sha1;
+use sha2::Sha256;
 use snafu::{OptionExt, ensure};
 
 use crate::error::{IllegalParamSnafu, InvalidConfigSnafu, Result, UserPasswordMismatchSnafu};
@@ -28,6 +30,10 @@ use crate::user_provider::watch_file_user_provider::{
 use crate::{UserInfoRef, UserProviderRef};
 
 pub(crate) const DEFAULT_USERNAME: &str = "greptime";
+pub const DEFAULT_PBKDF2_SHA256_ITERATIONS: u32 = 4096;
+pub const PBKDF2_SHA256_HASH_LEN: usize = 32;
+pub const MAX_PBKDF2_SHA256_ITERATIONS: u32 = 1_000_000;
+pub const MAX_PBKDF2_SHA256_SALT_LEN: usize = 1024;
 
 /// construct a [`UserInfo`](crate::user_info::UserInfo) impl with name
 /// use default username `greptime` if None is provided
@@ -150,8 +156,48 @@ pub(crate) fn auth_mysql_with_hash_stage_2(
     }
 }
 
-pub(crate) fn mysql_native_password_hash(save_pwd: &[u8]) -> Vec<u8> {
+pub fn mysql_native_password_hash(save_pwd: &[u8]) -> Vec<u8> {
     double_sha1(save_pwd)
+}
+
+pub fn format_mysql_native_password_verifier(password: &[u8]) -> String {
+    format!(
+        "mysql_native_password:{}",
+        hex::encode(mysql_native_password_hash(password))
+    )
+}
+
+pub fn format_pbkdf2_sha256_password_verifier(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+) -> Result<String> {
+    ensure!(
+        iterations > 0 && iterations <= MAX_PBKDF2_SHA256_ITERATIONS,
+        IllegalParamSnafu {
+            msg: format!(
+                "pbkdf2_sha256 iterations must be in 1..={}",
+                MAX_PBKDF2_SHA256_ITERATIONS
+            )
+        }
+    );
+    ensure!(
+        !salt.is_empty() && salt.len() <= MAX_PBKDF2_SHA256_SALT_LEN,
+        IllegalParamSnafu {
+            msg: format!(
+                "pbkdf2_sha256 salt length must be in 1..={}",
+                MAX_PBKDF2_SHA256_SALT_LEN
+            )
+        }
+    );
+
+    let mut hash = [0u8; PBKDF2_SHA256_HASH_LEN];
+    pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut hash);
+    Ok(format!(
+        "pbkdf2_sha256:{iterations}:{}:{}",
+        hex::encode(salt),
+        hex::encode(hash)
+    ))
 }
 
 fn sha1_two(input_1: &[u8], input_2: &[u8]) -> Vec<u8> {
@@ -197,5 +243,35 @@ mod tests {
         ];
         let sha1_2 = sha1_two("123456".as_bytes(), "654321".as_bytes());
         assert_eq!(sha1_2, sha1_2_answer);
+    }
+
+    #[test]
+    fn test_format_mysql_native_password_verifier() {
+        let verifier = format_mysql_native_password_verifier("123456".as_bytes());
+        assert_eq!(
+            "mysql_native_password:6bb4837eb74329105ee4568dda7dc67ed2ca2ad9",
+            verifier
+        );
+    }
+
+    #[test]
+    fn test_format_pbkdf2_sha256_password_verifier() {
+        let verifier =
+            format_pbkdf2_sha256_password_verifier("password".as_bytes(), b"salt", 4096).unwrap();
+        assert_eq!(
+            "pbkdf2_sha256:4096:73616c74:c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a",
+            verifier
+        );
+
+        assert!(format_pbkdf2_sha256_password_verifier(b"password", b"", 4096).is_err());
+        assert!(format_pbkdf2_sha256_password_verifier(b"password", b"salt", 0).is_err());
+        assert!(
+            format_pbkdf2_sha256_password_verifier(
+                b"password",
+                b"salt",
+                MAX_PBKDF2_SHA256_ITERATIONS + 1,
+            )
+            .is_err()
+        );
     }
 }

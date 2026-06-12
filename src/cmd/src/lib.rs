@@ -31,6 +31,7 @@ pub mod frontend;
 pub mod metasrv;
 pub mod options;
 pub mod standalone;
+pub mod user;
 
 lazy_static::lazy_static! {
     static ref APP_VERSION: prometheus::IntGaugeVec =

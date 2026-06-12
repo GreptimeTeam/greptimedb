@@ -27,19 +27,16 @@ use sha2::Sha256;
 use snafu::{OptionExt, ResultExt, ensure};
 use subtle::ConstantTimeEq;
 
-use crate::common::{Identity, Password, auth_mysql_with_hash_stage_2};
+use crate::common::{
+    Identity, MAX_PBKDF2_SHA256_ITERATIONS, MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN,
+    Password, auth_mysql_with_hash_stage_2,
+};
 use crate::error::{
     IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
     UserNotFoundSnafu, UserPasswordMismatchSnafu,
 };
 use crate::user_info::{DefaultUserInfo, PermissionMode};
 use crate::{UserInfoRef, auth_mysql};
-
-const MAX_PBKDF2_SHA256_ITERATIONS: u32 = 1_000_000;
-/// PBKDF2-SHA256 derived key length, fixed to the native SHA-256 output size.
-const PBKDF2_SHA256_HASH_LEN: usize = 32;
-/// Upper bound on the salt length to reject misconfigured credentials.
-const MAX_PBKDF2_SHA256_SALT_LEN: usize = 1024;
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
