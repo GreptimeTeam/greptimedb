@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
-use common_meta::wal_provider::prepare_wal_options;
+use common_meta::wal_provider::serialize_wal_options;
 use common_telemetry::info;
 use store_api::path_utils::table_dir;
 use store_api::region_request::{PathType, RegionOpenRequest};
@@ -50,9 +50,11 @@ impl InstructionHandler for OpenRegionsHandler {
                     "Received open region instruction, region_id: {region_id}, reason: {reason:?}"
                 );
                 if let Err(err) =
-                    prepare_wal_options(&mut region_options, region_id, &region_wal_options)
+                    serialize_wal_options(&mut region_options, region_id, &region_wal_options)
                 {
-                    return Err(format!("Failed to prepare wal options: {err:?}"));
+                    return Err(format!(
+                        "Failed to serialize WAL options for region {region_id}: {err:?}"
+                    ));
                 }
                 let request = RegionOpenRequest {
                     engine: region_ident.engine,

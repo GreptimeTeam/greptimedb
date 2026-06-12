@@ -19,7 +19,6 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_procedure::ProcedureId;
-use common_wal::options::WalOptions;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -529,12 +528,9 @@ pub enum Error {
         clean_poisons: bool,
     },
 
-    #[snafu(display(
-        "Failed to encode a wal options to json string, wal_options: {:?}",
-        wal_options
-    ))]
-    EncodeWalOptions {
-        wal_options: WalOptions,
+    #[snafu(display("Failed to serialize WAL options for region: {region_id}"))]
+    SerializeWalOptions {
+        region_id: RegionId,
         #[snafu(source)]
         error: serde_json::Error,
         #[snafu(implicit)]
@@ -1166,7 +1162,7 @@ impl ErrorExt for Error {
             | TableRouteNotFound { .. }
             | TableRepartNotFound { .. }
             | RegionOperatingRace { .. }
-            | EncodeWalOptions { .. }
+            | SerializeWalOptions { .. }
             | BuildKafkaClient { .. }
             | BuildKafkaCtrlClient { .. }
             | KafkaPartitionClient { .. }

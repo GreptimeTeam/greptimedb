@@ -24,11 +24,11 @@ use async_trait::async_trait;
 use common_wal::config::MetasrvWalConfig;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use snafu::{ResultExt, ensure};
+use snafu::ensure;
 use store_api::storage::{RegionId, RegionNumber};
 
 use crate::ddl::allocator::wal_options::WalOptionsAllocator;
-use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
+use crate::error::{InvalidTopicNamePrefixSnafu, Result};
 use crate::key::TOPIC_NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
@@ -195,16 +195,14 @@ pub async fn build_wal_provider(
     }
 }
 
-/// Inserts wal options into options.
-pub fn prepare_wal_options(
+/// Serializes and inserts WAL options into the region options.
+pub fn serialize_wal_options(
     options: &mut HashMap<String, String>,
     region_id: RegionId,
     region_wal_options: &RegionWalOptions,
-) -> Result<()> {
+) -> std::result::Result<(), serde_json::Error> {
     if let Some(wal_options) = region_wal_options.get(&region_id.region_number()) {
-        let encoded = serde_json::to_string(wal_options).context(EncodeWalOptionsSnafu {
-            wal_options: wal_options.clone(),
-        })?;
+        let encoded = serde_json::to_string(wal_options)?;
         options.insert(WAL_OPTIONS_KEY.to_string(), encoded);
     }
     Ok(())

@@ -25,9 +25,9 @@ use store_api::region_request::RegionRequirements;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
-use crate::error::{self, Result};
+use crate::error::{self, Result, SerializeWalOptionsSnafu};
 use crate::reconciliation::utils::build_column_metadata_from_table_info;
-use crate::wal_provider::{RegionWalOptions, prepare_wal_options};
+use crate::wal_provider::{RegionWalOptions, serialize_wal_options};
 
 /// Constructs a [CreateRequest] based on the provided [TableInfo].
 ///
@@ -236,7 +236,8 @@ impl CreateRequestBuilder {
         request.path = storage_path;
         request.requirements = Some(self.requirements.into());
         // Stores the encoded wal options into the request options.
-        prepare_wal_options(&mut request.options, region_id, region_wal_options)?;
+        serialize_wal_options(&mut request.options, region_id, region_wal_options)
+            .context(SerializeWalOptionsSnafu { region_id })?;
         request.partition = Some(prepare_partition_expr(region_id, partition_exprs));
 
         if let Some(physical_table_id) = self.physical_table_id {

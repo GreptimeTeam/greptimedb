@@ -25,7 +25,7 @@ use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
 use table::metadata::TableInfo;
 
-use crate::error::{CovertColumnSchemasToDefsSnafu, Result, TableMetadataSnafu};
+use crate::error::{BuildCreateRegionRequestSnafu, CovertColumnSchemasToDefsSnafu, Result};
 
 /// Generates a `CreateTableExpr` from a `TableInfo`.
 pub fn generate_create_table_expr(table_info: &TableInfo) -> Result<CreateTableExpr> {
@@ -89,7 +89,7 @@ pub fn make_create_region_request_for_peer(
                 &HashMap::new(),
                 &partition_exprs,
             )
-            .context(TableMetadataSnafu)?;
+            .context(BuildCreateRegionRequestSnafu { region_id })?;
         requests.push(region_request);
     }
 
