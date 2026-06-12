@@ -62,7 +62,7 @@ pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
 pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 
-pub const VALID_TABLE_OPTION_KEYS: [&str; 13] = [
+pub const VALID_TABLE_OPTION_KEYS: [&str; 14] = [
     // common keys:
     WRITE_BUFFER_SIZE_KEY,
     TTL_KEY,
@@ -80,6 +80,7 @@ pub const VALID_TABLE_OPTION_KEYS: [&str; 13] = [
     // table model info
     TABLE_DATA_MODEL,
     OTLP_METRIC_COMPAT_KEY,
+    REPARTITION_COLUMN_HINT_KEY,
 ];
 
 pub const DDL_TIMEOUT: &str = "timeout";
@@ -161,6 +162,7 @@ pub const COMMENT_KEY: &str = "comment";
 pub const AUTO_CREATE_TABLE_KEY: &str = "auto_create_table";
 pub const SKIP_WAL_KEY: &str = store_api::mito_engine_options::SKIP_WAL_KEY;
 pub const TRACE_TABLE_PARTITIONS_HINT_KEY: &str = "trace_table_partitions";
+pub const REPARTITION_COLUMN_HINT_KEY: &str = "repartition.column.hint";
 
 impl TableOptions {
     pub fn try_from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(
@@ -498,6 +500,7 @@ mod tests {
         assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
         assert!(validate_table_option(STORAGE_KEY));
         assert!(validate_table_option(MEMTABLE_BULK_MERGE_THRESHOLD));
+        assert!(validate_table_option(REPARTITION_COLUMN_HINT_KEY));
         assert!(!validate_table_option("foo"));
 
         // Only whitelisted semantic keys are accepted.

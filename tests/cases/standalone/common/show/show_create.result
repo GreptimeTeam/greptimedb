@@ -90,6 +90,39 @@ drop table table_without_partition;
 
 Affected Rows: 0
 
+CREATE TABLE hint_table (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'host');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE hint_table;
+
++------------+-------------------------------------------+
+| Table      | Create Table                              |
++------------+-------------------------------------------+
+| hint_table | CREATE TABLE IF NOT EXISTS "hint_table" ( |
+|            |   "host" STRING NULL,                    |
+|            |   "ts" TIMESTAMP(3) NOT NULL,            |
+|            |   "cpu" DOUBLE NULL,                     |
+|            |   TIME INDEX ("ts"),                     |
+|            |   PRIMARY KEY ("host")                   |
+|            | )                                         |
+|            |                                           |
+|            | ENGINE=mito                               |
+|            | WITH(                                     |
+|            |   'repartition.column.hint' = 'host'      |
+|            | )                                         |
++------------+-------------------------------------------+
+
+DROP TABLE hint_table;
+
+Affected Rows: 0
+
 CREATE TABLE not_supported_table_storage_option (
   `id` INT UNSIGNED,
   host STRING,
@@ -423,4 +456,3 @@ show create table table_comment_in_cjk;
 drop table table_comment_in_cjk;
 
 Affected Rows: 0
-
