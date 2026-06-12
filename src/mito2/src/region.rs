@@ -45,6 +45,7 @@ use tokio::sync::RwLockWriteGuard;
 pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
+use crate::engine::region_hook::RegionHookRef;
 use crate::error::{
     FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
     RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
@@ -441,7 +442,7 @@ impl MitoRegion {
             self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
 
-        match state {
+        let hook_payload: Option<(RegionMetaActionList, ManifestVersion)> = match state {
             SettableRegionRoleState::Leader => {
                 // Exit staging mode and return to normal writable leader
                 // Only allowed from staging state
@@ -449,11 +450,12 @@ impl MitoRegion {
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         info!("Exiting staging mode for region {}", self.region_id);
                         // Use the success exit path that merges all staged manifests
-                        self.exit_staging_on_success(&mut manager).await?;
+                        self.exit_staging_on_success(&mut manager).await?
                     }
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         // Already in desired state - no-op
                         info!("Region {} already in normal leader mode", self.region_id);
+                        None
                     }
                     _ => {
                         // Only staging -> leader transition is allowed
@@ -488,6 +490,7 @@ impl MitoRegion {
                         .build());
                     }
                 }
+                None
             }
 
             SettableRegionRoleState::Follower => {
@@ -510,6 +513,7 @@ impl MitoRegion {
                         info!("Region {} already in follower mode", self.region_id);
                     }
                 }
+                None
             }
 
             SettableRegionRoleState::DowngradingLeader => {
@@ -538,10 +542,12 @@ impl MitoRegion {
                         );
                     }
                 }
+                None
             }
-        }
+        };
 
         // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata.
+        let mut backfill_hook_payload: Option<(RegionMetaActionList, ManifestVersion)> = None;
         if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
             // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr)
             let manifest_meta = &manager.manifest().metadata;
@@ -553,9 +559,10 @@ impl MitoRegion {
                     sst_format: current_version.options.sst_format.unwrap_or_default(),
                     append_mode: None,
                 });
-                let result = manager
-                    .update(RegionMetaActionList::with_action(action), false)
-                    .await;
+                let action_list = RegionMetaActionList::with_action(action);
+                let hook = self.manifest_ctx.hook();
+                let al_for_hook = hook.as_ref().map(|_| action_list.clone());
+                let result = manager.update(action_list, false).await;
 
                 match result {
                     Ok(version) => {
@@ -563,6 +570,7 @@ impl MitoRegion {
                             "Successfully persisted backfilled metadata for region {}, version: {}",
                             self.region_id, version
                         );
+                        backfill_hook_payload = al_for_hook.map(|al| (al, version));
                     }
                     Err(e) => {
                         warn!(e; "Failed to persist backfilled metadata for region {}", self.region_id);
@@ -572,6 +580,27 @@ impl MitoRegion {
         }
 
         drop(manager);
+
+        // Merge both payloads into a single hook invocation so consumers see
+        // the complete set of actions and the latest manifest version.
+        let merged = match (hook_payload, backfill_hook_payload) {
+            (Some((al, _v)), Some((backfill_al, backfill_v))) => {
+                // Combine action lists; use the later version (backfill happens after staging merge).
+                let mut combined = al;
+                combined.actions.extend(backfill_al.actions);
+                Some((combined, backfill_v))
+            }
+            (Some(payload), None) => Some(payload),
+            (None, Some(payload)) => Some(payload),
+            (None, None) => None,
+        };
+
+        if let Some((action_list, version)) = merged
+            && let Some(hook) = self.manifest_ctx.hook()
+        {
+            hook.on_manifest_updated(self.region_id, &action_list, version)
+                .await;
+        }
 
         Ok(())
     }
@@ -784,10 +813,18 @@ impl MitoRegion {
     }
 
     /// Exit staging mode successfully by merging all staged manifests and making them visible.
+    /// Merges staged manifest actions into the live manifest and exits staging mode.
+    ///
+    /// The caller must hold the manifest write lock and pass it via `manager`.
+    /// Returns `Ok(Some(action_list, version))` when staging manifests were merged,
+    /// or `Ok(None)` when there were no staged manifests to merge.
+    ///
+    /// **Important:** the returned hook payload must be invoked **after** the caller
+    /// drops the manifest write lock, to avoid deadlocking if the hook reads the manifest.
     pub(crate) async fn exit_staging_on_success(
         &self,
         manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
-    ) -> Result<()> {
+    ) -> Result<Option<(RegionMetaActionList, ManifestVersion)>> {
         let current_state = self.manifest_ctx.current_state();
         ensure!(
             current_state == RegionRoleState::Leader(RegionLeaderState::Staging),
@@ -808,7 +845,7 @@ impl MitoRegion {
                 );
                 // Even if no manifests to merge, we still need to exit staging mode
                 self.exit_staging()?;
-                return Ok(());
+                return Ok(None);
             }
         };
         let expect_change = merged_actions.actions.iter().any(|a| a.is_change());
@@ -851,8 +888,13 @@ impl MitoRegion {
             );
         }
 
-        // Submit merged actions using the manifest manager's update method
-        // Pass the `false` so it saves to normal directory, not staging
+        // Submit merged actions using the manifest manager's update method.
+        // Pass `false` so it saves to normal directory, not staging.
+        //
+        // Clone the action list before it is consumed so we can return it to
+        // the caller for hook invocation after the lock is dropped.
+        let hook = self.manifest_ctx.hook();
+        let action_list_for_hook = hook.as_ref().map(|_| merged_actions.clone());
         let new_version = manager.update(merged_actions, false).await?;
         info!(
             "Successfully submitted merged staged manifests for region {}, new version: {}",
@@ -877,7 +919,9 @@ impl MitoRegion {
         }
         self.exit_staging()?;
 
-        Ok(())
+        // Return the hook payload; the caller invokes the hook after dropping the lock.
+        let hook_payload = action_list_for_hook.map(|action_list| (action_list, new_version));
+        Ok(hook_payload)
     }
 
     /// Returns the partition expression string for this region.
@@ -947,15 +991,27 @@ pub(crate) struct ManifestContext {
     /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
     /// so we need to store the partition info separately.
     staging_partition_info: Mutex<Option<StagingPartitionInfo>>,
+    /// Optional region hook for observing manifest mutations.
+    hook: Option<RegionHookRef>,
 }
 
 impl ManifestContext {
-    pub(crate) fn new(manager: RegionManifestManager, state: RegionRoleState) -> Self {
+    pub(crate) fn new(
+        manager: RegionManifestManager,
+        state: RegionRoleState,
+        hook: Option<RegionHookRef>,
+    ) -> Self {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
             staging_partition_info: Mutex::new(None),
+            hook,
         }
+    }
+
+    /// Returns the region hook if one is registered.
+    pub(crate) fn hook(&self) -> Option<RegionHookRef> {
+        self.hook.clone()
     }
 
     pub(crate) fn staging_partition_info(&self) -> Option<StagingPartitionInfo> {
@@ -1173,16 +1229,33 @@ impl ManifestContext {
             }
         }
 
-        // Now we can update the manifest.
-        let version = manager.update(action_list, is_staging).await.inspect_err(
-            |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
-        )?;
+        // If a region hook is registered, clone the action list before it is consumed
+        // so we can pass a reference to the hook after a successful update.
+        let hook = self.hook.clone();
+        let action_list_for_hook = hook.as_ref().map(|_| action_list.clone());
+        let region_id = manifest.metadata.region_id;
+        let version = manager
+            .update(action_list, is_staging)
+            .await
+            .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
+
+        // Drop the write lock before invoking the hook. Hook implementations may
+        // read the manifest or send region requests that acquire this lock;
+        // holding it would deadlock. Slow hooks also must not block manifest updates.
+        drop(manager);
 
         if self.state.load() == RegionRoleState::Follower {
             warn!(
                 "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
-                manifest.metadata.region_id
+                region_id
             );
+        }
+
+        if let Some(hook) = hook
+            && let Some(action_list) = action_list_for_hook
+        {
+            hook.on_manifest_updated(region_id, &action_list, version)
+                .await;
         }
 
         Ok(version)
@@ -1718,6 +1791,7 @@ mod tests {
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
             RegionRoleState::Leader(RegionLeaderState::Writable),
+            None,
         ));
 
         MitoRegion {
@@ -1806,7 +1880,7 @@ mod tests {
             .await
             .unwrap();
 
-        region.exit_staging_on_success(&mut manager).await.unwrap();
+        let _hook_payload = region.exit_staging_on_success(&mut manager).await.unwrap();
         drop(manager);
 
         assert_eq!(
@@ -1845,7 +1919,7 @@ mod tests {
             .await
             .unwrap();
 
-        region.exit_staging_on_success(&mut manager).await.unwrap();
+        let _hook_payload = region.exit_staging_on_success(&mut manager).await.unwrap();
         drop(manager);
 
         assert_eq!(
@@ -2007,6 +2081,7 @@ mod tests {
             Arc::new(ManifestContext::new(
                 manager,
                 RegionRoleState::Leader(RegionLeaderState::Staging),
+                None,
             ))
         };
 
@@ -2075,6 +2150,7 @@ mod tests {
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
             RegionRoleState::Leader(RegionLeaderState::Writable),
+            None,
         ));
 
         let region = MitoRegion {

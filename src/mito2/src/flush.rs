@@ -36,6 +36,7 @@ use crate::access_layer::{
 };
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
+use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
     Error, FlushRegionSnafu, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
     RegionTruncatedSnafu, Result,
@@ -386,6 +387,7 @@ impl RegionFlushTask {
             series_count,
             encoded_part_count,
             flush_metrics,
+            sst_infos,
         } = self.do_flush_memtables(version, write_opts).await?;
 
         if !file_metas.is_empty() {
@@ -413,6 +415,20 @@ impl RegionFlushTask {
             flush_metrics,
         );
         flush_metrics.observe();
+
+        let hook = self.manifest_ctx.hook();
+        if let Some(hook) = &hook {
+            let files: Vec<SstFileInfo<'_>> = sst_infos
+                .iter()
+                .zip(file_metas.iter())
+                .map(|(sst_info, file_meta)| SstFileInfo {
+                    sst_info_ref: sst_info,
+                    file_meta,
+                })
+                .collect();
+            hook.on_sst_files_written(self.region_id, &version.metadata, &files)
+                .await;
+        }
 
         let edit = RegionEdit {
             files_to_add: file_metas,
@@ -444,12 +460,12 @@ impl RegionFlushTask {
         };
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.
-        let version = self
+        let manifest_version = self
             .manifest_ctx
             .update_manifest(expected_state, action_list, self.is_staging)
             .await?;
         info!(
-            "Successfully update manifest version to {version}, region: {}, is_staging: {}, reason: {}",
+            "Successfully update manifest version to {manifest_version}, region: {}, is_staging: {}, reason: {}",
             self.region_id,
             self.is_staging,
             self.reason.as_str()
@@ -470,6 +486,8 @@ impl RegionFlushTask {
         let mut encoded_part_count = 0;
         let mut flush_metrics = Metrics::new(WriteType::Flush);
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
+        let hook = self.manifest_ctx.hook();
+        let mut all_sst_infos = Vec::new();
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -523,7 +541,7 @@ impl RegionFlushTask {
 
                 flush_metrics = flush_metrics.merge(metrics);
 
-                for sst_info in ssts_written {
+                for sst_info in &ssts_written {
                     flushed_bytes += sst_info.file_size;
                     let pk_range = sst_info
                         .file_metadata
@@ -536,6 +554,9 @@ impl RegionFlushTask {
                         partition_expr.clone(),
                         pk_range,
                     ));
+                }
+                if hook.is_some() {
+                    all_sst_infos.extend(ssts_written);
                 }
             }
 
@@ -558,6 +579,7 @@ impl RegionFlushTask {
             series_count,
             encoded_part_count,
             flush_metrics,
+            sst_infos: all_sst_infos,
         })
     }
 
@@ -626,7 +648,7 @@ impl RegionFlushTask {
     fn new_file_meta(
         region_id: RegionId,
         max_sequence: u64,
-        sst_info: SstInfo,
+        sst_info: &SstInfo,
         partition_expr: Option<PartitionExpr>,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> FileMeta {
@@ -722,6 +744,7 @@ struct DoFlushMemtablesResult {
     series_count: usize,
     encoded_part_count: usize,
     flush_metrics: Metrics,
+    sst_infos: Vec<SstInfo>,
 }
 
 struct FlatSources {

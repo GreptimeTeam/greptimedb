@@ -536,6 +536,7 @@ impl CompactionScheduler {
             file_purger: None,
             ttl: Some(ttl),
             max_parallelism,
+            plugins: self.plugins.clone(),
         };
 
         let picker_output = {
@@ -1884,6 +1885,7 @@ mod tests {
             Arc::new(ManifestContext::new(
                 manager,
                 RegionRoleState::Leader(RegionLeaderState::Staging),
+                None,
             ))
         };
 

@@ -16,24 +16,31 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
+use async_trait::async_trait;
+use common_base::Plugins;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
+use store_api::ManifestVersion;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
     ReplayCheckpoint,
 };
 use store_api::storage::{RegionId, ScanRequest};
+use tokio::sync::Notify;
 
 use crate::config::MitoConfig;
 use crate::engine::listener::{FlushListener, StallListener};
+use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
+use crate::manifest::action::RegionMetaActionList;
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv, build_rows,
     build_rows_for_key, flush_region, kafka_log_store_factory, multiple_log_store_factories,
@@ -890,4 +897,134 @@ async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
         .await
         .unwrap();
     assert_eq!(region.topic_latest_entry_id.load(Ordering::Relaxed), 1);
+}
+
+#[derive(Debug)]
+struct MockRegionHook {
+    sst_written_count: AtomicUsize,
+    manifest_updated_count: AtomicUsize,
+    notify: Notify,
+}
+
+impl MockRegionHook {
+    fn new() -> Self {
+        Self {
+            sst_written_count: AtomicUsize::new(0),
+            manifest_updated_count: AtomicUsize::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    async fn wait_for_manifest_update(&self) {
+        self.notify.notified().await;
+    }
+}
+
+#[async_trait]
+impl RegionHook for MockRegionHook {
+    async fn on_sst_files_written(
+        &self,
+        region_id: RegionId,
+        _region_metadata: &RegionMetadataRef,
+        files: &[SstFileInfo<'_>],
+    ) {
+        self.sst_written_count
+            .fetch_add(files.len(), Ordering::Relaxed);
+        common_telemetry::info!(
+            "MockRegionHook::on_sst_files_written: region={}, files={}",
+            region_id,
+            files.len(),
+        );
+        for (i, file) in files.iter().enumerate() {
+            common_telemetry::info!(
+                "  file[{}]: file_id={}, num_rows={}, num_series={}, file_size={}",
+                i,
+                file.sst_info_ref.file_id,
+                file.sst_info_ref.num_rows,
+                file.sst_info_ref.num_series,
+                file.sst_info_ref.file_size,
+            );
+        }
+    }
+
+    async fn on_manifest_updated(
+        &self,
+        region_id: RegionId,
+        action_list: &RegionMetaActionList,
+        manifest_version: ManifestVersion,
+    ) {
+        self.manifest_updated_count.fetch_add(1, Ordering::Relaxed);
+        // Count files added across all Edit actions.
+        let files_added: usize = action_list
+            .actions
+            .iter()
+            .map(|action| match action {
+                crate::manifest::action::RegionMetaAction::Edit(edit) => edit.files_to_add.len(),
+                _ => 0,
+            })
+            .sum();
+        common_telemetry::info!(
+            "MockRegionHook::on_manifest_updated: region={}, manifest_version={}, files_added={}",
+            region_id,
+            manifest_version,
+            files_added,
+        );
+        self.notify.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn test_region_hook() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+
+    let hook = Arc::new(MockRegionHook::new());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+
+    let engine = env
+        .create_engine_with_plugins(MitoConfig::default(), plugins)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 10, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let rows2 = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("b", 0, 10, 0),
+    };
+    put_rows(&engine, region_id, rows2).await;
+
+    flush_region(&engine, region_id, None).await;
+
+    hook.wait_for_manifest_update().await;
+
+    let sst_count = hook.sst_written_count.load(Ordering::Relaxed);
+    let manifest_count = hook.manifest_updated_count.load(Ordering::Relaxed);
+
+    assert!(
+        sst_count > 0,
+        "Expected at least 1 SST file, got {sst_count}"
+    );
+    assert_eq!(
+        manifest_count, 1,
+        "Expected exactly 1 manifest update, got {manifest_count}"
+    );
+
+    common_telemetry::info!(
+        "test_region_hook passed: sst_count={}, manifest_count={}",
+        sst_count,
+        manifest_count,
+    );
 }

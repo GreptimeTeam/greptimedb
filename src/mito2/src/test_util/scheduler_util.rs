@@ -144,6 +144,7 @@ impl SchedulerEnv {
             .await
             .unwrap(),
             RegionRoleState::Leader(RegionLeaderState::Writable),
+            None,
         ))
     }
 

@@ -56,6 +56,7 @@ mod parallel_test;
 mod projection_test;
 #[cfg(test)]
 mod prune_test;
+pub mod region_hook;
 #[cfg(test)]
 mod row_selector_test;
 #[cfg(test)]
