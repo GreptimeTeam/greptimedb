@@ -44,9 +44,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
-use crate::batching_mode::checkpoint::{
-    FlowCheckpointDecision, FlowQueryFallbackReason, checkpoint_mode_label,
-};
+use crate::batching_mode::checkpoint::checkpoint_mode_label;
 use crate::batching_mode::frontend_client::{FrontendClient, PeerDesc};
 use crate::batching_mode::state::{
     CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState, to_df_literal,
@@ -737,13 +735,9 @@ impl BatchingTask {
             .inc_by(affected_rows as _);
         let decision = {
             let mut state = self.state.write().unwrap();
-            Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage, dirty_restore)
+            Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage)
         };
         Self::record_checkpoint_decision(flow_id, decision);
-        self.restore_unscoped_dirty_signal_after_successful_incremental_fallback(
-            dirty_restore,
-            decision,
-        );
 
         Ok(Some((affected_rows, elapsed)))
     }
@@ -767,32 +761,6 @@ impl BatchingTask {
     /// it could prove any checkpoint advancement.
     fn restore_dirty_windows_after_failure(&self, query: &PlanInfo) {
         self.restore_dirty_windows(&query.dirty_restore);
-    }
-
-    /// If an incremental query executed successfully but failed to prove a safe
-    /// checkpoint advancement, the task switches back to full snapshot mode. The
-    /// unscoped incremental path has already consumed the dirty-window signal,
-    /// so restore that signal to make the next full snapshot actually run.
-    fn restore_unscoped_dirty_signal_after_successful_incremental_fallback(
-        &self,
-        dirty_restore: &DirtyRestore,
-        decision: FlowCheckpointDecision,
-    ) {
-        if !matches!(
-            decision,
-            FlowCheckpointDecision::FallbackToFullSnapshot {
-                previous_mode: CheckpointMode::Incremental,
-                reason: FlowQueryFallbackReason::MissingRegionWatermark
-                    | FlowQueryFallbackReason::IncompleteRegionWatermark,
-                ..
-            }
-        ) {
-            return;
-        }
-
-        if let DirtyRestore::Unscoped(dirty_windows) = dirty_restore {
-            self.restore_unscoped_dirty_windows(dirty_windows);
-        }
     }
 
     /// Restore scoped windows through `TaskState` so fenced repair can decide

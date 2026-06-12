@@ -24,27 +24,13 @@ use crate::batching_mode::checkpoint::{
     FlowCheckpointDecision, FlowQueryFallbackReason, checkpoint_mode_label,
 };
 use crate::batching_mode::state::{CheckpointMode, TaskState};
-use crate::batching_mode::task::{BatchingTask, DirtyRestore, QueryCoverage};
+use crate::batching_mode::task::{BatchingTask, QueryCoverage};
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT,
 };
 use crate::{Error, FlowId};
 
 impl BatchingTask {
-    /// Restore windows for a query that executed but did not provide enough
-    /// watermark proof to advance checkpoints.
-    fn restore_dirty_windows_for_unadvanced_query(
-        state: &mut TaskState,
-        dirty_restore: &DirtyRestore,
-    ) {
-        match dirty_restore {
-            DirtyRestore::Scoped(filter) => state.restore_scoped_windows(filter),
-            DirtyRestore::Unscoped(dirty_windows) => {
-                state.dirty_time_windows.add_dirty_windows(dirty_windows)
-            }
-        }
-    }
-
     /// Classify execution errors into checkpoint fallback reasons. A stale
     /// snapshot fence is special only for fenced repair chunks.
     pub(super) fn query_failure_reason(
@@ -107,7 +93,6 @@ impl BatchingTask {
         res: &OutputWithMetrics,
         elapsed: Duration,
         coverage: &QueryCoverage,
-        dirty_restore: &DirtyRestore,
     ) -> FlowCheckpointDecision {
         state.after_query_exec(elapsed, true);
         let checkpoint_mode = state.checkpoint_mode();
@@ -122,7 +107,6 @@ impl BatchingTask {
                         &participating_regions,
                         &watermark_map,
                     ) {
-                        Self::restore_dirty_windows_for_unadvanced_query(state, dirty_restore);
                         return FlowCheckpointDecision::FallbackToFullSnapshot {
                             previous_mode: checkpoint_mode,
                             reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
@@ -162,13 +146,10 @@ impl BatchingTask {
                     {
                         // A successful repair chunk whose terminal watermark
                         // differs from the frozen fence `H` cannot prove that
-                        // continuing the same repair is safe. Abandon the stale
-                        // fenced repair first so both the not-yet-in-flight
-                        // pending windows and this in-flight chunk restore to
-                        // live dirty windows. The next round then starts over as
-                        // a normal ScopedBaseRepair and obtains a fresh `H`.
+                        // continuing the same repair is safe. The chunk already
+                        // executed, so consume it; only restore not-yet-in-flight
+                        // pending windows, then start over with a fresh H.
                         state.abandon_fenced_repair();
-                        Self::restore_dirty_windows_for_unadvanced_query(state, dirty_restore);
                         return FlowCheckpointDecision::FallbackToFullSnapshot {
                             previous_mode: checkpoint_mode,
                             reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
@@ -216,7 +197,6 @@ impl BatchingTask {
                             }
                         }
                     } else {
-                        Self::restore_dirty_windows_for_unadvanced_query(state, dirty_restore);
                         if checkpoint_mode == CheckpointMode::Incremental {
                             state.mark_full_snapshot();
                         }
@@ -249,11 +229,8 @@ impl BatchingTask {
                 }
             }
         } else {
-            if matches!(
-                coverage,
-                QueryCoverage::ScopedBaseRepair | QueryCoverage::FencedRepairChunk { .. }
-            ) {
-                Self::restore_dirty_windows_for_unadvanced_query(state, dirty_restore);
+            if matches!(coverage, QueryCoverage::FencedRepairChunk { .. }) {
+                state.abandon_fenced_repair();
             }
             if matches!(checkpoint_mode, CheckpointMode::Incremental) {
                 state.mark_full_snapshot();

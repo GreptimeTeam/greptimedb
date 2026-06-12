@@ -399,7 +399,6 @@ fn test_apply_query_result_to_state_advances_full_snapshot_to_incremental() {
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::UnfilteredFull,
-        &DirtyRestore::Unscoped(DirtyTimeWindows::default()),
     );
 
     assert_eq!(
@@ -431,7 +430,6 @@ fn test_apply_query_result_to_state_stays_full_snapshot_when_incremental_disable
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::UnfilteredFull,
-        &DirtyRestore::Unscoped(DirtyTimeWindows::default()),
     );
 
     // Should NOT claim advancement to incremental; should fallback with correct reason.
@@ -463,7 +461,6 @@ fn test_apply_query_result_to_state_rejects_unproved_watermark() {
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::UnfilteredFull,
-        &DirtyRestore::Unscoped(DirtyTimeWindows::default()),
     );
 
     assert_eq!(
@@ -489,7 +486,6 @@ fn test_apply_query_result_to_state_reports_missing_watermark() {
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::UnfilteredFull,
-        &DirtyRestore::Unscoped(DirtyTimeWindows::default()),
     );
 
     assert_eq!(
@@ -520,7 +516,6 @@ fn test_apply_query_result_to_state_advances_incremental_subset() {
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::IncrementalDelta,
-        &DirtyRestore::Unscoped(DirtyTimeWindows::default()),
     );
 
     assert_eq!(
@@ -548,6 +543,7 @@ fn test_scoped_base_repair_with_dirty_backlog_starts_fenced_repair_from_full_sna
     state
         .dirty_time_windows
         .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(20)));
+    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
     let result = output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]);
 
     let decision = BatchingTask::apply_query_result_to_state(
@@ -555,12 +551,6 @@ fn test_scoped_base_repair_with_dirty_backlog_starts_fenced_repair_from_full_sna
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::ScopedBaseRepair,
-        &DirtyRestore::Scoped(FilterExprInfo {
-            expr: datafusion_expr::lit(true),
-            col_name: "ts".to_string(),
-            time_ranges: vec![(Timestamp::new_second(10), Timestamp::new_second(20))],
-            window_size: chrono::Duration::seconds(10),
-        }),
     );
 
     assert_eq!(
@@ -572,48 +562,7 @@ fn test_scoped_base_repair_with_dirty_backlog_starts_fenced_repair_from_full_sna
     );
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
     assert_eq!(state.dirty_time_windows.len(), 1);
-}
-
-#[test]
-fn test_scoped_base_repair_with_dirty_backlog_preserves_existing_incremental_checkpoints() {
-    let query_ctx = QueryContext::arc();
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let mut state = TaskState::new(query_ctx, rx);
-    state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
-    // Set a dirty window so that ScopedBaseRepair enters fenced repair instead
-    // of advancing directly; coverage type plus live dirty-window presence now
-    // determines this transition.
-    state
-        .dirty_time_windows
-        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(20)));
-    let result = output_with_region_watermarks([(1_u64, Some(12_u64)), (2_u64, Some(25_u64))]);
-
-    let decision = BatchingTask::apply_query_result_to_state(
-        &mut state,
-        &result,
-        std::time::Duration::from_millis(1),
-        &QueryCoverage::ScopedBaseRepair,
-        &DirtyRestore::Scoped(FilterExprInfo {
-            expr: datafusion_expr::lit(true),
-            col_name: "ts".to_string(),
-            time_ranges: vec![(Timestamp::new_second(10), Timestamp::new_second(20))],
-            window_size: chrono::Duration::seconds(10),
-        }),
-    );
-
-    assert_eq!(
-        decision,
-        FlowCheckpointDecision::ContinuedFencedRepair {
-            pending_windows: 1,
-            watermarks: 2,
-        }
-    );
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert_eq!(state.dirty_time_windows.len(), 1);
-    assert_eq!(
-        state.checkpoints(),
-        &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
-    );
+    assert_eq!(state.pending_fenced_repair().unwrap().high(), &high);
 }
 
 fn next_fenced_repair_filter(state: &mut TaskState, window_cnt: usize) -> FilterExprInfo {
@@ -644,7 +593,7 @@ fn test_fenced_repair_chunk_with_pending_windows_stays_full_snapshot() {
 
     let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
     state.start_fenced_repair(high.clone()).unwrap();
-    let filter = next_fenced_repair_filter(&mut state, 1);
+    let _filter = next_fenced_repair_filter(&mut state, 1);
     assert_eq!(
         state
             .pending_fenced_repair()
@@ -659,7 +608,6 @@ fn test_fenced_repair_chunk_with_pending_windows_stays_full_snapshot() {
         &output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]),
         std::time::Duration::from_millis(1),
         &QueryCoverage::FencedRepairChunk { high },
-        &DirtyRestore::Scoped(filter),
     );
 
     assert_eq!(
@@ -717,7 +665,6 @@ fn test_continued_fenced_repair_uses_pending_snapshot_not_later_live_dirty() {
         &output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]),
         std::time::Duration::from_millis(1),
         &QueryCoverage::FencedRepairChunk { high },
-        &DirtyRestore::Scoped(first_filter),
     );
     assert_eq!(
         decision,
@@ -785,7 +732,7 @@ fn test_final_fenced_repair_chunk_advances_to_high() {
 
     let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
     state.start_fenced_repair(high.clone()).unwrap();
-    let filter = next_fenced_repair_filter(&mut state, 1);
+    let _filter = next_fenced_repair_filter(&mut state, 1);
     assert!(state.fenced_repair_pending_is_empty());
 
     let decision = BatchingTask::apply_query_result_to_state(
@@ -793,7 +740,6 @@ fn test_final_fenced_repair_chunk_advances_to_high() {
         &output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]),
         std::time::Duration::from_millis(1),
         &QueryCoverage::FencedRepairChunk { high: high.clone() },
-        &DirtyRestore::Scoped(filter),
     );
 
     assert_eq!(
@@ -838,7 +784,7 @@ fn test_fenced_repair_watermarks_require_exact_high() {
 }
 
 #[test]
-fn test_fenced_repair_chunk_watermark_mismatch_restores_pending_and_inflight() {
+fn test_fenced_repair_chunk_watermark_mismatch_restores_pending_but_consumes_inflight() {
     let query_ctx = QueryContext::arc();
     let (_tx, rx) = tokio::sync::oneshot::channel();
     let mut state = TaskState::new(query_ctx, rx);
@@ -853,10 +799,11 @@ fn test_fenced_repair_chunk_watermark_mismatch_restores_pending_and_inflight() {
     state.start_fenced_repair(high.clone()).unwrap();
     // Isolate the restore assertions: the real state keeps live dirty windows
     // during fenced repair, but clearing them here proves mismatch restoration
-    // brings back both the remaining pending window and the in-flight chunk.
+    // brings back only the remaining pending window. The successful in-flight
+    // chunk is consumed.
     state.dirty_time_windows.clean();
 
-    let filter = next_fenced_repair_filter(&mut state, 1);
+    let _filter = next_fenced_repair_filter(&mut state, 1);
     assert_eq!(
         state
             .pending_fenced_repair()
@@ -872,7 +819,6 @@ fn test_fenced_repair_chunk_watermark_mismatch_restores_pending_and_inflight() {
         &output_with_region_watermarks([(1_u64, Some(11_u64)), (2_u64, Some(20_u64))]),
         std::time::Duration::from_millis(1),
         &QueryCoverage::FencedRepairChunk { high },
-        &DirtyRestore::Scoped(filter),
     );
 
     assert_eq!(
@@ -883,7 +829,7 @@ fn test_fenced_repair_chunk_watermark_mismatch_restores_pending_and_inflight() {
         }
     );
     assert!(state.pending_fenced_repair().is_none());
-    assert_eq!(state.dirty_time_windows.len(), 2);
+    assert_eq!(state.dirty_time_windows.len(), 1);
 }
 
 #[tokio::test]
@@ -897,7 +843,7 @@ async fn test_fenced_repair_mismatch_next_plan_is_scoped_base_repair() {
     )
     .await;
     let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
-    let filter = {
+    let _filter = {
         let mut state = task.state.write().unwrap();
         state
             .dirty_time_windows
@@ -913,7 +859,6 @@ async fn test_fenced_repair_mismatch_next_plan_is_scoped_base_repair() {
             &output_with_region_watermarks([(1_u64, Some(11_u64)), (2_u64, Some(20_u64))]),
             std::time::Duration::from_millis(1),
             &QueryCoverage::FencedRepairChunk { high },
-            &DirtyRestore::Scoped(filter),
         );
         assert_eq!(
             decision,
@@ -935,7 +880,7 @@ async fn test_fenced_repair_mismatch_next_plan_is_scoped_base_repair() {
         )
         .await
         .unwrap()
-        .expect("mismatch should restore dirty windows for a fresh scoped repair");
+        .expect("mismatch should keep live dirty backlog for a fresh scoped repair");
     assert!(matches!(plan.coverage, QueryCoverage::ScopedBaseRepair));
 }
 
@@ -1190,7 +1135,7 @@ fn test_repeated_abandon_and_new_fenced_repair_has_no_stale_pending_state() {
     // --- Cycle 1: fenced repair with H1, mismatch abandon ---
     let h1 = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
     state.start_fenced_repair(h1.clone()).unwrap();
-    let filter1 = next_fenced_repair_filter(&mut state, 1);
+    let _filter1 = next_fenced_repair_filter(&mut state, 1);
     assert_eq!(
         state
             .pending_fenced_repair()
@@ -1200,21 +1145,32 @@ fn test_repeated_abandon_and_new_fenced_repair_has_no_stale_pending_state() {
         1
     );
 
-    // Simulate watermark mismatch abandon (explicit abandon + restore
-    // in-flight chunk, just as the stale-fence and mismatch paths do).
+    // Simulate a successful watermark mismatch abandon: the in-flight chunk
+    // already ran, so only not-yet-in-flight pending windows are restored.
     state.abandon_fenced_repair();
     assert!(state.pending_fenced_repair().is_none());
     // The not-yet-in-flight pending window is already restored to live
-    // dirty windows by abandon_fenced_repair.
-    assert_eq!(state.dirty_time_windows.len(), 2);
-    // Restore in-flight chunk into live dirty windows too (no pending
-    // repair exists, so restore_scoped_windows targets dirty_time_windows).
-    state.restore_scoped_windows(&filter1);
+    // dirty windows by abandon_fenced_repair. The live dirty queue still has
+    // the original dirty signals because start_fenced_repair clones rather
+    // than clears it.
     assert_eq!(state.dirty_time_windows.len(), 2);
 
-    // --- Cycle 2: new fenced repair with H2 ---
+    // --- Cycle 2: fresh ScopedBaseRepair obtains H2, then starts new fenced repair ---
     let h2 = BTreeMap::from([(3_u64, 30_u64), (4_u64, 40_u64)]);
-    state.start_fenced_repair(h2.clone()).unwrap();
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &output_with_region_watermarks([(3_u64, Some(30_u64)), (4_u64, Some(40_u64))]),
+        std::time::Duration::from_millis(1),
+        &QueryCoverage::ScopedBaseRepair,
+    );
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::ContinuedFencedRepair {
+            pending_windows: 2,
+            watermarks: 2,
+        }
+    );
+
     let repair2 = state.pending_fenced_repair().unwrap();
     assert_eq!(repair2.high(), &h2, "high must be H2, not stale H1");
     assert_eq!(
@@ -1610,7 +1566,7 @@ async fn test_incremental_delta_applies_expire_after_retention_filter() {
 }
 
 #[tokio::test]
-async fn test_successful_incremental_fallback_restores_unscoped_dirty_signal() {
+async fn test_successful_incremental_checkpoint_fallback_consumes_unscoped_dirty_signal() {
     let TestTaskParts {
         task,
         query_engine,
@@ -1652,7 +1608,6 @@ async fn test_successful_incremental_fallback_restores_unscoped_dirty_signal() {
             &result,
             std::time::Duration::from_millis(1),
             &plan_info.coverage,
-            &plan_info.dirty_restore,
         )
     };
     assert_eq!(
@@ -1663,18 +1618,10 @@ async fn test_successful_incremental_fallback_restores_unscoped_dirty_signal() {
         }
     );
 
-    task.restore_unscoped_dirty_signal_after_successful_incremental_fallback(
-        &plan_info.dirty_restore,
-        decision,
-    );
     {
         let state = task.state.read().unwrap();
         assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-        assert_eq!(state.dirty_time_windows.len(), 1);
-        assert_eq!(
-            state.dirty_time_windows.window_size(),
-            std::time::Duration::from_secs(5)
-        );
+        assert!(state.dirty_time_windows.is_empty());
     }
 
     let followup = task
@@ -1682,8 +1629,8 @@ async fn test_successful_incremental_fallback_restores_unscoped_dirty_signal() {
         .await
         .unwrap();
     assert!(
-        followup.is_some(),
-        "restored dirty signal should schedule a full snapshot follow-up"
+        followup.is_none(),
+        "successful fallback consumes the dirty signal instead of re-running it"
     );
 }
 
@@ -1721,7 +1668,6 @@ async fn test_successful_incremental_advance_keeps_unscoped_dirty_signal_clean()
             &result,
             std::time::Duration::from_millis(1),
             &plan_info.coverage,
-            &plan_info.dirty_restore,
         )
     };
     assert_eq!(
@@ -1731,12 +1677,6 @@ async fn test_successful_incremental_advance_keeps_unscoped_dirty_signal_clean()
             watermarks: 1,
         }
     );
-
-    task.restore_unscoped_dirty_signal_after_successful_incremental_fallback(
-        &plan_info.dirty_restore,
-        decision,
-    );
-
     let state = task.state.read().unwrap();
     assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
     assert!(state.dirty_time_windows.is_empty());
