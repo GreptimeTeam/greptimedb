@@ -12,46 +12,69 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::LazyLock;
+
+use regex::{Captures, Regex};
+use url::Url;
+
+const REDACTED: &str = "***";
+
+static SENSITIVE_KV_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(^|\s)(password|pass|pwd|token|secret)\s*=\s*('[^']*'|"[^"]*"|\S+)"#).unwrap()
+});
+
 /// Removes sensitive information like passwords from connection strings.
-///
-/// This function sanitizes connection strings by removing credentials:
-/// - For URL format (mysql://user:password@host:port/db): Removes everything before '@'
-/// - For parameter format (host=localhost password=secret): Removes the password parameter
-/// - For URL format without credentials (mysql://host:port/db): Removes the protocol prefix
-///
-/// # Arguments
-///
-/// * `conn_str` - The connection string to sanitize
-///
-/// # Returns
-///
-/// A sanitized version of the connection string with sensitive information removed
 pub fn sanitize_connection_string(conn_str: &str) -> String {
-    // Case 1: URL format with credentials (mysql://user:password@host:port/db)
-    // Extract everything after the '@' symbol
-    if let Some(at_pos) = conn_str.find('@') {
-        return conn_str[at_pos + 1..].to_string();
+    if let Ok(url) = Url::parse(conn_str) {
+        return sanitize_url(url);
     }
 
-    // Case 2: Parameter format with password (host=localhost password=secret dbname=mydb)
-    // Filter out any parameter that starts with "password="
-    if conn_str.contains("password=") {
-        return conn_str
-            .split_whitespace()
-            .filter(|param| !param.starts_with("password="))
-            .collect::<Vec<_>>()
-            .join(" ");
+    sanitize_key_value_connection_string(conn_str)
+}
+
+fn sanitize_url(mut url: Url) -> String {
+    if !url.username().is_empty() {
+        let _ = url.set_username("");
+    }
+    if url.password().is_some() {
+        let _ = url.set_password(None);
     }
 
-    // Case 3: URL format without credentials (mysql://host:port/db)
-    // Extract everything after the protocol prefix
-    if let Some(host_part) = conn_str.split("://").nth(1) {
-        return host_part.to_string();
+    if url.query().is_some() {
+        let pairs = url
+            .query_pairs()
+            .map(|(key, value)| {
+                let value = if is_sensitive_key(&key) {
+                    REDACTED.into()
+                } else {
+                    value
+                };
+                (key.into_owned(), value.into_owned())
+            })
+            .collect::<Vec<_>>();
+
+        url.query_pairs_mut().clear().extend_pairs(pairs);
     }
 
-    // Case 4: Already sanitized or unknown format
-    // Return as is
-    conn_str.to_string()
+    url.as_str()
+        .split_once("://")
+        .map(|(_, addr)| addr.to_string())
+        .unwrap_or_else(|| url.to_string())
+}
+
+fn sanitize_key_value_connection_string(conn_str: &str) -> String {
+    SENSITIVE_KV_RE
+        .replace_all(conn_str, |caps: &Captures<'_>| {
+            format!("{}{}={}", &caps[1], &caps[2], REDACTED)
+        })
+        .into_owned()
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "password" | "pass" | "pwd" | "token" | "secret"
+    )
 }
 
 #[cfg(test)]
@@ -60,22 +83,62 @@ mod tests {
 
     #[test]
     fn test_sanitize_connection_string() {
-        // Test URL format with username/password
-        let conn_str = "mysql://user:password123@localhost:3306/db";
-        assert_eq!(sanitize_connection_string(conn_str), "localhost:3306/db");
+        let password = "sensitive-value";
 
-        // Test URL format without credentials
+        let conn_str = format!("mysql://user:{password}@localhost:3306/db");
+        assert_eq!(sanitize_connection_string(&conn_str), "localhost:3306/db");
+
         let conn_str = "mysql://localhost:3306/db";
         assert_eq!(sanitize_connection_string(conn_str), "localhost:3306/db");
 
-        // Test parameter format with password
-        let conn_str = "host=localhost port=5432 user=postgres password=secret dbname=mydb";
+        let conn_str =
+            format!("host=localhost port=5432 user=postgres password={password} dbname=mydb");
         assert_eq!(
-            sanitize_connection_string(conn_str),
-            "host=localhost port=5432 user=postgres dbname=mydb"
+            sanitize_connection_string(&conn_str),
+            "host=localhost port=5432 user=postgres password=*** dbname=mydb"
         );
 
-        // Test parameter format without password
+        let conn_str =
+            format!("host=localhost port=5432 user=postgres PASSWORD={password} dbname=mydb");
+        assert_eq!(
+            sanitize_connection_string(&conn_str),
+            "host=localhost port=5432 user=postgres PASSWORD=*** dbname=mydb"
+        );
+
+        let conn_str =
+            format!("host=localhost port=5432 user=postgres password = {password} dbname=mydb");
+        assert_eq!(
+            sanitize_connection_string(&conn_str),
+            "host=localhost port=5432 user=postgres password=*** dbname=mydb"
+        );
+
+        let conn_str =
+            format!("host=localhost port=5432 password='{password} with spaces' dbname=mydb");
+        assert_eq!(
+            sanitize_connection_string(&conn_str),
+            "host=localhost port=5432 password=*** dbname=mydb"
+        );
+
+        let conn_str = format!("mysql://localhost:3306/db?password={password}&ssl-mode=VERIFY_CA");
+        assert_eq!(
+            sanitize_connection_string(&conn_str),
+            "localhost:3306/db?password=***&ssl-mode=VERIFY_CA"
+        );
+
+        let conn_str =
+            format!("mysql://localhost:3306/db?token={password}&secret={password}&user=root");
+        assert_eq!(
+            sanitize_connection_string(&conn_str),
+            "localhost:3306/db?token=***&secret=***&user=root"
+        );
+
+        let conn_str =
+            format!("host=localhost port=5432 token={password} secret={password} dbname=mydb");
+        assert_eq!(
+            sanitize_connection_string(&conn_str),
+            "host=localhost port=5432 token=*** secret=*** dbname=mydb"
+        );
+
         let conn_str = "host=localhost port=5432 user=postgres dbname=mydb";
         assert_eq!(
             sanitize_connection_string(conn_str),

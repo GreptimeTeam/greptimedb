@@ -939,7 +939,7 @@ impl Metasrv {
 
 #[cfg(test)]
 mod tests {
-    use crate::metasrv::MetasrvNodeInfo;
+    use crate::metasrv::{MetasrvNodeInfo, MetasrvOptions};
 
     #[test]
     fn test_deserialize_metasrv_node_info() {
@@ -949,5 +949,25 @@ mod tests {
         assert_eq!(node_info.version, "0.1.0");
         assert_eq!(node_info.git_commit, "1234567890");
         assert_eq!(node_info.start_time_ms, 1715145600);
+    }
+
+    #[test]
+    fn test_metasrv_options_debug_sanitizes_store_addrs() {
+        let password = "sensitive-value";
+        let options = MetasrvOptions {
+            store_addrs: vec![
+                format!("mysql://user:{password}@localhost:3306/greptime_meta"),
+                format!(
+                    "host=localhost port=5432 user=postgres password={password} dbname=postgres"
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let debug = format!("{options:?}");
+
+        assert!(!debug.contains(password));
+        assert!(debug.contains("localhost:3306/greptime_meta"));
+        assert!(debug.contains("password=***"));
     }
 }
