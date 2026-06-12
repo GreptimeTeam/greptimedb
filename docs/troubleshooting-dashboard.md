@@ -225,7 +225,7 @@ Purpose: inspect the storage layer after triage points to datanodes.
 | Compaction work and failures | Requests, in-flight, input/output bytes, latency, failures, memory wait/reject. | ops/s, bytes/s, s, eps | Build a complete compaction row. |
 | Cache efficiency | `rate(greptime_mito_cache_hit[$__rate_interval]) / (rate(greptime_mito_cache_hit[$__rate_interval]) + rate(greptime_mito_cache_miss[$__rate_interval]))` | percent | More actionable than hit and miss counters alone. |
 | Memtable/cardinality pressure | Active series, field builders, dict bytes. | short/bytes | Explains write memory growth. |
-| Mito GC health | GC runs, duration, errors, deleted files, orphaned index files, skipped unparsable files. | ops/s, s, eps, short | Visible in the Health and Datanode rows. |
+| Mito GC health | GC runs, errors, deleted files, orphaned index files, skipped unparsable files, and duration. | ops/s, s, eps, short | Keep GC failures in Health; keep full GC health and a dedicated duration panel in the Datanode row. |
 
 ### 7. Index
 

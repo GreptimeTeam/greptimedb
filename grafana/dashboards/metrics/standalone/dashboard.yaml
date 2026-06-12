@@ -446,21 +446,6 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: skipped-unparsable
-        - title: Mito GC Duration
-          type: timeseries
-          description: P99 and average Mito garbage-collection duration by stage.
-          unit: s
-          queries:
-            - expr: histogram_quantile(0.99, sum by (le, stage) (rate(greptime_mito_gc_duration_seconds_bucket{}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '{{stage}}-p99'
-            - expr: sum by (stage) (rate(greptime_mito_gc_duration_seconds_sum{}[$__rate_interval])) / sum by (stage) (rate(greptime_mito_gc_duration_seconds_count{}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '{{stage}}-avg'
     - title: Capacity
       panels:
         - title: Runtime Threads
@@ -1244,7 +1229,7 @@ groups:
               legendFormat: compaction-[{{instance}}]-[{{pod}}]
         - title: Mito GC Health
           type: timeseries
-          description: Mito garbage-collection runs, errors, deleted files, orphaned index files, skipped unparsable files, and duration.
+          description: Mito garbage-collection runs, errors, deleted files, orphaned index files, and skipped unparsable files.
           unit: short
           queries:
             - expr: sum(rate(greptime_mito_gc_runs_total{}[$__rate_interval]))
@@ -1272,6 +1257,11 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: skipped-unparsable
+        - title: Mito GC Duration
+          type: timeseries
+          description: P99 and average Mito garbage-collection duration by stage.
+          unit: s
+          queries:
             - expr: histogram_quantile(0.99, sum by (le, stage) (rate(greptime_mito_gc_duration_seconds_bucket{}[$__rate_interval])))
               datasource:
                 type: prometheus

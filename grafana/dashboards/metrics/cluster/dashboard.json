@@ -3028,121 +3028,6 @@
       "type": "timeseries"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${metrics}"
-      },
-      "description": "P99 and average Mito garbage-collection duration by stage.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 40,
-        "w": 8,
-        "h": 6
-      },
-      "id": 551,
-      "options": {
-        "legend": {
-          "calcs": [
-            "mean"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(greptime_mito_gc_duration_seconds_bucket{instance=~\"$datanode\"}[$__rate_interval])))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{stage}}-p99",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (stage) (rate(greptime_mito_gc_duration_seconds_sum{instance=~\"$datanode\"}[$__rate_interval])) / sum by (stage) (rate(greptime_mito_gc_duration_seconds_count{instance=~\"$datanode\"}[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{stage}}-avg",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "title": "Mito GC Duration",
-      "type": "timeseries"
-    },
-    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -8506,7 +8391,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Mito garbage-collection runs, errors, deleted files, orphaned index files, skipped unparsable files, and duration.",
+      "description": "Mito garbage-collection runs, errors, deleted files, orphaned index files, and skipped unparsable files.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -8650,7 +8535,96 @@
           "legendFormat": "skipped-unparsable",
           "range": true,
           "refId": "E"
+        }
+      ],
+      "title": "Mito GC Health",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "P99 and average Mito garbage-collection duration by stage.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "s"
         },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 107,
+        "w": 8,
+        "h": 6
+      },
+      "id": 551,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
         {
           "datasource": {
             "type": "prometheus",
@@ -8662,7 +8636,7 @@
           "instant": false,
           "legendFormat": "{{stage}}-p99",
           "range": true,
-          "refId": "F"
+          "refId": "A"
         },
         {
           "datasource": {
@@ -8675,10 +8649,10 @@
           "instant": false,
           "legendFormat": "{{stage}}-avg",
           "range": true,
-          "refId": "G"
+          "refId": "B"
         }
       ],
-      "title": "Mito GC Health",
+      "title": "Mito GC Duration",
       "type": "timeseries"
     },
     {
