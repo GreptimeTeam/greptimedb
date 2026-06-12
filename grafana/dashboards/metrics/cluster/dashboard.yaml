@@ -156,7 +156,7 @@ groups:
               legendFormat: queries
         - title: Node Availability
           type: timeseries
-          description: Prometheus scrape availability by job and instance. Drops to zero indicate unavailable or uns scraped nodes.
+          description: Prometheus scrape availability by job and instance. Drops to zero indicate unavailable or unscraped nodes.
           unit: short
           queries:
             - expr: sum by (job) (up)
@@ -754,12 +754,12 @@ groups:
           description: Bulk-insert message row and byte rates. Spikes here can explain frontend bulk-insert latency.
           unit: short
           queries:
-            - expr: sum(rate(greptime_table_operator_bulk_insert_message_rows{instance=~"$frontend"}[$__rate_interval]))
+            - expr: sum(rate(greptime_table_operator_bulk_insert_message_rows_sum{instance=~"$frontend"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: rows
-            - expr: sum(rate(greptime_table_operator_bulk_insert_message_size{instance=~"$frontend"}[$__rate_interval]))
+            - expr: sum(rate(greptime_table_operator_bulk_insert_message_size_sum{instance=~"$frontend"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -774,7 +774,7 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: flush-ops
-            - expr: sum(rate(greptime_prom_store_flush_rows{instance=~"$frontend"}[$__rate_interval]))
+            - expr: sum(rate(greptime_prom_store_flush_rows_sum{instance=~"$frontend"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -946,12 +946,12 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: postgres-connections-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (greptime_servers_mysql_prepared_count{instance=~"$frontend"})
+            - expr: sum by (instance, pod) (rate(greptime_servers_mysql_prepared_count{instance=~"$frontend"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: mysql-prepared-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (greptime_servers_postgres_prepared_count{instance=~"$frontend"})
+            - expr: sum by (instance, pod) (rate(greptime_servers_postgres_prepared_count{instance=~"$frontend"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1095,7 +1095,7 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{request_type}}]-avg'
-        - title: 'Frontend Handle Bulk Insert Elapsed Time '
+        - title: Frontend Handle Bulk Insert Elapsed Time
           type: timeseries
           description: Per-stage time for frontend to handle bulk insert requests
           unit: s
@@ -1182,12 +1182,12 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: files-deleted
-            - expr: sum(greptime_mito_gc_orphaned_index_files{instance=~"$datanode"})
+            - expr: sum(rate(greptime_mito_gc_orphaned_index_files{instance=~"$datanode"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: orphaned-index-files
-            - expr: sum(greptime_mito_gc_skipped_unparsable_files{instance=~"$datanode"})
+            - expr: sum(rate(greptime_mito_gc_skipped_unparsable_files{instance=~"$datanode"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1341,7 +1341,7 @@ groups:
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-AVG'
         - title: Active Series and Field Builders Count
           type: timeseries
-          description: Compaction oinput output bytes
+          description: Active series and field-builder counts per memtable by instance.
           unit: none
           queries:
             - expr: sum by(instance, pod) (greptime_mito_memtable_active_series_count)
@@ -1460,11 +1460,11 @@ groups:
           description: Compaction P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le,stage) (rate(greptime_mito_compaction_total_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le) (rate(greptime_mito_compaction_total_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-compaction'
+              legendFormat: '[{{instance}}]-[{{pod}}]-p99'
             - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_sum{instance=~"$datanode"}[$__rate_interval])) / sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
               datasource:
                 type: prometheus
@@ -1488,14 +1488,14 @@ groups:
         - title: Compaction Input/Output Bytes
           type: timeseries
           description: Compaction input and output bytes by datanode. Use this to correlate compaction latency with rewritten data volume.
-          unit: bytes
+          unit: Bps
           queries:
-            - expr: sum by(instance, pod) (greptime_mito_compaction_input_bytes)
+            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_input_bytes[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-input'
-            - expr: sum by(instance, pod) (greptime_mito_compaction_output_bytes)
+            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_output_bytes[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1673,7 +1673,7 @@ groups:
           description: Counter of region migration error
           unit: none
           queries:
-            - expr: greptime_meta_region_migration_error
+            - expr: rate(greptime_meta_region_migration_error[$__rate_interval])
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1738,14 +1738,14 @@ groups:
             Shows p90 heartbeat message sizes, helping track network usage and identify anomalies in heartbeat payload.
           unit: bytes
           queries:
-            - expr: histogram_quantile(0.9, sum by(pod, le) (greptime_meta_heartbeat_stat_memory_size_bucket))
+            - expr: histogram_quantile(0.9, sum by(pod, le) (rate(greptime_meta_heartbeat_stat_memory_size_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '{{pod}}'
         - title: Meta Heartbeat Receive Rate
           type: timeseries
-          description: Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.
+          description: Rate of heartbeats received by metasrv from datanodes and frontends.
           unit: s
           queries:
             - expr: rate(greptime_meta_heartbeat_rate[$__rate_interval])
@@ -1755,10 +1755,10 @@ groups:
               legendFormat: '{{pod}}'
         - title: Meta KV Ops Latency
           type: timeseries
-          description: Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.
+          description: p99 and average latency of metasrv key-value store operations by op and target.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(pod, le, op, target) (greptime_meta_kv_request_elapsed_bucket))
+            - expr: histogram_quantile(0.99, sum by(pod, le, op, target) (rate(greptime_meta_kv_request_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1770,7 +1770,7 @@ groups:
               legendFormat: '[{{pod}}]-[{{op}}]-[{{target}}]-avg'
         - title: Rate of meta KV Ops
           type: timeseries
-          description: Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.
+          description: Rate of metasrv key-value store operations by op.
           unit: none
           queries:
             - expr: rate(greptime_meta_kv_request_elapsed_count[$__rate_interval])
@@ -1780,35 +1780,35 @@ groups:
               legendFormat: '{{pod}}-{{op}} p99'
         - title: DDL Latency
           type: timeseries
-          description: Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.
+          description: p90 latency of metasrv DDL procedures (create/alter/drop table, create view/flow) by step.
           unit: s
           queries:
-            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_tables_bucket))
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_create_tables_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: CreateLogicalTables-{{step}} p90
-            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_table))
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_create_table_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: CreateTable-{{step}} p90
-            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_view))
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_create_view_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: CreateView-{{step}} p90
-            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_flow))
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_create_flow_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: CreateFlow-{{step}} p90
-            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_drop_table))
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_drop_table_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: DropTable-{{step}} p90
-            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_alter_table))
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_alter_table_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1818,7 +1818,7 @@ groups:
           description: Reconciliation stats
           unit: s
           queries:
-            - expr: greptime_meta_reconciliation_stats
+            - expr: rate(greptime_meta_reconciliation_stats[$__rate_interval])
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1828,7 +1828,7 @@ groups:
           description: Elapsed of Reconciliation steps
           unit: s
           queries:
-            - expr: histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)
+            - expr: histogram_quantile(0.9, sum by(le, procedure_name, step) (rate(greptime_meta_reconciliation_procedure_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}

@@ -1353,7 +1353,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Prometheus scrape availability by job and instance. Drops to zero indicate unavailable or uns scraped nodes.",
+      "description": "Prometheus scrape availability by job and instance. Drops to zero indicate unavailable or unscraped nodes.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -5286,7 +5286,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_table_operator_bulk_insert_message_rows{instance=~\"$frontend\"}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_table_operator_bulk_insert_message_rows_sum{instance=~\"$frontend\"}[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "rows",
@@ -5299,7 +5299,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_table_operator_bulk_insert_message_size{instance=~\"$frontend\"}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_table_operator_bulk_insert_message_size_sum{instance=~\"$frontend\"}[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "bytes",
@@ -5414,7 +5414,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_prom_store_flush_rows{instance=~\"$frontend\"}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_prom_store_flush_rows_sum{instance=~\"$frontend\"}[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "flush-rows",
@@ -6477,7 +6477,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_servers_mysql_prepared_count{instance=~\"$frontend\"})",
+          "expr": "sum by (instance, pod) (rate(greptime_servers_mysql_prepared_count{instance=~\"$frontend\"}[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "mysql-prepared-[{{instance}}]-[{{pod}}]",
@@ -6490,7 +6490,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_servers_postgres_prepared_count{instance=~\"$frontend\"})",
+          "expr": "sum by (instance, pod) (rate(greptime_servers_postgres_prepared_count{instance=~\"$frontend\"}[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "postgres-prepared-[{{instance}}]-[{{pod}}]",
@@ -7809,7 +7809,7 @@
               "refId": "B"
             }
           ],
-          "title": "Frontend Handle Bulk Insert Elapsed Time ",
+          "title": "Frontend Handle Bulk Insert Elapsed Time",
           "type": "timeseries"
         }
       ],
@@ -8317,7 +8317,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(greptime_mito_gc_orphaned_index_files{instance=~\"$datanode\"})",
+          "expr": "sum(rate(greptime_mito_gc_orphaned_index_files{instance=~\"$datanode\"}[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "orphaned-index-files",
@@ -8330,7 +8330,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(greptime_mito_gc_skipped_unparsable_files{instance=~\"$datanode\"})",
+          "expr": "sum(rate(greptime_mito_gc_skipped_unparsable_files{instance=~\"$datanode\"}[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "skipped-unparsable",
@@ -9560,7 +9560,7 @@
             "type": "prometheus",
             "uid": "${metrics}"
           },
-          "description": "Compaction oinput output bytes",
+          "description": "Active series and field-builder counts per memtable by instance.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -10641,9 +10641,9 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(instance, pod, le,stage) (rate(greptime_mito_compaction_total_elapsed_bucket{instance=~\"$datanode\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(instance, pod, le) (rate(greptime_mito_compaction_total_elapsed_bucket{instance=~\"$datanode\"}[$__rate_interval])))",
           "instant": false,
-          "legendFormat": "[{{instance}}]-[{{pod}}]-[{{stage}}]-compaction",
+          "legendFormat": "[{{instance}}]-[{{pod}}]-p99",
           "range": true,
           "refId": "A"
         },
@@ -10835,7 +10835,7 @@
               }
             ]
           },
-          "unit": "bytes"
+          "unit": "Bps"
         },
         "overrides": []
       },
@@ -10869,7 +10869,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by(instance, pod) (greptime_mito_compaction_input_bytes)",
+          "expr": "sum by(instance, pod) (rate(greptime_mito_compaction_input_bytes[$__rate_interval]))",
           "instant": false,
           "legendFormat": "[{{instance}}]-[{{pod}}]-input",
           "range": true,
@@ -10881,7 +10881,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by(instance, pod) (greptime_mito_compaction_output_bytes)",
+          "expr": "sum by(instance, pod) (rate(greptime_mito_compaction_output_bytes[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "[{{instance}}]-[{{pod}}]-output",
@@ -12169,7 +12169,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "greptime_meta_region_migration_error",
+              "expr": "rate(greptime_meta_region_migration_error[$__rate_interval])",
               "instant": false,
               "legendFormat": "{{pod}}-{{state}}-{{error_type}}",
               "range": true,
@@ -12699,7 +12699,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum by(pod, le) (greptime_meta_heartbeat_stat_memory_size_bucket))",
+              "expr": "histogram_quantile(0.9, sum by(pod, le) (rate(greptime_meta_heartbeat_stat_memory_size_bucket[$__rate_interval])))",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -12717,7 +12717,7 @@
             "type": "prometheus",
             "uid": "${metrics}"
           },
-          "description": "Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.",
+          "description": "Rate of heartbeats received by metasrv from datanodes and frontends.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12820,7 +12820,7 @@
             "type": "prometheus",
             "uid": "${metrics}"
           },
-          "description": "Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.",
+          "description": "p99 and average latency of metasrv key-value store operations by op and target.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12905,7 +12905,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(pod, le, op, target) (greptime_meta_kv_request_elapsed_bucket))",
+              "expr": "histogram_quantile(0.99, sum by(pod, le, op, target) (rate(greptime_meta_kv_request_elapsed_bucket[$__rate_interval])))",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -12936,7 +12936,7 @@
             "type": "prometheus",
             "uid": "${metrics}"
           },
-          "description": "Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.",
+          "description": "Rate of metasrv key-value store operations by op.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -13039,7 +13039,7 @@
             "type": "prometheus",
             "uid": "${metrics}"
           },
-          "description": "Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.",
+          "description": "p90 latency of metasrv DDL procedures (create/alter/drop table, create view/flow) by step.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -13124,7 +13124,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_tables_bucket))",
+              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_create_tables_bucket[$__rate_interval])))",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -13140,7 +13140,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_table))",
+              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_create_table_bucket[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -13157,7 +13157,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_view))",
+              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_create_view_bucket[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -13174,7 +13174,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_flow))",
+              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_create_flow_bucket[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -13191,7 +13191,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_drop_table))",
+              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_drop_table_bucket[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -13208,7 +13208,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_alter_table))",
+              "expr": "histogram_quantile(0.9, sum by(le, pod, step) (rate(greptime_meta_procedure_alter_table_bucket[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -13311,7 +13311,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "greptime_meta_reconciliation_stats",
+              "expr": "rate(greptime_meta_reconciliation_stats[$__rate_interval])",
               "hide": false,
               "instant": false,
               "legendFormat": "{{pod}}-{{table_type}}-{{type}}",
@@ -13411,7 +13411,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)",
+              "expr": "histogram_quantile(0.9, sum by(le, procedure_name, step) (rate(greptime_meta_reconciliation_procedure_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{procedure_name}}-{{step}}-P90",
