@@ -28,7 +28,9 @@ use crate::data::import_v2::state::{
     delete_import_state, load_import_state, save_import_state, try_acquire_import_state_lock,
 };
 use crate::data::path::data_dir_for_schema_chunk;
-use crate::data::progress::{NoopProgress, ProgressPhase, ProgressReporter};
+#[cfg(test)]
+use crate::data::progress::NoopProgress;
+use crate::data::progress::{ProgressPhase, ProgressReporter};
 
 #[async_trait]
 pub(crate) trait ImportTaskExecutor {
@@ -127,6 +129,7 @@ pub(crate) async fn prepare_import_resume(
     })
 }
 
+#[cfg(test)]
 pub(crate) async fn import_with_resume_session<E>(
     session: ImportResumeSession,
     executor: &E,
@@ -134,8 +137,6 @@ pub(crate) async fn import_with_resume_session<E>(
 where
     E: ImportTaskExecutor + Sync,
 {
-    // Production callers do not care about progress yet; keep their call site
-    // unchanged and route them through the no-op reporter.
     let progress = NoopProgress;
     import_with_resume_session_with_progress(session, executor, &progress).await
 }
