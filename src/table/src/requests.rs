@@ -309,6 +309,10 @@ pub enum AlterKind {
     UnsetTableOptions {
         keys: Vec<UnsetRegionOption>,
     },
+    SetRepartitionColumnHint {
+        column_name: String,
+    },
+    UnsetRepartitionColumnHint,
     SetIndexes {
         options: Vec<SetIndexOption>,
     },
