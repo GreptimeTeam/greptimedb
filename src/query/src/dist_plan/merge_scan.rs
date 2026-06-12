@@ -47,6 +47,7 @@ use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
+use table::table::scan::REGION_SCAN_EXEC_NAME;
 use table::table_name::TableName;
 use tokio::time::Instant;
 use tracing::{Instrument, Span};
@@ -496,17 +497,19 @@ impl MergeScanExec {
 
                 // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
-                    let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
-                    let value = read_meter!(
-                        c,
-                        s,
-                        ReadItem {
-                            cpu_time: metrics.elapsed_compute as u64,
-                            table_scan: metrics.memory_usage as u64
-                        },
-                        current_channel as u8
-                    );
-                    metric.record_greptime_exec_cost(value as usize);
+                    if let Some(output_bytes) = scan_output_bytes(&metrics) {
+                        let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
+                        let value = read_meter!(
+                            c,
+                            s,
+                            ReadItem {
+                                cpu_time: metrics.elapsed_compute as u64,
+                                table_scan: output_bytes as u64,
+                            },
+                            current_channel as u8
+                        );
+                        metric.record_greptime_exec_cost(value as usize);
+                    }
 
                     // record metrics from sub sgates
                     let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
@@ -916,6 +919,17 @@ impl DisplayAs for MergeScanExec {
     }
 }
 
+/// Extract the `output_bytes` metric from the [`RegionScanExec`] plan node, if present.
+fn scan_output_bytes(metrics: &RecordBatchMetrics) -> Option<usize> {
+    metrics
+        .plan_metrics
+        .iter()
+        .filter(|pm| pm.plan_name == REGION_SCAN_EXEC_NAME)
+        .flat_map(|pm| &pm.metrics)
+        .find(|(name, _)| name == "output_bytes")
+        .map(|(_, value)| *value)
+}
+
 #[derive(Debug, Clone)]
 struct MergeScanMetric {
     /// Nanosecond elapsed till the scan operator is ready to emit data
@@ -969,6 +983,7 @@ mod tests {
 
     use async_trait::async_trait;
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
+    use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
@@ -1209,5 +1224,20 @@ mod tests {
 
         assert_eq!(exec.captured_remote_dyn_filters().len(), 1);
         assert!(matches!(propagation.filters.as_slice(), [PushedDown::Yes]));
+    }
+
+    #[test]
+    fn scan_output_bytes_uses_plan_name() {
+        let metrics = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "SeqScan: region=1".to_string(),
+                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 42)],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(scan_output_bytes(&metrics), Some(42));
     }
 }
