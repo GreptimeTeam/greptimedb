@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -293,6 +293,27 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::RetryLater { .. } => RetryHint::Retryable,
+            Error::External { source, .. }
+            | Error::PutState { source, .. }
+            | Error::DeleteStates { source, .. }
+            | Error::ListState { source, .. }
+            | Error::PutPoison { source, .. }
+            | Error::DeletePoison { source, .. }
+            | Error::GetPoison { source, .. }
+            | Error::CheckStatus { source, .. } => source.retry_hint(),
+            Error::ProcedureExec { source, .. } => source.retry_hint(),
+            Error::StartRemoveOutdatedMetaTask { source, .. }
+            | Error::StopRemoveOutdatedMetaTask { source, .. } => source.retry_hint(),
+            Error::RetryTimesExceeded { .. } | Error::RollbackTimesExceeded { .. } => {
+                RetryHint::NonRetryable
+            }
+            _ => RetryHint::NonRetryable,
+        }
+    }
 }
 
 impl Error {
@@ -347,5 +368,47 @@ impl Error {
         } else {
             Error::external(err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_error::mock::MockError;
+
+    use super::*;
+
+    #[test]
+    fn test_retry_later_hint_is_retryable() {
+        let err = Error::retry_later(MockError::new(StatusCode::Internal));
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_external_forwards_retry_hint() {
+        let source = Error::retry_later(MockError::new(StatusCode::Internal));
+        let err = Error::external(source);
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_retry_exceeded_hint_is_non_retryable() {
+        let source = Arc::new(Error::retry_later(MockError::new(StatusCode::Internal)));
+        let err = Error::RetryTimesExceeded {
+            source: source.clone(),
+            procedure_id: ProcedureId::random(),
+        };
+
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+
+        let err = Error::RollbackTimesExceeded {
+            source,
+            procedure_id: ProcedureId::random(),
+        };
+
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 }

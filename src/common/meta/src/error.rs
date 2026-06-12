@@ -15,7 +15,7 @@
 use std::str::Utf8Error;
 use std::sync::Arc;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_procedure::ProcedureId;
@@ -1267,6 +1267,33 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            RetryLater { .. } | GetLatestCacheRetryExceeded { .. } => RetryHint::Retryable,
+            SubmitProcedure { source, .. }
+            | QueryProcedure { source, .. }
+            | WaitProcedure { source, .. }
+            | StartProcedureManager { source, .. }
+            | StopProcedureManager { source, .. }
+            | RegisterProcedureLoader { source, .. }
+            | PutPoison { source, .. }
+            | ProcedureStateReceiver { source, .. } => source.retry_hint(),
+            External { source, .. }
+            | ResponseExceededSizeLimit { source, .. }
+            | OperateDatanode { source, .. }
+            | AbortProcedure { source, .. }
+            | RegisterRepartitionProcedureLoader { source, .. }
+            | CreateRepartitionProcedure { source, .. } => source.retry_hint(),
+            Table { source, .. } => source.retry_hint(),
+            ConvertAlterTableRequest { source, .. } => source.retry_hint(),
+            ConvertColumnDef { source, .. } => source.retry_hint(),
+            GetCache { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
+    }
 }
 
 impl Error {
@@ -1334,5 +1361,46 @@ impl Error {
             Error::ResponseExceededSizeLimit { .. } => true,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod retry_hint_tests {
+    use std::sync::Arc;
+
+    use common_error::mock::MockError;
+
+    use super::*;
+
+    #[test]
+    fn test_retry_later_hint_is_retryable() {
+        let err = Error::retry_later(MockError::new(StatusCode::Internal));
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_latest_cache_retry_exceeded_hint_is_retryable() {
+        let err = GetLatestCacheRetryExceededSnafu { attempts: 3_usize }.build();
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_get_cache_forwards_retry_hint() {
+        let source = Arc::new(Error::retry_later(MockError::new(StatusCode::Internal)));
+        let err = Error::GetCache { source };
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_default_hint_is_non_retryable() {
+        let err = UnexpectedSnafu {
+            err_msg: "mock error",
+        }
+        .build();
+
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 }
