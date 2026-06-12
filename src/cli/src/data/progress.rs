@@ -16,12 +16,14 @@
 //!
 //! This is intentionally small and log/internal oriented. It does not touch
 //! stdout and is safe for non-interactive runs. [`LogProgress`] backs the
-//! import-v2 `--progress` flag by routing events to stderr. A TTY progress bar
-//! (e.g. `indicatif`) is deliberately out of scope; it can layer on top of this
-//! trait later without changing call sites.
+//! import-v2 `--progress` flag for non-interactive runs by routing events to
+//! stderr, while [`IndicatifProgress`] renders an interactive bar on a TTY.
+//! Both implement [`ProgressReporter`], so call sites stay agnostic.
 
 use std::io::{self, Write};
 use std::sync::Mutex;
+
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 /// Receives progress events from long-running Export/Import V2 work.
 ///
@@ -118,6 +120,73 @@ impl ProgressReporter for LogProgress {
     }
 }
 
+/// A reporter that renders an interactive progress bar via `indicatif`.
+///
+/// It draws to stderr through an explicit [`ProgressDrawTarget::stderr`] so it
+/// never collides with stdout (e.g. dry-run SQL). Phases with a known total get
+/// a determinate bar; unknown totals fall back to an animated spinner. Each
+/// phase clears itself on finish via [`ProgressBar::finish_and_clear`].
+pub(crate) struct IndicatifProgress {
+    bar: Mutex<Option<ProgressBar>>,
+}
+
+impl IndicatifProgress {
+    pub(crate) fn new() -> Self {
+        Self {
+            bar: Mutex::new(None),
+        }
+    }
+}
+
+impl ProgressReporter for IndicatifProgress {
+    fn start_phase(&self, name: &str, total: Option<u64>) {
+        let Ok(mut guard) = self.bar.lock() else {
+            return;
+        };
+
+        // Replacing any prior phase: clear it before starting the next.
+        if let Some(prev) = guard.take() {
+            prev.finish_and_clear();
+        }
+
+        let bar = ProgressBar::with_draw_target(total, ProgressDrawTarget::stderr());
+        match total {
+            Some(_) => {
+                let style =
+                    ProgressStyle::with_template("{msg} [{bar:40}] {pos}/{len} ({percent}%)")
+                        .unwrap_or_else(|_| ProgressStyle::default_bar())
+                        .progress_chars("=>-");
+                bar.set_style(style);
+            }
+            None => {
+                let style = ProgressStyle::with_template("{spinner} {msg} {pos}")
+                    .unwrap_or_else(|_| ProgressStyle::default_spinner());
+                bar.set_style(style);
+            }
+        }
+        bar.set_message(name.to_string());
+        *guard = Some(bar);
+    }
+
+    fn inc(&self, delta: u64) {
+        let Ok(guard) = self.bar.lock() else {
+            return;
+        };
+        if let Some(bar) = guard.as_ref() {
+            bar.inc(delta);
+        }
+    }
+
+    fn finish_phase(&self) {
+        let Ok(mut guard) = self.bar.lock() else {
+            return;
+        };
+        if let Some(bar) = guard.take() {
+            bar.finish_and_clear();
+        }
+    }
+}
+
 /// RAII guard for a started progress phase.
 ///
 /// This keeps future stateful reporters safe on every early-return path after a
@@ -175,6 +244,26 @@ mod tests {
         reporter.start_phase("Import data tasks", Some(2));
         reporter.inc(1);
         reporter.inc(1);
+        reporter.finish_phase();
+        reporter.finish_phase(); // Idempotent: finishing twice is harmless.
+    }
+
+    #[test]
+    fn test_indicatif_progress_is_safe_across_phase_lifecycle() {
+        // IndicatifProgress takes only `&self`, so it must survive a full
+        // lifecycle (including determinate and spinner phases, an out-of-phase
+        // `inc`, and double finish) without panicking. The draw target is
+        // stderr, which is non-interactive under the test harness, so nothing
+        // actually renders.
+        let progress = IndicatifProgress::new();
+        let reporter: &dyn ProgressReporter = &progress;
+
+        reporter.inc(1); // No active phase yet: must be a no-op, not a panic.
+        reporter.start_phase("Import data tasks", Some(2));
+        reporter.inc(1);
+        reporter.inc(1);
+        reporter.start_phase("Streaming", None); // Spinner phase replaces the bar.
+        reporter.inc(5);
         reporter.finish_phase();
         reporter.finish_phase(); // Idempotent: finishing twice is harmless.
     }
