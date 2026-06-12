@@ -45,14 +45,39 @@ enum WalOptionsCompat {
     Structured(WalOptions),
 }
 
+fn deserialize_region_wal_options<E>(
+    values: HashMap<String, WalOptionsCompat>,
+) -> std::result::Result<RegionWalOptions, E>
+where
+    E: serde::de::Error,
+{
+    values
+        .into_iter()
+        .map(|(region_number, wal_options)| {
+            let region_number = region_number.parse::<RegionNumber>().map_err(|err| {
+                E::custom(format!(
+                    "invalid region number in region_wal_options: {region_number}, err: {err}"
+                ))
+            })?;
+            let wal_options = match wal_options {
+                WalOptionsCompat::Encoded(encoded) => serde_json::from_str(&encoded).map_err(|err| {
+                    E::custom(format!(
+                        "failed to decode legacy wal options for region {region_number}: {encoded}, err: {err}"
+                    ))
+                })?,
+                WalOptionsCompat::Structured(wal_options) => wal_options,
+            };
+            Ok((region_number, wal_options))
+        })
+        .collect()
+}
+
 /// Serde helpers for [`RegionWalOptions`] persisted in metadata.
 ///
 /// New metadata stores WAL options as structured JSON objects. The deserializer
 /// also accepts the legacy format whose map values are JSON strings encoded from
 /// [`WalOptions`].
 pub mod region_wal_options_serde {
-    use serde::de::Error as _;
-
     use super::*;
 
     /// Serializes region WAL options in structured form.
@@ -72,25 +97,38 @@ pub mod region_wal_options_serde {
         D: Deserializer<'de>,
     {
         let values = HashMap::<String, WalOptionsCompat>::deserialize(deserializer)?;
-        values
-            .into_iter()
-            .map(|(region_number, wal_options)| {
-                let region_number = region_number.parse::<RegionNumber>().map_err(|err| {
-                    D::Error::custom(format!(
-                        "invalid region number in region_wal_options: {region_number}, err: {err}"
-                    ))
-                })?;
-                let wal_options = match wal_options {
-                    WalOptionsCompat::Encoded(encoded) => serde_json::from_str(&encoded).map_err(|err| {
-                        D::Error::custom(format!(
-                            "failed to decode legacy wal options for region {region_number}: {encoded}, err: {err}"
-                        ))
-                    })?,
-                    WalOptionsCompat::Structured(wal_options) => wal_options,
-                };
-                Ok((region_number, wal_options))
-            })
-            .collect()
+        deserialize_region_wal_options(values)
+    }
+}
+
+/// Serde helpers for optional [`RegionWalOptions`] persisted in procedure state.
+pub mod optional_region_wal_options_serde {
+    use super::*;
+
+    /// Serializes optional region WAL options in structured form.
+    pub fn serialize<S>(
+        value: &Option<RegionWalOptions>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.serialize(serializer)
+    }
+
+    /// Deserializes optional region WAL options from structured or legacy encoded form.
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<Option<RegionWalOptions>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(values) = Option::<HashMap<String, WalOptionsCompat>>::deserialize(deserializer)?
+        else {
+            return Ok(None);
+        };
+
+        deserialize_region_wal_options(values).map(Some)
     }
 }
 

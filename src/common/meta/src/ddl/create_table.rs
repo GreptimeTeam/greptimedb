@@ -44,7 +44,7 @@ use crate::peer::PeerAllocContext;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::{CreateTableTask, QueryContext};
 use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
-use crate::wal_provider::RegionWalOptions;
+use crate::wal_provider::{RegionWalOptions, optional_region_wal_options_serde};
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -374,6 +374,8 @@ pub struct CreateTableData {
     /// None stands for not allocated yet.
     pub(crate) table_route: Option<PhysicalTableRouteValue>,
     /// None stands for not allocated yet.
+    #[serde(default)]
+    #[serde(with = "optional_region_wal_options_serde")]
     pub region_wal_options: Option<RegionWalOptions>,
 }
 
