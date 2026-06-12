@@ -367,8 +367,7 @@ impl MergeScanExec {
             let mut ready_timer = metric.ready_time().timer();
             let mut first_consume_timer = Some(metric.first_consume_time().timer());
 
-            // Per-partition timings, mirroring the global timers above but scoped to this
-            // partition's stream so they can be surfaced in `EXPLAIN VERBOSE`.
+            // Per-partition timings, scoped to this partition's stream for `EXPLAIN VERBOSE`.
             let partition_start = Instant::now();
             let mut partition_ready_time: Option<Duration> = None;
             let mut partition_first_consume_time: Option<Duration> = None;
@@ -459,10 +458,8 @@ impl MergeScanExec {
                     // reset poll timer
                     poll_timer = Instant::now();
                 }
-                // `first_consume_time` is the time until the first stream's first poll
-                // resolves, whether it yields a batch or is immediately exhausted. The
-                // `take()` guard ensures this only records once: on the first region whose
-                // stream produced no batch (the empty case the in-loop stop above misses).
+                // Also stop on an exhausted stream that yielded no batch. The `take()`
+                // guard ensures it only records once, on the first such region.
                 if let Some(mut first_consume_timer) = first_consume_timer.take() {
                     first_consume_timer.stop();
                     partition_first_consume_time = Some(partition_start.elapsed());
@@ -517,6 +514,13 @@ impl MergeScanExec {
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
+            }
+
+            // Stop the global timers for partitions with no region, otherwise they keep
+            // running until drop and inflate the shared metrics. No-op otherwise.
+            ready_timer.stop();
+            if let Some(mut first_consume_timer) = first_consume_timer.take() {
+                first_consume_timer.stop();
             }
 
             // Finish partition metrics and log results
