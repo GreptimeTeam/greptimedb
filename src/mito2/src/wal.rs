@@ -14,6 +14,7 @@
 
 //! Write ahead log of the engine.
 
+pub mod encoder;
 pub(crate) mod entry_distributor;
 pub(crate) mod entry_reader;
 pub(crate) mod raw_entry_reader;
@@ -25,10 +26,10 @@ use std::sync::Arc;
 use api::v1::WalEntry;
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
+use encoder::WalEntryEncoder;
 use entry_reader::NoopEntryReader;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use prost::Message;
 use snafu::ResultExt;
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
@@ -79,6 +80,7 @@ impl<S: LogStore> Wal<S> {
             store: self.store.clone(),
             entries: Vec::new(),
             providers: HashMap::new(),
+            encoder: WalEntryEncoder::new(),
         }
     }
 
@@ -167,6 +169,8 @@ pub struct WalWriter<S: LogStore> {
     entries: Vec<Entry>,
     /// Providers of regions being written into.
     providers: HashMap<RegionId, Provider>,
+    /// Cached-size single-pass encoder, reused across entries in this batch.
+    encoder: WalEntryEncoder,
 }
 
 impl<S: LogStore> WalWriter<S> {
@@ -184,7 +188,7 @@ impl<S: LogStore> WalWriter<S> {
             .entry(region_id)
             .or_insert_with(|| provider.clone());
 
-        let data = wal_entry.encode_to_vec();
+        let data = self.encoder.encode_to_vec(wal_entry);
         let entry = self
             .store
             .entry(data, entry_id, region_id, provider)

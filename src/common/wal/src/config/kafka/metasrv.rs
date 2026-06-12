@@ -18,8 +18,9 @@ use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
 use crate::config::kafka::common::{
-    DEFAULT_AUTO_PRUNE_INTERVAL, DEFAULT_AUTO_PRUNE_PARALLELISM, DEFAULT_CHECKPOINT_TRIGGER_SIZE,
-    DEFAULT_FLUSH_TRIGGER_SIZE, KafkaConnectionConfig, KafkaTopicConfig,
+    DEFAULT_AUTO_PRUNE_INTERVAL, DEFAULT_AUTO_PRUNE_LOGICAL_DELETE, DEFAULT_AUTO_PRUNE_PARALLELISM,
+    DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE, KafkaConnectionConfig,
+    KafkaTopicConfig,
 };
 
 /// Kafka wal configurations for metasrv.
@@ -37,6 +38,8 @@ pub struct MetasrvKafkaConfig {
     // Interval of WAL pruning.
     #[serde(with = "humantime_serde")]
     pub auto_prune_interval: Duration,
+    // Whether auto WAL pruning only updates metadata and skips Kafka DeleteRecords.
+    pub auto_prune_logical_delete: bool,
     // Limit of concurrent active pruning procedures.
     pub auto_prune_parallelism: usize,
     // The size of WAL to trigger flush.
@@ -52,6 +55,7 @@ impl Default for MetasrvKafkaConfig {
             kafka_topic: Default::default(),
             auto_create_topics: true,
             auto_prune_interval: DEFAULT_AUTO_PRUNE_INTERVAL,
+            auto_prune_logical_delete: DEFAULT_AUTO_PRUNE_LOGICAL_DELETE,
             auto_prune_parallelism: DEFAULT_AUTO_PRUNE_PARALLELISM,
             flush_trigger_size: DEFAULT_FLUSH_TRIGGER_SIZE,
             checkpoint_trigger_size: DEFAULT_CHECKPOINT_TRIGGER_SIZE,

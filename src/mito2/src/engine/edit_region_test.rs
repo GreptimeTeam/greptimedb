@@ -44,11 +44,21 @@ use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
 
 #[tokio::test]
 async fn test_edit_region_schedule_compaction() {
-    test_edit_region_schedule_compaction_with_format(false).await;
-    test_edit_region_schedule_compaction_with_format(true).await;
+    for flat_format in [true, false] {
+        for schedule_compaction_after_edit in [true, false] {
+            test_edit_region_schedule_compaction_with_format(
+                flat_format,
+                schedule_compaction_after_edit,
+            )
+            .await;
+        }
+    }
 }
 
-async fn test_edit_region_schedule_compaction_with_format(flat_format: bool) {
+async fn test_edit_region_schedule_compaction_with_format(
+    flat_format: bool,
+    schedule_compaction_after_edit: bool,
+) {
     let mut env = TestEnv::new().await;
 
     struct EditRegionListener {
@@ -65,6 +75,7 @@ async fn test_edit_region_schedule_compaction_with_format(flat_format: bool) {
     let (tx, mut rx) = oneshot::channel();
     let config = MitoConfig {
         min_compaction_interval: Duration::from_secs(60 * 60),
+        schedule_compaction_after_edit,
         default_flat_format: flat_format,
         ..Default::default()
     };
@@ -144,15 +155,19 @@ async fn test_edit_region_schedule_compaction_with_format(flat_format: bool) {
         .edit_region(region.region_id, new_edit(&[90]))
         .await
         .unwrap();
-    // ... finally asserts that the compaction of the region is scheduled.
-    let actual = tokio::time::timeout(Duration::from_secs(9), rx)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(region_id, actual);
-    // Wait for the `last_schedule_compaction_millis` to update.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(next_schedule_time, region.last_schedule_compaction_millis());
+
+    // ... finally asserts that the compaction of the region is scheduled, or not: controlled by the
+    // "schedule_compaction_after_edit" config.
+    let recv_or_timeout = tokio::time::timeout(Duration::from_secs(2), rx).await;
+    if schedule_compaction_after_edit {
+        let actual = recv_or_timeout.unwrap().unwrap();
+        assert_eq!(region_id, actual);
+        // Wait for the `last_schedule_compaction_millis` to update.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(next_schedule_time, region.last_schedule_compaction_millis());
+    } else {
+        assert!(recv_or_timeout.is_err());
+    }
 }
 
 #[tokio::test]

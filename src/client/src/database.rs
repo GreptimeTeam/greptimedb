@@ -36,7 +36,9 @@ use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
-use common_grpc::flight::{FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightMessage};
+use common_grpc::flight::{
+    FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightMessage, SNAPSHOT_SEQS_METADATA_KEY,
+};
 use common_query::Output;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::ExternalSnafu;
@@ -559,7 +561,28 @@ impl Database {
 
         let value = serde_json::to_string(&flow_extensions.to_vec())
             .expect("flow extension pairs should serialize");
-        let key = AsciiMetadataKey::from_static(FLOW_EXTENSIONS_METADATA_KEY);
+        Self::put_metadata_value(metadata, FLOW_EXTENSIONS_METADATA_KEY, value)
+    }
+
+    fn put_snapshot_seqs(
+        metadata: &mut MetadataMap,
+        snapshot_seqs: &std::collections::HashMap<u64, u64>,
+    ) -> Result<()> {
+        if snapshot_seqs.is_empty() {
+            return Ok(());
+        }
+
+        let value =
+            serde_json::to_string(snapshot_seqs).expect("snapshot sequence map should serialize");
+        Self::put_metadata_value(metadata, SNAPSHOT_SEQS_METADATA_KEY, value)
+    }
+
+    fn put_metadata_value(
+        metadata: &mut MetadataMap,
+        key: &'static str,
+        value: String,
+    ) -> Result<()> {
+        let key = AsciiMetadataKey::from_static(key);
         let value = AsciiMetadataValue::from_str(&value).context(InvalidTonicMetadataValueSnafu)?;
         metadata.insert(key, value);
         Ok(())
@@ -660,7 +683,7 @@ impl Database {
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(sql.as_ref().to_string())),
         });
-        self.do_get(request, hints, &[])
+        self.do_get(request, hints, &[], &Default::default())
             .await
             .map(OutputWithMetrics::into_output)
     }
@@ -683,6 +706,7 @@ impl Database {
             },
             hints,
             &[],
+            &Default::default(),
         )
         .await
     }
@@ -695,6 +719,7 @@ impl Database {
             },
             &[],
             &[],
+            &Default::default(),
         )
         .await
         .map(OutputWithMetrics::into_output)
@@ -709,9 +734,15 @@ impl Database {
         request: QueryRequest,
         hints: &[(&str, &str)],
         flow_extensions: &[(&str, &str)],
+        snapshot_seqs: &std::collections::HashMap<u64, u64>,
     ) -> Result<OutputWithMetrics> {
-        self.do_get(Request::Query(request), hints, flow_extensions)
-            .await
+        self.do_get(
+            Request::Query(request),
+            hints,
+            flow_extensions,
+            snapshot_seqs,
+        )
+        .await
     }
 
     /// Creates a new table using the provided table expression.
@@ -719,7 +750,7 @@ impl Database {
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(expr)),
         });
-        self.do_get(request, &[], &[])
+        self.do_get(request, &[], &[], &Default::default())
             .await
             .map(OutputWithMetrics::into_output)
     }
@@ -729,7 +760,7 @@ impl Database {
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::AlterTable(expr)),
         });
-        self.do_get(request, &[], &[])
+        self.do_get(request, &[], &[], &Default::default())
             .await
             .map(OutputWithMetrics::into_output)
     }
@@ -739,6 +770,7 @@ impl Database {
         request: Request,
         hints: &[(&str, &str)],
         flow_extensions: &[(&str, &str)],
+        snapshot_seqs: &std::collections::HashMap<u64, u64>,
     ) -> Result<OutputWithMetrics> {
         let request = self.to_rpc_request(request);
         let request = Ticket {
@@ -749,6 +781,7 @@ impl Database {
         let metadata = request.metadata_mut();
         Self::put_hints(metadata, hints)?;
         Self::put_flow_extensions(metadata, flow_extensions)?;
+        Self::put_snapshot_seqs(metadata, snapshot_seqs)?;
 
         let mut client = self.client.make_flight_client(false, false)?;
 
@@ -926,6 +959,25 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn test_put_snapshot_seqs_preserves_u64_precision() {
+        let mut metadata = MetadataMap::new();
+        let snapshot_seqs = std::collections::HashMap::from([
+            (u64::MAX, u64::MAX - 1),
+            (9_007_199_254_740_993_u64, 9_007_199_254_740_995_u64),
+        ]);
+
+        Database::put_snapshot_seqs(&mut metadata, &snapshot_seqs).unwrap();
+
+        let value = metadata
+            .get(SNAPSHOT_SEQS_METADATA_KEY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let decoded: std::collections::HashMap<u64, u64> = serde_json::from_str(value).unwrap();
+        assert_eq!(decoded, snapshot_seqs);
     }
 
     #[test]

@@ -37,6 +37,24 @@ use servers::tls::{TlsMode, TlsOption};
 use standalone::options::StandaloneOptions;
 use store_api::path_utils::WAL_DIR;
 
+#[test]
+fn test_load_datanode_runtime_options_from_runtime_section() {
+    let toml = r#"
+        [runtime]
+        global_rt_size = 8
+        compact_rt_size = 4
+        ingest_rt_size = 8
+        query_rt_size = 7
+    "#;
+
+    let options: GreptimeOptions<DatanodeOptions> = toml::from_str(toml).unwrap();
+
+    assert_eq!(8, options.runtime.global_rt_size);
+    assert_eq!(4, options.runtime.compact_rt_size);
+    assert_eq!(8, options.runtime.ingest_rt_size);
+    assert_eq!(7, options.runtime.query_rt_size);
+}
+
 #[allow(deprecated)]
 #[test]
 fn test_load_datanode_example_config() {
@@ -73,7 +91,7 @@ fn test_load_datanode_example_config() {
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
-                    scan_memory_limit: MemoryLimit::Percentage(50),
+                    scan_memory_limit: MemoryLimit::Unlimited,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
@@ -278,7 +296,7 @@ fn test_load_standalone_example_config() {
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
-                    scan_memory_limit: MemoryLimit::Percentage(50),
+                    scan_memory_limit: MemoryLimit::Unlimited,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),

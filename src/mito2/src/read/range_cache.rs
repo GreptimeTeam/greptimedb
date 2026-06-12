@@ -657,7 +657,7 @@ impl CacheBatchBuffer {
         let sender = cache_strategy.range_result_memory_limiter().map(|limiter| {
             let skip_threshold_bytes = cache_strategy.range_result_cache_size().unwrap_or(0);
             let (tx, rx) = mpsc::unbounded_channel();
-            common_runtime::spawn_global(run_cache_concat_task(
+            common_runtime::spawn_query(run_cache_concat_task(
                 rx,
                 limiter.clone(),
                 skip_threshold_bytes,

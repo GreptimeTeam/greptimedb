@@ -89,6 +89,8 @@ const PRI_COLUMN_KEY: &str = "PRI";
 const TIME_INDEX_COLUMN_KEY: &str = "TIME INDEX";
 const DEFAULT_PRIVILEGES: &str = "select,insert";
 const EMPTY_STR: &str = "";
+const YES: &str = "YES";
+const NO: &str = "NO";
 
 impl InformationSchemaColumns {
     pub(super) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
@@ -394,9 +396,9 @@ impl InformationSchemaColumnsBuilder {
                 .as_deref(),
         );
         if column_schema.is_nullable() {
-            self.is_nullables.push(Some("Yes"));
+            self.is_nullables.push(Some(YES));
         } else {
-            self.is_nullables.push(Some("No"));
+            self.is_nullables.push(Some(NO));
         }
         self.column_types.push(Some(&data_type));
         let column_comment = column_schema.column_comment().map(|x| x.as_ref());

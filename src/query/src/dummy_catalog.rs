@@ -407,7 +407,15 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
 
     let memtable_max_sequence = query_ctx.get_snapshot(region_id.as_u64());
 
+    // `skip_sst_files` is only valid for memtable-only incremental deltas,
+    // identified by a lower checkpoint bound. A snapshot upper bound without an
+    // incremental lower bound is a fenced full-snapshot read and must keep SSTs
+    // in the scan so mito can reject stale upper bounds after H has been flushed
+    // into SSTs, instead of silently bypassing the stale-fence check. If a future
+    // incremental delta also carries an upper bound, the lower-bound stale check
+    // still proves whether memtable-only is safe.
     let skip_sst_files = apply_incremental
+        && memtable_min_sequence.is_some()
         && flow_extensions.incremental_mode == Some(FlowIncrementalMode::MemtableOnly);
 
     Ok(FlowScanDecision {
@@ -742,16 +750,23 @@ mod tests {
         assert_eq!(request.sst_min_sequence, Some(90));
         assert_eq!(request.memtable_min_sequence, None);
         assert!(!request.snapshot_on_scan);
+        assert!(!request.skip_sst_files);
     }
 
     #[test]
     fn test_scan_request_from_query_context_reuses_existing_snapshot_for_incremental_scan() {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
-            .extensions(HashMap::from([(
-                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
-                format!(r#"{{"{}":10}}"#, region_id.as_u64()),
-            )]))
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    "memtable_only".to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":10}}"#, region_id.as_u64()),
+                ),
+            ]))
             .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
                 region_id.as_u64(),
                 42_u64,
@@ -763,6 +778,7 @@ mod tests {
         assert_eq!(request.memtable_min_sequence, Some(10));
         assert_eq!(request.memtable_max_sequence, Some(42));
         assert!(!request.snapshot_on_scan);
+        assert!(request.skip_sst_files);
     }
 
     #[test]

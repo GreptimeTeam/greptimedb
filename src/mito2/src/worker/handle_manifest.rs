@@ -404,8 +404,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             false
         } else {
-            let need_compaction =
-                edit_result.result.is_ok() && !edit_result.edit.files_to_add.is_empty();
+            let need_compaction = self.config.schedule_compaction_after_edit
+                && edit_result.result.is_ok()
+                && !edit_result.edit.files_to_add.is_empty();
+
             // Only apply the edit if the result is ok and region is not in staging state.
             if edit_result.result.is_ok() {
                 // Applies the edit to the region.

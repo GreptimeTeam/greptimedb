@@ -292,6 +292,14 @@ pub enum Error {
         error: snap::Error,
     },
 
+    #[snafu(display("Failed to decompress snappy Loki request"))]
+    DecompressSnappyLokiRequest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: snap::Error,
+    },
+
     #[snafu(display("Failed to decompress zstd prometheus remote request"))]
     DecompressZstdPromRemoteRequest {
         #[snafu(implicit)]
@@ -756,6 +764,7 @@ impl ErrorExt for Error {
             | UnsupportedJsonContentType { .. }
             | CompressPromRemoteRequest { .. }
             | DecompressSnappyPromRemoteRequest { .. }
+            | DecompressSnappyLokiRequest { .. }
             | DecompressZstdPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }

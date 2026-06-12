@@ -147,8 +147,9 @@ pub struct MitoConfig {
     pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
-    /// Memory limit for table scans across all queries. Setting it to 0 disables the limit.
-    /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
+    /// Memory limit for table scans across all queries.
+    /// Setting it to 0 or "unlimited" disables the limit.
+    /// Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "50%").
     pub scan_memory_limit: MemoryLimit,
     /// Behavior when scan memory tracking cannot acquire memory from the budget.
     /// `wait` means `wait(10s)`, not unlimited waiting.
@@ -172,6 +173,8 @@ pub struct MitoConfig {
     /// To align with the old behavior, the default value is 0 (no restrictions).
     #[serde(with = "humantime_serde")]
     pub min_compaction_interval: Duration,
+    /// Whether to schedule compaction after applying a region edit.
+    pub schedule_compaction_after_edit: bool,
 
     /// Whether to enable flat format as the default SST format.
     /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
@@ -225,6 +228,7 @@ impl Default for MitoConfig {
             #[cfg(feature = "vector_index")]
             vector_index: VectorIndexConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
+            schedule_compaction_after_edit: true,
             default_flat_format: true,
             gc: GcConfig::default(),
         };

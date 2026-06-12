@@ -299,12 +299,16 @@ explain analyze select tag from t where num > 6 order by ts desc limit 2;
 |_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
+| 1_| 0_|_FilterExec: DynamicFilter [ true ] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
 |_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
 |_|_|_FilterExec: num@2 > 6, projection=[tag@0, ts@1] REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 1_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
+| 1_| 1_|_FilterExec: DynamicFilter [ true ] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
 |_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
 |_|_|_FilterExec: num@2 > 6, projection=[tag@0, ts@1] REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED

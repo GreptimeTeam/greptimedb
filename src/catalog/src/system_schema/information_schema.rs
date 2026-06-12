@@ -25,6 +25,7 @@ pub mod region_peers;
 mod region_statistics;
 pub mod schemata;
 mod ssts;
+pub mod statistics;
 mod table_constraints;
 mod table_names;
 mod table_semantics;
@@ -50,6 +51,9 @@ use lazy_static::lazy_static;
 use paste::paste;
 use process_list::InformationSchemaProcessList;
 use region_info::InformationSchemaRegionInfo;
+use store_api::metric_engine_consts::{
+    MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
+};
 use store_api::region_info::RegionInfoEntry;
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{ScanRequest, TableId};
@@ -72,6 +76,7 @@ use crate::system_schema::information_schema::schemata::InformationSchemaSchemat
 use crate::system_schema::information_schema::ssts::{
     InformationSchemaSstsIndexMeta, InformationSchemaSstsManifest, InformationSchemaSstsStorage,
 };
+use crate::system_schema::information_schema::statistics::InformationSchemaStatistics;
 use crate::system_schema::information_schema::table_constraints::InformationSchemaTableConstraints;
 use crate::system_schema::information_schema::table_semantics::InformationSchemaTableSemantics;
 use crate::system_schema::information_schema::tables::InformationSchemaTables;
@@ -80,6 +85,23 @@ pub(crate) use crate::system_schema::predicate::Predicates;
 use crate::system_schema::{
     SystemSchemaProvider, SystemSchemaProviderInner, SystemTable, SystemTableRef,
 };
+
+const DENSE_PRIMARY_KEY_ENCODING: &str = "dense";
+const SPARSE_PRIMARY_KEY_ENCODING: &str = "sparse";
+
+pub(crate) fn primary_key_encoding_index_type(options: &HashMap<String, String>) -> &'static str {
+    options
+        .get(PRIMARY_KEY_ENCODING)
+        .or_else(|| options.get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING))
+        .map(|value| {
+            if value.eq_ignore_ascii_case(SPARSE_PRIMARY_KEY_ENCODING) {
+                SPARSE_PRIMARY_KEY_ENCODING
+            } else {
+                DENSE_PRIMARY_KEY_ENCODING
+            }
+        })
+        .unwrap_or(DENSE_PRIMARY_KEY_ENCODING)
+}
 
 lazy_static! {
     // Memory tables in `information_schema`.
@@ -225,6 +247,10 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
+            STATISTICS => Some(Arc::new(InformationSchemaStatistics::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
             CLUSTER_INFO => Some(Arc::new(InformationSchemaClusterInfo::new(
                 self.catalog_manager.clone(),
             )) as _),
@@ -361,6 +387,10 @@ impl InformationSchemaProvider {
         tables.insert(
             TABLE_CONSTRAINTS.to_string(),
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
+        );
+        tables.insert(
+            STATISTICS.to_string(),
+            self.build_table(STATISTICS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
         tables.insert(

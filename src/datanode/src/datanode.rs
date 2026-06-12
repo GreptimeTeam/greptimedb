@@ -450,7 +450,6 @@ impl DatanodeBuilder {
             .table_provider_factory
             .clone()
             .unwrap_or_else(|| Arc::new(DummyTableProviderFactory));
-
         let mut region_server = RegionServer::with_table_provider(
             query_engine,
             common_runtime::global_runtime(),
@@ -460,6 +459,7 @@ impl DatanodeBuilder {
             opts.concurrent_query_limiter_timeout,
             opts.grpc.flight_compression,
         );
+        region_server.install_remote_dyn_filter_receiver_injector(&self.plugins);
 
         let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
         let engines = self

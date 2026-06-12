@@ -411,7 +411,12 @@ impl FrontendClient {
                     peer: db.peer.clone(),
                 });
                 db.database
-                    .query_with_terminal_metrics_and_flow_extensions(request, &hints, extensions)
+                    .query_with_terminal_metrics_and_flow_extensions(
+                        request,
+                        &hints,
+                        extensions,
+                        &Default::default(),
+                    )
                     .await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)

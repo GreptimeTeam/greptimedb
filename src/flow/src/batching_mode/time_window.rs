@@ -33,7 +33,9 @@ use datafusion::error::Result as DfResult;
 use datafusion::execution::SessionState;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
+use datafusion_common::tree_node::{
+    Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
+};
 use datafusion_common::{DFSchema, TableReference};
 use datafusion_expr::{ColumnarValue, LogicalPlan};
 use datafusion_physical_expr::PhysicalExprRef;
@@ -58,6 +60,84 @@ use crate::expr::error::DataTypeSnafu;
 
 /// Represents a test timestamp in seconds since the Unix epoch.
 const DEFAULT_TEST_TIMESTAMP: Timestamp = Timestamp::new_second(17_0000_0000);
+
+#[derive(Default)]
+struct TimeWindowPlanShape {
+    table_scan_count: usize,
+    aggregate_count: usize,
+    has_unsupported_pruning_node: bool,
+}
+
+impl TimeWindowPlanShape {
+    fn should_skip_time_window_expr(&self) -> bool {
+        self.has_unsupported_pruning_node || self.table_scan_count != 1 || self.aggregate_count > 1
+    }
+
+    fn should_stop_inspection(&self) -> bool {
+        // This intentionally differs from the final skip predicate above:
+        // zero table scans make a fully inspected plan ineligible, but they are
+        // not an early-stop condition because a later subtree may still contain
+        // the first table scan.
+        self.has_unsupported_pruning_node || self.table_scan_count > 1 || self.aggregate_count > 1
+    }
+}
+
+impl TreeNodeVisitor<'_> for TimeWindowPlanShape {
+    type Node = LogicalPlan;
+
+    fn f_down(&mut self, node: &Self::Node) -> DfResult<TreeNodeRecursion> {
+        match node {
+            LogicalPlan::TableScan(_) => {
+                self.table_scan_count += 1;
+            }
+            LogicalPlan::Aggregate(_) => {
+                self.aggregate_count += 1;
+            }
+            // The pinned DataFusion fork has no separate
+            // `LogicalPlan::CrossJoin` variant. SQL `CROSS JOIN` is represented
+            // as `LogicalPlan::Join(_)` here, so rejecting all joins also
+            // rejects cross joins.
+            LogicalPlan::Join(_)
+            | LogicalPlan::Window(_)
+            | LogicalPlan::Union(_)
+            | LogicalPlan::Distinct(_)
+            | LogicalPlan::Limit(_)
+            | LogicalPlan::Sort(_)
+            | LogicalPlan::Extension(_)
+            | LogicalPlan::Dml(_)
+            | LogicalPlan::Ddl(_)
+            | LogicalPlan::Unnest(_)
+            | LogicalPlan::RecursiveQuery(_) => {
+                self.has_unsupported_pruning_node = true;
+            }
+            _ => {}
+        }
+
+        // These disqualifying conditions are monotonic. Once any of them is
+        // met, later traversal cannot make the plan eligible for TWE pruning
+        // again. Counts may be partial after `Stop`, but they are only used by
+        // the final skip predicate.
+        if self.should_stop_inspection() {
+            Ok(TreeNodeRecursion::Stop)
+        } else {
+            Ok(TreeNodeRecursion::Continue)
+        }
+    }
+}
+
+fn inspect_time_window_plan_shape(plan: &LogicalPlan) -> DfResult<TimeWindowPlanShape> {
+    let mut shape = TimeWindowPlanShape::default();
+    plan.visit_with_subqueries(&mut shape)?;
+    Ok(shape)
+}
+
+fn should_skip_time_window_expr(plan: &LogicalPlan) -> bool {
+    let Ok(shape) = inspect_time_window_plan_shape(plan) else {
+        return true;
+    };
+
+    shape.should_skip_time_window_expr()
+}
 
 /// Time window expr like `date_bin(INTERVAL '1' MINUTE, ts)`, this type help with
 /// evaluating the expr using given timestamp
@@ -353,6 +433,21 @@ pub async fn find_time_window_expr(
     query_ctx: QueryContextRef,
 ) -> Result<(String, Option<datafusion_expr::Expr>, TimeUnit, DFSchema), Error> {
     // TODO(discord9): find the expr that do time window
+
+    // Dirty-window pruning is only safe for simple single-source aggregate plans.
+    // For joins, window functions, set operations, distinct/sort/limit, extension
+    // nodes, or multi-scan plans, conservatively give up and let batching mode run
+    // the unfiltered full query instead.
+    if should_skip_time_window_expr(plan) {
+        // The column/schema/unit fields are placeholders when the TWE is None;
+        // callers must only use them when a TWE is present.
+        return Ok((
+            String::new(),
+            None,
+            TimeUnit::Millisecond,
+            DFSchema::empty(),
+        ));
+    }
 
     let mut table_name = None;
 
@@ -947,5 +1042,155 @@ mod test {
             };
             assert_eq!(expected_unparsed, new_sql);
         }
+    }
+
+    #[tokio::test]
+    async fn test_complex_plans_skip_time_window_expr() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+
+        let testcases = [
+            // A join may duplicate or drop rows across sources, so a time window
+            // found on one side is not safe to use as a full-query dirty-window
+            // pruning boundary.
+            r#"
+SELECT
+    l.number,
+    date_bin('5 minutes', l.ts) AS time_window
+FROM numbers_with_ts l
+JOIN numbers_with_ts r ON l.number = r.number
+GROUP BY l.number, time_window
+"#,
+            // Window functions can depend on rows outside the dirty window,
+            // even if their input contains a group-by time window.
+            r#"
+SELECT number, time_window
+FROM (
+    SELECT
+        number,
+        time_window,
+        row_number() OVER (PARTITION BY number ORDER BY time_window DESC) AS rn
+    FROM (
+        SELECT number, date_bin('5 minutes', ts) AS time_window
+        FROM numbers_with_ts
+        GROUP BY number, time_window
+    )
+)
+WHERE rn = 1
+"#,
+            // Set operations combine multiple query scopes/sources.
+            r#"
+SELECT date_bin('5 minutes', ts) AS time_window
+FROM numbers_with_ts
+GROUP BY time_window
+UNION ALL
+SELECT date_bin('5 minutes', ts) AS time_window
+FROM numbers_with_ts
+GROUP BY time_window
+"#,
+            // Nested aggregates are unsafe: pruning source rows by the inner
+            // time window is not equivalent for the outer/global aggregate.
+            r#"
+SELECT max(cnt)
+FROM (
+    SELECT date_bin('5 minutes', ts) AS time_window, count(number) AS cnt
+    FROM numbers_with_ts
+    GROUP BY time_window
+)
+"#,
+            // Expression subqueries add another query scope/source and should
+            // not be treated as a simple single-source TWE plan.
+            r#"
+SELECT date_bin('5 minutes', ts) AS time_window
+FROM numbers_with_ts
+WHERE number IN (SELECT number FROM numbers_with_ts)
+GROUP BY time_window
+"#,
+            // Sorting an otherwise valid TWE query is conservatively treated
+            // as full-query to avoid adding dirty-window predicates across
+            // post-aggregate plan nodes.
+            r#"
+SELECT date_bin('5 minutes', ts) AS time_window
+FROM numbers_with_ts
+GROUP BY time_window
+ORDER BY time_window
+"#,
+            // DISTINCT is a post-query de-duplication boundary; keep it on the
+            // full-query path even if its input has a time window group key.
+            r#"
+SELECT DISTINCT time_window
+FROM (
+    SELECT date_bin('5 minutes', ts) AS time_window
+    FROM numbers_with_ts
+    GROUP BY time_window
+)
+"#,
+            // LIMIT can change which rows are visible after pruning.
+            r#"
+SELECT date_bin('5 minutes', ts) AS time_window
+FROM numbers_with_ts
+GROUP BY time_window
+LIMIT 10
+"#,
+            // Cross joins may appear either as a dedicated node or as multiple
+            // table scans; either way they must not use source dirty-window
+            // pruning from one side only.
+            r#"
+SELECT date_bin('5 minutes', l.ts) AS time_window
+FROM numbers_with_ts l, numbers_with_ts r
+GROUP BY time_window
+"#,
+            // A cross join with a constant relation still has only one table
+            // scan, so it must be rejected by the join node instead of relying
+            // on the multi-scan guard.
+            r#"
+SELECT date_bin('5 minutes', l.ts) AS time_window
+FROM numbers_with_ts l CROSS JOIN (VALUES (1)) AS v(x)
+GROUP BY time_window
+"#,
+        ];
+
+        for sql in testcases {
+            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, true)
+                .await
+                .unwrap();
+            let (_, lower, upper) = find_plan_time_window_bound(
+                &plan,
+                Timestamp::new(23, TimeUnit::Millisecond),
+                ctx.clone(),
+                query_engine.clone(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(None, lower, "query should not have TWE: {sql}");
+            assert_eq!(None, upper, "query should not have TWE: {sql}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_simple_single_source_aggregate_keeps_time_window_expr() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+
+        let sql = r#"
+SELECT max(number) AS max_number, date_bin('5 minutes', ts) AS time_window
+FROM numbers_with_ts
+GROUP BY time_window
+"#;
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, true)
+            .await
+            .unwrap();
+        let (_, lower, upper) = find_plan_time_window_bound(
+            &plan,
+            Timestamp::new(23, TimeUnit::Millisecond),
+            ctx.clone(),
+            query_engine.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(Some(Timestamp::new(0, TimeUnit::Millisecond)), lower);
+        assert_eq!(Some(Timestamp::new(300000, TimeUnit::Millisecond)), upper);
     }
 }
