@@ -34,6 +34,7 @@ use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use crate::rpc::KeyValue;
 use crate::rpc::router::region_distribution;
 use crate::rpc::store::{BatchGetRequest, RangeRequest};
+use crate::wal_provider::{RegionWalOptions, region_wal_options_serde};
 
 #[serde_with::serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -50,10 +51,10 @@ pub struct RegionInfo {
     #[serde(default)]
     pub region_options: HashMap<String, String>,
     /// The per-region wal options.
-    /// Key: region number. Value: the encoded wal options of the region.
+    /// Key: region number. Value: the wal options of the region.
     #[serde(default)]
-    #[serde_as(as = "HashMap<serde_with::DisplayFromStr, _>")]
-    pub region_wal_options: HashMap<RegionNumber, String>,
+    #[serde(with = "region_wal_options_serde")]
+    pub region_wal_options: RegionWalOptions,
 }
 
 /// The key mapping {datanode_id} to {table_id}
@@ -228,7 +229,7 @@ impl DatanodeTableManager {
         engine: &str,
         region_storage_path: &str,
         region_options: HashMap<String, String>,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution
@@ -313,7 +314,7 @@ impl DatanodeTableManager {
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
         new_region_options: &HashMap<String, String>,
-        new_region_wal_options: &HashMap<RegionNumber, String>,
+        new_region_wal_options: &RegionWalOptions,
     ) -> Result<Txn> {
         let mut opts = Vec::new();
 
@@ -386,6 +387,8 @@ impl DatanodeTableManager {
 
 #[cfg(test)]
 mod tests {
+    use common_wal::options::WalOptions;
+
     use super::*;
 
     #[test]
@@ -487,9 +490,9 @@ mod tests {
                 ("c".to_string(), "cc".to_string()),
             ]),
             region_wal_options: HashMap::from([
-                (1, "aaa".to_string()),
-                (2, "bbb".to_string()),
-                (3, "ccc".to_string()),
+                (1, WalOptions::RaftEngine),
+                (2, WalOptions::Noop),
+                (3, WalOptions::RaftEngine),
             ]),
         };
         let table_value = DatanodeTableValue {
@@ -507,6 +510,18 @@ mod tests {
         let encoded = serde_json::to_vec(&table_value).unwrap();
         let decoded = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(table_value, decoded);
+    }
+
+    #[test]
+    fn test_deserialize_legacy_region_wal_options() {
+        let literal = br#"{"table_id":42,"regions":[1],"follower_regions":[],"engine":"","region_storage_path":"","region_options":{},"region_wal_options":{"1":"{\"wal.provider\":\"raft_engine\"}"},"version":1}"#;
+
+        let actual = DatanodeTableValue::try_from_raw_value(literal).unwrap();
+
+        assert_eq!(
+            actual.region_info.region_wal_options,
+            HashMap::from([(1, WalOptions::RaftEngine)])
+        );
     }
 
     #[test]

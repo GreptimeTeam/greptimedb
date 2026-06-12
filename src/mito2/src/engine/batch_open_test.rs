@@ -118,10 +118,7 @@ async fn test_batch_open_with_format(factory: Option<LogStoreFactory>, flat_form
     if let Some(topic) = &topic {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            }))
-            .unwrap(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic.clone()))).unwrap(),
         );
     };
     let mut requests = (1..=num_regions)
@@ -204,10 +201,7 @@ async fn test_batch_open_err_with_format(factory: Option<LogStoreFactory>, flat_
     if let Some(topic) = &topic {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            }))
-            .unwrap(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic.clone()))).unwrap(),
         );
     };
     let num_regions = 3u32;

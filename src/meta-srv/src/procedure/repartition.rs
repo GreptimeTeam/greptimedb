@@ -44,6 +44,7 @@ use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
+use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
@@ -53,7 +54,7 @@ use common_telemetry::{error, info, warn};
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::{RegionNumber, TableId};
+use store_api::storage::TableId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
@@ -378,7 +379,7 @@ impl Context {
         &self,
         current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
         new_region_routes: Vec<RegionRoute>,
-        new_region_wal_options: HashMap<RegionNumber, String>,
+        new_region_wal_options: RegionWalOptions,
     ) -> Result<()> {
         let table_id = self.persistent_ctx.table_id;
         if new_region_routes.is_empty() {

@@ -28,6 +28,7 @@ use crate::flow_name::FlowName;
 use crate::key::schema_name::SchemaName;
 use crate::key::{FlowId, FlowPartitionId};
 use crate::peer::Peer;
+use crate::wal_provider::{RegionWalOptions, region_wal_options_serde};
 use crate::{DatanodeId, FlownodeId};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
@@ -204,8 +205,8 @@ pub struct OpenRegion {
     pub region_storage_path: String,
     pub region_options: HashMap<String, String>,
     #[serde(default)]
-    #[serde_as(as = "HashMap<serde_with::DisplayFromStr, _>")]
-    pub region_wal_options: HashMap<RegionNumber, String>,
+    #[serde(with = "region_wal_options_serde")]
+    pub region_wal_options: RegionWalOptions,
     #[serde(default)]
     pub skip_wal_replay: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -219,7 +220,7 @@ impl OpenRegion {
         region_ident: RegionIdent,
         path: &str,
         region_options: HashMap<String, String>,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
         skip_wal_replay: bool,
         reason: Option<OpenRegionReason>,
         requirements: RegionRequirements,
@@ -1129,6 +1130,7 @@ impl InstructionReply {
 mod tests {
     use std::collections::HashSet;
 
+    use common_wal::options::WalOptions;
     use store_api::storage::{FileId, FileRef};
 
     use super::*;
@@ -1396,6 +1398,18 @@ mod tests {
             requirements: RegionRequirements::empty(),
         };
         assert_eq!(expected, deserialized);
+    }
+
+    #[test]
+    fn test_deserialize_open_region_with_legacy_region_wal_options() {
+        let open_region = r#"{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{"1":"{\"wal.provider\":\"raft_engine\"}"},"skip_wal_replay":false}"#;
+
+        let open_region: OpenRegion = serde_json::from_str(open_region).unwrap();
+
+        assert_eq!(
+            open_region.region_wal_options,
+            HashMap::from([(1, WalOptions::RaftEngine)])
+        );
     }
 
     #[test]
