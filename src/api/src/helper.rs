@@ -451,10 +451,10 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                             if native_type.is_null() {
                                 None
                             } else {
-                                let native_type =
+                                let concrete_type =
                                     ConcreteDataType::from_arrow_type(&native_type.as_arrow_type());
                                 let (datatype, datatype_extension) =
-                                    ColumnDataTypeWrapper::try_from(native_type)?.into_parts();
+                                    ColumnDataTypeWrapper::try_from(concrete_type)?.into_parts();
                                 Some(ColumnDataTypeExtension {
                                     type_ext: Some(TypeExt::JsonNativeType(Box::new(
                                         JsonNativeTypeExtension {
