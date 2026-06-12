@@ -330,12 +330,14 @@ mod tests {
         let builder = CreateRequestBuilder::new(template, None)
             .with_requirements(RegionRequirements::object_storage());
 
-        let request = builder.build_one(
-            RegionId::new(42, 0),
-            "/p".to_string(),
-            &Default::default(),
-            &Default::default(),
-        );
+        let request = builder
+            .build_one(
+                RegionId::new(42, 0),
+                "/p".to_string(),
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
 
         assert_eq!(
             request.requirements.map(RegionRequirements::from),
