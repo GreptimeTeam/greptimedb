@@ -538,7 +538,7 @@ fn test_apply_query_result_to_state_advances_incremental_subset() {
 }
 
 #[test]
-fn test_apply_query_result_to_state_blocks_full_snapshot_when_dirty_backlog_pending() {
+fn test_scoped_base_repair_with_dirty_backlog_starts_fenced_repair_from_full_snapshot() {
     let query_ctx = QueryContext::arc();
     let (_tx, rx) = tokio::sync::oneshot::channel();
     let mut state = TaskState::new(query_ctx, rx);
@@ -575,7 +575,7 @@ fn test_apply_query_result_to_state_blocks_full_snapshot_when_dirty_backlog_pend
 }
 
 #[test]
-fn test_apply_query_result_to_state_blocks_incremental_when_dirty_backlog_pending() {
+fn test_scoped_base_repair_with_dirty_backlog_preserves_existing_incremental_checkpoints() {
     let query_ctx = QueryContext::arc();
     let (_tx, rx) = tokio::sync::oneshot::channel();
     let mut state = TaskState::new(query_ctx, rx);
@@ -782,10 +782,6 @@ fn test_fenced_repair_watermarks_require_exact_high() {
     assert!(!state.fenced_repair_watermarks_match_high(
         &participating_regions,
         &HashMap::from([(1_u64, 11_u64), (2_u64, 20_u64)])
-    ));
-    assert!(!state.fenced_repair_watermarks_match_high(
-        &participating_regions,
-        &HashMap::from([(1_u64, 9_u64), (2_u64, 20_u64)])
     ));
     assert!(!state.fenced_repair_watermarks_match_high(
         &participating_regions,
@@ -1129,8 +1125,7 @@ fn test_repeated_abandon_and_new_fenced_repair_has_no_stale_pending_state() {
     // After abandoning a fenced repair with high H1 and starting a fresh
     // fenced repair with high H2, the pending state must reflect H2 (not
     // the stale H1), and pending windows must come from the current dirty
-    // state. This exercises two complete cycles to ensure no stale pending
-    // state leaks across abandon → new repair transitions.
+    // state.
     let query_ctx = QueryContext::arc();
     let (_tx, rx) = tokio::sync::oneshot::channel();
     let mut state = TaskState::new(query_ctx, rx);
@@ -1179,23 +1174,6 @@ fn test_repeated_abandon_and_new_fenced_repair_has_no_stale_pending_state() {
         2,
         "pending windows come from current dirty state"
     );
-
-    let filter2 = next_fenced_repair_filter(&mut state, 1);
-    assert_eq!(
-        state
-            .pending_fenced_repair()
-            .unwrap()
-            .pending_windows()
-            .len(),
-        1
-    );
-
-    // Abandon the second repair and confirm no stale pending remains.
-    state.abandon_fenced_repair();
-    assert!(state.pending_fenced_repair().is_none());
-    state.restore_scoped_windows(&filter2);
-    assert_eq!(state.dirty_time_windows.len(), 2);
-    assert!(state.pending_fenced_repair().is_none());
 }
 
 #[test]

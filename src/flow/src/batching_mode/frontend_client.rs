@@ -769,28 +769,9 @@ mod tests {
             ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
             assert_eq!(ctx.extension("flow.return_region_seq"), Some("true"));
-            assert_eq!(ctx.get_snapshot(7), Some(88));
-            ctx.set_snapshot(42, 99);
-            Ok(Output::new_with_affected_rows(1))
-        }
-    }
-
-    /// Handler that asserts a multi-entry snapshot_seqs map — mimicking
-    /// what `QueryCoverage::FencedRepairChunk { high }` would produce —
-    /// arrives via the standalone `query_with_terminal_metrics` path.
-    #[derive(Debug)]
-    struct FencedRepairSnapshotHandler;
-
-    #[async_trait::async_trait]
-    impl GrpcQueryHandlerWithBoxedError for FencedRepairSnapshotHandler {
-        async fn do_query(
-            &self,
-            _query: Request,
-            ctx: QueryContextRef,
-        ) -> std::result::Result<Output, BoxedError> {
-            assert_eq!(ctx.extension("flow.return_region_seq"), Some("true"));
             assert_eq!(ctx.get_snapshot(1), Some(10));
             assert_eq!(ctx.get_snapshot(2), Some(20));
+            ctx.set_snapshot(42, 99);
             Ok(Output::new_with_affected_rows(1))
         }
     }
@@ -967,7 +948,7 @@ mod tests {
                     query: Some(Query::Sql("insert into t select * from src".to_string())),
                 },
                 &[("flow.return_region_seq", "true")],
-                &HashMap::from([(7, 88)]),
+                &HashMap::from([(1, 10), (2, 20)]),
                 &mut peer_desc,
             )
             .await
@@ -976,37 +957,6 @@ mod tests {
 
         assert!(result.metrics.is_ready());
         assert_eq!(result.region_watermark_map(), None);
-    }
-
-    #[tokio::test]
-    async fn test_query_with_terminal_metrics_forwards_fenced_repair_snapshot_seqs() {
-        // Exercises the propagation boundary: when the flow issues a
-        // FencedRepairChunk with a multi-entry high-watermark map, the
-        // snapshot_seqs must arrive in the QueryContext so the datanode
-        // can bind per-region snapshot upper bounds against the frozen H.
-        // This test uses a standalone handler to verify the metadata
-        // plumbing without a real distributed gRPC round-trip.
-        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
-            Arc::new(FencedRepairSnapshotHandler);
-        let client =
-            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
-        let mut peer_desc = None;
-
-        let result = client
-            .query_with_terminal_metrics(
-                "greptime",
-                "public",
-                QueryRequest {
-                    query: Some(Query::Sql("insert into t select * from src".to_string())),
-                },
-                &[("flow.return_region_seq", "true")],
-                &HashMap::from([(1, 10), (2, 20)]),
-                &mut peer_desc,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(peer_desc, Some(PeerDesc::Standalone)));
-        assert!(result.metrics.is_ready());
     }
 
     #[tokio::test]
