@@ -4,7 +4,7 @@ This document records a metric-oriented review of the current GreptimeDB Grafana
 
 ## Review scope
 
-- Current cluster and standalone metric dashboards use the same panel groups: Overview, Health, Capacity, Resources, Ingestion, Queries, Frontend Requests, Frontend to Datanode, Datanode, Storage, Index, Metasrv, Hotspot, Autopilot, Object Store, WAL, Flownode, and Trigger.
+- Current cluster and standalone metric dashboards use the same panel groups: Overview, Health, Capacity, Resources, Ingestion, Queries, Frontend Requests, Frontend to Datanode, Datanode, Storage, Flush and Compaction, Index, Metasrv, Hotspot, Autopilot, Object Store, WAL, Flownode, and Trigger.
 - The existing dashboard already exposes many throughput and latency panels, but its first screen is mostly business/resource totals. Error, saturation, backlog, and metasrv health signals are spread across later sections, so an on-call engineer cannot quickly answer: "Is GreptimeDB healthy?", "Are users failing?", "Where is the bottleneck?", and "Which component should I inspect first?".
 - The review below groups metrics by the failure mode they explain, then proposes dashboard sections and panels that make incident triage faster.
 
@@ -65,6 +65,7 @@ Most metrics are defined in `metrics.rs` files. The following inventory focuses 
 | `greptime_datanode_region_failed_insert_count`, `greptime_datanode_region_changed_row_count` | Region-level failed inserts and changed rows. | Detect write errors and write amplification per datanode/region. |
 | `greptime_datanode_heartbeat_send_count`, `greptime_datanode_heartbeat_recv_count`, `greptime_last_sent_heartbeat_lease_elapsed`, `greptime_last_received_heartbeat_lease_elapsed`, `greptime_lease_expired_region`, `greptime_heartbeat_region_leases` | Datanode heartbeat and region lease state. | Detect metasrv connectivity and lease-expiry symptoms. |
 | `greptime_mito_handle_request_elapsed` | Mito request latency by request type. | Main backend storage-engine service-time signal. |
+| `greptime_mito_request_wait_time` | Mito request queueing time before region worker handling. | Separate region-worker queueing from Mito request service time when latency rises. |
 | `greptime_mito_write_stage_elapsed`, `greptime_mito_read_stage_elapsed` | Per-stage write/read latency. | Localize slow writes and reads inside the engine. |
 | `greptime_mito_write_buffer_bytes`, `greptime_mito_write_rows_total`, `greptime_mito_write_stall_total`, `greptime_mito_write_stalling_count`, `greptime_mito_write_reject_total` | Write-buffer size, rows, stalls, active stalling, and rejected writes. | Detect write-path saturation and backpressure. |
 | `greptime_mito_flush_requests_total`, `greptime_mito_flush_elapsed`, `greptime_mito_flush_bytes_total`, `greptime_mito_flush_file_total`, `greptime_mito_inflight_flush_count`, `greptime_mito_flush_failure_total` | Flush work, latency, bytes/files, in-flight jobs, and failures. | Identify flush bottlenecks, large flush jobs, and durable-write risk. |
@@ -176,6 +177,7 @@ Purpose: show whether the system is near limits even before errors begin.
 | --- | --- | --- | --- |
 | CPU versus limits by role | Existing `process_cpu_seconds_total` with `greptime_cpu_limit_in_millicores`. | millicores | Keep role-specific panels, but add a top-row max-over-role stat. |
 | Memory versus limits by role | Existing `process_resident_memory_bytes` with `greptime_memory_limit_in_bytes`. | bytes | Add threshold when usage exceeds 80% of limit. |
+| Resource CPU and memory by role | Frontend, Datanode, and Metasrv CPU panels in one line, followed by their memory panels. Flownode CPU and memory are kept on the next line. | millicores/bytes | Keep `Resources` expanded by default so per-role saturation is visible without opening a row. |
 | Runtime thread starvation | `sum by (instance, pod) (greptime_runtime_threads_idle)` and `sum by (instance, pod) (greptime_runtime_threads_alive)` | short | Low idle threads during latency spikes suggests executor saturation. |
 | Request memory utilization | `greptime_servers_request_memory_in_use_bytes / greptime_servers_request_memory_limit_bytes` | percent | Frontend rejection precursor. |
 | Query memory utilization | `greptime_query_memory_pool_usage_bytes` | bytes | Use alongside query rejections. |
@@ -220,14 +222,22 @@ Purpose: inspect the storage layer after triage points to datanodes.
 | --- | --- | --- | --- |
 | Region request QPS/latency/failures | Datanode region request elapsed count/bucket plus fail count. | req/s, s, eps | Keep adjacent. |
 | Mito request OPS and p99 | Existing `greptime_mito_handle_request_elapsed` panels. | ops/s, s | Keep by request type. |
+| Mito request wait p95/p99/avg | `greptime_mito_request_wait_time` grouped by instance, pod, and worker. | s | Put next to Mito request service latency to expose queueing before worker handling. |
 | Read/write stage p95/p99 | Existing read/write stage latency panels. | s | Include p95 and p99. |
-| Flush work and failures | Requests by reason, bytes, files, in-flight jobs, p95/p99 latency by type, failure counter. | ops/s, bytes/s, s, eps | Build a complete flush row. |
-| Compaction work and failures | Requests, in-flight, input/output bytes, latency, failures, memory wait/reject. | ops/s, bytes/s, s, eps | Build a complete compaction row. |
 | Cache efficiency | `rate(greptime_mito_cache_hit[$__rate_interval]) / (rate(greptime_mito_cache_hit[$__rate_interval]) + rate(greptime_mito_cache_miss[$__rate_interval]))` | percent | More actionable than hit and miss counters alone. |
 | Memtable/cardinality pressure | Active series, field builders, dict bytes. | short/bytes | Explains write memory growth. |
 | Mito GC health | GC runs, errors, deleted files, orphaned index files, skipped unparsable files, and duration. | ops/s, s, eps, short | Keep GC failures in Health; keep full GC health and a dedicated duration panel in the Datanode row. |
 
-### 7. Index
+### 7. Flush and Compaction
+
+Purpose: drill into durable-write and background rewrite work after `Health`, `Datanode`, or `Capacity` points to flush or compaction pressure.
+
+| Panel | Query sketch | Unit | Notes |
+| --- | --- | --- | --- |
+| Flush work | Flush requests by reason, p95/p99/avg elapsed time, bytes/files throughput, and in-flight flush count. | ops/s, s, bytes/s, short | Keep the row expanded by default because flush stalls can affect durability and write latency. |
+| Compaction work | Compaction requests, in-flight count, total/stage latency, and input/output bytes. | ops/s, short, s, bytes | Keep failures in `Health` and `Datanode`; this row is for workload and latency drill-down. |
+
+### 8. Index
 
 Purpose: diagnose index creation, index application, and index IO after storage panels point to indexed read/write pressure.
 
@@ -238,7 +248,7 @@ Purpose: diagnose index creation, index application, and index IO after storage 
 | Index memory and IO | `greptime_index_apply_memory_usage`, `greptime_index_create_memory_usage`, `greptime_index_io_bytes_total`, `greptime_index_io_op_total` | bytes, ops/s | Diagnose indexing memory pressure and puffin/intermediate-file IO. |
 | Index cache | Existing Mito cache hit/miss/eviction metrics filtered to index-related cache types. | ops/s | Diagnose index metadata/content/result cache effectiveness. |
 
-### 8. Object Store
+### 9. Object Store
 
 Purpose: identify whether object-store dependencies are slowing the database.
 
@@ -247,7 +257,7 @@ Purpose: identify whether object-store dependencies are slowing the database.
 | OpenDAL QPS/latency/errors by operation | Existing OpenDAL request and error panels. | req/s, s, eps | Move errors before detailed latency. |
 | OpenDAL traffic | Existing traffic panel. | bytes/s | Split read/write if available. |
 
-### 9. WAL
+### 10. WAL
 
 Purpose: identify whether local or remote WAL dependencies are slowing the database.
 
@@ -259,7 +269,7 @@ Purpose: identify whether local or remote WAL dependencies are slowing the datab
 | Kafka produce latency/traffic | `greptime_logstore_kafka_client_produce_elapsed`, Kafka bytes/traffic totals. | s, bytes/s | Remote WAL dependency. |
 | Remote WAL checkpoint/flush triggers | Existing meta-triggered counters. | ops/s | Confirm maintenance activity. |
 
-### 10. Metasrv, Hotspot, and Autopilot
+### 11. Metasrv, Hotspot, and Autopilot
 
 Purpose: diagnose routing, metadata, region health, load hotspots, and automated balancing. Keep core metasrv health in `Metasrv`, and keep load distribution plus automation details in their own collapsed rows so metasrv health stays scannable.
 
@@ -278,20 +288,22 @@ Purpose: diagnose routing, metadata, region health, load hotspots, and automated
 ## Concrete dashboard editing plan
 
 1. **Keep the generated-dashboard workflow.** Update `grafana/dashboards/metrics/cluster/dashboard.json`, then regenerate JSON/YAML/Markdown with `grafana/scripts/gen-dashboards.sh`.
-2. **Use concise row titles.** Prefer Overview, Health, Capacity, Ingestion, Queries, Datanode, Storage, Index, Metasrv, Hotspot, Autopilot, Object Store, and WAL.
+2. **Use concise row titles.** Prefer Overview, Health, Capacity, Resources, Ingestion, Queries, Datanode, Storage, Flush and Compaction, Index, Metasrv, Hotspot, Autopilot, Object Store, and WAL.
 3. **Keep summary stats first, then time-series ingestion and query rates.** Operators should see compact cluster totals first, then traffic context before node availability and request p99.
 4. **Add a `Health` group** immediately after overview. Use mostly rate panels with red thresholds on non-zero critical counters.
-5. **Split the current `Resources` group into `Resources` and `Capacity`.** CPU/memory stay in Resources; request/query/scan/compaction memory, write stalling, runtime threads, and pending-row backlog move to Capacity.
+5. **Split the current `Resources` group into `Resources` and `Capacity`.** CPU/memory stay in an expanded `Resources` row, with Frontend/Datanode/Metasrv arranged three panels per line; request/query/scan/compaction memory, write stalling, runtime threads, and pending-row backlog move to Capacity.
 6. **Expand `Ingestion`.** Add OTLP, Loki, Elasticsearch, Prometheus store backlog, flush failures, dropped rows, and bulk insert message rows/size.
 7. **Expand `Queries`.** Fix the PromQL `_count` typo, add p95 where useful, and add query-stage, merge-scan, pushdown fallback, PromQL series count, and connection/prepared-count panels.
 8. **Create a compact `Datanode` row before deep `Storage`.** Include region failures, failed inserts, write reject/stall, flush/compaction failures, scan/compaction memory rejects, and GC errors.
-9. **Deepen `Storage`.** Add flush elapsed/throughput panels near Mito flush and compaction panels.
-10. **Create an `Index` row.** Move index apply/create/memory/IO/cache panels into a dedicated row after Storage.
-11. **Keep metasrv health above object-store and WAL details.** Move heartbeat, inactive region, lease-expiry, metadata KV, migration failures, and reconciliation errors before detailed OpenDAL/WAL panels. Keep only core metasrv health in `Metasrv`; move hotspot/load distribution to `Hotspot` and balancer/repartition automation to `Autopilot`.
-12. **Keep existing deep-dive groups but improve descriptions.** Each panel should answer: symptom shown, likely cause, and next drill-down panel.
-13. **Collapse deep-dive rows by default.** Keep Overview, Health, Capacity, Ingestion, Queries, and Datanode open; collapse Resources, Frontend Requests, Frontend to Datanode, Storage, Index, Metasrv, Hotspot, Autopilot, Object Store, WAL, Flownode, and Trigger.
-14. **Show average request cost beside p99 where histogram sum/count exists.** Use matching labels for numerator and denominator so request, storage, object-store, Metasrv, flow, and trigger panels can compare average and tail latency directly.
-15. **Use repeated panels sparingly.** For cluster dashboards, keep role variables (`$frontend`, `$datanode`, `$metasrv`, `$flownode`). For standalone dashboards, remove instance filters as the current script already does.
+9. **Deepen `Storage`.** Add Mito request wait time beside Mito request service latency, and keep storage focused on request latency, read/write stages, write buffer, cache, and memtable/cardinality pressure.
+10. **Create a `Flush and Compaction` row.** Move flush and compaction work, latency, throughput, and in-flight panels out of `Storage` into an expanded row after Storage.
+11. **Create an `Index` row.** Move index apply/create/memory/IO/cache panels into a dedicated row after Flush and Compaction.
+12. **Keep metasrv health above object-store and WAL details.** Move heartbeat, inactive region, lease-expiry, metadata KV, migration failures, and reconciliation errors before detailed OpenDAL/WAL panels. Keep only core metasrv health in `Metasrv`; move hotspot/load distribution to `Hotspot` and balancer/repartition automation to `Autopilot`.
+13. **Keep existing deep-dive groups but improve descriptions.** Each panel should answer: symptom shown, likely cause, and next drill-down panel.
+14. **Collapse only secondary deep-dive rows by default.** Keep Overview, Health, Capacity, Resources, Ingestion, Queries, Datanode, and Flush and Compaction open; collapse Frontend Requests, Frontend to Datanode, Storage, Index, Metasrv, Hotspot, Autopilot, Object Store, WAL, Flownode, and Trigger.
+15. **Do not commit hidden-series overrides as defaults.** Ad-hoc Grafana `hideSeriesFrom`/`custom.hideFrom.viz=true` settings should be removed so all query series are visible on import.
+16. **Show average request cost beside p99 where histogram sum/count exists.** Use matching labels for numerator and denominator so request, storage, object-store, Metasrv, flow, and trigger panels can compare average and tail latency directly.
+17. **Use repeated panels sparingly.** For cluster dashboards, keep role variables (`$frontend`, `$datanode`, `$metasrv`, `$flownode`). For standalone dashboards, remove instance filters as the current script already does.
 
 ## Suggested alert seeds
 

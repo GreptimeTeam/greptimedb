@@ -490,17 +490,17 @@ groups:
               legendFormat: compaction-[{{instance}}]-[{{pod}}]
     - title: Resources
       panels:
-        - title: Datanode Memory per Instance
+        - title: Frontend CPU Usage per Instance
           type: timeseries
-          description: Current memory usage by instance
-          unit: bytes
+          description: Current cpu usage by instance
+          unit: none
           queries:
-            - expr: sum(process_resident_memory_bytes{instance=~"$datanode"}) by (instance, pod)
+            - expr: sum(rate(process_cpu_seconds_total{instance=~"$frontend"}[$__rate_interval]) * 1000) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{ pod }}]'
-            - expr: max(greptime_memory_limit_in_bytes{instance=~"$datanode"})
+              legendFormat: '[{{ instance }}]-[{{ pod }}]-cpu'
+            - expr: max(greptime_cpu_limit_in_millicores{instance=~"$frontend"})
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -520,6 +520,21 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: limit
+        - title: Metasrv CPU Usage per Instance
+          type: timeseries
+          description: Current cpu usage by instance
+          unit: none
+          queries:
+            - expr: sum(rate(process_cpu_seconds_total{instance=~"$metasrv"}[$__rate_interval]) * 1000) by (instance, pod)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_cpu_limit_in_millicores{instance=~"$metasrv"})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Frontend Memory per Instance
           type: timeseries
           description: Current memory usage by instance
@@ -535,17 +550,17 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: limit
-        - title: Frontend CPU Usage per Instance
+        - title: Datanode Memory per Instance
           type: timeseries
-          description: Current cpu usage by instance
-          unit: none
+          description: Current memory usage by instance
+          unit: bytes
           queries:
-            - expr: sum(rate(process_cpu_seconds_total{instance=~"$frontend"}[$__rate_interval]) * 1000) by (instance, pod)
+            - expr: sum(process_resident_memory_bytes{instance=~"$datanode"}) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{ instance }}]-[{{ pod }}]-cpu'
-            - expr: max(greptime_cpu_limit_in_millicores{instance=~"$frontend"})
+              legendFormat: '[{{instance}}]-[{{ pod }}]'
+            - expr: max(greptime_memory_limit_in_bytes{instance=~"$datanode"})
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -565,17 +580,17 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: limit
-        - title: Metasrv CPU Usage per Instance
+        - title: Flownode CPU Usage per Instance
           type: timeseries
           description: Current cpu usage by instance
           unit: none
           queries:
-            - expr: sum(rate(process_cpu_seconds_total{instance=~"$metasrv"}[$__rate_interval]) * 1000) by (instance, pod)
+            - expr: sum(rate(process_cpu_seconds_total{instance=~"$flownode"}[$__rate_interval]) * 1000) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
-            - expr: max(greptime_cpu_limit_in_millicores{instance=~"$metasrv"})
+            - expr: max(greptime_cpu_limit_in_millicores{instance=~"$flownode"})
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -591,21 +606,6 @@ groups:
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
             - expr: max(greptime_memory_limit_in_bytes{instance=~"$flownode"})
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: limit
-        - title: Flownode CPU Usage per Instance
-          type: timeseries
-          description: Current cpu usage by instance
-          unit: none
-          queries:
-            - expr: sum(rate(process_cpu_seconds_total{instance=~"$flownode"}[$__rate_interval]) * 1000) by (instance, pod)
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{ instance }}]-[{{ pod }}]'
-            - expr: max(greptime_cpu_limit_in_millicores{instance=~"$flownode"})
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1234,6 +1234,26 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-avg'
+        - title: Request Wait P99 and Avg per Worker
+          type: timeseries
+          description: Time Mito requests spend waiting before region worker handling. Use this with request service latency to distinguish queueing from execution time.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.95, sum by(instance, pod, worker, le) (rate(greptime_mito_request_wait_time_bucket{instance=~"$datanode"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{worker}}]-p95'
+            - expr: histogram_quantile(0.99, sum by(instance, pod, worker, le) (rate(greptime_mito_request_wait_time_bucket{instance=~"$datanode"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{worker}}]-p99'
+            - expr: sum by(instance, pod, worker) (rate(greptime_mito_request_wait_time_sum{instance=~"$datanode"}[$__rate_interval])) / sum by(instance, pod, worker) (rate(greptime_mito_request_wait_time_count{instance=~"$datanode"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{worker}}]-avg'
         - title: Write Buffer per Instance
           type: timeseries
           description: Write Buffer per Instance.
@@ -1254,51 +1274,6 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]'
-        - title: Flush OPS per Instance
-          type: timeseries
-          description: Flush QPS per Instance.
-          unit: ops
-          queries:
-            - expr: sum by(instance, pod, reason) (rate(greptime_mito_flush_requests_total{instance=~"$datanode"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-[{{reason}}]'
-        - title: Flush Elapsed Time
-          type: timeseries
-          description: Mito flush p95 and p99 elapsed time by datanode and flush type. Use this to identify slow flush jobs.
-          unit: s
-          queries:
-            - expr: histogram_quantile(0.95, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-p95'
-            - expr: histogram_quantile(0.99, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-p99'
-            - expr: sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_sum{instance=~"$datanode"}[$__rate_interval])) / sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-avg'
-        - title: Flush Throughput
-          type: timeseries
-          description: Mito flushed bytes and flushed file rates. Use this with flush elapsed time to distinguish slow jobs from large jobs.
-          unit: bytes
-          queries:
-            - expr: sum by (instance, pod) (rate(greptime_mito_flush_bytes_total{instance=~"$datanode"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-bytes'
-            - expr: sum by (instance, pod) (rate(greptime_mito_flush_file_total{instance=~"$datanode"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-files'
         - title: Read Stage OPS per Instance
           type: timeseries
           description: Read Stage OPS per Instance.
@@ -1339,46 +1314,6 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-avg'
-        - title: Compaction OPS per Instance
-          type: timeseries
-          description: Compaction OPS per Instance.
-          unit: ops
-          queries:
-            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{ instance }}]-[{{pod}}]'
-        - title: Compaction Elapsed Time per Instance by Stage
-          type: timeseries
-          description: Compaction latency by stage
-          unit: s
-          queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-p99'
-            - expr: sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_sum{instance=~"$datanode"}[$__rate_interval]))/sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-avg'
-        - title: Compaction P99 and Avg per Instance
-          type: timeseries
-          description: Compaction P99 and average per Instance.
-          unit: s
-          queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le,stage) (rate(greptime_mito_compaction_total_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-compaction'
-            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_sum{instance=~"$datanode"}[$__rate_interval])) / sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-avg'
         - title: Cached Bytes per Instance
           type: timeseries
           description: Cached Bytes per Instance.
@@ -1389,41 +1324,6 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]'
-        - title: Inflight Compaction
-          type: timeseries
-          description: Ongoing compaction task count
-          unit: none
-          queries:
-            - expr: greptime_mito_inflight_compaction_count
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]'
-        - title: Inflight Flush
-          type: timeseries
-          description: Ongoing flush task count
-          unit: none
-          queries:
-            - expr: greptime_mito_inflight_flush_count
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]'
-        - title: Compaction Input/Output Bytes
-          type: timeseries
-          description: Compaction oinput output bytes
-          unit: bytes
-          queries:
-            - expr: sum by(instance, pod) (greptime_mito_compaction_input_bytes)
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-input'
-            - expr: sum by(instance, pod) (greptime_mito_compaction_output_bytes)
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-output'
         - title: Region Worker Handle Bulk Insert Requests
           type: timeseries
           description: Per-stage elapsed time for region worker to handle bulk insert region requests.
@@ -1478,6 +1378,128 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]'
+    - title: Flush and Compaction
+      panels:
+        - title: Flush OPS per Instance
+          type: timeseries
+          description: Flush QPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod, reason) (rate(greptime_mito_flush_requests_total{instance=~"$datanode"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{reason}}]'
+        - title: Flush Elapsed Time
+          type: timeseries
+          description: Mito flush p95 and p99 elapsed time by datanode and flush type. Use this to identify slow flush jobs.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.95, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-p95'
+            - expr: histogram_quantile(0.99, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-p99'
+            - expr: sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_sum{instance=~"$datanode"}[$__rate_interval])) / sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-avg'
+        - title: Flush Throughput
+          type: timeseries
+          description: Mito flushed bytes and flushed file rates. Use this with flush elapsed time to distinguish slow jobs from large jobs.
+          unit: bytes
+          queries:
+            - expr: sum by (instance, pod) (rate(greptime_mito_flush_bytes_total{instance=~"$datanode"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-bytes'
+            - expr: sum by (instance, pod) (rate(greptime_mito_flush_file_total{instance=~"$datanode"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-files'
+        - title: Inflight Flush
+          type: timeseries
+          description: Ongoing flush task count
+          unit: none
+          queries:
+            - expr: greptime_mito_inflight_flush_count
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+        - title: Compaction OPS per Instance
+          type: timeseries
+          description: Compaction OPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{pod}}]'
+        - title: Inflight Compaction
+          type: timeseries
+          description: Ongoing compaction task count
+          unit: none
+          queries:
+            - expr: greptime_mito_inflight_compaction_count
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+        - title: Compaction P99 and Avg per Instance
+          type: timeseries
+          description: Compaction P99 and average per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le,stage) (rate(greptime_mito_compaction_total_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-compaction'
+            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_sum{instance=~"$datanode"}[$__rate_interval])) / sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-avg'
+        - title: Compaction Elapsed Time per Instance by Stage
+          type: timeseries
+          description: Compaction latency by stage
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-p99'
+            - expr: sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_sum{instance=~"$datanode"}[$__rate_interval]))/sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-avg'
+        - title: Compaction Input/Output Bytes
+          type: timeseries
+          description: Compaction input and output bytes by datanode. Use this to correlate compaction latency with rewritten data volume.
+          unit: bytes
+          queries:
+            - expr: sum by(instance, pod) (greptime_mito_compaction_input_bytes)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-input'
+            - expr: sum by(instance, pod) (greptime_mito_compaction_output_bytes)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-output'
     - title: Index
       panels:
         - title: Index Apply Elapsed Time
