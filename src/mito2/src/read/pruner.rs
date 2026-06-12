@@ -31,7 +31,7 @@ use crate::error::{PruneFileSnafu, Result};
 use crate::metrics::PRUNER_ACTIVE_BUILDERS;
 use crate::read::range::{FileRangeBuilder, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
-use crate::read::scan_util::{FileScanMetrics, PartitionMetrics};
+use crate::read::scan_util::{FileScanMetrics, PartitionMetrics, new_filter_metrics};
 use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
 use crate::sst::parquet::reader::ReaderMetrics;
 
@@ -447,7 +447,14 @@ impl Pruner {
             // Do the actual pruning (outside lock)
             let file = &inner.stream_ctx.input.files[file_index];
             pruned_files.push(file.file_id().file_id());
-            let mut metrics = ReaderMetrics::default();
+            let explain_verbose = partition_metrics
+                .as_ref()
+                .map(|m| m.explain_verbose())
+                .unwrap_or(false);
+            let mut metrics = ReaderMetrics {
+                filter_metrics: new_filter_metrics(explain_verbose),
+                ..Default::default()
+            };
             let result = inner
                 .stream_ctx
                 .input

@@ -1426,7 +1426,7 @@ mod split_tests {
 
 /// Creates a new [ReaderFilterMetrics] with optional apply metrics initialized
 /// based on the `explain_verbose` flag.
-fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
+pub(crate) fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
     if explain_verbose {
         ReaderFilterMetrics {
             inverted_index_apply_metrics: Some(InvertedIndexApplyMetrics::default()),
