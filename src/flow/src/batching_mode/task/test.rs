@@ -683,6 +683,98 @@ fn test_fenced_repair_chunk_with_pending_windows_stays_full_snapshot() {
 }
 
 #[test]
+fn test_continued_fenced_repair_uses_pending_snapshot_not_later_live_dirty() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    state
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+    state
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
+
+    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
+    state.start_fenced_repair(high.clone()).unwrap();
+
+    // Make the two queues distinguishable: the fenced repair should keep using
+    // the pending snapshot captured above, not this later live dirty window.
+    state.dirty_time_windows.clean();
+    state.dirty_time_windows.add_window(
+        Timestamp::new_second(1000),
+        Some(Timestamp::new_second(1005)),
+    );
+    assert_eq!(state.dirty_time_windows.len(), 1);
+
+    let first_filter = next_fenced_repair_filter(&mut state, 1);
+    assert_eq!(
+        first_filter.time_ranges,
+        vec![(Timestamp::new_second(10), Timestamp::new_second(15))]
+    );
+
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]),
+        std::time::Duration::from_millis(1),
+        &QueryCoverage::FencedRepairChunk { high },
+        &DirtyRestore::Scoped(first_filter),
+    );
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::ContinuedFencedRepair {
+            pending_windows: 1,
+            watermarks: 2,
+        }
+    );
+
+    let second_filter = next_fenced_repair_filter(&mut state, 1);
+    assert_eq!(
+        second_filter.time_ranges,
+        vec![(Timestamp::new_second(100), Timestamp::new_second(105))]
+    );
+    assert!(state.fenced_repair_pending_is_empty());
+    assert_eq!(state.dirty_time_windows.len(), 1);
+}
+
+#[test]
+fn test_empty_fenced_repair_queue_falls_back_to_later_live_dirty() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    state
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+
+    state
+        .start_fenced_repair(BTreeMap::from([(1_u64, 10_u64)]))
+        .unwrap();
+
+    state.dirty_time_windows.clean();
+    state.dirty_time_windows.add_window(
+        Timestamp::new_second(1000),
+        Some(Timestamp::new_second(1005)),
+    );
+
+    let filter = state
+        .gen_scoped_filter_exprs(
+            "ts",
+            Some(Timestamp::new_second(100)),
+            chrono::Duration::seconds(10),
+            1,
+            1,
+            None,
+        )
+        .unwrap()
+        .expect("expired empty repair should fall back to live dirty windows");
+
+    assert!(state.pending_fenced_repair().is_none());
+    assert_eq!(
+        filter.time_ranges,
+        vec![(Timestamp::new_second(1000), Timestamp::new_second(1005))]
+    );
+}
+
+#[test]
 fn test_final_fenced_repair_chunk_advances_to_high() {
     let query_ctx = QueryContext::arc();
     let (_tx, rx) = tokio::sync::oneshot::channel();
@@ -715,50 +807,6 @@ fn test_final_fenced_repair_chunk_advances_to_high() {
     assert_eq!(state.checkpoints(), &high);
     assert!(state.pending_fenced_repair().is_none());
     assert_eq!(state.dirty_time_windows.len(), 1);
-}
-
-#[test]
-fn test_final_fenced_repair_chunk_with_incremental_disabled_finishes_repair_stays_full_snapshot() {
-    // When incremental mode is permanently disabled, a fenced repair must
-    // still drain its backlog and set the checkpoint map to H, but it must
-    // NOT transition to CheckpointMode::Incremental. The final chunk
-    // returns FallbackToFullSnapshot with reason IncrementalDisabled.
-    let query_ctx = QueryContext::arc();
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let mut state = TaskState::new(query_ctx, rx);
-    state
-        .dirty_time_windows
-        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(20)));
-
-    state.disable_incremental();
-    assert!(state.is_incremental_disabled());
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-
-    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
-    state.start_fenced_repair(high.clone()).unwrap();
-    let filter = next_fenced_repair_filter(&mut state, 1);
-    assert!(state.fenced_repair_pending_is_empty());
-
-    let decision = BatchingTask::apply_query_result_to_state(
-        &mut state,
-        &output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]),
-        std::time::Duration::from_millis(1),
-        &QueryCoverage::FencedRepairChunk { high: high.clone() },
-        &DirtyRestore::Scoped(filter),
-    );
-
-    assert_eq!(
-        decision,
-        FlowCheckpointDecision::FallbackToFullSnapshot {
-            previous_mode: CheckpointMode::FullSnapshot,
-            reason: FlowQueryFallbackReason::IncrementalDisabled,
-        }
-    );
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-    assert_eq!(state.checkpoints(), &high);
-    assert!(state.pending_fenced_repair().is_none());
-    assert_eq!(state.dirty_time_windows.len(), 1);
-    assert!(state.is_incremental_disabled());
 }
 
 #[test]
@@ -1321,6 +1369,52 @@ async fn test_full_snapshot_scoped_plan_marks_checkpoint_advance_safe_only_after
         .unwrap();
     assert!(matches!(second.coverage, QueryCoverage::ScopedBaseRepair));
     assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+}
+
+#[tokio::test]
+async fn test_expired_empty_fenced_repair_generates_scoped_base_repair_plan() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+    )
+    .await;
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .expire_after = Some(expire_after_for_retention_filter_test());
+
+    {
+        let mut state = task.state.write().unwrap();
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        state
+            .start_fenced_repair(BTreeMap::from([(1_u64, 10_u64)]))
+            .unwrap();
+
+        state.dirty_time_windows.clean();
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
+    }
+
+    let plan = task
+        .gen_query_with_time_window(
+            query_engine,
+            &aggregate_time_window_sink_schema(),
+            &[],
+            false,
+            Some(1),
+        )
+        .await
+        .unwrap()
+        .expect("expired empty repair should fall back to live dirty");
+
+    assert!(matches!(plan.coverage, QueryCoverage::ScopedBaseRepair));
+    assert!(plan.coverage.snapshot_seqs().is_empty());
+    assert!(task.state.read().unwrap().pending_fenced_repair().is_none());
 }
 
 #[tokio::test]

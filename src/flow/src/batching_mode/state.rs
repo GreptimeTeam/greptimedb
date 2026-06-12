@@ -235,14 +235,22 @@ impl TaskState {
         task_ctx: Option<&BatchingTask>,
     ) -> Result<Option<FilterExprInfo>, Error> {
         if let Some(repair) = self.pending_fenced_repair.as_mut() {
-            return repair.pending_windows.gen_filter_exprs(
+            let expr = repair.pending_windows.gen_filter_exprs(
                 col_name,
                 expire_lower_bound,
                 window_size,
                 window_cnt,
                 flow_id,
                 task_ctx,
-            );
+            )?;
+            if expr.is_some() || !repair.pending_windows.is_empty() {
+                return Ok(expr);
+            }
+
+            // All pending repair windows may have expired during merge. Clear
+            // the empty repair so this call can fall back to live dirty windows
+            // instead of routing future executions to an empty queue forever.
+            self.pending_fenced_repair = None;
         }
 
         self.dirty_time_windows.gen_filter_exprs(

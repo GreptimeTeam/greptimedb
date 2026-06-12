@@ -1208,9 +1208,6 @@ impl BatchingTask {
             let mut state = self.state.write().unwrap();
             let window_cnt = max_window_cnt
                 .unwrap_or(self.config.batch_opts.experimental_max_filter_num_per_query);
-            let repair_high = state
-                .pending_fenced_repair()
-                .map(|repair| repair.high().clone());
             let expr = state.gen_scoped_filter_exprs(
                 &col_name,
                 Some(expire_lower_bound),
@@ -1219,6 +1216,9 @@ impl BatchingTask {
                 self.config.flow_id,
                 Some(self),
             )?;
+            let repair_high = state
+                .pending_fenced_repair()
+                .map(|repair| repair.high().clone());
             let coverage = if let Some(high) = repair_high {
                 QueryCoverage::FencedRepairChunk { high }
             } else {
