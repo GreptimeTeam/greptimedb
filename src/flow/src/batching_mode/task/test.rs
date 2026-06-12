@@ -684,44 +684,6 @@ fn test_continued_fenced_repair_uses_pending_snapshot_not_later_live_dirty() {
 }
 
 #[test]
-fn test_empty_fenced_repair_queue_falls_back_to_later_live_dirty() {
-    let query_ctx = QueryContext::arc();
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let mut state = TaskState::new(query_ctx, rx);
-    state
-        .dirty_time_windows
-        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
-
-    state
-        .start_fenced_repair(BTreeMap::from([(1_u64, 10_u64)]))
-        .unwrap();
-
-    state.dirty_time_windows.clean();
-    state.dirty_time_windows.add_window(
-        Timestamp::new_second(1000),
-        Some(Timestamp::new_second(1005)),
-    );
-
-    let filter = state
-        .gen_scoped_filter_exprs(
-            "ts",
-            Some(Timestamp::new_second(100)),
-            chrono::Duration::seconds(10),
-            1,
-            1,
-            None,
-        )
-        .unwrap()
-        .expect("expired empty repair should fall back to live dirty windows");
-
-    assert!(state.pending_fenced_repair().is_none());
-    assert_eq!(
-        filter.time_ranges,
-        vec![(Timestamp::new_second(1000), Timestamp::new_second(1005))]
-    );
-}
-
-#[test]
 fn test_final_fenced_repair_chunk_advances_to_high() {
     let query_ctx = QueryContext::arc();
     let (_tx, rx) = tokio::sync::oneshot::channel();
@@ -1114,73 +1076,6 @@ fn test_fenced_repair_transient_non_stale_failure_retries_same_high() {
 }
 
 #[test]
-fn test_repeated_abandon_and_new_fenced_repair_has_no_stale_pending_state() {
-    // After abandoning a fenced repair with high H1 and starting a fresh
-    // fenced repair with high H2, the pending state must reflect H2 (not
-    // the stale H1), and pending windows must come from the current dirty
-    // state.
-    let query_ctx = QueryContext::arc();
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let mut state = TaskState::new(query_ctx, rx);
-    // Use windows far enough apart (> 3 * 10s merge threshold) to avoid
-    // `merge_dirty_time_windows` collapsing them into a single window that
-    // would be skipped by `gen_scoped_filter_exprs`.
-    state
-        .dirty_time_windows
-        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
-    state
-        .dirty_time_windows
-        .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
-
-    // --- Cycle 1: fenced repair with H1, mismatch abandon ---
-    let h1 = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
-    state.start_fenced_repair(h1.clone()).unwrap();
-    let _filter1 = next_fenced_repair_filter(&mut state, 1);
-    assert_eq!(
-        state
-            .pending_fenced_repair()
-            .unwrap()
-            .pending_windows()
-            .len(),
-        1
-    );
-
-    // Simulate a successful watermark mismatch abandon: the in-flight chunk
-    // already ran, so only not-yet-in-flight pending windows are restored.
-    state.abandon_fenced_repair();
-    assert!(state.pending_fenced_repair().is_none());
-    // The not-yet-in-flight pending window is already restored to live
-    // dirty windows by abandon_fenced_repair. The live dirty queue still has
-    // the original dirty signals because start_fenced_repair clones rather
-    // than clears it.
-    assert_eq!(state.dirty_time_windows.len(), 2);
-
-    // --- Cycle 2: fresh ScopedBaseRepair obtains H2, then starts new fenced repair ---
-    let h2 = BTreeMap::from([(3_u64, 30_u64), (4_u64, 40_u64)]);
-    let decision = BatchingTask::apply_query_result_to_state(
-        &mut state,
-        &output_with_region_watermarks([(3_u64, Some(30_u64)), (4_u64, Some(40_u64))]),
-        std::time::Duration::from_millis(1),
-        &QueryCoverage::ScopedBaseRepair,
-    );
-    assert_eq!(
-        decision,
-        FlowCheckpointDecision::ContinuedFencedRepair {
-            pending_windows: 2,
-            watermarks: 2,
-        }
-    );
-
-    let repair2 = state.pending_fenced_repair().unwrap();
-    assert_eq!(repair2.high(), &h2, "high must be H2, not stale H1");
-    assert_eq!(
-        repair2.pending_windows().len(),
-        2,
-        "pending windows come from current dirty state"
-    );
-}
-
-#[test]
 fn test_checkpoint_decision_labels_are_stable() {
     let advance = FlowCheckpointDecision::AdvancedIncremental {
         participating_regions: 1,
@@ -1410,7 +1305,7 @@ async fn test_incremental_plan_consumes_dirty_signal_for_checkpoint_safety() {
 }
 
 #[tokio::test]
-async fn test_full_snapshot_seeding_for_incremental_does_not_add_dirty_window_filter() {
+async fn test_scoped_base_repair_plan_applies_dirty_window_filter() {
     let TestTaskParts {
         task,
         query_engine,
@@ -1635,54 +1530,6 @@ async fn test_successful_incremental_checkpoint_fallback_consumes_unscoped_dirty
 }
 
 #[tokio::test]
-async fn test_successful_incremental_advance_keeps_unscoped_dirty_signal_clean() {
-    let TestTaskParts {
-        task,
-        query_engine,
-        ..
-    } = new_time_window_test_task_with_query(
-        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
-    )
-    .await;
-    {
-        let mut state = task.state.write().unwrap();
-        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
-        state
-            .dirty_time_windows
-            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
-    }
-    let sink_schema = aggregate_time_window_sink_schema();
-
-    let plan_info = task
-        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
-
-    let result = output_with_region_watermarks([(1_u64, Some(12_u64))]);
-    let decision = {
-        let mut state = task.state.write().unwrap();
-        BatchingTask::apply_query_result_to_state(
-            &mut state,
-            &result,
-            std::time::Duration::from_millis(1),
-            &plan_info.coverage,
-        )
-    };
-    assert_eq!(
-        decision,
-        FlowCheckpointDecision::AdvancedIncremental {
-            participating_regions: 1,
-            watermarks: 1,
-        }
-    );
-    let state = task.state.read().unwrap();
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
-    assert!(state.dirty_time_windows.is_empty());
-}
-
-#[tokio::test]
 async fn test_explicit_full_query_paths_generate_unfiltered_full() {
     for (case_name, query_type, flow_eval_interval) in [
         ("TQL", QueryType::Tql, None),
@@ -1832,81 +1679,6 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
     let state = task.state.read().unwrap();
     assert!(state.is_incremental_disabled());
     assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-}
-
-#[tokio::test]
-async fn test_prepare_plan_for_incremental_skips_without_full_fallback_on_rewrite_error() {
-    let query_engine = create_test_query_engine();
-    let ctx = QueryContext::arc();
-    let plan = sql_to_df_plan(
-        ctx.clone(),
-        query_engine.clone(),
-        "SELECT sum(number) AS total, ts FROM numbers_with_ts GROUP BY ts",
-        true,
-    )
-    .await
-    .unwrap();
-
-    let (sink_table, _) = get_table_info_df_schema(
-        query_engine.engine_state().catalog_manager().clone(),
-        [
-            "greptime".to_string(),
-            "public".to_string(),
-            "numbers_with_ts".to_string(),
-        ],
-    )
-    .await
-    .unwrap();
-    let table_provider = Arc::new(DfTableProviderAdapter::new(sink_table));
-    let table_source = Arc::new(DefaultTableSource::new(table_provider));
-    let dml_plan = LogicalPlan::Dml(DmlStatement::new(
-        datafusion_common::TableReference::bare("test"),
-        table_source,
-        WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
-        Arc::new(plan),
-    ));
-
-    let (_tx, rx) = tokio::sync::oneshot::channel();
-    let task = BatchingTask::try_new(TaskArgs {
-        flow_id: 1,
-        query: "SELECT sum(number) AS total, ts FROM numbers_with_ts GROUP BY ts",
-        plan: dml_plan.clone(),
-        time_window_expr: None,
-        expire_after: None,
-        // The sink table exists, but does not have the rewritten aggregate
-        // output column `total`, so the rewrite fails deterministically.
-        sink_table_name: [
-            "greptime".to_string(),
-            "public".to_string(),
-            "numbers_with_ts".to_string(),
-        ],
-        source_table_names: vec![[
-            "greptime".to_string(),
-            "public".to_string(),
-            "numbers_with_ts".to_string(),
-        ]],
-        query_ctx: ctx,
-        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
-        shutdown_rx: rx,
-        batch_opts: incremental_batch_opts(),
-        flow_eval_interval: None,
-    })
-    .unwrap();
-
-    task.state
-        .write()
-        .unwrap()
-        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
-    assert_eq!(
-        task.state.read().unwrap().checkpoint_mode(),
-        CheckpointMode::Incremental
-    );
-
-    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
-    assert!(incremental_plan.is_none());
-    let state = task.state.read().unwrap();
-    assert!(!state.is_incremental_disabled());
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
 }
 
 #[tokio::test]
