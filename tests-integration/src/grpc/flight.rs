@@ -77,6 +77,27 @@ mod test {
 | 1970-01-01T00:00:00.009 | -9 | s9 |
 +-------------------------+----+----+";
         query_and_expect(db.frontend().as_ref(), sql, expected).await;
+
+        create_table_named(&client, "bar").await;
+        let result = client
+            .sql_with_terminal_metrics(
+                "insert into bar select ts, a, `B` from foo",
+                &[("flow.return_region_seq", "true")],
+            )
+            .await
+            .unwrap();
+        let OutputData::AffectedRows(affected_rows) = result.output.data else {
+            panic!("expected affected rows output");
+        };
+        assert_eq!(affected_rows, 9);
+        assert!(result.metrics.is_ready());
+        let region_watermark_map = result
+            .region_watermark_map()
+            .expect("standalone affected-rows output should carry terminal region watermarks");
+        assert!(
+            !region_watermark_map.is_empty(),
+            "standalone affected-rows output should contain at least one region watermark"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

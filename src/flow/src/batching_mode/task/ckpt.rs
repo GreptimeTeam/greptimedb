@@ -197,9 +197,7 @@ impl BatchingTask {
                             }
                         }
                     } else {
-                        if checkpoint_mode == CheckpointMode::Incremental {
-                            state.mark_full_snapshot();
-                        }
+                        debug_assert_ne!(checkpoint_mode, CheckpointMode::Incremental);
                         FlowCheckpointDecision::FallbackToFullSnapshot {
                             previous_mode: checkpoint_mode,
                             reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
