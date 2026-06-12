@@ -1811,6 +1811,8 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '{{procedure_name}}-{{step}}-P90'
+    - title: Hotspot
+      panels:
         - title: Hotspot Regions
           type: table
           queries:
@@ -1871,6 +1873,8 @@ groups:
               datasource:
                 type: mysql
                 uid: ${information_schema}
+    - title: Autopilot
+      panels:
         - title: Region Balancer Actions
           type: timeseries
           description: Region balancer action count

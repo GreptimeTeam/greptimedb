@@ -4,7 +4,7 @@ This document records a metric-oriented review of the current GreptimeDB Grafana
 
 ## Review scope
 
-- Current cluster and standalone metric dashboards use the same panel groups: Overview, Ingestion, Queries, Resources, Frontend Requests, Frontend to Datanode, Mito Engine, OpenDAL, Remote WAL, Metasrv, Flownode, Trigger, Hotspot, and Autopilot.
+- Current cluster and standalone metric dashboards use the same panel groups: Overview, Health, Capacity, Resources, Ingestion, Queries, Frontend Requests, Frontend to Datanode, Datanode, Storage, Index, Metasrv, Hotspot, Autopilot, Object Store, WAL, Flownode, and Trigger.
 - The existing dashboard already exposes many throughput and latency panels, but its first screen is mostly business/resource totals. Error, saturation, backlog, and metasrv health signals are spread across later sections, so an on-call engineer cannot quickly answer: "Is GreptimeDB healthy?", "Are users failing?", "Where is the bottleneck?", and "Which component should I inspect first?".
 - The review below groups metrics by the failure mode they explain, then proposes dashboard sections and panels that make incident triage faster.
 
@@ -259,9 +259,9 @@ Purpose: identify whether local or remote WAL dependencies are slowing the datab
 | Kafka produce latency/traffic | `greptime_logstore_kafka_client_produce_elapsed`, Kafka bytes/traffic totals. | s, bytes/s | Remote WAL dependency. |
 | Remote WAL checkpoint/flush triggers | Existing meta-triggered counters. | ops/s | Confirm maintenance activity. |
 
-### 10. Metasrv
+### 10. Metasrv, Hotspot, and Autopilot
 
-Purpose: diagnose routing, metadata, region health, and automated balancing.
+Purpose: diagnose routing, metadata, region health, load hotspots, and automated balancing. Keep core metasrv health in `Metasrv`, and keep load distribution plus automation details in their own collapsed rows so metasrv health stays scannable.
 
 | Panel | Query sketch | Unit | Notes |
 | --- | --- | --- | --- |
@@ -271,14 +271,14 @@ Purpose: diagnose routing, metadata, region health, and automated balancing.
 | Metadata KV latency and RDS SQL latency | Existing meta KV/RDS panels. | s/ms | Keep with metasrv. |
 | Region migration state/errors/stage latency | Existing migration panels plus fail counter. | short/eps/s | Make failures obvious. |
 | Reconciliation errors/stats | Existing reconciliation panels plus explicit error rate. | eps/short | Metasrv repair health. |
-| Hotspot regions and datanode distribution | Existing Hotspot SQL tables and load distribution. | table/bytes | Put after health signals. |
-| Autopilot actions/gate stops | Existing balancer and repartition panels. | short | Keep, but annotate gate stops as "why automation did not act". |
+| Hotspot regions and datanode distribution | Existing Hotspot SQL tables plus datanode load and data distribution. | table/bytes | Put in a separate collapsed `Hotspot` row after `Metasrv`; align the three datanode distribution panels in one row. |
+| Autopilot actions/gate stops | Existing balancer and repartition panels. | short | Put in a separate collapsed `Autopilot` row after `Hotspot`; annotate gate stops as "why automation did not act". |
 | Metasrv GC | `greptime_metasrv_gc_*` | ops/s, s, short | Add cleanup health for failed/candidate regions. |
 
 ## Concrete dashboard editing plan
 
 1. **Keep the generated-dashboard workflow.** Update `grafana/dashboards/metrics/cluster/dashboard.json`, then regenerate JSON/YAML/Markdown with `grafana/scripts/gen-dashboards.sh`.
-2. **Use concise row titles.** Prefer Overview, Health, Capacity, Ingestion, Queries, Datanode, Storage, Metasrv, Object Store, and WAL.
+2. **Use concise row titles.** Prefer Overview, Health, Capacity, Ingestion, Queries, Datanode, Storage, Index, Metasrv, Hotspot, Autopilot, Object Store, and WAL.
 3. **Keep summary stats first, then time-series ingestion and query rates.** Operators should see compact cluster totals first, then traffic context before node availability and request p99.
 4. **Add a `Health` group** immediately after overview. Use mostly rate panels with red thresholds on non-zero critical counters.
 5. **Split the current `Resources` group into `Resources` and `Capacity`.** CPU/memory stay in Resources; request/query/scan/compaction memory, write stalling, runtime threads, and pending-row backlog move to Capacity.
@@ -287,9 +287,9 @@ Purpose: diagnose routing, metadata, region health, and automated balancing.
 8. **Create a compact `Datanode` row before deep `Storage`.** Include region failures, failed inserts, write reject/stall, flush/compaction failures, scan/compaction memory rejects, and GC errors.
 9. **Deepen `Storage`.** Add flush elapsed/throughput panels near Mito flush and compaction panels.
 10. **Create an `Index` row.** Move index apply/create/memory/IO/cache panels into a dedicated row after Storage.
-11. **Keep metasrv health above object-store and WAL details.** Move heartbeat, inactive region, lease-expiry, metadata KV, migration failures, and reconciliation errors before detailed OpenDAL/WAL panels.
+11. **Keep metasrv health above object-store and WAL details.** Move heartbeat, inactive region, lease-expiry, metadata KV, migration failures, and reconciliation errors before detailed OpenDAL/WAL panels. Keep only core metasrv health in `Metasrv`; move hotspot/load distribution to `Hotspot` and balancer/repartition automation to `Autopilot`.
 12. **Keep existing deep-dive groups but improve descriptions.** Each panel should answer: symptom shown, likely cause, and next drill-down panel.
-13. **Collapse deep-dive rows by default.** Keep Overview, Health, Capacity, Ingestion, Queries, and Datanode open; collapse Resources, Frontend Requests, Frontend to Datanode, Storage, Index, Metasrv, Object Store, WAL, Flownode, and Trigger.
+13. **Collapse deep-dive rows by default.** Keep Overview, Health, Capacity, Ingestion, Queries, and Datanode open; collapse Resources, Frontend Requests, Frontend to Datanode, Storage, Index, Metasrv, Hotspot, Autopilot, Object Store, WAL, Flownode, and Trigger.
 14. **Show average request cost beside p99 where histogram sum/count exists.** Use matching labels for numerator and denominator so request, storage, object-store, Metasrv, flow, and trigger panels can compare average and tail latency directly.
 15. **Use repeated panels sparingly.** For cluster dashboards, keep role variables (`$frontend`, `$datanode`, `$metasrv`, `$flownode`). For standalone dashboards, remove instance filters as the current script already does.
 
