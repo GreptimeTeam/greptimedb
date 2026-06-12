@@ -131,11 +131,11 @@ impl TaskState {
         self.mark_full_snapshot();
     }
 
-    /// Move back to top-level FullSnapshot mode and discard any fenced repair
-    /// sub-state tied to an older watermark.
+    /// Move back to top-level FullSnapshot mode. If a fenced repair is active,
+    /// restore its not-yet-in-flight pending windows to the live dirty queue so
+    /// the moved backlog is not lost.
     pub fn mark_full_snapshot(&mut self) {
-        self.checkpoint_mode = CheckpointMode::FullSnapshot;
-        self.pending_fenced_repair = None;
+        self.abandon_fenced_repair();
     }
 
     /// Replace full-snapshot checkpoints with a complete watermark proof.
@@ -1197,6 +1197,38 @@ mod test {
             state.checkpoints(),
             &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
         );
+    }
+
+    #[test]
+    fn test_mark_full_snapshot_restores_pending_fenced_repair_windows() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
+
+        state
+            .start_fenced_repair(BTreeMap::from([(1_u64, 10_u64)]))
+            .unwrap();
+        assert!(state.dirty_time_windows.is_empty());
+        assert_eq!(
+            state
+                .pending_fenced_repair()
+                .unwrap()
+                .pending_windows()
+                .len(),
+            2
+        );
+
+        state.mark_full_snapshot();
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(state.pending_fenced_repair().is_none());
+        assert_eq!(state.dirty_time_windows.len(), 2);
     }
 
     #[test]
