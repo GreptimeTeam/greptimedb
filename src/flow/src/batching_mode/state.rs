@@ -341,6 +341,9 @@ impl TaskState {
     ///
     /// if current the dirty time range is longer than one query can handle,
     /// execute immediately to faster clean up dirty time windows.
+    /// Active fenced repairs also execute immediately while pending windows
+    /// remain: the current backlog has moved out of live dirty windows and into
+    /// `pending_fenced_repair.pending_windows`.
     ///
     /// If `prefer_short_incremental_cadence` is true, run incremental queries
     /// more often when there is no large dirty backlog. This only reduces the
@@ -363,6 +366,18 @@ impl TaskState {
         } else {
             next_duration
         };
+
+        if self
+            .pending_fenced_repair
+            .as_ref()
+            .is_some_and(|repair| !repair.pending_windows().is_empty())
+        {
+            debug!(
+                "Flow id = {}, active fenced repair still has pending windows, execute immediately",
+                flow_id,
+            );
+            return Instant::now();
+        }
 
         let cur_dirty_window_size = self.dirty_time_windows.window_size();
         // compute how much time range can be handled in one query
@@ -1538,6 +1553,33 @@ mod test {
         assert!(
             result2 <= Instant::now(),
             "dirty overflow should schedule immediately"
+        );
+    }
+
+    #[test]
+    fn test_pending_fenced_repair_schedules_immediately() {
+        let mut state = state_with_past_update(Duration::from_secs(10));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        state
+            .start_fenced_repair(BTreeMap::from([(1_u64, 10_u64)]))
+            .unwrap();
+        assert!(state.dirty_time_windows.is_empty());
+        assert!(!state.fenced_repair_pending_is_empty());
+
+        let result = state.get_next_start_query_time(
+            1,
+            &Some(Duration::from_secs(60)),
+            Duration::from_secs(5),
+            None,
+            20,
+            false,
+        );
+
+        assert!(
+            result <= Instant::now(),
+            "pending fenced repair backlog should schedule immediately"
         );
     }
 
