@@ -1391,7 +1391,7 @@ INTO (
 
         assert_eq!(
             result.output_msg(),
-            "Invalid SQL syntax: sql parser error: Expected end of MERGE PARTITION clause, found: ON"
+            "SQL statement is not supported, keyword: ON"
         );
     }
 
