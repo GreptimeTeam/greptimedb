@@ -696,8 +696,13 @@ pub struct RepartitionRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepartitionSource {
-    Partitions { from_exprs: Vec<Expr> },
-    Unpartitioned { partition_columns: Vec<String> },
+    Partitions {
+        from_exprs: Vec<Expr>,
+        target_partition_columns: Option<Vec<String>>,
+    },
+    Unpartitioned {
+        partition_columns: Vec<String>,
+    },
 }
 
 pub(crate) fn to_repartition_request(
@@ -718,6 +723,12 @@ pub(crate) fn to_repartition_request(
         AlterTableOperation::Repartition { operation } => (
             RepartitionSource::Partitions {
                 from_exprs: operation.from_exprs,
+                target_partition_columns: operation.partition_columns.map(|columns| {
+                    columns
+                        .into_iter()
+                        .map(|ident| ident.value)
+                        .collect::<Vec<_>>()
+                }),
             },
             operation.into_exprs,
         ),
@@ -1717,9 +1728,14 @@ ALTER TABLE metrics REPARTITION (
         assert_eq!("greptime", request.catalog_name);
         assert_eq!("public", request.schema_name);
         assert_eq!("metrics", request.table_name);
-        let RepartitionSource::Partitions { from_exprs } = request.source else {
+        let RepartitionSource::Partitions {
+            from_exprs,
+            target_partition_columns,
+        } = request.source
+        else {
             unreachable!()
         };
+        assert!(target_partition_columns.is_none());
         assert_eq!(
             from_exprs
                 .into_iter()
@@ -1737,6 +1753,40 @@ ALTER TABLE metrics REPARTITION (
                 "device_id < 100 AND area < 'South'".to_string(),
                 "device_id < 100 AND area >= 'South'".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_to_repartition_request_with_target_partition_columns() {
+        let sql = r#"
+ALTER TABLE metrics REPARTITION (
+  device_id < 100
+) ON COLUMNS (device_id, area) INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterTable(alter_table) = stmt else {
+            unreachable!()
+        };
+
+        let request = to_repartition_request(alter_table, &QueryContext::arc()).unwrap();
+        let RepartitionSource::Partitions {
+            target_partition_columns,
+            ..
+        } = request.source
+        else {
+            unreachable!()
+        };
+
+        assert_eq!(
+            target_partition_columns,
+            Some(vec!["device_id".to_string(), "area".to_string()])
         );
     }
 

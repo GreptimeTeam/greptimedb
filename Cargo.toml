@@ -158,7 +158,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "912f6c21017d5ab6c529568d36e7b8c30a94d84b" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "00e1d312ecc4b11ffb3c48161d61b03ed0e848a5" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -250,7 +250,9 @@ tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
-tonic = { version = "0.14", features = ["tls-aws-lc", "gzip", "zstd"] }
+# Pin below 0.14.5 to avoid the `connection_timeout_future` "async fn resumed after
+# completion" panic (greptimedb#8265 / grpc-rust#2522). Remove once tonic ships a fix.
+tonic = { version = "0.14, <0.14.5", features = ["tls-aws-lc", "gzip", "zstd"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"

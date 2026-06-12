@@ -844,7 +844,10 @@ mod tests {
     use crate::sst::parquet::flat_format::{
         FlatReadFormat, FlatWriteFormat, sequence_column_index, sst_column_id_indices,
     };
-    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema, with_field_id};
+    use crate::sst::{
+        FlatSchemaOptions, OP_TYPE_PARQUET_FIELD_ID, PRIMARY_KEY_PARQUET_FIELD_ID,
+        SEQUENCE_PARQUET_FIELD_ID, to_flat_sst_arrow_schema, with_field_id,
+    };
 
     const TEST_SEQUENCE: u64 = 1;
     const TEST_OP_TYPE: u8 = OpType::Put as u8;
@@ -910,10 +913,20 @@ mod tests {
                     Box::new(ArrowDataType::Binary),
                 ),
                 false,
-                None,
+                Some(PRIMARY_KEY_PARQUET_FIELD_ID),
             ),
-            make_field("__sequence", ArrowDataType::UInt64, false, None),
-            make_field("__op_type", ArrowDataType::UInt8, false, None),
+            make_field(
+                "__sequence",
+                ArrowDataType::UInt64,
+                false,
+                Some(SEQUENCE_PARQUET_FIELD_ID),
+            ),
+            make_field(
+                "__op_type",
+                ArrowDataType::UInt8,
+                false,
+                Some(OP_TYPE_PARQUET_FIELD_ID),
+            ),
         ];
         Arc::new(Schema::new(fields))
     }
@@ -1223,9 +1236,9 @@ mod tests {
             Some(4),
             Some(2),
             Some(5),
-            None,
-            None,
-            None,
+            Some(PRIMARY_KEY_PARQUET_FIELD_ID),
+            Some(SEQUENCE_PARQUET_FIELD_ID),
+            Some(OP_TYPE_PARQUET_FIELD_ID),
         ];
         let fields: Vec<_> = build_test_flat_sst_schema()
             .fields()

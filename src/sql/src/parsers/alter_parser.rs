@@ -22,6 +22,7 @@ use datatypes::schema::COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE;
 use snafu::{ResultExt, ensure};
 use sqlparser::ast::{BinaryOperator, Expr, Ident};
 use sqlparser::keywords::Keyword;
+use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan};
 
@@ -205,6 +206,8 @@ impl ParserContext<'_> {
         let _ = self.parser.next_token();
 
         let from_exprs = self.parse_repartition_expr_list()?;
+        let partition_columns = self.parse_optional_repartition_columns()?;
+
         self.parser
             .expect_keyword(Keyword::INTO)
             .context(error::SyntaxSnafu)?;
@@ -215,7 +218,14 @@ impl ParserContext<'_> {
         }
 
         Ok(AlterTableOperation::Repartition {
-            operation: RepartitionOperation::new(from_exprs, into_exprs),
+            operation: match partition_columns {
+                Some(partition_columns) => RepartitionOperation::with_partition_columns(
+                    from_exprs,
+                    into_exprs,
+                    partition_columns,
+                ),
+                None => RepartitionOperation::new(from_exprs, into_exprs),
+            },
         })
     }
 
@@ -246,6 +256,8 @@ impl ParserContext<'_> {
             );
         }
 
+        let partition_columns = self.parse_optional_repartition_columns()?;
+
         self.parser
             .expect_keyword(Keyword::INTO)
             .context(error::SyntaxSnafu)?;
@@ -254,10 +266,37 @@ impl ParserContext<'_> {
         if matches!(self.parser.peek_token().token, Token::Comma) {
             return self.expected("end of SPLIT PARTITION clause", self.parser.peek_token());
         }
+        if matches!(&self.parser.peek_token().token, Token::Word(w) if w.keyword == Keyword::ON) {
+            return self.expected("end of SPLIT PARTITION clause", self.parser.peek_token());
+        }
 
         Ok(AlterTableOperation::Repartition {
-            operation: RepartitionOperation::new(from_exprs, into_exprs),
+            operation: match partition_columns {
+                Some(partition_columns) => RepartitionOperation::with_partition_columns(
+                    from_exprs,
+                    into_exprs,
+                    partition_columns,
+                ),
+                None => RepartitionOperation::new(from_exprs, into_exprs),
+            },
         })
+    }
+
+    fn parse_optional_repartition_columns(&mut self) -> Result<Option<Vec<Ident>>> {
+        if !self.parser.parse_keywords(&[Keyword::ON, Keyword::COLUMNS]) {
+            return Ok(None);
+        }
+
+        let raw_column_list = self
+            .parser
+            .parse_parenthesized_column_list(Mandatory, false)
+            .context(error::SyntaxSnafu)?;
+        let column_list = raw_column_list
+            .into_iter()
+            .map(Self::canonicalize_identifier)
+            .collect();
+
+        Ok(Some(column_list))
     }
 
     fn parse_alter_table_merge_partition(&mut self) -> Result<AlterTableOperation> {
@@ -978,6 +1017,7 @@ ALTER TABLE t REPARTITION (
                 assert_eq!(operation.from_exprs.len(), 1);
                 assert_eq!(operation.from_exprs[0].to_string(), "device_id < 100");
                 assert_eq!(operation.into_exprs.len(), 2);
+                assert!(operation.partition_columns.is_none());
                 assert_eq!(
                     operation.into_exprs[0].to_string(),
                     "device_id < 100 AND area < 'South'"
@@ -987,6 +1027,100 @@ ALTER TABLE t REPARTITION (
                     "device_id < 100 AND area >= 'South'"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_table_repartition_on_columns() {
+        let sql = r#"
+ALTER TABLE t REPARTITION (
+  device_id < 100
+)
+ON COLUMNS (device_id, area)
+INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);"#;
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        if let Statement::AlterTable(alter_table) = statement {
+            assert_matches!(
+                alter_table.alter_operation(),
+                AlterTableOperation::Repartition { .. }
+            );
+
+            if let AlterTableOperation::Repartition { operation } = alter_table.alter_operation() {
+                assert_eq!(operation.from_exprs.len(), 1);
+                assert_eq!(operation.from_exprs[0].to_string(), "device_id < 100");
+                assert_eq!(operation.into_exprs.len(), 2);
+                assert_eq!(
+                    operation
+                        .partition_columns
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|ident| ident.value.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["device_id", "area"]
+                );
+                assert_eq!(
+                    operation.to_string(),
+                    "(device_id < 100) ON COLUMNS (device_id, area) INTO (device_id < 100 AND area < 'South', device_id < 100 AND area >= 'South')"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_table_repartition_on_columns_with_options() {
+        let sql = r#"
+ALTER TABLE t REPARTITION (
+  device_id < 100
+)
+ON COLUMNS (device_id, area)
+INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+)
+WITH (
+  TIMEOUT = '5m',
+  WAIT = false
+);"#;
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        if let Statement::AlterTable(alter_table) = statement {
+            assert_matches!(
+                alter_table.alter_operation(),
+                AlterTableOperation::Repartition { .. }
+            );
+
+            if let AlterTableOperation::Repartition { operation } = alter_table.alter_operation() {
+                assert_eq!(
+                    operation
+                        .partition_columns
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|ident| ident.value.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["device_id", "area"]
+                );
+            }
+
+            let options = alter_table.options().to_str_map();
+            assert_eq!(options.get("timeout").unwrap(), &"5m");
+            assert_eq!(options.get("wait").unwrap(), &"false");
+            assert_eq!(options.len(), 2);
         }
     }
 
@@ -1110,6 +1244,7 @@ ALTER TABLE metrics SPLIT PARTITION (
                 assert_eq!(operation.from_exprs.len(), 1);
                 assert_eq!(operation.from_exprs[0].to_string(), "device_id < 100");
                 assert_eq!(operation.into_exprs.len(), 2);
+                assert!(operation.partition_columns.is_none());
                 assert_eq!(
                     operation.into_exprs[0].to_string(),
                     "device_id < 100 AND area < 'South'"
@@ -1120,6 +1255,90 @@ ALTER TABLE metrics SPLIT PARTITION (
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_parse_alter_table_split_partition_on_columns() {
+        let sql = r#"
+ALTER TABLE metrics SPLIT PARTITION (
+  device_id < 100
+)
+ON COLUMNS (device_id, area)
+INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);"#;
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        if let Statement::AlterTable(alter_table) = statement {
+            assert_matches!(
+                alter_table.alter_operation(),
+                AlterTableOperation::Repartition { .. }
+            );
+
+            if let AlterTableOperation::Repartition { operation } = alter_table.alter_operation() {
+                assert_eq!(operation.from_exprs.len(), 1);
+                assert_eq!(operation.from_exprs[0].to_string(), "device_id < 100");
+                assert_eq!(operation.into_exprs.len(), 2);
+                assert_eq!(
+                    operation
+                        .partition_columns
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|ident| ident.value.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["device_id", "area"]
+                );
+                assert_eq!(
+                    operation.to_string(),
+                    "(device_id < 100) ON COLUMNS (device_id, area) INTO (device_id < 100 AND area < 'South', device_id < 100 AND area >= 'South')"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_table_split_partition_on_columns_empty_columns() {
+        let sql = r#"
+ALTER TABLE metrics SPLIT PARTITION (
+  device_id < 100
+)
+ON COLUMNS ()
+INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);"#;
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_alter_table_split_partition_on_columns_wrong_order() {
+        let sql = r#"
+ALTER TABLE metrics SPLIT PARTITION (
+  device_id < 100
+)
+INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+)
+ON COLUMNS (device_id, area);"#;
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+
+        assert_eq!(
+            result.output_msg(),
+            "Invalid SQL syntax: sql parser error: Expected end of SPLIT PARTITION clause, found: ON"
+        );
     }
 
     #[test]
@@ -1153,6 +1372,27 @@ ALTER TABLE metrics MERGE PARTITION (
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_parse_alter_table_merge_partition_on_columns_rejected() {
+        let sql = r#"
+ALTER TABLE metrics MERGE PARTITION (
+  device_id < 100,
+  device_id >= 100
+)
+ON COLUMNS (device_id, area)
+INTO (
+  device_id >= 0
+);"#;
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+
+        assert_eq!(
+            result.output_msg(),
+            "SQL statement is not supported, keyword: ON"
+        );
     }
 
     #[test]

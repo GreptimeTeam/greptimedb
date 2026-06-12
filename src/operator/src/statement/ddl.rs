@@ -22,7 +22,7 @@ use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::repartition::Source;
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    PartitionExprs, Repartition, UnpartitionedSource, column_def,
+    PartitionedSource, Repartition, TargetPartitionColumns, UnpartitionedSource, column_def,
 };
 #[cfg(feature = "enterprise")]
 use api::v1::{
@@ -1517,8 +1517,17 @@ impl StatementExecutor {
 
         let table_info = table.table_info();
         let existing_partition_columns = table_info.meta.partition_columns().collect::<Vec<_>>();
-        let partition_columns = match &request.source {
-            RepartitionSource::Partitions { .. } => {
+        let column_schemas = table_info.meta.schema.column_schemas();
+        // `REPARTITION ... ON COLUMNS` uses overwrite semantics: the provided
+        // columns are the full target partition columns, not an extension of the
+        // current ones. Therefore source expressions are converted with the
+        // existing partition columns, while target expressions and the final
+        // partition rule are validated against this effective target column set.
+        let target_partition_columns = match &request.source {
+            RepartitionSource::Partitions {
+                target_partition_columns,
+                ..
+            } => {
                 ensure!(
                     !existing_partition_columns.is_empty(),
                     InvalidPartitionRuleSnafu {
@@ -1528,7 +1537,21 @@ impl StatementExecutor {
                         )
                     }
                 );
-                existing_partition_columns
+
+                if let Some(target_partition_columns) = target_partition_columns {
+                    ensure!(
+                        !target_partition_columns.is_empty(),
+                        InvalidPartitionRuleSnafu {
+                            reason: "ON COLUMNS requires at least one partition column"
+                        }
+                    );
+                    validate_and_collect_partition_columns(
+                        target_partition_columns,
+                        column_schemas,
+                    )?
+                } else {
+                    existing_partition_columns.clone()
+                }
             }
             RepartitionSource::Unpartitioned { partition_columns } => {
                 ensure!(
@@ -1543,7 +1566,6 @@ impl StatementExecutor {
                         reason: format!("table {} already has partition columns", table_ref)
                     }
                 );
-                let column_schemas = table_info.meta.schema.column_schemas();
                 partition_columns
                     .iter()
                     .map(|column_name| {
@@ -1556,16 +1578,18 @@ impl StatementExecutor {
             }
         };
 
-        let column_name_and_type = partition_columns
+        let from_column_name_and_type = column_name_and_type(&existing_partition_columns);
+        let target_column_name_and_type = column_name_and_type(&target_partition_columns);
+        let target_partition_column_names = target_partition_columns
             .iter()
-            .map(|column| (&column.name, column.data_type.clone()))
-            .collect();
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
         let timezone = query_context.timezone();
         // Convert SQL Exprs to PartitionExprs.
         let from_partition_exprs = match &request.source {
-            RepartitionSource::Partitions { from_exprs } => from_exprs
+            RepartitionSource::Partitions { from_exprs, .. } => from_exprs
                 .iter()
-                .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
+                .map(|expr| convert_one_expr(expr, &from_column_name_and_type, &timezone))
                 .collect::<Result<Vec<_>>>()?,
             RepartitionSource::Unpartitioned { .. } => vec![],
         };
@@ -1573,7 +1597,7 @@ impl StatementExecutor {
         let mut into_partition_exprs = request
             .into_exprs
             .iter()
-            .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
+            .map(|expr| convert_one_expr(expr, &target_column_name_and_type, &timezone))
             .collect::<Result<Vec<_>>>()?;
 
         // `MERGE PARTITION` (and some `REPARTITION`) generates a single `OR` expression from
@@ -1630,12 +1654,16 @@ impl StatementExecutor {
                 .collect(),
             RepartitionSource::Unpartitioned { .. } => into_partition_exprs.clone(),
         };
+        ensure_partition_expr_columns_in_target(
+            &new_partition_exprs,
+            &target_partition_column_names.iter().collect(),
+        )?;
         let new_partition_exprs_len = new_partition_exprs.len();
         let from_partition_exprs_len = from_partition_exprs.len();
 
         // Validate the new partition expressions using MultiDimPartitionRule and PartitionChecker.
         let _ = MultiDimPartitionRule::try_new(
-            partition_columns.iter().map(|c| c.name.clone()).collect(),
+            target_partition_column_names,
             vec![],
             new_partition_exprs,
             true,
@@ -1653,8 +1681,14 @@ impl StatementExecutor {
         let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
         let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
         let source = match &request.source {
-            RepartitionSource::Partitions { .. } => Source::PartitionExprs(PartitionExprs {
+            RepartitionSource::Partitions {
+                target_partition_columns,
+                ..
+            } => Source::PartitionExprs(PartitionedSource {
                 exprs: from_partition_exprs_json,
+                target_partition_columns: target_partition_columns
+                    .clone()
+                    .map(|columns| TargetPartitionColumns { columns }),
             }),
             RepartitionSource::Unpartitioned { partition_columns } => {
                 Source::Unpartitioned(UnpartitionedSource {
@@ -2360,6 +2394,73 @@ fn find_partition_entries(
     Ok(partition_exprs)
 }
 
+fn column_name_and_type<'a>(
+    partition_columns: &'a [&'a ColumnSchema],
+) -> HashMap<&'a String, ConcreteDataType> {
+    partition_columns
+        .iter()
+        .map(|column| (&column.name, column.data_type.clone()))
+        .collect()
+}
+
+fn validate_and_collect_partition_columns<'a>(
+    column_names: &[String],
+    column_schemas: &'a [ColumnSchema],
+) -> Result<Vec<&'a ColumnSchema>> {
+    let mut seen = HashSet::with_capacity(column_names.len());
+    column_names
+        .iter()
+        .map(|column_name| {
+            ensure!(
+                seen.insert(column_name),
+                InvalidPartitionRuleSnafu {
+                    reason: format!("duplicate partition column '{}'", column_name)
+                }
+            );
+            column_schemas
+                .iter()
+                .find(|column| &column.name == column_name)
+                .with_context(|| ColumnNotFoundSnafu { msg: column_name })
+        })
+        .collect()
+}
+
+fn ensure_partition_expr_columns_in_target(
+    partition_exprs: &[PartitionExpr],
+    target_partition_columns: &HashSet<&String>,
+) -> Result<()> {
+    for expr in partition_exprs {
+        ensure_partition_operand_columns_in_target(&expr.lhs, target_partition_columns)?;
+        ensure_partition_operand_columns_in_target(&expr.rhs, target_partition_columns)?;
+    }
+
+    Ok(())
+}
+
+fn ensure_partition_operand_columns_in_target(
+    operand: &Operand,
+    target_partition_columns: &HashSet<&String>,
+) -> Result<()> {
+    match operand {
+        Operand::Column(column) => ensure!(
+            target_partition_columns.contains(column),
+            InvalidPartitionRuleSnafu {
+                reason: format!(
+                    "partition expression references column '{}' that is not in target partition columns",
+                    column
+                )
+            }
+        ),
+        Operand::Expr(expr) => {
+            ensure_partition_operand_columns_in_target(&expr.lhs, target_partition_columns)?;
+            ensure_partition_operand_columns_in_target(&expr.rhs, target_partition_columns)?;
+        }
+        Operand::Value(_) => {}
+    }
+
+    Ok(())
+}
+
 fn convert_one_expr(
     expr: &Expr,
     column_name_and_type: &HashMap<&String, ConcreteDataType>,
@@ -2646,6 +2747,78 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         physical_partition_exprs.sort_unstable();
         logical_partition_exprs.sort_unstable();
         assert_eq!(physical_partition_exprs, logical_partition_exprs);
+    }
+
+    #[test]
+    fn test_repartition_target_partition_columns_are_overwrite_context() {
+        let device_id = ColumnSchema::new("device_id", ConcreteDataType::int32_datatype(), true);
+        let area = ColumnSchema::new("area", ConcreteDataType::string_datatype(), true);
+        let existing_partition_columns = vec![&device_id];
+        let target_partition_columns = vec![&device_id, &area];
+        let existing_column_name_and_type = column_name_and_type(&existing_partition_columns);
+        let target_column_name_and_type = column_name_and_type(&target_partition_columns);
+        let timezone = Timezone::from_tz_string("UTC").unwrap();
+        let dialect = GreptimeDbDialect {};
+
+        let mut parser = Parser::new(&dialect)
+            .try_with_sql("device_id < 100 AND area < 'South'")
+            .unwrap();
+        let expr = parser.parse_expr().unwrap();
+
+        let err = convert_one_expr(&expr, &existing_column_name_and_type, &timezone).unwrap_err();
+        assert!(err.to_string().contains("area"));
+
+        let partition_expr = convert_one_expr(&expr, &target_column_name_and_type, &timezone)
+            .expect("target columns should overwrite the conversion context");
+        let partition_expr = partition_expr.to_string();
+        assert!(partition_expr.contains("device_id"));
+        assert!(partition_expr.contains("area"));
+        assert!(partition_expr.contains("South"));
+    }
+
+    #[test]
+    fn test_repartition_rejects_remaining_expr_outside_target_columns() {
+        let device_id = "device_id".to_string();
+        let area = "area".to_string();
+        let timezone = Timezone::from_tz_string("UTC").unwrap();
+        let column_name_and_type = HashMap::from([
+            (&device_id, ConcreteDataType::int32_datatype()),
+            (&area, ConcreteDataType::string_datatype()),
+        ]);
+        let dialect = GreptimeDbDialect {};
+        let mut parser = Parser::new(&dialect)
+            .try_with_sql("device_id >= 100")
+            .unwrap();
+        let remaining_old_expr = convert_one_expr(
+            &parser.parse_expr().unwrap(),
+            &column_name_and_type,
+            &timezone,
+        )
+        .unwrap();
+        let target_partition_columns = HashSet::from([&area]);
+
+        let err = ensure_partition_expr_columns_in_target(
+            &[remaining_old_expr],
+            &target_partition_columns,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("device_id"));
+        assert!(err.to_string().contains("target partition columns"));
+    }
+
+    #[test]
+    fn test_repartition_rejects_duplicate_target_partition_columns() {
+        let device_id = ColumnSchema::new("device_id", ConcreteDataType::int32_datatype(), true);
+        let column_schemas = vec![device_id];
+        let target_partition_columns = vec!["device_id".to_string(), "device_id".to_string()];
+
+        let err =
+            validate_and_collect_partition_columns(&target_partition_columns, &column_schemas)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("duplicate partition column"));
+        assert!(err.to_string().contains("device_id"));
     }
 
     #[tokio::test]

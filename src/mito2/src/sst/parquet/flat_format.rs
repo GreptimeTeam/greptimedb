@@ -932,12 +932,13 @@ mod tests {
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
+    use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
     use super::*;
     use crate::read::read_columns::ReadColumns;
     use crate::sst::{
-        FlatSchemaOptions, flat_sst_arrow_schema_column_num, override_pk_field_to_binary,
-        to_flat_sst_arrow_schema,
+        FlatSchemaOptions, PARQUET_FIELD_ID_KEY, PRIMARY_KEY_PARQUET_FIELD_ID,
+        flat_sst_arrow_schema_column_num, override_pk_field_to_binary, to_flat_sst_arrow_schema,
     };
 
     /// Builds a `RegionMetadata` with the given number of tags and fields.
@@ -1039,6 +1040,17 @@ mod tests {
 
         let output_schema = read_format.output_arrow_schema().unwrap();
         let binary_schema = override_pk_field_to_binary(&output_schema);
+
+        // The __primary_key field must preserve its field_id metadata after
+        // being converted from dictionary to plain binary.
+        let pk_field = binary_schema
+            .field_with_name(PRIMARY_KEY_COLUMN_NAME)
+            .unwrap();
+        assert_eq!(
+            pk_field.metadata().get(PARQUET_FIELD_ID_KEY),
+            Some(&PRIMARY_KEY_PARQUET_FIELD_ID.to_string()),
+            "__primary_key field must retain its PARQUET:field_id after override_pk_field_to_binary"
+        );
 
         // Repeat the second pk to verify identity keys (no dedup).
         let tag_keys = UInt32Array::from(vec![0u32, 1, 1]);
