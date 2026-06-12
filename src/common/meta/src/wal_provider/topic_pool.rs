@@ -21,7 +21,6 @@ use common_wal::config::kafka::MetasrvKafkaConfig;
 use snafu::ensure;
 
 use crate::error::{InvalidNumTopicsSnafu, Result};
-use crate::key::topic_name::TopicNameKey;
 use crate::kv_backend::KvBackendRef;
 use crate::wal_provider::selector::{RoundRobinTopicSelector, TopicSelectorRef};
 use crate::wal_provider::topic_creator::KafkaTopicCreator;
@@ -121,34 +120,6 @@ impl KafkaTopicPool {
         (0..num_topics)
             .map(|_| self.selector.select(&self.topics))
             .collect()
-    }
-
-    /// Selects a batch of topics with their current pruned entry ids.
-    pub async fn select_batch_with_pruned_entry_id(
-        &self,
-        num_topics: usize,
-    ) -> Result<Vec<(&String, u64)>> {
-        let topics = self.select_batch(num_topics)?;
-        let topic_values = self
-            .topic_manager
-            .batch_get(
-                topics
-                    .iter()
-                    .map(|topic| TopicNameKey::new(topic))
-                    .collect(),
-            )
-            .await?;
-
-        Ok(topics
-            .into_iter()
-            .map(|topic| {
-                let pruned_entry_id = topic_values
-                    .get(topic)
-                    .map(|value| value.pruned_entry_id)
-                    .unwrap_or_default();
-                (topic, pruned_entry_id)
-            })
-            .collect())
     }
 }
 

@@ -172,7 +172,12 @@ impl Procedure for WalPruneProcedure {
         false
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
+        let _guard = ctx
+            .provider
+            .acquire_lock(&(RemoteWalLock::Write(self.data.topic.clone()).into()))
+            .await;
+
         self.on_prune().await.map_err(|e| {
             if e.is_retryable() {
                 ProcedureError::retry_later(e)

@@ -175,15 +175,9 @@ impl WalProvider {
             WalProvider::RaftEngine => Ok(vec![WalOptions::RaftEngine; num_regions]),
             WalProvider::Kafka(topic_manager) => {
                 let options_batch = topic_manager
-                    .select_batch_with_pruned_entry_id(num_regions)
-                    .await?
+                    .select_batch(num_regions)?
                     .into_iter()
-                    .map(|(topic, initial_pruned_entry_id)| {
-                        WalOptions::Kafka(KafkaWalOptions {
-                            topic: topic.clone(),
-                            initial_pruned_entry_id: Some(initial_pruned_entry_id),
-                        })
-                    })
+                    .map(|topic| WalOptions::Kafka(KafkaWalOptions::new(topic.clone())))
                     .collect();
                 Ok(options_batch)
             }
@@ -331,14 +325,6 @@ mod tests {
         let provider = WalProvider::Kafka(topic_pool);
         provider.start().await.unwrap();
 
-        if let WalProvider::Kafka(topic_pool) = &provider {
-            for (i, topic) in topics.iter().take(3).enumerate() {
-                let manager = topic_pool.topic_manager();
-                let prev = manager.get(topic).await.unwrap();
-                manager.update(topic, i as u64 + 100, prev).await.unwrap();
-            }
-        }
-
         let num_regions = 3;
         let regions = (0..num_regions).collect::<Vec<_>>();
         let got = provider.allocate(&regions, false).await.unwrap();
@@ -346,10 +332,7 @@ mod tests {
         // Check the allocated wal options contain the expected topics.
         let expected = (0..num_regions)
             .map(|i| {
-                let options = WalOptions::Kafka(KafkaWalOptions {
-                    topic: topics[i as usize].clone(),
-                    initial_pruned_entry_id: Some(i as u64 + 100),
-                });
+                let options = WalOptions::Kafka(KafkaWalOptions::new(topics[i as usize].clone()));
                 (i, options)
             })
             .collect::<HashMap<_, _>>();
