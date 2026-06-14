@@ -296,6 +296,10 @@ pub struct ExportCreateCommand {
     #[clap(long, default_value = "1")]
     parallelism: usize,
 
+    /// Number of export chunks to run concurrently on the client (1..=64).
+    #[clap(long, default_value = "1", value_parser = parse_chunk_parallelism)]
+    chunk_parallelism: usize,
+
     /// Basic authentication (user:password).
     #[clap(long)]
     auth_basic: Option<String>,
@@ -351,6 +355,9 @@ impl ExportCreateCommand {
             if self.parallelism != 1 {
                 invalid_args.push("--parallelism");
             }
+            if self.chunk_parallelism != 1 {
+                invalid_args.push("--chunk-parallelism");
+            }
             if !invalid_args.is_empty() {
                 return SchemaOnlyArgsNotAllowedSnafu {
                     args: invalid_args.join(", "),
@@ -391,6 +398,7 @@ impl ExportCreateCommand {
                 time_range,
                 chunk_time_window: self.chunk_time_window,
                 parallelism: self.parallelism,
+                chunk_parallelism: self.chunk_parallelism,
                 snapshot_uri: self.to.clone(),
                 storage_config: self.storage.clone(),
             },
@@ -416,8 +424,20 @@ struct ExportConfig {
     time_range: TimeRange,
     chunk_time_window: Option<Duration>,
     parallelism: usize,
+    chunk_parallelism: usize,
     snapshot_uri: String,
     storage_config: ObjectStoreConfig,
+}
+
+fn parse_chunk_parallelism(value: &str) -> std::result::Result<usize, String> {
+    let parallelism = value
+        .parse::<usize>()
+        .map_err(|_| "chunk parallelism must be an integer between 1 and 64".to_string())?;
+    if (1..=64).contains(&parallelism) {
+        Ok(parallelism)
+    } else {
+        Err("chunk parallelism must be between 1 and 64".to_string())
+    }
 }
 
 #[async_trait]
@@ -474,6 +494,7 @@ impl ExportCreate {
                     &self.config.storage_config,
                     &mut manifest,
                     self.config.parallelism,
+                    self.config.chunk_parallelism,
                 )
                 .await?;
                 return Ok(());
@@ -531,6 +552,7 @@ impl ExportCreate {
                 &self.config.storage_config,
                 &mut manifest,
                 self.config.parallelism,
+                self.config.chunk_parallelism,
             )
             .await?;
         }
@@ -1557,6 +1579,8 @@ mod tests {
             "csv",
             "--parallelism",
             "2",
+            "--chunk-parallelism",
+            "2",
         ]);
 
         let error = cmd.build().await.err().unwrap().to_string();
@@ -1567,6 +1591,63 @@ mod tests {
         assert!(error.contains("--chunk-time-window"));
         assert!(error.contains("--format"));
         assert!(error.contains("--parallelism"));
+        assert!(error.contains("--chunk-parallelism"));
+    }
+
+    #[test]
+    fn test_chunk_parallelism_defaults_to_one() {
+        let cmd = ExportCreateCommand::parse_from([
+            "export-v2-create",
+            "--addr",
+            "127.0.0.1:4000",
+            "--to",
+            "file:///tmp/export-v2-test",
+        ]);
+
+        assert_eq!(1, cmd.chunk_parallelism);
+    }
+
+    #[test]
+    fn test_chunk_parallelism_parses_valid_value() {
+        let cmd = ExportCreateCommand::parse_from([
+            "export-v2-create",
+            "--addr",
+            "127.0.0.1:4000",
+            "--to",
+            "file:///tmp/export-v2-test",
+            "--chunk-parallelism",
+            "64",
+        ]);
+
+        assert_eq!(64, cmd.chunk_parallelism);
+    }
+
+    #[test]
+    fn test_chunk_parallelism_rejects_out_of_range_values() {
+        assert!(
+            ExportCreateCommand::try_parse_from([
+                "export-v2-create",
+                "--addr",
+                "127.0.0.1:4000",
+                "--to",
+                "file:///tmp/export-v2-test",
+                "--chunk-parallelism",
+                "0",
+            ])
+            .is_err()
+        );
+        assert!(
+            ExportCreateCommand::try_parse_from([
+                "export-v2-create",
+                "--addr",
+                "127.0.0.1:4000",
+                "--to",
+                "file:///tmp/export-v2-test",
+                "--chunk-parallelism",
+                "65",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -1602,6 +1683,7 @@ mod tests {
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
             parallelism: 1,
+            chunk_parallelism: 1,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1637,6 +1719,7 @@ mod tests {
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
             parallelism: 1,
+            chunk_parallelism: 1,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1667,6 +1750,7 @@ mod tests {
             time_range,
             chunk_time_window: Some(Duration::from_secs(3600)),
             parallelism: 1,
+            chunk_parallelism: 1,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1698,6 +1782,7 @@ mod tests {
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
             parallelism: 1,
+            chunk_parallelism: 1,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1731,6 +1816,7 @@ mod tests {
             time_range: TimeRange::new(Some(start), Some(start)),
             chunk_time_window: None,
             parallelism: 1,
+            chunk_parallelism: 1,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
