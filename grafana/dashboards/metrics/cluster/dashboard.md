@@ -285,7 +285,7 @@ ORDER BY data_size DESC;` | `piechart` | Distribution of leader regions and data
 # Trigger
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
-| Trigger Count | `greptime_trigger_count` | `timeseries` | Total number of triggers currently defined. | `prometheus` | -- | `__auto` |
+| Trigger Count | `greptime_trigger_count{}` | `timeseries` | Total number of triggers currently defined. | `prometheus` | -- | `__auto` |
 | Trigger Eval Elapsed | `histogram_quantile(0.99, sum by (le) (rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])))`<br/>`histogram_quantile(0.75, sum by (le) (rate(greptime_trigger_evaluate_elapsed_bucket[$__rate_interval])))`<br/>`sum(rate(greptime_trigger_evaluate_elapsed_sum[$__rate_interval])) / sum(rate(greptime_trigger_evaluate_elapsed_count[$__rate_interval]))` | `timeseries` | Elapsed time for trigger evaluation, including query execution and condition evaluation. | `prometheus` | `s` | `p99` |
 | Trigger Eval Failure Rate | `rate(greptime_trigger_evaluate_failure_count[$__rate_interval])` | `timeseries` | Rate of failed trigger evaluations. | `prometheus` | `none` | `__auto` |
 | Send Alert Elapsed | `histogram_quantile(0.99, sum by (le) (rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])))`<br/>`histogram_quantile(0.75, sum by (le) (rate(greptime_trigger_send_alert_elapsed_bucket[$__rate_interval])))`<br/>`sum(rate(greptime_trigger_send_alert_elapsed_sum[$__rate_interval])) / sum(rate(greptime_trigger_send_alert_elapsed_count[$__rate_interval]))` | `timeseries` | Elapsed time to send trigger alerts to notification channels. | `prometheus` | `s` | `p99` |

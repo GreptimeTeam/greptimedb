@@ -2251,7 +2251,7 @@ groups:
           type: timeseries
           description: Total number of triggers currently defined.
           queries:
-            - expr: greptime_trigger_count
+            - expr: greptime_trigger_count{}
               datasource:
                 type: prometheus
                 uid: ${metrics}

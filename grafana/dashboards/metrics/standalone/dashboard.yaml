@@ -1259,7 +1259,7 @@ groups:
           description: Read Stage OPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod) (rate(greptime_mito_read_stage_elapsed_count{ stage="total"}[$__rate_interval]))
+            - expr: sum by(instance, pod) (rate(greptime_mito_read_stage_elapsed_count{stage="total"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1987,7 +1987,7 @@ groups:
           description: Read QPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation=~"read|Reader::read"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation=~"read|Reader::read"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -2002,7 +2002,7 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
-            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{ operation=~"read|Reader::read"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation=~"read|Reader::read"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{operation=~"read|Reader::read"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation=~"read|Reader::read"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -2012,7 +2012,7 @@ groups:
           description: Write QPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation=~"write|Writer::write|Writer::close"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation=~"write|Writer::write|Writer::close"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -2022,12 +2022,12 @@ groups:
           description: Write P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{ operation =~ "Writer::write|Writer::close|write"}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{operation =~ "Writer::write|Writer::close|write"}[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
-            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{ operation=~"write|Writer::write|Writer::close"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation=~"write|Writer::write|Writer::close"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{operation=~"write|Writer::write|Writer::close"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation=~"write|Writer::write|Writer::close"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -2037,7 +2037,7 @@ groups:
           description: List QPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod, scheme) (rate(opendal_operation_duration_seconds_count{ operation="list"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme) (rate(opendal_operation_duration_seconds_count{operation="list"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -2047,12 +2047,12 @@ groups:
           description: List P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{ operation="list"}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{operation="list"}[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]'
-            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{ operation="list"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation="list"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{operation="list"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation="list"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -2062,7 +2062,7 @@ groups:
           description: Other Requests per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation!~"read|Reader::read|write|Writer::write|Writer::close|list|stat"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation!~"read|Reader::read|write|Writer::write|Writer::close|list|stat"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -2072,12 +2072,12 @@ groups:
           description: Other Request P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{ operation!~"read|Reader::read|write|Writer::write|Writer::close|list|stat"}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{operation!~"read|Reader::read|write|Writer::write|Writer::close|list|stat"}[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
-            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{ operation!~"read|Reader::read|write|Writer::write|Writer::close|list|stat"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation!~"read|Reader::read|write|Writer::write|Writer::close|list|stat"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{operation!~"read|Reader::read|write|Writer::write|Writer::close|list|stat"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation!~"read|Reader::read|write|Writer::write|Writer::close|list|stat"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -2096,7 +2096,7 @@ groups:
           type: timeseries
           description: OpenDAL error counts per Instance.
           queries:
-            - expr: sum by(instance, pod, scheme, operation, error) (rate(opendal_operation_errors_total{ error!="NotFound"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation, error) (rate(opendal_operation_errors_total{error!="NotFound"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
