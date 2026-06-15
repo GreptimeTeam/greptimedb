@@ -71,6 +71,10 @@ pub struct ImportV2Command {
     #[clap(long, value_enum, default_value_t = ProgressMode::Auto)]
     progress: ProgressMode,
 
+    /// Number of import data tasks to run concurrently on the client (1..=64).
+    #[clap(long, default_value = "1", value_parser = parse_task_parallelism)]
+    task_parallelism: usize,
+
     /// Basic authentication (user:password).
     #[clap(long)]
     auth_basic: Option<String>,
@@ -132,11 +136,23 @@ impl ImportV2Command {
             schemas,
             dry_run: self.dry_run,
             progress: self.progress,
+            task_parallelism: self.task_parallelism,
             snapshot_uri: self.from.clone(),
             storage_config: self.storage.clone(),
             storage: Box::new(storage),
             database_client,
         }))
+    }
+}
+
+fn parse_task_parallelism(value: &str) -> std::result::Result<usize, String> {
+    let parallelism = value
+        .parse::<usize>()
+        .map_err(|_| "task parallelism must be an integer between 1 and 64".to_string())?;
+    if (1..=64).contains(&parallelism) {
+        Ok(parallelism)
+    } else {
+        Err("task parallelism must be between 1 and 64".to_string())
     }
 }
 
@@ -146,6 +162,7 @@ pub struct Import {
     schemas: Option<Vec<String>>,
     dry_run: bool,
     progress: ProgressMode,
+    task_parallelism: usize,
     snapshot_uri: String,
     storage_config: ObjectStoreConfig,
     storage: Box<dyn SnapshotStorage>,
@@ -241,6 +258,7 @@ impl Import {
                     schemas: schemas_to_import.clone(),
                     state_path,
                     tasks: data_tasks,
+                    task_parallelism: self.task_parallelism,
                 })
                 .await?,
             )
@@ -733,6 +751,42 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_task_parallelism_defaults_to_one() {
+        assert_eq!(parse_command(&[]).task_parallelism, 1);
+    }
+
+    #[test]
+    fn test_task_parallelism_parses_valid_values() {
+        assert_eq!(
+            parse_command(&["--task-parallelism", "2"]).task_parallelism,
+            2
+        );
+        assert_eq!(
+            parse_command(&["--task-parallelism", "64"]).task_parallelism,
+            64
+        );
+    }
+
+    #[test]
+    fn test_task_parallelism_rejects_invalid_values() {
+        for value in ["0", "65", "abc"] {
+            assert!(
+                ImportV2Command::try_parse_from([
+                    "import-v2",
+                    "--addr",
+                    "127.0.0.1:4000",
+                    "--from",
+                    "file:///tmp/snapshot",
+                    "--task-parallelism",
+                    value,
+                ])
+                .is_err(),
+                "value {value} should be rejected"
+            );
+        }
     }
 
     #[test]
