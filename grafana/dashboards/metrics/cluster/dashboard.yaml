@@ -184,6 +184,190 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: grpc-avg
+    - title: Ingestion
+      panels:
+        - title: Total Ingestion Rate
+          type: timeseries
+          description: |
+            Total ingestion rate.
+
+            Here we listed 3 primary protocols:
+
+            - Prometheus remote write
+            - Greptime's gRPC API (when using our ingest SDK)
+            - Log ingestion http API
+          unit: rowsps
+          queries:
+            - expr: sum(rate(greptime_table_operator_ingest_rows{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: ingestion
+        - title: Ingestion Rate by Protocol
+          type: timeseries
+          description: Rows, samples, or documents ingested by primary observability and table-ingestion protocols.
+          unit: rowsps
+          queries:
+            - expr: sum(rate(greptime_table_operator_ingest_rows{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: table-operator
+            - expr: sum(rate(greptime_servers_prometheus_remote_write_samples{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: prometheus-remote-write
+            - expr: sum(rate(greptime_servers_http_logs_ingestion_counter{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: http-logs
+            - expr: sum(rate(greptime_servers_loki_logs_ingestion_counter{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: loki-logs
+            - expr: sum(rate(greptime_servers_elasticsearch_logs_docs_count{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: elasticsearch-docs
+            - expr: sum(rate(greptime_frontend_otlp_metrics_rows{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: otlp-metrics
+            - expr: sum(rate(greptime_frontend_otlp_logs_rows{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: otlp-logs
+            - expr: sum(rate(greptime_frontend_otlp_traces_rows{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: otlp-traces
+        - title: Ingestion Latency by Protocol
+          type: timeseries
+          description: p99 and average HTTP ingestion latency for Prometheus remote write, logs, Loki, Elasticsearch, and OTLP endpoints.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_prometheus_write_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: prometheus-write
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_logs_ingestion_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: http-logs
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_loki_logs_ingestion_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: loki-logs
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: elasticsearch
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_metrics_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: otlp-metrics
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_logs_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: otlp-logs
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_traces_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: otlp-traces
+            - expr: sum(rate(greptime_servers_http_prometheus_write_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_http_prometheus_write_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: prom-write-avg
+            - expr: sum(rate(greptime_servers_http_logs_ingestion_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_http_logs_ingestion_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: http-logs-avg
+            - expr: sum(rate(greptime_servers_loki_logs_ingestion_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_loki_logs_ingestion_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: loki-logs-avg
+            - expr: sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: elasticsearch-avg
+            - expr: sum(rate(greptime_servers_http_otlp_metrics_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_metrics_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: otlp-metrics-avg
+            - expr: sum(rate(greptime_servers_http_otlp_logs_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_logs_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: otlp-logs-avg
+            - expr: sum(rate(greptime_servers_http_otlp_traces_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_traces_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: otlp-traces-avg
+        - title: Bulk Insert Message Rows and Size
+          type: timeseries
+          description: Bulk-insert message row and byte rates. Spikes here can explain frontend bulk-insert latency.
+          unit: short
+          queries:
+            - expr: sum(rate(greptime_table_operator_bulk_insert_message_rows_sum{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: rows
+            - expr: sum(rate(greptime_table_operator_bulk_insert_message_size_sum{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: bytes
+        - title: Prom Store Flush Pipeline
+          type: timeseries
+          description: Remote-write pending-row flush operations, flushed rows, and p99 flush latency.
+          unit: short
+          queries:
+            - expr: sum(rate(greptime_prom_store_flush_total{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: flush-ops
+            - expr: sum(rate(greptime_prom_store_flush_rows_sum{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: flush-rows
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_prom_store_flush_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: flush-p99
+        - title: OTLP Trace Failures
+          type: timeseries
+          description: OTLP trace ingestion failures reported by frontends.
+          unit: eps
+          queries:
+            - expr: sum(rate(greptime_frontend_otlp_traces_failure_count{instance=~"$frontend"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: trace-failures
     - title: Health
       panels:
         - title: Protocol Error Rates
@@ -600,190 +784,6 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: limit
-    - title: Ingestion
-      panels:
-        - title: Total Ingestion Rate
-          type: timeseries
-          description: |
-            Total ingestion rate.
-
-            Here we listed 3 primary protocols:
-
-            - Prometheus remote write
-            - Greptime's gRPC API (when using our ingest SDK)
-            - Log ingestion http API
-          unit: rowsps
-          queries:
-            - expr: sum(rate(greptime_table_operator_ingest_rows{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: ingestion
-        - title: Ingestion Rate by Protocol
-          type: timeseries
-          description: Rows, samples, or documents ingested by primary observability and table-ingestion protocols.
-          unit: rowsps
-          queries:
-            - expr: sum(rate(greptime_table_operator_ingest_rows{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: table-operator
-            - expr: sum(rate(greptime_servers_prometheus_remote_write_samples{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: prometheus-remote-write
-            - expr: sum(rate(greptime_servers_http_logs_ingestion_counter{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: http-logs
-            - expr: sum(rate(greptime_servers_loki_logs_ingestion_counter{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: loki-logs
-            - expr: sum(rate(greptime_servers_elasticsearch_logs_docs_count{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: elasticsearch-docs
-            - expr: sum(rate(greptime_frontend_otlp_metrics_rows{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: otlp-metrics
-            - expr: sum(rate(greptime_frontend_otlp_logs_rows{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: otlp-logs
-            - expr: sum(rate(greptime_frontend_otlp_traces_rows{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: otlp-traces
-        - title: Ingestion Latency by Protocol
-          type: timeseries
-          description: p99 and average HTTP ingestion latency for Prometheus remote write, logs, Loki, Elasticsearch, and OTLP endpoints.
-          unit: s
-          queries:
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_prometheus_write_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: prometheus-write
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_logs_ingestion_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: http-logs
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_loki_logs_ingestion_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: loki-logs
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: elasticsearch
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_metrics_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: otlp-metrics
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_logs_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: otlp-logs
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_traces_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: otlp-traces
-            - expr: sum(rate(greptime_servers_http_prometheus_write_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_http_prometheus_write_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: prom-write-avg
-            - expr: sum(rate(greptime_servers_http_logs_ingestion_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_http_logs_ingestion_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: http-logs-avg
-            - expr: sum(rate(greptime_servers_loki_logs_ingestion_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_loki_logs_ingestion_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: loki-logs-avg
-            - expr: sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: elasticsearch-avg
-            - expr: sum(rate(greptime_servers_http_otlp_metrics_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_metrics_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: otlp-metrics-avg
-            - expr: sum(rate(greptime_servers_http_otlp_logs_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_logs_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: otlp-logs-avg
-            - expr: sum(rate(greptime_servers_http_otlp_traces_elapsed_sum{instance=~"$frontend"}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_traces_elapsed_count{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: otlp-traces-avg
-        - title: Bulk Insert Message Rows and Size
-          type: timeseries
-          description: Bulk-insert message row and byte rates. Spikes here can explain frontend bulk-insert latency.
-          unit: short
-          queries:
-            - expr: sum(rate(greptime_table_operator_bulk_insert_message_rows_sum{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: rows
-            - expr: sum(rate(greptime_table_operator_bulk_insert_message_size_sum{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: bytes
-        - title: Prom Store Flush Pipeline
-          type: timeseries
-          description: Remote-write pending-row flush operations, flushed rows, and p99 flush latency.
-          unit: short
-          queries:
-            - expr: sum(rate(greptime_prom_store_flush_total{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: flush-ops
-            - expr: sum(rate(greptime_prom_store_flush_rows_sum{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: flush-rows
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_prom_store_flush_elapsed_bucket{instance=~"$frontend"}[$__rate_interval])))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: flush-p99
-        - title: OTLP Trace Failures
-          type: timeseries
-          description: OTLP trace ingestion failures reported by frontends.
-          unit: eps
-          queries:
-            - expr: sum(rate(greptime_frontend_otlp_traces_failure_count{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: trace-failures
     - title: Queries
       panels:
         - title: Query Rate by Protocol
@@ -1050,16 +1050,6 @@ groups:
               legendFormat: '[{{instance}}]-[{{pod}}]-avg'
     - title: Frontend to Datanode
       panels:
-        - title: Ingest Rows per Instance
-          type: timeseries
-          description: Ingestion rate by row as in each frontend
-          unit: rowsps
-          queries:
-            - expr: sum by(instance, pod)(rate(greptime_table_operator_ingest_rows{instance=~"$frontend"}[$__rate_interval]))
-              datasource:
-                type: prometheus
-                uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]'
         - title: Region Call QPS per Instance
           type: timeseries
           description: Region Call QPS per Instance.
