@@ -22,16 +22,18 @@ use common_meta::key::topic_region::{
     TopicRegionValue,
 };
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::wal_provider::{extract_topic_from_wal_options, prepare_wal_options};
+use common_meta::wal_provider::{
+    RegionWalOptions, extract_topic_from_wal_options, serialize_wal_options,
+};
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::path_utils::table_dir;
 use store_api::region_request::{PathType, RegionOpenRequest, ReplayCheckpoint};
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionId;
 use tracing::info;
 
-use crate::error::{GetMetadataSnafu, Result};
+use crate::error::{GetMetadataSnafu, Result, SerializeWalOptionsSnafu};
 
 /// The requests to open regions.
 pub struct RegionOpenRequests {
@@ -60,7 +62,7 @@ impl RegionOpenRequests {
 
 fn group_region_by_topic(
     region_id: RegionId,
-    region_options: &HashMap<RegionNumber, String>,
+    region_options: &RegionWalOptions,
     topic_regions: &mut HashMap<String, Vec<RegionId>>,
 ) {
     if let Some(topic) = extract_topic_from_wal_options(region_id, region_options) {
@@ -136,11 +138,12 @@ pub async fn build_region_open_requests(
             let region_id = RegionId::new(table_value.table_id, region_number);
             // Augments region options with wal options if a wal options is provided.
             let mut region_options = table_value.region_info.region_options.clone();
-            prepare_wal_options(
+            serialize_wal_options(
                 &mut region_options,
                 region_id,
                 &table_value.region_info.region_wal_options,
-            );
+            )
+            .context(SerializeWalOptionsSnafu { region_id })?;
             group_region_by_topic(
                 region_id,
                 &table_value.region_info.region_wal_options,
@@ -160,11 +163,12 @@ pub async fn build_region_open_requests(
             let region_id = RegionId::new(table_value.table_id, region_number);
             // Augments region options with wal options if a wal options is provided.
             let mut region_options = table_value.region_info.region_options.clone();
-            prepare_wal_options(
+            serialize_wal_options(
                 &mut region_options,
                 RegionId::new(table_value.table_id, region_number),
                 &table_value.region_info.region_wal_options,
-            );
+            )
+            .context(SerializeWalOptionsSnafu { region_id })?;
             group_region_by_topic(
                 region_id,
                 &table_value.region_info.region_wal_options,

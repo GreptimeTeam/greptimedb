@@ -17,22 +17,192 @@ pub(crate) mod topic_creator;
 mod topic_manager;
 pub(crate) mod topic_pool;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_procedure::Context as ProcedureContext;
+use common_procedure::local::DynamicKeyLockGuard;
 use common_wal::config::MetasrvWalConfig;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
-use snafu::{ResultExt, ensure};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use snafu::ensure;
 use store_api::storage::{RegionId, RegionNumber};
 
 use crate::ddl::allocator::wal_options::WalOptionsAllocator;
-use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
-use crate::key::TOPIC_NAME_PATTERN_REGEX;
+use crate::error::{InvalidTopicNamePrefixSnafu, Result};
+use crate::key::topic_name::TopicNameKey;
+use crate::key::{TOPIC_NAME_PATTERN_REGEX, TableMetadataManagerRef};
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
+use crate::lock_key::RemoteWalLock;
 pub use crate::wal_provider::topic_creator::{build_kafka_client, build_kafka_topic_creator};
 use crate::wal_provider::topic_pool::KafkaTopicPool;
+
+/// WAL options allocated for each region.
+pub type RegionWalOptions = HashMap<RegionNumber, WalOptions>;
+
+/// Returns remote WAL topics referenced by region WAL options.
+pub fn remote_wal_topics(region_wal_options: &RegionWalOptions) -> Vec<&str> {
+    region_wal_options
+        .values()
+        .filter_map(|wal_options| match wal_options {
+            WalOptions::Kafka(kafka_options) => Some(kafka_options.topic.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Acquires per-topic read locks for remote WAL topics.
+pub async fn acquire_remote_wal_read_locks(
+    ctx: &ProcedureContext,
+    region_wal_options: &RegionWalOptions,
+) -> Vec<DynamicKeyLockGuard> {
+    let topics = remote_wal_topics(region_wal_options)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut guards = Vec::with_capacity(topics.len());
+    for topic in topics {
+        let guard = ctx
+            .provider
+            .acquire_lock(&(RemoteWalLock::Read(topic).into()))
+            .await;
+        guards.push(guard);
+    }
+    guards
+}
+
+/// Refreshes initial pruned entry ids for Kafka WAL options.
+pub async fn refresh_initial_pruned_entry_ids(
+    table_metadata_manager: &TableMetadataManagerRef,
+    region_wal_options: &mut RegionWalOptions,
+) -> Result<()> {
+    let topics = remote_wal_topics(region_wal_options);
+    if topics.is_empty() {
+        return Ok(());
+    }
+
+    let topic_values = table_metadata_manager
+        .topic_name_manager()
+        .batch_get(
+            topics
+                .iter()
+                .map(|topic| TopicNameKey::new(topic))
+                .collect(),
+        )
+        .await?;
+
+    for wal_options in region_wal_options.values_mut() {
+        let WalOptions::Kafka(kafka_options) = wal_options else {
+            continue;
+        };
+        kafka_options.initial_pruned_entry_id = Some(
+            topic_values
+                .get(&kafka_options.topic)
+                .map(|value| value.pruned_entry_id)
+                .unwrap_or_default(),
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WalOptionsCompat {
+    Encoded(String),
+    Structured(WalOptions),
+}
+
+fn deserialize_region_wal_options<E>(
+    values: HashMap<String, WalOptionsCompat>,
+) -> std::result::Result<RegionWalOptions, E>
+where
+    E: serde::de::Error,
+{
+    values
+        .into_iter()
+        .map(|(region_number, wal_options)| {
+            let region_number = region_number.parse::<RegionNumber>().map_err(|err| {
+                E::custom(format!(
+                    "invalid region number in region_wal_options: {region_number}, err: {err}"
+                ))
+            })?;
+            let wal_options = match wal_options {
+                WalOptionsCompat::Encoded(encoded) => serde_json::from_str(&encoded).map_err(|err| {
+                    E::custom(format!(
+                        "failed to decode legacy wal options for region {region_number}: {encoded}, err: {err}"
+                    ))
+                })?,
+                WalOptionsCompat::Structured(wal_options) => wal_options,
+            };
+            Ok((region_number, wal_options))
+        })
+        .collect()
+}
+
+/// Serde helpers for [`RegionWalOptions`] persisted in metadata.
+///
+/// New metadata stores WAL options as structured JSON objects. The deserializer
+/// also accepts the legacy format whose map values are JSON strings encoded from
+/// [`WalOptions`].
+pub mod region_wal_options_serde {
+    use super::*;
+
+    /// Serializes region WAL options in structured form.
+    pub fn serialize<S>(
+        value: &RegionWalOptions,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.serialize(serializer)
+    }
+
+    /// Deserializes region WAL options from either structured or legacy encoded form.
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<RegionWalOptions, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let values = HashMap::<String, WalOptionsCompat>::deserialize(deserializer)?;
+        deserialize_region_wal_options(values)
+    }
+}
+
+/// Serde helpers for optional [`RegionWalOptions`] persisted in procedure state.
+pub mod optional_region_wal_options_serde {
+    use super::*;
+
+    /// Serializes optional region WAL options in structured form.
+    pub fn serialize<S>(
+        value: &Option<RegionWalOptions>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.serialize(serializer)
+    }
+
+    /// Deserializes optional region WAL options from structured or legacy encoded form.
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<Option<RegionWalOptions>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(values) = Option::<HashMap<String, WalOptionsCompat>>::deserialize(deserializer)?
+        else {
+            return Ok(None);
+        };
+
+        deserialize_region_wal_options(values).map(Some)
+    }
+}
 
 /// Provides wal options in region granularity.
 #[derive(Default, Debug)]
@@ -51,14 +221,8 @@ impl WalOptionsAllocator for WalProvider {
         &self,
         region_numbers: &[RegionNumber],
         skip_wal: bool,
-    ) -> Result<HashMap<RegionNumber, String>> {
-        let wal_options = self
-            .alloc_batch(region_numbers.len(), skip_wal)?
-            .into_iter()
-            .map(|wal_options| {
-                serde_json::to_string(&wal_options).context(EncodeWalOptionsSnafu { wal_options })
-            })
-            .collect::<Result<Vec<_>>>()?;
+    ) -> Result<RegionWalOptions> {
+        let wal_options = self.alloc_batch(region_numbers.len(), skip_wal).await?;
 
         Ok(region_numbers.iter().copied().zip(wal_options).collect())
     }
@@ -75,7 +239,7 @@ impl WalProvider {
 
     /// Allocates a batch of wal options where each wal options goes to a region.
     /// If skip_wal is true, the wal options will be set to Noop regardless of the provider type.
-    pub fn alloc_batch(&self, num_regions: usize, skip_wal: bool) -> Result<Vec<WalOptions>> {
+    pub async fn alloc_batch(&self, num_regions: usize, skip_wal: bool) -> Result<Vec<WalOptions>> {
         if skip_wal {
             return Ok(vec![WalOptions::Noop; num_regions]);
         }
@@ -85,11 +249,7 @@ impl WalProvider {
                 let options_batch = topic_manager
                     .select_batch(num_regions)?
                     .into_iter()
-                    .map(|topic| {
-                        WalOptions::Kafka(KafkaWalOptions {
-                            topic: topic.clone(),
-                        })
-                    })
+                    .map(|topic| WalOptions::Kafka(KafkaWalOptions::new(topic.clone())))
                     .collect();
                 Ok(options_batch)
             }
@@ -139,34 +299,29 @@ pub async fn build_wal_provider(
     }
 }
 
-/// Inserts wal options into options.
-pub fn prepare_wal_options(
+/// Serializes and inserts WAL options into the region options.
+pub fn serialize_wal_options(
     options: &mut HashMap<String, String>,
     region_id: RegionId,
-    region_wal_options: &HashMap<RegionNumber, String>,
-) {
+    region_wal_options: &RegionWalOptions,
+) -> std::result::Result<(), serde_json::Error> {
     if let Some(wal_options) = region_wal_options.get(&region_id.region_number()) {
-        options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone());
+        let encoded = serde_json::to_string(wal_options)?;
+        options.insert(WAL_OPTIONS_KEY.to_string(), encoded);
     }
+    Ok(())
 }
 
 /// Extracts the topic from the wal options.
 pub fn extract_topic_from_wal_options(
     region_id: RegionId,
-    region_options: &HashMap<RegionNumber, String>,
+    region_options: &RegionWalOptions,
 ) -> Option<String> {
     region_options
         .get(&region_id.region_number())
-        .and_then(|wal_options| {
-            serde_json::from_str::<WalOptions>(wal_options)
-                .ok()
-                .and_then(|wal_options| {
-                    if let WalOptions::Kafka(kafka_wal_option) = wal_options {
-                        Some(kafka_wal_option.topic)
-                    } else {
-                        None
-                    }
-                })
+        .and_then(|wal_options| match wal_options {
+            WalOptions::Kafka(kafka_wal_option) => Some(kafka_wal_option.topic.clone()),
+            _ => None,
         })
 }
 
@@ -197,10 +352,9 @@ mod tests {
         let regions = (0..num_regions).collect::<Vec<_>>();
         let got = provider.allocate(&regions, false).await.unwrap();
 
-        let encoded_wal_options = serde_json::to_string(&WalOptions::RaftEngine).unwrap();
         let expected = regions
             .into_iter()
-            .zip(vec![encoded_wal_options; num_regions as usize])
+            .zip(vec![WalOptions::RaftEngine; num_regions as usize])
             .collect();
         assert_eq!(got, expected);
     }
@@ -250,13 +404,83 @@ mod tests {
         // Check the allocated wal options contain the expected topics.
         let expected = (0..num_regions)
             .map(|i| {
-                let options = WalOptions::Kafka(KafkaWalOptions {
-                    topic: topics[i as usize].clone(),
-                });
-                (i, serde_json::to_string(&options).unwrap())
+                let options = WalOptions::Kafka(KafkaWalOptions::new(topics[i as usize].clone()));
+                (i, options)
             })
             .collect::<HashMap<_, _>>();
         assert_eq!(got, expected);
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct RegionWalOptionsWrapper {
+        #[serde(with = "region_wal_options_serde")]
+        region_wal_options: RegionWalOptions,
+    }
+
+    #[test]
+    fn test_deserialize_legacy_region_wal_options_from_encoded_map() {
+        let legacy_region_wal_options = HashMap::from([
+            (1, serde_json::to_string(&WalOptions::RaftEngine).unwrap()),
+            (
+                2,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(
+                    "topic_a".to_string(),
+                )))
+                .unwrap(),
+            ),
+        ]);
+        let legacy_json = serde_json::json!({
+            "region_wal_options": legacy_region_wal_options,
+        });
+
+        assert_eq!(
+            legacy_json.to_string(),
+            r#"{"region_wal_options":{"1":"{\"wal.provider\":\"raft_engine\"}","2":"{\"wal.provider\":\"kafka\",\"wal.kafka.topic\":\"topic_a\"}"}}"#
+        );
+
+        let decoded: RegionWalOptionsWrapper = serde_json::from_value(legacy_json).unwrap();
+
+        assert_eq!(
+            decoded.region_wal_options,
+            HashMap::from([
+                (1, WalOptions::RaftEngine),
+                (
+                    2,
+                    WalOptions::Kafka(KafkaWalOptions::new("topic_a".to_string())),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_deserialize_structured_region_wal_options() {
+        let json = r#"{
+            "region_wal_options": {
+                "1": {"wal.provider":"raft_engine"},
+                "2": {"wal.provider":"noop"}
+            }
+        }"#;
+
+        let decoded: RegionWalOptionsWrapper = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            decoded.region_wal_options,
+            HashMap::from([(1, WalOptions::RaftEngine), (2, WalOptions::Noop)])
+        );
+    }
+
+    #[test]
+    fn test_serialize_structured_region_wal_options() {
+        let wrapper = RegionWalOptionsWrapper {
+            region_wal_options: HashMap::from([(1, WalOptions::RaftEngine)]),
+        };
+
+        let encoded = serde_json::to_string(&wrapper).unwrap();
+
+        assert_eq!(
+            encoded,
+            r#"{"region_wal_options":{"1":{"wal.provider":"raft_engine"}}}"#
+        );
     }
 
     #[tokio::test]
@@ -269,7 +493,7 @@ mod tests {
         let got = provider.allocate(&regions, true).await.unwrap();
         assert_eq!(got.len(), num_regions as usize);
         for wal_options in got.values() {
-            assert_eq!(wal_options, &"{\"wal.provider\":\"noop\"}");
+            assert_eq!(wal_options, &WalOptions::Noop);
         }
     }
 }

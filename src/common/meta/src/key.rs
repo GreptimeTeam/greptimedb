@@ -167,6 +167,7 @@ use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::rpc::router::{LeaderState, RegionRoute, region_distribution};
 use crate::rpc::store::BatchDeleteRequest;
 use crate::state_store::PoisonValue;
+use crate::wal_provider::RegionWalOptions;
 
 pub const TOPIC_NAME_PATTERN: &str = r"[a-zA-Z0-9_:-][a-zA-Z0-9_:\-\.@#]*";
 pub const LEGACY_MAINTENANCE_KEY: &str = "__maintenance";
@@ -778,7 +779,7 @@ impl TableMetadataManager {
         &self,
         table_info: TableInfo,
         table_route_value: TableRouteValue,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
     ) -> Result<()> {
         let table_id = table_info.ident.table_id;
         let engine = table_info.meta.engine.clone();
@@ -1175,10 +1176,7 @@ impl TableMetadataManager {
             let datanode_table_value = DatanodeTableValue::try_from_raw_value(&kv.value)?;
             for (region_number, wal_options) in &datanode_table_value.region_info.region_wal_options
             {
-                region_wal_options.insert(
-                    *region_number,
-                    serde_json::from_str(wal_options).context(error::SerdeJsonSnafu)?,
-                );
+                region_wal_options.insert(*region_number, wal_options.clone());
             }
         }
 
@@ -1435,7 +1433,7 @@ impl TableMetadataManager {
         current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
         new_region_routes: Vec<RegionRoute>,
         new_region_options: &HashMap<String, String>,
-        new_region_wal_options: &HashMap<RegionNumber, String>,
+        new_region_wal_options: &RegionWalOptions,
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
         let current_region_distribution =
@@ -1664,7 +1662,7 @@ mod tests {
     use crate::peer::Peer;
     use crate::rpc::router::{LeaderState, Region, RegionRoute, region_distribution};
     use crate::rpc::store::{PutRequest, RangeRequest};
-    use crate::wal_provider::WalProvider;
+    use crate::wal_provider::{RegionWalOptions, WalProvider};
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1737,7 +1735,7 @@ mod tests {
         table_metadata_manager: &TableMetadataManager,
         table_info: TableInfo,
         region_routes: Vec<RegionRoute>,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
     ) -> Result<()> {
         table_metadata_manager
             .create_table_metadata(
@@ -1754,11 +1752,7 @@ mod tests {
             .collect::<Vec<_>>();
         let wal_options = topics
             .iter()
-            .map(|topic| {
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: topic.clone(),
-                })
-            })
+            .map(|topic| WalOptions::Kafka(KafkaWalOptions::new(topic.clone())))
             .collect::<Vec<_>>();
 
         (0..16)
@@ -1771,17 +1765,13 @@ mod tests {
         HashMap::from([
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "greptimedb_topic0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("greptimedb_topic0".to_string())),
             ),
             (1, WalOptions::RaftEngine),
             (2, WalOptions::Noop),
             (
                 3,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "greptimedb_topic1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("greptimedb_topic1".to_string())),
             ),
         ])
     }
@@ -1819,10 +1809,7 @@ mod tests {
         let region_route = new_test_region_route();
         let region_routes = &vec![region_route.clone()];
         let table_info = new_test_table_info();
-        let region_wal_options = create_mock_region_wal_options()
-            .into_iter()
-            .map(|(k, v)| (k, serde_json::to_string(&v).unwrap()))
-            .collect::<HashMap<_, _>>();
+        let region_wal_options = create_mock_region_wal_options();
 
         // creates metadata.
         create_physical_table_metadata(
@@ -2083,10 +2070,7 @@ mod tests {
         let table_id = table_info.ident.table_id;
         let datanode_id = 2;
         let region_wal_options = create_mock_region_wal_options();
-        let serialized_region_wal_options = region_wal_options
-            .iter()
-            .map(|(k, v)| (*k, serde_json::to_string(v).unwrap()))
-            .collect::<HashMap<_, _>>();
+        let serialized_region_wal_options = region_wal_options.clone();
 
         // creates metadata.
         create_physical_table_metadata(
@@ -2561,20 +2545,14 @@ mod tests {
             region_storage_path(&table_info.catalog_name, &table_info.schema_name);
 
         // Create initial metadata with Kafka WAL options
-        let old_region_wal_options: HashMap<RegionNumber, String> = vec![
+        let old_region_wal_options: RegionWalOptions = vec![
             (
                 1,
-                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }))
-                .unwrap(),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
             (
                 2,
-                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_2".to_string(),
-                }))
-                .unwrap(),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_2".to_string())),
             ),
         ]
         .into_iter()
@@ -2621,27 +2599,18 @@ mod tests {
             new_region_route(2, 2),
             new_region_route(3, 3), // New region
         ];
-        let new_region_wal_options: HashMap<RegionNumber, String> = vec![
+        let new_region_wal_options: RegionWalOptions = vec![
             (
                 1,
-                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(), // Unchanged
-                }))
-                .unwrap(),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())), // Unchanged
             ),
             (
                 2,
-                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_2".to_string(), // Unchanged
-                }))
-                .unwrap(),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_2".to_string())), // Unchanged
             ),
             (
                 3,
-                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_3".to_string(), // New topic
-                }))
-                .unwrap(),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_3".to_string())), // New topic
             ),
         ]
         .into_iter()
@@ -2685,20 +2654,14 @@ mod tests {
             // Region 2 removed
             // Region 3 now has different topic
         ];
-        let newer_region_wal_options: HashMap<RegionNumber, String> = vec![
+        let newer_region_wal_options: RegionWalOptions = vec![
             (
                 1,
-                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(), // Unchanged
-                }))
-                .unwrap(),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())), // Unchanged
             ),
             (
                 3,
-                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_3_new".to_string(), // Changed topic
-                }))
-                .unwrap(),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_3_new".to_string())), // Changed topic
             ),
         ]
         .into_iter()
@@ -2768,10 +2731,7 @@ mod tests {
         let table_name = "foo";
         let task = test_create_table_task(table_name, table_id);
         let options = create_mixed_region_wal_options();
-        let serialized_options = options
-            .iter()
-            .map(|(k, v)| (*k, serde_json::to_string(v).unwrap()))
-            .collect::<HashMap<_, _>>();
+        let serialized_options = options.clone();
         table_metadata_manager
             .create_table_metadata(
                 task.table_info,
@@ -2828,10 +2788,7 @@ mod tests {
         let table_name = "foo";
         let task = test_create_table_task(table_name, table_id);
         let options = create_mixed_region_wal_options();
-        let serialized_options = options
-            .iter()
-            .map(|(k, v)| (*k, serde_json::to_string(v).unwrap()))
-            .collect::<HashMap<_, _>>();
+        let serialized_options = options.clone();
         table_metadata_manager
             .create_table_metadata(
                 task.table_info,
@@ -2904,10 +2861,7 @@ mod tests {
         let task = test_create_table_task(table_name, table_id);
         let table_info = task.table_info.clone();
         let options = create_mixed_region_wal_options();
-        let serialized_options = options
-            .iter()
-            .map(|(k, v)| (*k, serde_json::to_string(v).unwrap()))
-            .collect::<HashMap<_, _>>();
+        let serialized_options = options.clone();
         table_metadata_manager
             .create_table_metadata(
                 table_info.clone(),
@@ -3004,10 +2958,7 @@ mod tests {
         let dropped_task = test_create_table_task(table_name, dropped_table_id);
         let dropped_table_info = dropped_task.table_info.clone();
         let options = create_mock_region_wal_options();
-        let serialized_options = options
-            .iter()
-            .map(|(k, v)| (*k, serde_json::to_string(v).unwrap()))
-            .collect::<HashMap<_, _>>();
+        let serialized_options = options.clone();
         table_metadata_manager
             .create_table_metadata(
                 dropped_table_info.clone(),
@@ -3110,10 +3061,7 @@ mod tests {
         let task = test_create_table_task(table_name, table_id);
         let table_info = task.table_info.clone();
         let options = create_mixed_region_wal_options();
-        let serialized_options = options
-            .iter()
-            .map(|(k, v)| (*k, serde_json::to_string(v).unwrap()))
-            .collect::<HashMap<_, _>>();
+        let serialized_options = options.clone();
         table_metadata_manager
             .create_table_metadata(
                 table_info.clone(),

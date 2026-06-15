@@ -301,6 +301,15 @@ pub enum Error {
         source: store_api::metadata::MetadataError,
     },
 
+    #[snafu(display("Failed to serialize WAL options for region {}", region_id))]
+    SerializeWalOptions {
+        region_id: RegionId,
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to stop region engine {}", name))]
     StopRegionEngine {
         name: String,
@@ -453,6 +462,7 @@ impl ErrorExt for Error {
 
             PayloadNotExist { .. }
             | Unexpected { .. }
+            | SerializeWalOptions { .. }
             | WatchAsyncTaskChange { .. }
             | BuildHttpClient { .. } => StatusCode::Unexpected,
 

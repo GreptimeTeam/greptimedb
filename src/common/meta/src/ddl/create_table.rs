@@ -15,20 +15,18 @@
 pub mod executor;
 pub mod template;
 
-use std::collections::HashMap;
-
 use api::v1::CreateTableExpr;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{
     ExternalSnafu, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
+use common_procedure::local::DynamicKeyLockGuard;
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, ProcedureId, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
-use store_api::storage::RegionNumber;
 use strum::AsRefStr;
 use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
@@ -47,6 +45,10 @@ use crate::peer::PeerAllocContext;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::{CreateTableTask, QueryContext};
 use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
+use crate::wal_provider::{
+    RegionWalOptions, acquire_remote_wal_read_locks, optional_region_wal_options_serde,
+    refresh_initial_pruned_entry_ids,
+};
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -56,6 +58,8 @@ pub struct CreateTableProcedure {
     pub opening_regions: Vec<OperatingRegionGuard>,
     /// The executor of the procedure.
     pub executor: CreateTableExecutor,
+    /// The guards of remote WAL topic locks.
+    remote_wal_lock_guards: Vec<DynamicKeyLockGuard>,
 }
 
 fn build_executor_from_create_table_data(
@@ -92,6 +96,7 @@ impl CreateTableProcedure {
             data: CreateTableData::new(task, query_context),
             opening_regions: vec![],
             executor,
+            remote_wal_lock_guards: vec![],
         })
     }
 
@@ -109,6 +114,7 @@ impl CreateTableProcedure {
             data,
             opening_regions: vec![],
             executor,
+            remote_wal_lock_guards: vec![],
         })
     }
 
@@ -120,7 +126,7 @@ impl CreateTableProcedure {
         self.table_info().ident.table_id
     }
 
-    fn region_wal_options(&self) -> Result<&HashMap<RegionNumber, String>> {
+    fn region_wal_options(&self) -> Result<&RegionWalOptions> {
         self.data
             .region_wal_options
             .as_ref()
@@ -173,6 +179,29 @@ impl CreateTableProcedure {
         self.set_allocated_metadata(table_id, table_route, region_wal_options);
 
         Ok(Status::executing(true))
+    }
+
+    async fn ensure_remote_wal_read_locks(&mut self, ctx: &ProcedureContext) -> Result<()> {
+        if !self.remote_wal_lock_guards.is_empty() {
+            return Ok(());
+        }
+
+        self.remote_wal_lock_guards =
+            acquire_remote_wal_read_locks(ctx, self.region_wal_options()?).await;
+
+        Ok(())
+    }
+
+    async fn refresh_initial_pruned_entry_ids(&mut self) -> Result<()> {
+        let region_wal_options =
+            self.data
+                .region_wal_options
+                .as_mut()
+                .context(error::UnexpectedSnafu {
+                    err_msg: "region_wal_options is not allocated",
+                })?;
+        refresh_initial_pruned_entry_ids(&self.context.table_metadata_manager, region_wal_options)
+            .await
     }
 
     /// Creates regions on datanodes
@@ -261,6 +290,7 @@ impl CreateTableProcedure {
         );
 
         self.opening_regions.clear();
+        self.remote_wal_lock_guards.clear();
         Ok(Status::done_with_output(table_id))
     }
 
@@ -294,7 +324,7 @@ impl CreateTableProcedure {
         &mut self,
         table_id: TableId,
         table_route: PhysicalTableRouteValue,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
     ) {
         self.data.task.table_info.ident.table_id = table_id;
         self.data.table_route = Some(table_route);
@@ -332,10 +362,21 @@ impl Procedure for CreateTableProcedure {
         match state {
             CreateTableState::Prepare => self.on_prepare().await,
             CreateTableState::DatanodeCreateRegions => {
-                let retrying = ctx.is_retrying().await.unwrap_or(false);
-                self.on_datanode_create_regions(retrying).await
+                async {
+                    self.ensure_remote_wal_read_locks(ctx).await?;
+                    self.refresh_initial_pruned_entry_ids().await?;
+                    let retrying = ctx.is_retrying().await.unwrap_or(false);
+                    self.on_datanode_create_regions(retrying).await
+                }
+                .await
             }
-            CreateTableState::CreateMetadata => self.on_create_metadata(ctx.procedure_id).await,
+            CreateTableState::CreateMetadata => {
+                async {
+                    self.ensure_remote_wal_read_locks(ctx).await?;
+                    self.on_create_metadata(ctx.procedure_id).await
+                }
+                .await
+            }
         }
         .map_err(map_to_procedure_error)
     }
@@ -376,7 +417,9 @@ pub struct CreateTableData {
     /// None stands for not allocated yet.
     pub(crate) table_route: Option<PhysicalTableRouteValue>,
     /// None stands for not allocated yet.
-    pub region_wal_options: Option<HashMap<RegionNumber, String>>,
+    #[serde(default)]
+    #[serde(with = "optional_region_wal_options_serde")]
+    pub region_wal_options: Option<RegionWalOptions>,
 }
 
 impl CreateTableData {

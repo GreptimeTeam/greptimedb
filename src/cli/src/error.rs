@@ -20,7 +20,7 @@ use common_macro::stack_trace_debug;
 use common_meta::peer::Peer;
 use object_store::Error as ObjectStoreError;
 use snafu::{Location, Snafu};
-use store_api::storage::TableId;
+use store_api::storage::{RegionId, TableId};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -77,6 +77,14 @@ pub enum Error {
 
     #[snafu(display("Failed to get table metadata"))]
     TableMetadata {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to build create region request for region: {region_id}"))]
+    BuildCreateRegionRequest {
+        region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
@@ -324,7 +332,8 @@ impl ErrorExt for Error {
         match self {
             Error::InitMetadata { source, .. }
             | Error::InitDdlManager { source, .. }
-            | Error::TableMetadata { source, .. } => source.status_code(),
+            | Error::TableMetadata { source, .. }
+            | Error::BuildCreateRegionRequest { source, .. } => source.status_code(),
 
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }

@@ -22,6 +22,7 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
+use common_meta::wal_provider::RegionWalOptions;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use moka::future::CacheBuilder;
@@ -69,7 +70,7 @@ pub fn new_test_table_info(
         .unwrap()
 }
 
-fn new_test_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumber, String> {
+fn new_test_region_wal_options(regions: Vec<RegionNumber>) -> RegionWalOptions {
     // TODO(niebayes): construct region wal options for test.
     let _ = regions;
     HashMap::default()

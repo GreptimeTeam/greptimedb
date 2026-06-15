@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use store_api::storage::{RegionId, RegionNumber, TableId};
+use store_api::storage::{RegionId, TableId};
 
 use crate::DatanodeId;
 use crate::cache_invalidator::CacheInvalidatorRef;
@@ -27,6 +26,7 @@ use crate::key::table_route::PhysicalTableRouteValue;
 use crate::node_manager::NodeManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::region_registry::LeaderRegionRegistryRef;
+use crate::wal_provider::RegionWalOptions;
 
 pub mod allocator;
 pub mod alter_database;
@@ -59,9 +59,9 @@ pub struct TableMetadata {
     pub table_id: TableId,
     /// Route information for each region of the table.
     pub table_route: PhysicalTableRouteValue,
-    /// The encoded wal options for regions of the table.
+    /// The WAL options for regions of the table.
     // If a region does not have an associated wal options, no key for the region would be found in the map.
-    pub region_wal_options: HashMap<RegionNumber, String>,
+    pub region_wal_options: RegionWalOptions,
 }
 
 pub type RegionFailureDetectorControllerRef = Arc<dyn RegionFailureDetectorController>;

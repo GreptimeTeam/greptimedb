@@ -84,6 +84,13 @@ const PARQUET_META_PRELOAD_CONCURRENCY: usize = 8;
 static PARQUET_META_PRELOAD_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(PARQUET_META_PRELOAD_CONCURRENCY));
 
+fn initial_pruned_entry_id(wal_options: &WalOptions) -> EntryId {
+    match wal_options {
+        WalOptions::Kafka(options) => options.initial_pruned_entry_id.unwrap_or(0),
+        WalOptions::RaftEngine | WalOptions::Noop => 0,
+    }
+}
+
 /// A fetcher to retrieve partition expr for a region.
 ///
 /// Compatibility: older regions didn't persist `partition_expr` in engine metadata,
@@ -325,7 +332,10 @@ impl RegionOpener {
             .and_then(|cm| cm.write_cache())
             .and_then(|wc| wc.manifest_cache());
         // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
-        let flushed_entry_id = provider.initial_flushed_entry_id::<S>(wal.store());
+        // Kafka WAL allocation also carries the topic's pruned entry id as a create-time hint.
+        let flushed_entry_id = provider
+            .initial_flushed_entry_id::<S>(wal.store())
+            .max(initial_pruned_entry_id(&options.wal_options));
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
             flushed_entry_id,
@@ -1233,6 +1243,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use common_time::Timestamp;
+    use common_wal::options::{KafkaWalOptions, WalOptions};
     use datatypes::arrow::array::{ArrayRef, BinaryArray, Int64Array};
     use datatypes::arrow::record_batch::RecordBatch;
     use object_store::ObjectStore;
@@ -1244,7 +1255,7 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use super::{
-        preload_parquet_meta_cache_for_files, sanitize_region_options,
+        initial_pruned_entry_id, preload_parquet_meta_cache_for_files, sanitize_region_options,
         supports_open_region_object_storage_requirement,
     };
     use crate::cache::CacheManager;
@@ -1278,6 +1289,25 @@ mod tests {
         ObjectStore::new(Fs::default().root("/tmp"))
             .unwrap()
             .finish()
+    }
+
+    #[test]
+    fn test_initial_pruned_entry_id() {
+        assert_eq!(0, initial_pruned_entry_id(&WalOptions::RaftEngine));
+        assert_eq!(0, initial_pruned_entry_id(&WalOptions::Noop));
+        assert_eq!(
+            0,
+            initial_pruned_entry_id(&WalOptions::Kafka(KafkaWalOptions::new(
+                "test_topic".to_string()
+            )))
+        );
+        assert_eq!(
+            42,
+            initial_pruned_entry_id(&WalOptions::Kafka(KafkaWalOptions {
+                topic: "test_topic".to_string(),
+                initial_pruned_entry_id: Some(42),
+            }))
+        );
     }
 
     #[test]
