@@ -1012,7 +1012,7 @@ mod tests {
             code: StatusCode::Internal,
             msg: "blabla".to_string(),
             tonic_code: Code::Internal,
-            retry_hint: RetryHint::NonRetryable,
+            retry_hint: RetryHint::Retryable,
         }
         .build();
 
@@ -1020,7 +1020,8 @@ mod tests {
         let actual: Error = status.into();
 
         assert_eq!(expected.to_string(), actual.to_string());
-        assert_eq!(actual.retry_hint(), RetryHint::NonRetryable);
+        assert_eq!(actual.retry_hint(), RetryHint::Retryable);
+        assert!(actual.should_retry());
     }
 
     #[test]
@@ -1040,6 +1041,32 @@ mod tests {
         let actual: Error = status.into();
 
         assert_eq!(actual.retry_hint(), RetryHint::Retryable);
+        assert!(actual.should_retry());
+    }
+
+    #[test]
+    fn test_from_tonic_status_fallback_uses_status_code() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GREPTIME_DB_HEADER_ERROR_CODE,
+            HeaderValue::from(StatusCode::InvalidArguments as u32),
+        );
+        let status =
+            Status::with_metadata(Code::Internal, "blabla", MetadataMap::from_headers(headers));
+
+        let actual: Error = status.into();
+
+        assert_eq!(actual.retry_hint(), RetryHint::NonRetryable);
+        assert!(!actual.should_retry());
+    }
+
+    #[test]
+    fn test_should_retry_preserves_transport_retry() {
+        let status = Status::new(Code::Unavailable, "blabla");
+        let actual: Error = status.into();
+
+        assert_eq!(actual.retry_hint(), RetryHint::Retryable);
+        assert!(actual.should_retry());
     }
 
     #[tokio::test]

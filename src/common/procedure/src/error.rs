@@ -311,7 +311,7 @@ impl ErrorExt for Error {
             Error::RetryTimesExceeded { .. } | Error::RollbackTimesExceeded { .. } => {
                 RetryHint::NonRetryable
             }
-            _ => RetryHint::NonRetryable,
+            _ => RetryHint::from_status_code(self.status_code()),
         }
     }
 }
@@ -361,9 +361,9 @@ impl Error {
     }
 
     /// Creates a new [Error::RetryLater] or [Error::External] error from source `err` according
-    /// to its [StatusCode].
+    /// to its [RetryHint].
     pub fn from_error_ext<E: ErrorExt + Send + Sync + 'static>(err: E) -> Self {
-        if err.status_code().is_retryable() {
+        if err.retry_hint().is_retryable() {
             Error::retry_later(err)
         } else {
             Error::external(err)
@@ -410,5 +410,19 @@ mod tests {
         };
 
         assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+    }
+
+    #[test]
+    fn test_from_error_ext_uses_retry_hint() {
+        let err = Error::from_error_ext(Error::retry_later(MockError::new(
+            StatusCode::InvalidArguments,
+        )));
+        assert!(err.is_retry_later());
+
+        let err = Error::from_error_ext(MockError::new(StatusCode::InvalidArguments));
+        assert!(!err.is_retry_later());
+
+        let err = Error::from_error_ext(MockError::new(StatusCode::Internal));
+        assert!(err.is_retry_later());
     }
 }

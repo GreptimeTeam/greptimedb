@@ -1291,7 +1291,7 @@ impl ErrorExt for Error {
             ConvertAlterTableRequest { source, .. } => source.retry_hint(),
             ConvertColumnDef { source, .. } => source.retry_hint(),
             GetCache { source, .. } => source.retry_hint(),
-            _ => RetryHint::NonRetryable,
+            _ => RetryHint::from_status_code(self.status_code()),
         }
     }
 }

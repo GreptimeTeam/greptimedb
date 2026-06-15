@@ -165,7 +165,7 @@ impl ErrorExt for Error {
             | Error::ConvertMetaRequest { source, .. }
             | Error::ConvertMetaResponse { source, .. }
             | Error::GetFlowStat { source, .. } => source.retry_hint(),
-            _ => RetryHint::NonRetryable,
+            _ => RetryHint::from_status_code(self.status_code()),
         }
     }
 }
@@ -194,8 +194,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_from_tonic_status_defaults_to_non_retryable() {
+    fn test_from_tonic_status_fallbacks_to_status_code() {
         let status = tonic::Status::new(tonic::Code::Internal, "blabla");
+
+        let err: Error = status.into();
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_from_tonic_status_fallback_can_be_non_retryable() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GREPTIME_DB_HEADER_ERROR_CODE,
+            HeaderValue::from(StatusCode::InvalidArguments as u32),
+        );
+        let status = tonic::Status::with_metadata(
+            tonic::Code::Internal,
+            "blabla",
+            MetadataMap::from_headers(headers),
+        );
 
         let err: Error = status.into();
 

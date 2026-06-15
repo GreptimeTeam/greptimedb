@@ -1296,25 +1296,33 @@ impl ErrorExt for Error {
     }
 
     fn retry_hint(&self) -> RetryHint {
-        if matches!(
-            self,
+        match self {
             Error::RetryLater { .. }
-                | Error::RetryLaterWithSource { .. }
-                | Error::MailboxTimeout { .. }
-        ) || matches!(
-            self,
+            | Error::RetryLaterWithSource { .. }
+            | Error::MailboxTimeout { .. } => RetryHint::Retryable,
+
             Error::AllocateRegions { source, .. } | Error::DeallocateRegions { source, .. }
-                if source.retry_hint().is_retryable()
-        ) || matches!(
-            self,
+                if source.retry_hint().is_retryable() =>
+            {
+                RetryHint::Retryable
+            }
+
             Error::DeleteRecords { error, .. }
-                | Error::BuildPartitionClient { error, .. }
-                | Error::GetOffset { error, .. }
-                if Self::is_retryable_kafka_client_error(error)
-        ) {
-            RetryHint::Retryable
-        } else {
-            RetryHint::NonRetryable
+            | Error::BuildPartitionClient { error, .. }
+            | Error::GetOffset { error, .. }
+                if Self::is_retryable_kafka_client_error(error) =>
+            {
+                RetryHint::Retryable
+            }
+
+            Error::DeleteRecords { .. }
+            | Error::BuildPartitionClient { .. }
+            | Error::GetOffset { .. }
+            | Error::PusherNotFound { .. }
+            | Error::PushMessage { .. }
+            | Error::ExceededDeadline { .. } => RetryHint::NonRetryable,
+
+            _ => RetryHint::from_status_code(self.status_code()),
         }
     }
 }

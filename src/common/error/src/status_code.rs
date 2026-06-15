@@ -273,7 +273,7 @@ macro_rules! define_from_tonic_status {
                     .unwrap_or_else(|| e.message().to_string());
                 let retry_hint = metadata_value(&e, $crate::GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or($crate::ext::RetryHint::NonRetryable);
+                    .unwrap_or_else(|| $crate::ext::RetryHint::from_status_code(code));
 
                 // TODO(LFC): Make the error variant defined automatically.
                 Self::$Variant {
