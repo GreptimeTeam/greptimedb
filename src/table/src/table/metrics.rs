@@ -36,7 +36,7 @@ pub struct StreamMetrics {
 }
 
 impl StreamMetrics {
-    /// Create a new MemoryUsageMetrics structure, and set `start_time` to now
+    /// Create a new [`StreamMetrics`] structure, and set `start_time` to now.
     pub fn new(metrics: &ExecutionPlanMetricsSet, partition: usize) -> Self {
         let start_time = MetricBuilder::new(metrics).start_timestamp(partition);
         start_time.record();
