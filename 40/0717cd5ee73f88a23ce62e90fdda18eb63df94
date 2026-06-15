@@ -1,0 +1,27 @@
+src/meta-srv/src/procedure/repartition/allocate_region.rs
+  s_b2c1f5f63bb6a4::t_1c0ff08d01b628 26-28,168
+  s_b2c1f5f63bb6a4::t_d4a282025df34c 179-180
+  s_b2c1f5f63bb6a4::t_087fe4c0e4381d 181-183
+src/common/meta/src/wal_provider.rs
+  s_b2c1f5f63bb6a4::t_a02ce908a1dc52 20,24-25,34,38,45-89,96-112
+  s_b2c1f5f63bb6a4::t_d4a282025df34c 35,90-95
+src/common/meta/src/ddl/create_table.rs
+  s_b2c1f5f63bb6a4::t_d4a282025df34c 189-190,203-204
+  s_b2c1f5f63bb6a4::t_4b350b7745bb95 42,48-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "400717cd5ee73f88a23ce62e90fdda18eb63df94",
+  "prompts": {},
+  "sessions": {
+    "s_b2c1f5f63bb6a4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a06f7a3ffetYZYY9HX7UMRL2",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
