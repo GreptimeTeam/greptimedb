@@ -75,4 +75,7 @@ AGENTS.md
 
 # local design docs
 docs/specs/
-.vs/ 
+.vs/
+
+# Claude Code personal/local overrides (keep shared .claude/ content tracked)
+.claude/*.local.* 
