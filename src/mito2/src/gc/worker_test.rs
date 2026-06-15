@@ -333,6 +333,89 @@ async fn test_gc_worker_basic_compact() {
     assert!(report.need_retry_regions.is_empty());
 }
 
+/// Compact with stale file-ref manifest version should safely skip deletion.
+#[tokio::test]
+async fn test_gc_worker_compact_manifest_mismatch_skips_deletion() {
+    init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    env.log_store = Some(env.create_log_store().await);
+    // use in memory object store for gc test, so it will use `ObjectStoreFilePurger`
+    env.object_store_manager = Some(Arc::new(env.create_in_memory_object_store_manager()));
+
+    let engine = env
+        .new_mito_engine(MitoConfig {
+            gc: GcConfig {
+                enable: true,
+                // for faster delete file
+                lingering_time: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+    put_and_flush(&engine, region_id, &column_schemas, 20..30).await;
+    delete_and_flush(&engine, region_id, &column_schemas, 15..30).await;
+    put_and_flush(&engine, region_id, &column_schemas, 15..25).await;
+
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 0);
+
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(manifest.removed_files.removed_files[0].files.len(), 3);
+
+    let stale_version = manifest.manifest_version + 1;
+    let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
+    let file_ref_manifest = FileRefsManifest {
+        file_refs: Default::default(),
+        manifest_version: [(region_id, stale_version)].into(),
+        cross_region_refs: HashMap::new(),
+    };
+
+    let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
+    let report = gc_worker.run().await.unwrap();
+
+    assert!(report.deleted_files.get(&region_id).unwrap().is_empty());
+    assert!(report.need_retry_regions.is_empty());
+    assert!(report.processed_regions.contains(&region_id));
+
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(
+        manifest.removed_files.removed_files[0].files.len(),
+        3,
+        "manifest-mismatch GC must leave removed files pending for a future matching run"
+    );
+}
+
 /// Compact with file refs should not delete files
 #[tokio::test]
 async fn test_gc_worker_compact_with_ref() {
