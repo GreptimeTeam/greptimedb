@@ -17,10 +17,12 @@ pub(crate) mod topic_creator;
 mod topic_manager;
 pub(crate) mod topic_pool;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_procedure::Context as ProcedureContext;
+use common_procedure::local::DynamicKeyLockGuard;
 use common_wal::config::MetasrvWalConfig;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -29,14 +31,84 @@ use store_api::storage::{RegionId, RegionNumber};
 
 use crate::ddl::allocator::wal_options::WalOptionsAllocator;
 use crate::error::{InvalidTopicNamePrefixSnafu, Result};
-use crate::key::TOPIC_NAME_PATTERN_REGEX;
+use crate::key::topic_name::TopicNameKey;
+use crate::key::{TOPIC_NAME_PATTERN_REGEX, TableMetadataManagerRef};
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
+use crate::lock_key::RemoteWalLock;
 pub use crate::wal_provider::topic_creator::{build_kafka_client, build_kafka_topic_creator};
 use crate::wal_provider::topic_pool::KafkaTopicPool;
 
 /// WAL options allocated for each region.
 pub type RegionWalOptions = HashMap<RegionNumber, WalOptions>;
+
+/// Returns remote WAL topics referenced by region WAL options.
+pub fn remote_wal_topics(region_wal_options: &RegionWalOptions) -> Vec<&str> {
+    region_wal_options
+        .values()
+        .filter_map(|wal_options| match wal_options {
+            WalOptions::Kafka(kafka_options) => Some(kafka_options.topic.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Acquires per-topic read locks for remote WAL topics.
+pub async fn acquire_remote_wal_read_locks(
+    ctx: &ProcedureContext,
+    region_wal_options: &RegionWalOptions,
+) -> Vec<DynamicKeyLockGuard> {
+    let topics = remote_wal_topics(region_wal_options)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut guards = Vec::with_capacity(topics.len());
+    for topic in topics {
+        let guard = ctx
+            .provider
+            .acquire_lock(&(RemoteWalLock::Read(topic).into()))
+            .await;
+        guards.push(guard);
+    }
+    guards
+}
+
+/// Refreshes initial pruned entry ids for Kafka WAL options.
+pub async fn refresh_initial_pruned_entry_ids(
+    table_metadata_manager: &TableMetadataManagerRef,
+    region_wal_options: &mut RegionWalOptions,
+) -> Result<()> {
+    let topics = remote_wal_topics(region_wal_options);
+    if topics.is_empty() {
+        return Ok(());
+    }
+
+    let topic_values = table_metadata_manager
+        .topic_name_manager()
+        .batch_get(
+            topics
+                .iter()
+                .map(|topic| TopicNameKey::new(topic))
+                .collect(),
+        )
+        .await?;
+
+    for wal_options in region_wal_options.values_mut() {
+        let WalOptions::Kafka(kafka_options) = wal_options else {
+            continue;
+        };
+        kafka_options.initial_pruned_entry_id = Some(
+            topic_values
+                .get(&kafka_options.topic)
+                .map(|value| value.pruned_entry_id)
+                .unwrap_or_default(),
+        );
+    }
+
+    Ok(())
+}
 
 #[derive(Deserialize)]
 #[serde(untagged)]

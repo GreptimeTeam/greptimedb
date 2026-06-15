@@ -23,7 +23,9 @@ use common_meta::lock_key::TableLock;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::PeerAllocContext;
 use common_meta::rpc::router::RegionRoute;
-use common_meta::wal_provider::RegionWalOptions;
+use common_meta::wal_provider::{
+    RegionWalOptions, acquire_remote_wal_read_locks, refresh_initial_pruned_entry_ids,
+};
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -163,7 +165,7 @@ impl ExecutePlan {
             )
             .await
             .context(error::AllocateRegionRoutesSnafu { table_id })?;
-        let wal_options = ctx
+        let mut wal_options = ctx
             .wal_options_allocator
             .allocate(
                 &allocate_regions
@@ -172,6 +174,11 @@ impl ExecutePlan {
                     .collect::<Vec<_>>(),
                 table_info_value.table_info.meta.options.skip_wal,
             )
+            .await
+            .context(error::AllocateWalOptionsSnafu { table_id })?;
+        let _remote_wal_lock_guards =
+            acquire_remote_wal_read_locks(procedure_ctx, &wal_options).await;
+        refresh_initial_pruned_entry_ids(&ctx.table_metadata_manager, &mut wal_options)
             .await
             .context(error::AllocateWalOptionsSnafu { table_id })?;
 
