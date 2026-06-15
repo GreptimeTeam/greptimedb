@@ -103,6 +103,7 @@ pub mod otlp;
 pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
+pub(crate) mod prometheus_query_frontend;
 pub mod result;
 mod timeout;
 pub mod utils;

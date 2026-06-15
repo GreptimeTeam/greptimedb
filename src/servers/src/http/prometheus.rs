@@ -69,6 +69,7 @@ use crate::error::{
     NotSupportedSnafu, ParseTimestampSnafu, Result, TableNotFoundSnafu, UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
+use crate::http::prometheus_query_frontend::{QueryFrontendKey, observe_range_query};
 use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL, is_database_selection_label};
 use crate::prometheus_handler::PrometheusHandlerRef;
 
@@ -451,12 +452,29 @@ async fn do_range_query(
     prom_query: &PromQuery,
     query_ctx: QueryContextRef,
 ) -> PrometheusJsonResponse {
+    let frontend_key = QueryFrontendKey::new(
+        query_ctx.get_db_string(),
+        query_ctx.read_preference().to_string(),
+        prom_query,
+    );
+    let mut in_flight_guard = observe_range_query(frontend_key);
+
     let result = handler.do_query(prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
-        Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
+        Err(err) => {
+            in_flight_guard.mark_errored();
+            return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
+        }
         Ok((metric_name, _)) => metric_name,
     };
-    PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix).await
+    let response =
+        PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix).await;
+    if response.status == "error" {
+        in_flight_guard.mark_errored();
+    } else {
+        in_flight_guard.mark_completed();
+    }
+    response
 }
 
 #[derive(Debug, Default, Serialize)]

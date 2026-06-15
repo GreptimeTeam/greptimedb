@@ -198,6 +198,12 @@ lazy_static! {
         &[METRIC_DB_LABEL, METRIC_METHOD_LABEL]
     )
     .unwrap();
+    pub static ref METRIC_HTTP_PROMETHEUS_QUERY_FRONTEND_OBSERVATIONS: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_http_prometheus_query_frontend_observations_total",
+        "servers http prometheus query frontend observe-only in-flight lifecycle observations. Entry outcomes are first_in_flight/duplicate_in_flight; exit outcomes are completed/errored/cancelled",
+        &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
+    )
+    .unwrap();
     pub static ref METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED: HistogramVec =
         register_histogram_vec!(
             "greptime_servers_http_otlp_metrics_elapsed",
