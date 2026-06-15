@@ -40,8 +40,11 @@ outward-facing step (creating the release, which creates the tag and triggers CI
 ## 1. Verify the Cargo version
 
 The workspace version on the release branch **must** equal the version being released, or
-stop:
+stop. **Fetch the branch first** — §0 only used `git ls-remote`, which does **not** update
+the remote-tracking ref, so `<remote>/release/vX.Y` may be missing or stale (and the branch
+may have just been created in §0 or moved by another maintainer):
 ```
+git fetch <remote> release/vX.Y
 git show <remote>/release/vX.Y:Cargo.toml | grep -A30 '\[workspace.package\]' | grep -m1 version
 ```
 (For a fresh minor cut from main, `<remote>/main` and `release/vX.Y` are usually the same
