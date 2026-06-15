@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::ext::{ErrorExt, RetryHint};
+use common_error::ext::{ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
@@ -391,9 +391,8 @@ impl ErrorExt for Error {
             CreateWriter { error, .. } | WriteIndex { error, .. } | ReadIndex { error, .. } => {
                 retry_hint_from_opendal_error(error)
             }
-            Io { .. } | FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => {
-                RetryHint::Retryable
-            }
+            Io { error, .. } => retry_hint_from_io_error(error),
+            FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)

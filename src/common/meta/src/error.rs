@@ -19,7 +19,6 @@ use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_procedure::ProcedureId;
-use common_wal::options::WalOptions;
 use object_store::error::retry_hint_from_opendal_error;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};

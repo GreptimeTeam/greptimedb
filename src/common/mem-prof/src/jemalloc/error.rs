@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::path::PathBuf;
 
-use common_error::ext::{BoxedError, ErrorExt, RetryHint};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -103,7 +103,8 @@ impl ErrorExt for Error {
 
     fn retry_hint(&self) -> RetryHint {
         match self {
-            Error::OpenTempFile { .. } | Error::DumpProfileData { .. } => RetryHint::Retryable,
+            Error::OpenTempFile { error, .. } => retry_hint_from_io_error(error),
+            Error::DumpProfileData { .. } => RetryHint::Retryable,
             _ => RetryHint::NonRetryable,
         }
     }

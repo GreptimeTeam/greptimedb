@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::ext::{ErrorExt, RetryHint};
+use common_error::ext::{ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -230,7 +230,7 @@ impl ErrorExt for Error {
             Error::SnapshotStorage { error, .. } | Error::ChunkImportFailed { error, .. } => {
                 error.retry_hint()
             }
-            Error::ImportStateIo { .. } => RetryHint::Retryable,
+            Error::ImportStateIo { error, .. } => retry_hint_from_io_error(error),
             _ => RetryHint::NonRetryable,
         }
     }

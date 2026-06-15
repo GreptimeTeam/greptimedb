@@ -14,9 +14,13 @@
 
 use std::any::Any;
 use std::fmt::{Display, Formatter};
+use std::io::{Error as IoError, ErrorKind};
 use std::str::FromStr;
 
-use common_error::ext::{BoxedError, ErrorExt, PlainError, RetryHint, StackError, WhateverResult};
+use common_error::ext::{
+    BoxedError, ErrorExt, PlainError, RetryHint, StackError, WhateverResult,
+    retry_hint_from_io_error,
+};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, ResultExt, Snafu};
@@ -74,7 +78,7 @@ fn test_into_whatever_error() {
         normalize_path(&whatever.to_string()),
         // The location points to the `NormalSnafu` context in `normal_error()`.
         format!(
-            r#"0: A normal error with "display" attribute, message "blabla", at {}:57:22
+            r#"0: A normal error with "display" attribute, message "blabla", at {}:61:22
 1: PlainError {{ msg: "<root cause>", status_code: Unexpected }}"#,
             normalize_path(file!())
         )
@@ -85,7 +89,7 @@ fn test_into_whatever_error() {
         normalize_path(&whatever.to_string()),
         // The location points to the transparent `?` return in `transparent_error()`.
         format!(
-            r#"0: <transparent>, at {}:62:5
+            r#"0: <transparent>, at {}:66:5
 1: PlainError {{ msg: "<root cause>", status_code: Unexpected }}"#,
             normalize_path(file!())
         )
@@ -129,7 +133,7 @@ fn test_debug_format() {
         normalize_path(&debug_output),
         // The location points to the `NormalSnafu` context in `normal_error()`.
         format!(
-            r#"0: A normal error with "display" attribute, message "blabla", at {}:57:22
+            r#"0: A normal error with "display" attribute, message "blabla", at {}:61:22
 1: PlainError {{ msg: "<root cause>", status_code: Unexpected }}"#,
             normalize_path(file!())
         )
@@ -141,7 +145,7 @@ fn test_debug_format() {
         normalize_path(&debug_output),
         // The location points to the transparent `?` return in `transparent_error()`.
         format!(
-            r#"0: <transparent>, at {}:62:5
+            r#"0: <transparent>, at {}:66:5
 1: PlainError {{ msg: "<root cause>", status_code: Unexpected }}"#,
             normalize_path(file!())
         )
@@ -189,6 +193,72 @@ fn test_boxed_error_retry_hint() {
 
     assert_eq!(err.retry_hint(), RetryHint::Retryable);
     assert!(err.is_retryable());
+}
+
+#[test]
+fn test_retry_hint_from_io_error() {
+    let retryable_kinds = [
+        ErrorKind::ConnectionRefused,
+        ErrorKind::ConnectionReset,
+        ErrorKind::HostUnreachable,
+        ErrorKind::NetworkUnreachable,
+        ErrorKind::ConnectionAborted,
+        ErrorKind::NotConnected,
+        ErrorKind::NetworkDown,
+        ErrorKind::BrokenPipe,
+        ErrorKind::WouldBlock,
+        ErrorKind::StaleNetworkFileHandle,
+        ErrorKind::TimedOut,
+        ErrorKind::ResourceBusy,
+        ErrorKind::Interrupted,
+    ];
+
+    for kind in retryable_kinds {
+        let error = IoError::from(kind);
+        assert_eq!(
+            retry_hint_from_io_error(&error),
+            RetryHint::Retryable,
+            "{kind:?}"
+        );
+    }
+
+    let non_retryable_kinds = [
+        ErrorKind::NotFound,
+        ErrorKind::PermissionDenied,
+        ErrorKind::AddrInUse,
+        ErrorKind::AddrNotAvailable,
+        ErrorKind::AlreadyExists,
+        ErrorKind::NotADirectory,
+        ErrorKind::IsADirectory,
+        ErrorKind::DirectoryNotEmpty,
+        ErrorKind::ReadOnlyFilesystem,
+        ErrorKind::InvalidInput,
+        ErrorKind::InvalidData,
+        ErrorKind::WriteZero,
+        ErrorKind::StorageFull,
+        ErrorKind::NotSeekable,
+        ErrorKind::QuotaExceeded,
+        ErrorKind::FileTooLarge,
+        ErrorKind::ExecutableFileBusy,
+        ErrorKind::Deadlock,
+        ErrorKind::CrossesDevices,
+        ErrorKind::TooManyLinks,
+        ErrorKind::InvalidFilename,
+        ErrorKind::ArgumentListTooLong,
+        ErrorKind::Unsupported,
+        ErrorKind::UnexpectedEof,
+        ErrorKind::OutOfMemory,
+        ErrorKind::Other,
+    ];
+
+    for kind in non_retryable_kinds {
+        let error = IoError::from(kind);
+        assert_eq!(
+            retry_hint_from_io_error(&error),
+            RetryHint::NonRetryable,
+            "{kind:?}"
+        );
+    }
 }
 
 #[derive(Debug)]

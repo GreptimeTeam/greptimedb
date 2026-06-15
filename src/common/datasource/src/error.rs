@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use arrow_schema::ArrowError;
-use common_error::ext::{ErrorExt, RetryHint};
+use common_error::ext::{ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::parquet::errors::ParquetError;
@@ -260,7 +260,8 @@ impl ErrorExt for Error {
             | ListObjects { error, .. }
             | ReadObject { error, .. }
             | WriteObject { error, .. } => retry_hint_from_opendal_error(error),
-            AsyncWrite { .. } | WriteParquet { .. } => RetryHint::Retryable,
+            AsyncWrite { error, .. } => retry_hint_from_io_error(error),
+            WriteParquet { .. } => RetryHint::Retryable,
             _ => RetryHint::NonRetryable,
         }
     }
