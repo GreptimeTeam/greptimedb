@@ -58,7 +58,7 @@ GITHUB_TOKEN=$(gh auth token) git cliff <prev-minor-tag>..<release-commit> --tag
 audience cares about what's new vs the latest patch. Collect the PR set from the patch release
 bodies and remove matching lines:
 ```
-gh release view vX.Y.Z --repo GreptimeTeam/greptimedb | grep -oE 'pull/[0-9]+'
+gh release view vX.(Y-1).Z --repo GreptimeTeam/greptimedb | grep -oE 'pull/[0-9]+'
 ```
 Remove every changelog bullet whose `#NNNN` is in that combined set (a small Python script is
 the reliable way — match `pull/<n>)` on lines starting with `*`).
@@ -133,8 +133,9 @@ The release note is also published as a blog post in **`GreptimeTeam/docs`**.
   for the reviewer.
 - Commit with sign-off, push, open a **draft** PR, then remove the worktree:
   ```
-  cd /tmp/docs-release-note && git add blog/release-X-Y-Z.md && git commit -s -m "docs: add X.Y.Z release note"
-  git push -u origin chore/X.Y.Z-release-note
+  git -C /tmp/docs-release-note add blog/release-X-Y-Z.md
+  git -C /tmp/docs-release-note commit -s -m "docs: add X.Y.Z release note"
+  git -C /tmp/docs-release-note push -u origin chore/X.Y.Z-release-note
   gh pr create --draft --repo GreptimeTeam/docs --base main --head chore/X.Y.Z-release-note \
     --title "docs: add X.Y.Z release note" --body-file <template-filled body>
   git -C <docs> worktree remove /tmp/docs-release-note
