@@ -1,0 +1,35 @@
+src/client/src/database.rs
+  h_623774b620da8e 963,971-972
+src/common/error/src/ext.rs
+  h_623774b620da8e 67
+src/frontend/src/instance/otlp.rs
+  s_abc59d71f18a4d::t_10a24ab26217f4 546-547,549-551
+  h_623774b620da8e 548
+src/meta-client/src/error.rs
+  h_623774b620da8e 202
+src/common/procedure/src/error.rs
+  h_623774b620da8e 426
+src/common/error/src/status_code.rs
+  s_abc59d71f18a4d::t_145377bddd27af 228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "e7f68d02c9fd58b34983ace6ff21626e73882484",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_abc59d71f18a4d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a7bfa0affeEwe6BgYqF7nPHZ",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
