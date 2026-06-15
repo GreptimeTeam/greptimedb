@@ -162,15 +162,6 @@ fn test_retry_hint_helpers() {
     assert!(RetryHint::Retryable.is_retryable());
     assert!(!RetryHint::NonRetryable.is_retryable());
 
-    assert_eq!(
-        RetryHint::from_status_code(StatusCode::Internal),
-        RetryHint::Retryable
-    );
-    assert_eq!(
-        RetryHint::from_status_code(StatusCode::InvalidArguments),
-        RetryHint::NonRetryable
-    );
-
     assert_eq!(RetryHint::Retryable.as_str(), "retryable");
     assert_eq!(RetryHint::NonRetryable.as_str(), "non_retryable");
 

@@ -134,54 +134,6 @@ impl StatusCode {
         Self::Success as u32 == code
     }
 
-    /// Returns `true` if the error with this code is retryable.
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            StatusCode::StorageUnavailable
-            | StatusCode::RuntimeResourcesExhausted
-            | StatusCode::RegionNotReady
-            | StatusCode::TableUnavailable
-            | StatusCode::RegionBusy => true,
-
-            StatusCode::Success
-            | StatusCode::Internal
-            | StatusCode::Unknown
-            | StatusCode::Unsupported
-            | StatusCode::IllegalState
-            | StatusCode::Unexpected
-            | StatusCode::InvalidArguments
-            | StatusCode::Cancelled
-            | StatusCode::DeadlineExceeded
-            | StatusCode::InvalidSyntax
-            | StatusCode::DatabaseAlreadyExists
-            | StatusCode::PlanQuery
-            | StatusCode::EngineExecuteQuery
-            | StatusCode::TableAlreadyExists
-            | StatusCode::TableNotFound
-            | StatusCode::RegionAlreadyExists
-            | StatusCode::RegionNotFound
-            | StatusCode::FlowAlreadyExists
-            | StatusCode::FlowNotFound
-            | StatusCode::TriggerAlreadyExists
-            | StatusCode::TriggerNotFound
-            | StatusCode::RegionReadonly
-            | StatusCode::TableColumnNotFound
-            | StatusCode::TableColumnExists
-            | StatusCode::DatabaseNotFound
-            | StatusCode::RateLimited
-            | StatusCode::UserNotFound
-            | StatusCode::UnsupportedPasswordType
-            | StatusCode::UserPasswordMismatch
-            | StatusCode::AuthHeaderNotFound
-            | StatusCode::InvalidAuthHeader
-            | StatusCode::AccessDenied
-            | StatusCode::PermissionDenied
-            | StatusCode::RequestOutdated
-            | StatusCode::External
-            | StatusCode::Suspended => false,
-        }
-    }
-
     /// Returns `true` if we should print an error log for an error with
     /// this status code.
     pub fn should_log_error(&self) -> bool {
@@ -273,7 +225,7 @@ macro_rules! define_from_tonic_status {
                     .unwrap_or_else(|| e.message().to_string());
                 let retry_hint = metadata_value(&e, $crate::GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| $crate::ext::RetryHint::from_status_code(code));
+                    .unwrap_or($crate::ext::RetryHint::NonRetryable);
 
                 // TODO(LFC): Make the error variant defined automatically.
                 Self::$Variant {

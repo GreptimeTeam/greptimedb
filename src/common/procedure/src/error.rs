@@ -423,6 +423,6 @@ mod tests {
         assert!(!err.is_retry_later());
 
         let err = Error::from_error_ext(MockError::new(StatusCode::Internal));
-        assert!(err.is_retry_later());
+        assert!(!err.is_retry_later());
     }
 }

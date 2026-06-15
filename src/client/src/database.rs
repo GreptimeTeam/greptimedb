@@ -1012,7 +1012,7 @@ mod tests {
             code: StatusCode::Internal,
             msg: "blabla".to_string(),
             tonic_code: Code::Internal,
-            retry_hint: RetryHint::Retryable,
+            retry_hint: RetryHint::NonRetryable,
         }
         .build();
 
@@ -1020,8 +1020,8 @@ mod tests {
         let actual: Error = status.into();
 
         assert_eq!(expected.to_string(), actual.to_string());
-        assert_eq!(actual.retry_hint(), RetryHint::Retryable);
-        assert!(actual.should_retry());
+        assert_eq!(expected.retry_hint(), actual.retry_hint());
+        assert_eq!(expected.should_retry(), actual.should_retry());
     }
 
     #[test]
@@ -1065,7 +1065,6 @@ mod tests {
         let status = Status::new(Code::Unavailable, "blabla");
         let actual: Error = status.into();
 
-        assert_eq!(actual.retry_hint(), RetryHint::Retryable);
         assert!(actual.should_retry());
     }
 

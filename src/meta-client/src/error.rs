@@ -199,7 +199,7 @@ mod tests {
 
         let err: Error = status.into();
 
-        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 
     #[test]

@@ -35,17 +35,6 @@ impl RetryHint {
         matches!(self, RetryHint::Retryable)
     }
 
-    pub fn from_status_code(status_code: StatusCode) -> Self {
-        match status_code {
-            StatusCode::StorageUnavailable
-            | StatusCode::RuntimeResourcesExhausted
-            | StatusCode::RegionNotReady
-            | StatusCode::TableUnavailable
-            | StatusCode::RegionBusy => RetryHint::Retryable,
-            _ => RetryHint::NonRetryable,
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             RetryHint::Retryable => RETRY_HINT_RETRYABLE,
@@ -75,7 +64,7 @@ pub trait ErrorExt: StackError {
 
     /// Returns the retry hint for this error.
     fn retry_hint(&self) -> RetryHint {
-        RetryHint::from_status_code(self.status_code())
+        RetryHint::NonRetryable
     }
 
     /// Returns true if this error is retryable.
