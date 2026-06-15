@@ -36,10 +36,13 @@ impl RetryHint {
     }
 
     pub fn from_status_code(status_code: StatusCode) -> Self {
-        if status_code.is_retryable() {
-            RetryHint::Retryable
-        } else {
-            RetryHint::NonRetryable
+        match status_code {
+            StatusCode::StorageUnavailable
+            | StatusCode::RuntimeResourcesExhausted
+            | StatusCode::RegionNotReady
+            | StatusCode::TableUnavailable
+            | StatusCode::RegionBusy => RetryHint::Retryable,
+            _ => RetryHint::NonRetryable,
         }
     }
 

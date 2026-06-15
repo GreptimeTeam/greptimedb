@@ -14,11 +14,12 @@
 
 use std::any::Any;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::arrow::error::ArrowError;
 use datafusion::error::DataFusionError;
+use object_store::error::retry_hint_from_opendal_error;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -233,6 +234,19 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            BuildBackend { source, .. } | ParseFileFormat { source, .. } => source.retry_hint(),
+            CheckObject { error, .. }
+            | StoreRegionManifest { error, .. }
+            | LoadRegionManifest { error, .. }
+            | DeleteRegionManifest { error, .. } => retry_hint_from_opendal_error(error),
+            _ => RetryHint::NonRetryable,
+        }
     }
 }
 

@@ -1299,7 +1299,8 @@ impl ErrorExt for Error {
         match self {
             Error::RetryLater { .. }
             | Error::RetryLaterWithSource { .. }
-            | Error::MailboxTimeout { .. } => RetryHint::Retryable,
+            | Error::MailboxTimeout { .. }
+            | Error::NoEnoughAvailableNode { .. } => RetryHint::Retryable,
 
             Error::AllocateRegions { source, .. } | Error::DeallocateRegions { source, .. }
                 if source.retry_hint().is_retryable() =>
@@ -1322,7 +1323,7 @@ impl ErrorExt for Error {
             | Error::PushMessage { .. }
             | Error::ExceededDeadline { .. } => RetryHint::NonRetryable,
 
-            _ => RetryHint::from_status_code(self.status_code()),
+            _ => RetryHint::NonRetryable,
         }
     }
 }

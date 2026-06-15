@@ -181,7 +181,7 @@ impl ErrorExt for Error {
             | Error::CreateChannel { source, .. }
             | Error::CreateTlsChannel { source, .. } => source.retry_hint(),
             Error::ConvertSchema { source, .. } => source.retry_hint(),
-            _ => RetryHint::from_status_code(self.status_code()),
+            _ => RetryHint::NonRetryable,
         }
     }
 }

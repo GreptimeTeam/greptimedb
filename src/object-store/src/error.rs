@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use common_macro::stack_trace_debug;
-use common_telemetry::common_error::ext::ErrorExt;
+use common_telemetry::common_error::ext::{ErrorExt, RetryHint};
 use common_telemetry::common_error::status_code::StatusCode;
 use snafu::{Location, Snafu};
 
@@ -56,6 +56,15 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Converts an `opendal::Error` into a `RetryHint`.
+pub fn retry_hint_from_opendal_error(error: &opendal::Error) -> RetryHint {
+    if error.is_temporary() {
+        RetryHint::Retryable
+    } else {
+        RetryHint::NonRetryable
+    }
+}
+
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
@@ -68,5 +77,12 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::InitBackend { error, .. } => retry_hint_from_opendal_error(error),
+            _ => RetryHint::NonRetryable,
+        }
     }
 }

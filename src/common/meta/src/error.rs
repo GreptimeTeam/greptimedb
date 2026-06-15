@@ -19,6 +19,8 @@ use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_procedure::ProcedureId;
+use common_wal::options::WalOptions;
+use object_store::error::retry_hint_from_opendal_error;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -1272,7 +1274,12 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            RetryLater { .. } | GetLatestCacheRetryExceeded { .. } => RetryHint::Retryable,
+            RetryLater { .. } | GetLatestCacheRetryExceeded { .. } | NoLeader { .. } => {
+                RetryHint::Retryable
+            }
+            WriteObject { error, .. } | ReadObject { error, .. } => {
+                retry_hint_from_opendal_error(error)
+            }
             SubmitProcedure { source, .. }
             | QueryProcedure { source, .. }
             | WaitProcedure { source, .. }
@@ -1291,7 +1298,7 @@ impl ErrorExt for Error {
             ConvertAlterTableRequest { source, .. } => source.retry_hint(),
             ConvertColumnDef { source, .. } => source.retry_hint(),
             GetCache { source, .. } => source.retry_hint(),
-            _ => RetryHint::from_status_code(self.status_code()),
+            _ => RetryHint::NonRetryable,
         }
     }
 }

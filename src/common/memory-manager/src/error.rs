@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::time::Duration;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::Snafu;
@@ -59,5 +59,14 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::MemoryLimitExceeded { .. } | Error::MemoryAcquireTimeout { .. } => {
+                RetryHint::Retryable
+            }
+            _ => RetryHint::NonRetryable,
+        }
     }
 }

@@ -14,9 +14,10 @@
 
 use std::any::Any;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use object_store::error::retry_hint_from_opendal_error;
 use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
@@ -242,5 +243,15 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::StorageOperation { error, .. } | Error::BuildObjectStore { error, .. } => {
+                retry_hint_from_opendal_error(error)
+            }
+            Error::Database { error, .. } => error.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
     }
 }

@@ -538,7 +538,7 @@ impl ErrorExt for Error {
             BuildMetricEngine { source, .. } => source.retry_hint(),
             ListStorageSsts { source, .. } => source.retry_hint(),
             ObjectStore { source, .. } => source.retry_hint(),
-            _ => RetryHint::from_status_code(self.status_code()),
+            _ => RetryHint::NonRetryable,
         }
     }
 }

@@ -311,7 +311,7 @@ impl ErrorExt for Error {
             Error::RetryTimesExceeded { .. } | Error::RollbackTimesExceeded { .. } => {
                 RetryHint::NonRetryable
             }
-            _ => RetryHint::from_status_code(self.status_code()),
+            _ => RetryHint::NonRetryable,
         }
     }
 }

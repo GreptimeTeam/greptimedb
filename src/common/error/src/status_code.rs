@@ -139,12 +139,12 @@ impl StatusCode {
         match self {
             StatusCode::StorageUnavailable
             | StatusCode::RuntimeResourcesExhausted
-            | StatusCode::Internal
             | StatusCode::RegionNotReady
             | StatusCode::TableUnavailable
             | StatusCode::RegionBusy => true,
 
             StatusCode::Success
+            | StatusCode::Internal
             | StatusCode::Unknown
             | StatusCode::Unsupported
             | StatusCode::IllegalState

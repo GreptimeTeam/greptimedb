@@ -16,13 +16,14 @@ use std::any::Any;
 
 use common_datasource::file_format::Format;
 use common_error::define_into_tonic_status;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_query::error::Error as QueryResult;
 use datafusion::parquet;
 use datafusion_common::DataFusionError;
 use datatypes::arrow::error::ArrowError;
+use object_store::error::retry_hint_from_opendal_error;
 use snafu::{Location, Snafu};
 use table::metadata::TableType;
 
@@ -1061,6 +1062,67 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::ReadObject { error, .. } => retry_hint_from_opendal_error(error),
+            Error::ReadParquetMetadata { .. } => RetryHint::Retryable,
+            Error::InvalidateTableCache { source, .. }
+            | Error::ExecuteDdl { source, .. }
+            | Error::RequestInserts { source, .. }
+            | Error::RequestDeletes { source, .. }
+            | Error::RequestRegion { source, .. }
+            | Error::FindViewInfo { source, .. }
+            | Error::TableMetadataManager { source, .. } => source.retry_hint(),
+
+            Error::ParseFileFormat { source, .. }
+            | Error::InferSchema { source, .. }
+            | Error::ListObjects { source, .. }
+            | Error::ParseUrl { source, .. }
+            | Error::BuildBackend { source, .. }
+            | Error::ReadOrc { source, .. } => source.retry_hint(),
+
+            Error::ExtractTableNames { source, .. }
+            | Error::ExecuteStatement { source, .. }
+            | Error::PlanStatement { source, .. }
+            | Error::ParseQuery { source, .. }
+            | Error::ExecLogicalPlan { source, .. }
+            | Error::DescribeStatement { source, .. } => source.retry_hint(),
+
+            Error::FindTablePartitionRule { source, .. }
+            | Error::SplitInsert { source, .. }
+            | Error::SplitDelete { source, .. }
+            | Error::FindRegionLeader { source, .. } => source.retry_hint(),
+
+            Error::BuildCreateExprOnInsertion { source, .. }
+            | Error::FindNewColumnsOnInsertion { source, .. }
+            | Error::AlterExprToRequest { source, .. } => source.retry_hint(),
+
+            Error::ConvertColumnDefaultConstraint { source, .. }
+            | Error::IntoVectors { source, .. }
+            | Error::ColumnDefaultValue { source, .. } => source.retry_hint(),
+
+            Error::ColumnDataType { source, .. }
+            | Error::InvalidColumnDef { source, .. }
+            | Error::ColumnOptions { source, .. } => source.retry_hint(),
+
+            Error::Table { source, .. }
+            | Error::Insert { source, .. }
+            | Error::MissingTimeIndexColumn { source, .. } => source.retry_hint(),
+
+            Error::Cast { source, .. } => source.retry_hint(),
+            Error::ParseSql { source, .. } => source.retry_hint(),
+            Error::Catalog { source, .. } => source.retry_hint(),
+            Error::SubstraitCodec { source, .. } => source.retry_hint(),
+            Error::External { source, .. } => source.retry_hint(),
+            Error::BuildRecordBatch { source, .. } => source.retry_hint(),
+            Error::DecodeFlightData { source, .. } => source.retry_hint(),
+            Error::SqlCommon { source, .. } => source.retry_hint(),
+            #[cfg(feature = "enterprise")]
+            Error::TriggerQuerier { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
     }
 }
 

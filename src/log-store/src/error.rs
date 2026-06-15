@@ -14,10 +14,11 @@
 
 use std::any::Any;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
+use object_store::error::retry_hint_from_opendal_error;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -322,6 +323,13 @@ fn rskafka_client_error_to_status_code(error: &rskafka::client::error::Error) ->
     }
 }
 
+fn rskafka_client_error_to_retry_hint(error: &rskafka::client::error::Error) -> RetryHint {
+    match error {
+        rskafka::client::error::Error::Timeout => RetryHint::Retryable,
+        _ => RetryHint::NonRetryable,
+    }
+}
+
 impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
@@ -373,6 +381,33 @@ impl ErrorExt for Error {
             | BatchProduce { error, .. }
             | GetOffset { error, .. }
             | ConsumeRecord { error, .. } => rskafka_client_error_to_status_code(error),
+        }
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            CreateWriter { error, .. } | WriteIndex { error, .. } | ReadIndex { error, .. } => {
+                retry_hint_from_opendal_error(error)
+            }
+            Io { .. } | FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => {
+                RetryHint::Retryable
+            }
+            ProduceRecord { error, .. } => match error {
+                rskafka::client::producer::Error::Client(error) => {
+                    rskafka_client_error_to_retry_hint(error)
+                }
+                rskafka::client::producer::Error::Aggregator(_)
+                | rskafka::client::producer::Error::FlushError(_)
+                | rskafka::client::producer::Error::TooLarge => RetryHint::NonRetryable,
+            },
+            BuildClient { error, .. }
+            | BuildPartitionClient { error, .. }
+            | BatchProduce { error, .. }
+            | GetOffset { error, .. }
+            | ConsumeRecord { error, .. } => rskafka_client_error_to_retry_hint(error),
+            _ => RetryHint::NonRetryable,
         }
     }
 }

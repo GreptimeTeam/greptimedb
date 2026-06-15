@@ -15,10 +15,11 @@
 use std::any::Any;
 
 use arrow_schema::ArrowError;
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::parquet::errors::ParquetError;
+use object_store::error::retry_hint_from_opendal_error;
 use snafu::{Location, Snafu};
 use url::ParseError;
 
@@ -249,5 +250,18 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            BuildBackend { error, .. }
+            | ListObjects { error, .. }
+            | ReadObject { error, .. }
+            | WriteObject { error, .. } => retry_hint_from_opendal_error(error),
+            AsyncWrite { .. } | WriteParquet { .. } => RetryHint::Retryable,
+            _ => RetryHint::NonRetryable,
+        }
     }
 }
