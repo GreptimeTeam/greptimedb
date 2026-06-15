@@ -21,6 +21,7 @@ use crate::data::export_v2::data::{CopyOptions, build_copy_target, execute_copy_
 use crate::data::export_v2::error::{Error, Result};
 use crate::data::export_v2::manifest::{ChunkStatus, DataFormat, Manifest, TimeRange};
 use crate::data::path::data_dir_for_schema_chunk;
+use crate::data::progress::{ProgressPhase, ProgressReporter};
 use crate::data::snapshot_storage::{SnapshotStorage, StorageScheme};
 use crate::database::DatabaseClient;
 
@@ -40,14 +41,19 @@ struct ExportContext<'a> {
     parallelism: usize,
 }
 
+pub struct ExportDataOptions<'a> {
+    pub snapshot_uri: &'a str,
+    pub storage_config: &'a ObjectStoreConfig,
+    pub parallelism: usize,
+    pub chunk_parallelism: usize,
+}
+
 pub async fn export_data(
     storage: &dyn SnapshotStorage,
     database_client: &DatabaseClient,
-    snapshot_uri: &str,
-    storage_config: &ObjectStoreConfig,
     manifest: &mut Manifest,
-    parallelism: usize,
-    chunk_parallelism: usize,
+    options: ExportDataOptions<'_>,
+    progress: &dyn ProgressReporter,
 ) -> Result<()> {
     if manifest.chunks.is_empty() {
         return Ok(());
@@ -56,19 +62,43 @@ pub async fn export_data(
     let context = ExportContext {
         storage,
         database_client,
-        snapshot_uri,
-        storage_config,
+        snapshot_uri: options.snapshot_uri,
+        storage_config: options.storage_config,
         catalog: manifest.catalog.clone(),
         schemas: manifest.schemas.clone(),
         format: manifest.format,
-        parallelism,
+        parallelism: options.parallelism,
     };
 
-    if chunk_parallelism <= 1 {
-        export_data_serial(&context, storage, manifest).await
-    } else {
-        export_data_concurrent(&context, storage, manifest, chunk_parallelism).await
+    // One progress unit per chunk. Already completed/skipped chunks from a
+    // previous run count up front so the reported total matches the chunk plan
+    // regardless of resume position; each chunk finalized in this run (completed,
+    // skipped, or failed) then increments exactly once.
+    let progress_phase = ProgressPhase::start(
+        progress,
+        "Export data chunks",
+        Some(manifest.chunks.len() as u64),
+    );
+    let already_done = (manifest.completed_count() + manifest.skipped_count()) as u64;
+    if already_done > 0 {
+        progress.inc(already_done);
     }
+
+    let result = if options.chunk_parallelism <= 1 {
+        export_data_serial(&context, storage, manifest, progress).await
+    } else {
+        export_data_concurrent(
+            &context,
+            storage,
+            manifest,
+            options.chunk_parallelism,
+            progress,
+        )
+        .await
+    };
+
+    progress_phase.finish();
+    result
 }
 
 /// Exports chunks one at a time, preserving the original serial behavior.
@@ -76,6 +106,7 @@ async fn export_data_serial(
     context: &ExportContext<'_>,
     storage: &dyn SnapshotStorage,
     manifest: &mut Manifest,
+    progress: &dyn ProgressReporter,
 ) -> Result<()> {
     for idx in 0..manifest.chunks.len() {
         if matches!(
@@ -104,6 +135,8 @@ async fn export_data_serial(
 
         manifest.touch();
         storage.write_manifest(manifest).await?;
+        // The chunk is finalized (completed, skipped, or failed) and persisted.
+        progress.inc(1);
 
         result?;
     }
@@ -127,6 +160,7 @@ async fn export_data_concurrent(
     storage: &dyn SnapshotStorage,
     manifest: &mut Manifest,
     chunk_parallelism: usize,
+    progress: &dyn ProgressReporter,
 ) -> Result<()> {
     let mut pending = FuturesUnordered::new();
     let mut next_idx = 0;
@@ -171,6 +205,8 @@ async fn export_data_concurrent(
         }
         manifest.touch();
         storage.write_manifest(manifest).await?;
+        // The chunk is finalized (completed, skipped, or failed) and persisted.
+        progress.inc(1);
     }
 
     match first_error {

@@ -27,7 +27,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
-use crate::data::export_v2::coordinator::export_data;
+use crate::data::export_v2::coordinator::{ExportDataOptions, export_data};
 use crate::data::export_v2::error::{
     ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu, EmptyResultSnafu, IoSnafu,
     ManifestVersionMismatchSnafu, Result, ResumeConfigMismatchSnafu, SchemaOnlyArgsNotAllowedSnafu,
@@ -39,6 +39,7 @@ use crate::data::export_v2::manifest::{
 };
 use crate::data::export_v2::schema::{DDL_DIR, SCHEMA_DIR, SCHEMAS_FILE};
 use crate::data::path::{data_dir_for_schema_chunk, ddl_path_for_schema};
+use crate::data::progress::{ProgressMode, build_progress_reporter};
 use crate::data::snapshot_storage::{
     OpenDalStorage, SnapshotStorage, validate_snapshot_uri, validate_uri,
 };
@@ -321,6 +322,10 @@ pub struct ExportCreateCommand {
     #[clap(long)]
     no_proxy: bool,
 
+    /// Progress reporting mode.
+    #[clap(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
+
     /// Object store configuration for remote storage backends.
     #[clap(flatten)]
     storage: ObjectStoreConfig,
@@ -399,6 +404,7 @@ impl ExportCreateCommand {
                 chunk_time_window: self.chunk_time_window,
                 parallelism: self.parallelism,
                 chunk_parallelism: self.chunk_parallelism,
+                progress: self.progress,
                 snapshot_uri: self.to.clone(),
                 storage_config: self.storage.clone(),
             },
@@ -425,6 +431,7 @@ struct ExportConfig {
     chunk_time_window: Option<Duration>,
     parallelism: usize,
     chunk_parallelism: usize,
+    progress: ProgressMode,
     snapshot_uri: String,
     storage_config: ObjectStoreConfig,
 }
@@ -487,14 +494,18 @@ impl ExportCreate {
                     return Ok(());
                 }
 
+                let progress = build_progress_reporter(self.config.progress);
                 export_data(
                     self.storage.as_ref(),
                     &self.database_client,
-                    &self.config.snapshot_uri,
-                    &self.config.storage_config,
                     &mut manifest,
-                    self.config.parallelism,
-                    self.config.chunk_parallelism,
+                    ExportDataOptions {
+                        snapshot_uri: &self.config.snapshot_uri,
+                        storage_config: &self.config.storage_config,
+                        parallelism: self.config.parallelism,
+                        chunk_parallelism: self.config.chunk_parallelism,
+                    },
+                    progress.as_ref(),
                 )
                 .await?;
                 return Ok(());
@@ -545,14 +556,18 @@ impl ExportCreate {
         info!("Snapshot created: {}", manifest.snapshot_id);
 
         if !self.config.schema_only {
+            let progress = build_progress_reporter(self.config.progress);
             export_data(
                 self.storage.as_ref(),
                 &self.database_client,
-                &self.config.snapshot_uri,
-                &self.config.storage_config,
                 &mut manifest,
-                self.config.parallelism,
-                self.config.chunk_parallelism,
+                ExportDataOptions {
+                    snapshot_uri: &self.config.snapshot_uri,
+                    storage_config: &self.config.storage_config,
+                    parallelism: self.config.parallelism,
+                    chunk_parallelism: self.config.chunk_parallelism,
+                },
+                progress.as_ref(),
             )
             .await?;
         }
@@ -1608,6 +1623,56 @@ mod tests {
     }
 
     #[test]
+    fn test_progress_mode_defaults_to_auto() {
+        let cmd = ExportCreateCommand::parse_from([
+            "export-v2-create",
+            "--addr",
+            "127.0.0.1:4000",
+            "--to",
+            "file:///tmp/export-v2-test",
+        ]);
+
+        assert_eq!(ProgressMode::Auto, cmd.progress);
+    }
+
+    #[test]
+    fn test_progress_mode_parses_explicit_values() {
+        for (value, expected) in [
+            ("auto", ProgressMode::Auto),
+            ("always", ProgressMode::Always),
+            ("never", ProgressMode::Never),
+        ] {
+            let cmd = ExportCreateCommand::parse_from([
+                "export-v2-create",
+                "--addr",
+                "127.0.0.1:4000",
+                "--to",
+                "file:///tmp/export-v2-test",
+                "--progress",
+                value,
+            ]);
+
+            assert_eq!(expected, cmd.progress);
+        }
+    }
+
+    #[test]
+    fn test_progress_mode_rejects_unknown_value() {
+        assert!(
+            ExportCreateCommand::try_parse_from([
+                "export-v2-create",
+                "--addr",
+                "127.0.0.1:4000",
+                "--to",
+                "file:///tmp/export-v2-test",
+                "--progress",
+                "bogus",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn test_chunk_parallelism_parses_valid_value() {
         let cmd = ExportCreateCommand::parse_from([
             "export-v2-create",
@@ -1684,6 +1749,7 @@ mod tests {
             chunk_time_window: None,
             parallelism: 1,
             chunk_parallelism: 1,
+            progress: ProgressMode::Auto,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1720,6 +1786,7 @@ mod tests {
             chunk_time_window: None,
             parallelism: 1,
             chunk_parallelism: 1,
+            progress: ProgressMode::Auto,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1751,6 +1818,7 @@ mod tests {
             chunk_time_window: Some(Duration::from_secs(3600)),
             parallelism: 1,
             chunk_parallelism: 1,
+            progress: ProgressMode::Auto,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1783,6 +1851,7 @@ mod tests {
             chunk_time_window: None,
             parallelism: 1,
             chunk_parallelism: 1,
+            progress: ProgressMode::Auto,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1817,6 +1886,7 @@ mod tests {
             chunk_time_window: None,
             parallelism: 1,
             chunk_parallelism: 1,
+            progress: ProgressMode::Auto,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
