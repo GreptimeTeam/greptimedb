@@ -34,7 +34,7 @@ groups:
           description: Total query API call rate across MySQL, PostgreSQL, and PromQL frontends.
           unit: reqps
           queries:
-            - expr: sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_http_sql_elapsed_count[$__rate_interval])) + sum(rate(greptime_frontend_grpc_handle_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -44,7 +44,7 @@ groups:
           description: Server protocol errors returned by frontends. Sustained non-zero values indicate user-visible failures.
           unit: eps
           queries:
-            - expr: sum(rate(greptime_servers_error{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_error[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -139,7 +139,7 @@ groups:
           description: Total ingestion throughput trend across frontends. Protocol breakdown is in the Ingestion row.
           unit: rowsps
           queries:
-            - expr: sum(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))
+            - expr: sum(rate(greptime_table_operator_ingest_rows[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -149,7 +149,7 @@ groups:
           description: Total query API call rate trend across frontend protocols. Protocol breakdown is in the Queries row.
           unit: reqps
           queries:
-            - expr: sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_http_sql_elapsed_count[$__rate_interval])) + sum(rate(greptime_frontend_grpc_handle_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -174,12 +174,12 @@ groups:
           description: Tail and average latency for gRPC requests served by frontends.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_grpc_requests_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_grpc_requests_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: grpc-p99
-            - expr: sum(rate(greptime_servers_grpc_requests_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_grpc_requests_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_grpc_requests_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_grpc_requests_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -198,7 +198,7 @@ groups:
             - Log ingestion http API
           unit: rowsps
           queries:
-            - expr: sum(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))
+            - expr: sum(rate(greptime_table_operator_ingest_rows[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -208,42 +208,42 @@ groups:
           description: Rows, samples, or documents ingested by primary observability and table-ingestion protocols.
           unit: rowsps
           queries:
-            - expr: sum(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))
+            - expr: sum(rate(greptime_table_operator_ingest_rows[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: table-operator
-            - expr: sum(rate(greptime_servers_prometheus_remote_write_samples{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_prometheus_remote_write_samples[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: prometheus-remote-write
-            - expr: sum(rate(greptime_servers_http_logs_ingestion_counter{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_http_logs_ingestion_counter[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: http-logs
-            - expr: sum(rate(greptime_servers_loki_logs_ingestion_counter{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_loki_logs_ingestion_counter[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: loki-logs
-            - expr: sum(rate(greptime_servers_elasticsearch_logs_docs_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_elasticsearch_logs_docs_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: elasticsearch-docs
-            - expr: sum(rate(greptime_frontend_otlp_metrics_rows{}[$__rate_interval]))
+            - expr: sum(rate(greptime_frontend_otlp_metrics_rows[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: otlp-metrics
-            - expr: sum(rate(greptime_frontend_otlp_logs_rows{}[$__rate_interval]))
+            - expr: sum(rate(greptime_frontend_otlp_logs_rows[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: otlp-logs
-            - expr: sum(rate(greptime_frontend_otlp_traces_rows{}[$__rate_interval]))
+            - expr: sum(rate(greptime_frontend_otlp_traces_rows[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -253,72 +253,72 @@ groups:
           description: p99 and average HTTP ingestion latency for Prometheus remote write, logs, Loki, Elasticsearch, and OTLP endpoints.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_prometheus_write_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_prometheus_write_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: prometheus-write
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_logs_ingestion_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_logs_ingestion_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: http-logs
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_loki_logs_ingestion_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_loki_logs_ingestion_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: loki-logs
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: elasticsearch
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_metrics_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_metrics_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: otlp-metrics
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_logs_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_logs_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: otlp-logs
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_traces_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_traces_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: otlp-traces
-            - expr: sum(rate(greptime_servers_http_prometheus_write_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_prometheus_write_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_http_prometheus_write_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_prometheus_write_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: prom-write-avg
-            - expr: sum(rate(greptime_servers_http_logs_ingestion_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_logs_ingestion_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_http_logs_ingestion_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_logs_ingestion_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: http-logs-avg
-            - expr: sum(rate(greptime_servers_loki_logs_ingestion_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_loki_logs_ingestion_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_loki_logs_ingestion_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_loki_logs_ingestion_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: loki-logs-avg
-            - expr: sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: elasticsearch-avg
-            - expr: sum(rate(greptime_servers_http_otlp_metrics_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_metrics_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_http_otlp_metrics_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_metrics_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: otlp-metrics-avg
-            - expr: sum(rate(greptime_servers_http_otlp_logs_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_logs_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_http_otlp_logs_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_logs_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: otlp-logs-avg
-            - expr: sum(rate(greptime_servers_http_otlp_traces_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_traces_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_http_otlp_traces_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_traces_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -326,14 +326,14 @@ groups:
         - title: Bulk Insert Message Rows and Size
           type: timeseries
           description: Bulk-insert message row and byte rates. Spikes here can explain frontend bulk-insert latency.
-          unit: short
+          unit: rowsps
           queries:
-            - expr: sum(rate(greptime_table_operator_bulk_insert_message_rows_sum{}[$__rate_interval]))
+            - expr: sum(rate(greptime_table_operator_bulk_insert_message_rows_sum[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: rows
-            - expr: sum(rate(greptime_table_operator_bulk_insert_message_size_sum{}[$__rate_interval]))
+            - expr: sum(rate(greptime_table_operator_bulk_insert_message_size_sum[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -343,17 +343,17 @@ groups:
           description: Remote-write pending-row flush operations, flushed rows, and p99 flush latency.
           unit: short
           queries:
-            - expr: sum(rate(greptime_prom_store_flush_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_prom_store_flush_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: flush-ops
-            - expr: sum(rate(greptime_prom_store_flush_rows_sum{}[$__rate_interval]))
+            - expr: sum(rate(greptime_prom_store_flush_rows_sum[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: flush-rows
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_prom_store_flush_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_prom_store_flush_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -363,7 +363,7 @@ groups:
           description: OTLP trace ingestion failures reported by frontends.
           unit: eps
           queries:
-            - expr: sum(rate(greptime_frontend_otlp_traces_failure_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_frontend_otlp_traces_failure_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -375,12 +375,12 @@ groups:
           description: User-facing and protocol-level error rates. Use labels to identify whether failures are server, auth, HTTP, or gRPC related.
           unit: eps
           queries:
-            - expr: sum by (protocol) (rate(greptime_servers_error{}[$__rate_interval]))
+            - expr: sum by (protocol) (rate(greptime_servers_error[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: server-{{protocol}}
-            - expr: sum by (code) (rate(greptime_servers_auth_failure_count{}[$__rate_interval]))
+            - expr: sum by (code) (rate(greptime_servers_auth_failure_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -400,7 +400,7 @@ groups:
           description: Request and query memory rejections. Non-zero values indicate requests are being rejected before or during execution.
           unit: rps
           queries:
-            - expr: sum(rate(greptime_servers_request_memory_rejected_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_request_memory_rejected_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -415,12 +415,12 @@ groups:
           description: Region request failures and failed inserts on datanodes. These indicate backend write-path errors after routing.
           unit: eps
           queries:
-            - expr: sum by (instance, pod) (rate(greptime_datanode_region_request_fail_count{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_datanode_region_request_fail_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: region-request-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (rate(greptime_datanode_region_failed_insert_count{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_datanode_region_failed_insert_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -430,12 +430,12 @@ groups:
           description: Pending-row flush failures and dropped rows. Sustained non-zero dropped rows are a data-loss signal.
           unit: eps
           queries:
-            - expr: sum(rate(greptime_pending_rows_flush_failures{}[$__rate_interval]))
+            - expr: sum(rate(greptime_pending_rows_flush_failures[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: flush-failures
-            - expr: sum(rate(greptime_pending_rows_flush_dropped_rows{}[$__rate_interval]))
+            - expr: sum(rate(greptime_pending_rows_flush_dropped_rows[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -445,22 +445,22 @@ groups:
           description: Storage-engine write rejects, write stalls, flush failures, and compaction failures on datanodes.
           unit: eps
           queries:
-            - expr: sum(rate(greptime_mito_write_reject_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_write_reject_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: write-reject
-            - expr: sum(rate(greptime_mito_write_stall_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_write_stall_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: write-stall
-            - expr: sum(rate(greptime_mito_flush_failure_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_flush_failure_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: flush-failure
-            - expr: sum(rate(greptime_mito_compaction_failure_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_compaction_failure_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -470,17 +470,17 @@ groups:
           description: Datanode scan and compaction memory rejection/exhaustion counters.
           unit: rps
           queries:
-            - expr: sum(rate(greptime_mito_scan_requests_rejected_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_scan_requests_rejected_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: scan-rejected
-            - expr: sum(rate(greptime_mito_scan_memory_exhausted_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_scan_memory_exhausted_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: scan-exhausted
-            - expr: sum(rate(greptime_mito_compaction_memory_rejected_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_compaction_memory_rejected_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -540,17 +540,17 @@ groups:
           description: Mito garbage-collection errors and skipped/orphaned files on datanodes.
           unit: short
           queries:
-            - expr: sum(rate(greptime_mito_gc_errors_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_gc_errors_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: gc-errors
-            - expr: sum(rate(greptime_mito_gc_orphaned_index_files{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_gc_orphaned_index_files[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: orphaned-index-files
-            - expr: sum(rate(greptime_mito_gc_skipped_unparsable_files{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_gc_skipped_unparsable_files[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -577,7 +577,7 @@ groups:
           description: Frontend request memory usage divided by configured request memory limit.
           unit: percentunit
           queries:
-            - expr: sum by (instance, pod) (greptime_servers_request_memory_in_use_bytes{}) / sum by (instance, pod) (greptime_servers_request_memory_limit_bytes{})
+            - expr: sum by (instance, pod) (greptime_servers_request_memory_in_use_bytes) / sum by (instance, pod) (greptime_servers_request_memory_limit_bytes)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -597,17 +597,17 @@ groups:
           description: Datanode scan memory usage and compaction memory utilization.
           unit: bytes
           queries:
-            - expr: sum by (instance, pod) (greptime_mito_scan_memory_usage_bytes{})
+            - expr: sum by (instance, pod) (greptime_mito_scan_memory_usage_bytes)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: scan-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (greptime_mito_compaction_memory_in_use_bytes{})
+            - expr: sum by (instance, pod) (greptime_mito_compaction_memory_in_use_bytes)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: compaction-used-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (greptime_mito_compaction_memory_limit_bytes{})
+            - expr: sum by (instance, pod) (greptime_mito_compaction_memory_limit_bytes)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -617,12 +617,12 @@ groups:
           description: Mito write buffer bytes and active write-stalling gauges. Growth here indicates write-path backpressure.
           unit: bytes
           queries:
-            - expr: sum by (instance, pod) (greptime_mito_write_buffer_bytes{})
+            - expr: sum by (instance, pod) (greptime_mito_write_buffer_bytes)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: buffer-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (greptime_mito_write_stalling_count{})
+            - expr: sum by (instance, pod) (greptime_mito_write_stalling_count)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -632,17 +632,17 @@ groups:
           description: Prometheus remote-write pending rows, batches, and workers. Rising pending rows indicate remote-write buffering backlog.
           unit: short
           queries:
-            - expr: sum by (instance, pod) (greptime_prom_store_pending_rows{})
+            - expr: sum by (instance, pod) (greptime_prom_store_pending_rows)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: rows-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (greptime_prom_store_pending_batches{})
+            - expr: sum by (instance, pod) (greptime_prom_store_pending_batches)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: batches-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (greptime_prom_store_pending_workers{})
+            - expr: sum by (instance, pod) (greptime_prom_store_pending_workers)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -652,12 +652,12 @@ groups:
           description: Current in-flight flush and compaction tasks on datanodes.
           unit: short
           queries:
-            - expr: sum by (instance, pod) (greptime_mito_inflight_flush_count{})
+            - expr: sum by (instance, pod) (greptime_mito_inflight_flush_count)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: flush-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (greptime_mito_inflight_compaction_count{})
+            - expr: sum by (instance, pod) (greptime_mito_inflight_compaction_count)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -669,12 +669,12 @@ groups:
           description: Current cpu usage by instance
           unit: none
           queries:
-            - expr: sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)
+            - expr: sum(rate(process_cpu_seconds_total[$__rate_interval]) * 1000) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]-cpu'
-            - expr: max(greptime_cpu_limit_in_millicores{})
+            - expr: max(greptime_cpu_limit_in_millicores)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -684,12 +684,12 @@ groups:
           description: Current cpu usage by instance
           unit: none
           queries:
-            - expr: sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)
+            - expr: sum(rate(process_cpu_seconds_total[$__rate_interval]) * 1000) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
-            - expr: max(greptime_cpu_limit_in_millicores{})
+            - expr: max(greptime_cpu_limit_in_millicores)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -699,12 +699,12 @@ groups:
           description: Current cpu usage by instance
           unit: none
           queries:
-            - expr: sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)
+            - expr: sum(rate(process_cpu_seconds_total[$__rate_interval]) * 1000) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
-            - expr: max(greptime_cpu_limit_in_millicores{})
+            - expr: max(greptime_cpu_limit_in_millicores)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -714,12 +714,12 @@ groups:
           description: Current memory usage by instance
           unit: bytes
           queries:
-            - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
+            - expr: sum(process_resident_memory_bytes) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
-            - expr: max(greptime_memory_limit_in_bytes{})
+            - expr: max(greptime_memory_limit_in_bytes)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -729,12 +729,12 @@ groups:
           description: Current memory usage by instance
           unit: bytes
           queries:
-            - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
+            - expr: sum(process_resident_memory_bytes) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{ pod }}]'
-            - expr: max(greptime_memory_limit_in_bytes{})
+            - expr: max(greptime_memory_limit_in_bytes)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -744,12 +744,12 @@ groups:
           description: Current memory usage by instance
           unit: bytes
           queries:
-            - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
+            - expr: sum(process_resident_memory_bytes) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]-resident'
-            - expr: max(greptime_memory_limit_in_bytes{})
+            - expr: max(greptime_memory_limit_in_bytes)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -759,12 +759,12 @@ groups:
           description: Current cpu usage by instance
           unit: none
           queries:
-            - expr: sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)
+            - expr: sum(rate(process_cpu_seconds_total[$__rate_interval]) * 1000) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
-            - expr: max(greptime_cpu_limit_in_millicores{})
+            - expr: max(greptime_cpu_limit_in_millicores)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -774,12 +774,12 @@ groups:
           description: Current memory usage by instance
           unit: bytes
           queries:
-            - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
+            - expr: sum(process_resident_memory_bytes) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
-            - expr: max(greptime_memory_limit_in_bytes{})
+            - expr: max(greptime_memory_limit_in_bytes)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -791,27 +791,27 @@ groups:
           description: Query API call rates by protocol, collected from frontends.
           unit: reqps
           queries:
-            - expr: sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: mysql
-            - expr: sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: postgres
-            - expr: sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_http_promql_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: promql
-            - expr: sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_http_sql_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: http-sql
-            - expr: sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_frontend_grpc_handle_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -821,52 +821,52 @@ groups:
           description: p95, p99, and average query latency by main frontend protocol.
           unit: s
           queries:
-            - expr: histogram_quantile(0.95, sum by (le) (rate(greptime_servers_mysql_query_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.95, sum by (le) (rate(greptime_servers_mysql_query_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: mysql-p95
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_mysql_query_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_mysql_query_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: mysql-p99
-            - expr: histogram_quantile(0.95, sum by (le) (rate(greptime_servers_postgres_query_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.95, sum by (le) (rate(greptime_servers_postgres_query_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: postgres-p95
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_postgres_query_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_postgres_query_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: postgres-p99
-            - expr: histogram_quantile(0.95, sum by (le) (rate(greptime_servers_http_promql_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.95, sum by (le) (rate(greptime_servers_http_promql_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: promql-p95
-            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_promql_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_promql_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: promql-p99
-            - expr: sum(rate(greptime_servers_mysql_query_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_mysql_query_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: mysql-avg
-            - expr: sum(rate(greptime_servers_postgres_query_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_postgres_query_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: postgres-avg
-            - expr: sum(rate(greptime_servers_http_promql_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_servers_http_promql_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_promql_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: promql-avg
-            - expr: sum(rate(greptime_frontend_grpc_handle_query_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_frontend_grpc_handle_query_elapsed_sum[$__rate_interval])) / sum(rate(greptime_frontend_grpc_handle_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -926,22 +926,22 @@ groups:
           description: MySQL/PostgreSQL connection and prepared-statement counts. Spikes can indicate client storms or leaks.
           unit: short
           queries:
-            - expr: sum by (instance, pod) (greptime_servers_mysql_connection_count{})
+            - expr: sum by (instance, pod) (greptime_servers_mysql_connection_count)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: mysql-connections-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (greptime_servers_postgres_connection_count{})
+            - expr: sum by (instance, pod) (greptime_servers_postgres_connection_count)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: postgres-connections-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (rate(greptime_servers_mysql_prepared_count{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_servers_mysql_prepared_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: mysql-prepared-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (rate(greptime_servers_postgres_prepared_count{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_servers_postgres_prepared_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -978,7 +978,7 @@ groups:
           description: gRPC QPS per Instance.
           unit: reqps
           queries:
-            - expr: sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -988,12 +988,12 @@ groups:
           description: gRPC P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, path, code) (rate(greptime_servers_grpc_requests_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, path, code) (rate(greptime_servers_grpc_requests_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{path}}]-[{{method}}]-[{{code}}]-p99'
-            - expr: sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_sum{}[$__rate_interval])) / sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_sum[$__rate_interval])) / sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1003,7 +1003,7 @@ groups:
           description: MySQL QPS per Instance.
           unit: reqps
           queries:
-            - expr: sum by(pod, instance)(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(pod, instance)(rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1013,12 +1013,12 @@ groups:
           description: MySQL P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(pod, instance, le) (rate(greptime_servers_mysql_query_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(pod, instance, le) (rate(greptime_servers_mysql_query_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]-p99'
-            - expr: sum by(pod, instance) (rate(greptime_servers_mysql_query_elapsed_sum{}[$__rate_interval])) / sum by(pod, instance) (rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(pod, instance) (rate(greptime_servers_mysql_query_elapsed_sum[$__rate_interval])) / sum by(pod, instance) (rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1028,7 +1028,7 @@ groups:
           description: PostgreSQL QPS per Instance.
           unit: reqps
           queries:
-            - expr: sum by(pod, instance)(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(pod, instance)(rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1038,12 +1038,12 @@ groups:
           description: PostgreSQL P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(pod,instance,le) (rate(greptime_servers_postgres_query_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(pod,instance,le) (rate(greptime_servers_postgres_query_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-p99'
-            - expr: sum by(pod, instance) (rate(greptime_servers_postgres_query_elapsed_sum{}[$__rate_interval])) / sum by(pod, instance) (rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(pod, instance) (rate(greptime_servers_postgres_query_elapsed_sum[$__rate_interval])) / sum by(pod, instance) (rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1055,7 +1055,7 @@ groups:
           description: Region Call QPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1065,12 +1065,12 @@ groups:
           description: Region Call P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, request_type) (rate(greptime_grpc_region_request_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, request_type) (rate(greptime_grpc_region_request_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{request_type}}]'
-            - expr: sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_sum{}[$__rate_interval])) / sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_sum[$__rate_interval])) / sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1097,12 +1097,12 @@ groups:
           description: Datanode region request failures and failed inserts by instance.
           unit: eps
           queries:
-            - expr: sum by (instance, pod) (rate(greptime_datanode_region_request_fail_count{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_datanode_region_request_fail_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: request-fail-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (rate(greptime_datanode_region_failed_insert_count{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_datanode_region_failed_insert_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1112,17 +1112,17 @@ groups:
           description: Mito write rejects, write stall events, and active write stalling by datanode.
           unit: short
           queries:
-            - expr: sum by (instance, pod) (rate(greptime_mito_write_reject_total{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_mito_write_reject_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: reject-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (rate(greptime_mito_write_stall_total{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_mito_write_stall_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: stall-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (greptime_mito_write_stalling_count{})
+            - expr: sum by (instance, pod) (greptime_mito_write_stalling_count)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1132,12 +1132,12 @@ groups:
           description: Mito flush and compaction failure rates by datanode.
           unit: eps
           queries:
-            - expr: sum by (instance, pod) (rate(greptime_mito_flush_failure_total{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_mito_flush_failure_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: flush-[{{instance}}]-[{{pod}}]
-            - expr: sum by (instance, pod) (rate(greptime_mito_compaction_failure_total{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_mito_compaction_failure_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1147,27 +1147,27 @@ groups:
           description: Mito garbage-collection runs, errors, deleted files, orphaned index files, and skipped unparsable files.
           unit: short
           queries:
-            - expr: sum(rate(greptime_mito_gc_runs_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_gc_runs_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: runs
-            - expr: sum(rate(greptime_mito_gc_errors_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_gc_errors_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: errors
-            - expr: sum(rate(greptime_mito_gc_files_deleted_total{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_gc_files_deleted_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: files-deleted
-            - expr: sum(rate(greptime_mito_gc_orphaned_index_files{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_gc_orphaned_index_files[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: orphaned-index-files
-            - expr: sum(rate(greptime_mito_gc_skipped_unparsable_files{}[$__rate_interval]))
+            - expr: sum(rate(greptime_mito_gc_skipped_unparsable_files[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1177,12 +1177,12 @@ groups:
           description: P99 and average Mito garbage-collection duration by stage.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by (le, stage) (rate(greptime_mito_gc_duration_seconds_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (le, stage) (rate(greptime_mito_gc_duration_seconds_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '{{stage}}-p99'
-            - expr: sum by (stage) (rate(greptime_mito_gc_duration_seconds_sum{}[$__rate_interval])) / sum by (stage) (rate(greptime_mito_gc_duration_seconds_count{}[$__rate_interval]))
+            - expr: sum by (stage) (rate(greptime_mito_gc_duration_seconds_sum[$__rate_interval])) / sum by (stage) (rate(greptime_mito_gc_duration_seconds_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1194,7 +1194,7 @@ groups:
           description: Request QPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1204,12 +1204,12 @@ groups:
           description: Request P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, type) (rate(greptime_mito_handle_request_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, type) (rate(greptime_mito_handle_request_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]'
-            - expr: sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_sum{}[$__rate_interval])) / sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_sum[$__rate_interval])) / sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1219,17 +1219,17 @@ groups:
           description: Time Mito requests spend waiting before region worker handling. Use this with request service latency to distinguish queueing from execution time.
           unit: s
           queries:
-            - expr: histogram_quantile(0.95, sum by(instance, pod, worker, le) (rate(greptime_mito_request_wait_time_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.95, sum by(instance, pod, worker, le) (rate(greptime_mito_request_wait_time_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{worker}}]-p95'
-            - expr: histogram_quantile(0.99, sum by(instance, pod, worker, le) (rate(greptime_mito_request_wait_time_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, worker, le) (rate(greptime_mito_request_wait_time_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{worker}}]-p99'
-            - expr: sum by(instance, pod, worker) (rate(greptime_mito_request_wait_time_sum{}[$__rate_interval])) / sum by(instance, pod, worker) (rate(greptime_mito_request_wait_time_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, worker) (rate(greptime_mito_request_wait_time_sum[$__rate_interval])) / sum by(instance, pod, worker) (rate(greptime_mito_request_wait_time_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1239,7 +1239,7 @@ groups:
           description: Write Buffer per Instance.
           unit: decbytes
           queries:
-            - expr: greptime_mito_write_buffer_bytes{}
+            - expr: greptime_mito_write_buffer_bytes
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1249,7 +1249,7 @@ groups:
           description: Ingestion size by row counts.
           unit: rowsps
           queries:
-            - expr: sum by (instance, pod) (rate(greptime_mito_write_rows_total{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_mito_write_rows_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1269,12 +1269,12 @@ groups:
           description: Read Stage P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]'
-            - expr: sum by(instance, pod, stage) (rate(greptime_mito_read_stage_elapsed_sum{}[$__rate_interval])) / sum by(instance, pod, stage) (rate(greptime_mito_read_stage_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, stage) (rate(greptime_mito_read_stage_elapsed_sum[$__rate_interval])) / sum by(instance, pod, stage) (rate(greptime_mito_read_stage_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1284,12 +1284,12 @@ groups:
           description: Write Stage P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_write_stage_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_write_stage_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]'
-            - expr: sum by(instance, pod, stage) (rate(greptime_mito_write_stage_elapsed_sum{}[$__rate_interval])) / sum by(instance, pod, stage) (rate(greptime_mito_write_stage_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, stage) (rate(greptime_mito_write_stage_elapsed_sum[$__rate_interval])) / sum by(instance, pod, stage) (rate(greptime_mito_write_stage_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1299,7 +1299,7 @@ groups:
           description: Cached Bytes per Instance.
           unit: decbytes
           queries:
-            - expr: greptime_mito_cache_bytes{}
+            - expr: greptime_mito_cache_bytes
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1353,7 +1353,7 @@ groups:
           type: timeseries
           description: The local cache miss of the datanode.
           queries:
-            - expr: sum by (instance,pod, type) (rate(greptime_mito_cache_miss{}[$__rate_interval]))
+            - expr: sum by (instance,pod, type) (rate(greptime_mito_cache_miss[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1365,7 +1365,7 @@ groups:
           description: Flush QPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod, reason) (rate(greptime_mito_flush_requests_total{}[$__rate_interval]))
+            - expr: sum by(instance, pod, reason) (rate(greptime_mito_flush_requests_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1375,17 +1375,17 @@ groups:
           description: Mito flush p95 and p99 elapsed time by datanode and flush type. Use this to identify slow flush jobs.
           unit: s
           queries:
-            - expr: histogram_quantile(0.95, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.95, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-p95'
-            - expr: histogram_quantile(0.99, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-p99'
-            - expr: sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_sum{}[$__rate_interval])) / sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_count{}[$__rate_interval]))
+            - expr: sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_sum[$__rate_interval])) / sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1393,14 +1393,14 @@ groups:
         - title: Flush Throughput
           type: timeseries
           description: Mito flushed bytes and flushed file rates. Use this with flush elapsed time to distinguish slow jobs from large jobs.
-          unit: bytes
+          unit: Bps
           queries:
-            - expr: sum by (instance, pod) (rate(greptime_mito_flush_bytes_total{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_mito_flush_bytes_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-bytes'
-            - expr: sum by (instance, pod) (rate(greptime_mito_flush_file_total{}[$__rate_interval]))
+            - expr: sum by (instance, pod) (rate(greptime_mito_flush_file_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1420,7 +1420,7 @@ groups:
           description: Compaction OPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1440,12 +1440,12 @@ groups:
           description: Compaction P99 and average per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le) (rate(greptime_mito_compaction_total_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le) (rate(greptime_mito_compaction_total_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-p99'
-            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_sum{}[$__rate_interval])) / sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_sum[$__rate_interval])) / sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1455,12 +1455,12 @@ groups:
           description: Compaction latency by stage
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket{}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-p99'
-            - expr: sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_sum{}[$__rate_interval]))/sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_sum[$__rate_interval]))/sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1515,7 +1515,7 @@ groups:
         - title: Index Create Rows and Bytes
           type: timeseries
           description: Rows and bytes produced by index creation by index type. Spikes here can explain storage write pressure.
-          unit: short
+          unit: rowsps
           queries:
             - expr: sum by (type) (rate(greptime_index_create_rows_total[$__rate_interval]))
               datasource:
@@ -1594,7 +1594,7 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: inactive-regions
-            - expr: sum(greptime_lease_expired_region{})
+            - expr: sum(greptime_lease_expired_region)
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1614,22 +1614,22 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: meta-connections
-            - expr: sum(rate(greptime_frontend_heartbeat_send_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_frontend_heartbeat_send_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: frontend-send
-            - expr: sum(rate(greptime_frontend_heartbeat_recv_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_frontend_heartbeat_recv_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: frontend-recv
-            - expr: sum(rate(greptime_datanode_heartbeat_send_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_datanode_heartbeat_send_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: datanode-send
-            - expr: sum(rate(greptime_datanode_heartbeat_recv_count{}[$__rate_interval]))
+            - expr: sum(rate(greptime_datanode_heartbeat_recv_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1796,7 +1796,7 @@ groups:
         - title: Reconciliation stats
           type: timeseries
           description: Reconciliation stats
-          unit: s
+          unit: ops
           queries:
             - expr: rate(greptime_meta_reconciliation_stats[$__rate_interval])
               datasource:
@@ -1977,7 +1977,7 @@ groups:
           description: QPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -2087,7 +2087,7 @@ groups:
           description: Total traffic as in bytes by instance and operation
           unit: decbytes
           queries:
-            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum{}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -2251,7 +2251,7 @@ groups:
           type: timeseries
           description: Total number of triggers currently defined.
           queries:
-            - expr: greptime_trigger_count{}
+            - expr: greptime_trigger_count
               datasource:
                 type: prometheus
                 uid: ${metrics}

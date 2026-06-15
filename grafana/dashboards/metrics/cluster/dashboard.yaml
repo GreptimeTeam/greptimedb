@@ -326,7 +326,7 @@ groups:
         - title: Bulk Insert Message Rows and Size
           type: timeseries
           description: Bulk-insert message row and byte rates. Spikes here can explain frontend bulk-insert latency.
-          unit: short
+          unit: rowsps
           queries:
             - expr: sum(rate(greptime_table_operator_bulk_insert_message_rows_sum{instance=~"$frontend"}[$__rate_interval]))
               datasource:
@@ -1393,7 +1393,7 @@ groups:
         - title: Flush Throughput
           type: timeseries
           description: Mito flushed bytes and flushed file rates. Use this with flush elapsed time to distinguish slow jobs from large jobs.
-          unit: bytes
+          unit: Bps
           queries:
             - expr: sum by (instance, pod) (rate(greptime_mito_flush_bytes_total{instance=~"$datanode"}[$__rate_interval]))
               datasource:
@@ -1515,7 +1515,7 @@ groups:
         - title: Index Create Rows and Bytes
           type: timeseries
           description: Rows and bytes produced by index creation by index type. Spikes here can explain storage write pressure.
-          unit: short
+          unit: rowsps
           queries:
             - expr: sum by (type) (rate(greptime_index_create_rows_total[$__rate_interval]))
               datasource:
@@ -1796,7 +1796,7 @@ groups:
         - title: Reconciliation stats
           type: timeseries
           description: Reconciliation stats
-          unit: s
+          unit: ops
           queries:
             - expr: rate(greptime_meta_reconciliation_stats[$__rate_interval])
               datasource:
@@ -2251,7 +2251,7 @@ groups:
           type: timeseries
           description: Total number of triggers currently defined.
           queries:
-            - expr: greptime_trigger_count{}
+            - expr: greptime_trigger_count
               datasource:
                 type: prometheus
                 uid: ${metrics}

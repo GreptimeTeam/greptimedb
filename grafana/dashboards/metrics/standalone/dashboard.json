@@ -327,7 +327,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_http_sql_elapsed_count[$__rate_interval])) + sum(rate(greptime_frontend_grpc_handle_query_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "queries",
@@ -401,7 +401,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_error{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_error[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "errors",
@@ -1235,7 +1235,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_table_operator_ingest_rows[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "ingestion",
@@ -1337,7 +1337,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval])) + sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_http_promql_elapsed_count[$__rate_interval])) + sum(rate(greptime_servers_http_sql_elapsed_count[$__rate_interval])) + sum(rate(greptime_frontend_grpc_handle_query_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "queries",
@@ -1554,7 +1554,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_grpc_requests_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_grpc_requests_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "grpc-p99",
@@ -1567,7 +1567,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_grpc_requests_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_grpc_requests_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_grpc_requests_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_grpc_requests_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "grpc-avg",
@@ -1682,7 +1682,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_table_operator_ingest_rows[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "ingestion",
@@ -1784,7 +1784,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_table_operator_ingest_rows[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "table-operator",
@@ -1797,7 +1797,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_prometheus_remote_write_samples{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_prometheus_remote_write_samples[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "prometheus-remote-write",
@@ -1810,7 +1810,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_logs_ingestion_counter{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_http_logs_ingestion_counter[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "http-logs",
@@ -1823,7 +1823,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_loki_logs_ingestion_counter{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_loki_logs_ingestion_counter[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "loki-logs",
@@ -1836,7 +1836,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_elasticsearch_logs_docs_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_elasticsearch_logs_docs_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "elasticsearch-docs",
@@ -1849,7 +1849,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_frontend_otlp_metrics_rows{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_frontend_otlp_metrics_rows[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "otlp-metrics",
@@ -1862,7 +1862,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_frontend_otlp_logs_rows{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_frontend_otlp_logs_rows[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "otlp-logs",
@@ -1875,7 +1875,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_frontend_otlp_traces_rows{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_frontend_otlp_traces_rows[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "otlp-traces",
@@ -1977,7 +1977,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_prometheus_write_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_prometheus_write_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "prometheus-write",
@@ -1990,7 +1990,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_logs_ingestion_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_logs_ingestion_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "http-logs",
@@ -2003,7 +2003,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_loki_logs_ingestion_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_loki_logs_ingestion_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "loki-logs",
@@ -2016,7 +2016,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "elasticsearch",
@@ -2029,7 +2029,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_metrics_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_metrics_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "otlp-metrics",
@@ -2042,7 +2042,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_logs_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_logs_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "otlp-logs",
@@ -2055,7 +2055,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_traces_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_otlp_traces_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "otlp-traces",
@@ -2068,7 +2068,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_prometheus_write_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_prometheus_write_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_http_prometheus_write_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_prometheus_write_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "prom-write-avg",
@@ -2081,7 +2081,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_logs_ingestion_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_logs_ingestion_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_http_logs_ingestion_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_logs_ingestion_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "http-logs-avg",
@@ -2094,7 +2094,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_loki_logs_ingestion_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_loki_logs_ingestion_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_loki_logs_ingestion_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_loki_logs_ingestion_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "loki-logs-avg",
@@ -2107,7 +2107,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_elasticsearch_logs_ingestion_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "elasticsearch-avg",
@@ -2120,7 +2120,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_otlp_metrics_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_metrics_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_http_otlp_metrics_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_metrics_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "otlp-metrics-avg",
@@ -2133,7 +2133,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_otlp_logs_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_logs_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_http_otlp_logs_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_logs_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "otlp-logs-avg",
@@ -2146,7 +2146,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_otlp_traces_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_traces_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_http_otlp_traces_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_otlp_traces_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "otlp-traces-avg",
@@ -2214,9 +2214,22 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "rowsps"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "Bps"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "x": 0,
@@ -2248,7 +2261,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_table_operator_bulk_insert_message_rows_sum{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_table_operator_bulk_insert_message_rows_sum[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "rows",
@@ -2261,7 +2274,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_table_operator_bulk_insert_message_size_sum{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_table_operator_bulk_insert_message_size_sum[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "bytes",
@@ -2363,7 +2376,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_prom_store_flush_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_prom_store_flush_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "flush-ops",
@@ -2376,7 +2389,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_prom_store_flush_rows_sum{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_prom_store_flush_rows_sum[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "flush-rows",
@@ -2389,7 +2402,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_prom_store_flush_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_prom_store_flush_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "flush-p99",
@@ -2491,7 +2504,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_frontend_otlp_traces_failure_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_frontend_otlp_traces_failure_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "trace-failures",
@@ -2606,7 +2619,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (protocol) (rate(greptime_servers_error{}[$__rate_interval]))",
+          "expr": "sum by (protocol) (rate(greptime_servers_error[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "server-{{protocol}}",
@@ -2619,7 +2632,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (code) (rate(greptime_servers_auth_failure_count{}[$__rate_interval]))",
+          "expr": "sum by (code) (rate(greptime_servers_auth_failure_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "auth-{{code}}",
@@ -2747,7 +2760,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_request_memory_rejected_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_request_memory_rejected_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "request-memory",
@@ -2862,7 +2875,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (rate(greptime_datanode_region_request_fail_count{}[$__rate_interval]))",
+          "expr": "sum by (instance, pod) (rate(greptime_datanode_region_request_fail_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "region-request-[{{instance}}]-[{{pod}}]",
@@ -2875,7 +2888,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (rate(greptime_datanode_region_failed_insert_count{}[$__rate_interval]))",
+          "expr": "sum by (instance, pod) (rate(greptime_datanode_region_failed_insert_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "failed-insert-[{{instance}}]-[{{pod}}]",
@@ -2977,7 +2990,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_pending_rows_flush_failures{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_pending_rows_flush_failures[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "flush-failures",
@@ -2990,7 +3003,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_pending_rows_flush_dropped_rows{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_pending_rows_flush_dropped_rows[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "dropped-rows",
@@ -3092,7 +3105,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_write_reject_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_write_reject_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "write-reject",
@@ -3105,7 +3118,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_write_stall_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_write_stall_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "write-stall",
@@ -3118,7 +3131,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_flush_failure_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_flush_failure_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "flush-failure",
@@ -3131,7 +3144,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_compaction_failure_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_compaction_failure_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "compaction-failure",
@@ -3233,7 +3246,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_scan_requests_rejected_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_scan_requests_rejected_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "scan-rejected",
@@ -3246,7 +3259,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_scan_memory_exhausted_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_scan_memory_exhausted_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "scan-exhausted",
@@ -3259,7 +3272,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_compaction_memory_rejected_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_compaction_memory_rejected_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "compaction-rejected",
@@ -3719,7 +3732,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_gc_errors_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_gc_errors_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "gc-errors",
@@ -3732,7 +3745,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_gc_orphaned_index_files{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_gc_orphaned_index_files[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "orphaned-index-files",
@@ -3745,7 +3758,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_gc_skipped_unparsable_files{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_gc_skipped_unparsable_files[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "skipped-unparsable",
@@ -3975,7 +3988,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_servers_request_memory_in_use_bytes{}) / sum by (instance, pod) (greptime_servers_request_memory_limit_bytes{})",
+          "expr": "sum by (instance, pod) (greptime_servers_request_memory_in_use_bytes) / sum by (instance, pod) (greptime_servers_request_memory_limit_bytes)",
           "hide": false,
           "instant": false,
           "legendFormat": "[{{instance}}]-[{{pod}}]",
@@ -4179,7 +4192,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_mito_scan_memory_usage_bytes{})",
+          "expr": "sum by (instance, pod) (greptime_mito_scan_memory_usage_bytes)",
           "hide": false,
           "instant": false,
           "legendFormat": "scan-[{{instance}}]-[{{pod}}]",
@@ -4192,7 +4205,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_mito_compaction_memory_in_use_bytes{})",
+          "expr": "sum by (instance, pod) (greptime_mito_compaction_memory_in_use_bytes)",
           "hide": false,
           "instant": false,
           "legendFormat": "compaction-used-[{{instance}}]-[{{pod}}]",
@@ -4205,7 +4218,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_mito_compaction_memory_limit_bytes{})",
+          "expr": "sum by (instance, pod) (greptime_mito_compaction_memory_limit_bytes)",
           "hide": false,
           "instant": false,
           "legendFormat": "compaction-limit-[{{instance}}]-[{{pod}}]",
@@ -4307,7 +4320,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_mito_write_buffer_bytes{})",
+          "expr": "sum by (instance, pod) (greptime_mito_write_buffer_bytes)",
           "hide": false,
           "instant": false,
           "legendFormat": "buffer-[{{instance}}]-[{{pod}}]",
@@ -4320,7 +4333,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_mito_write_stalling_count{})",
+          "expr": "sum by (instance, pod) (greptime_mito_write_stalling_count)",
           "hide": false,
           "instant": false,
           "legendFormat": "stalling-[{{instance}}]-[{{pod}}]",
@@ -4422,7 +4435,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_prom_store_pending_rows{})",
+          "expr": "sum by (instance, pod) (greptime_prom_store_pending_rows)",
           "hide": false,
           "instant": false,
           "legendFormat": "rows-[{{instance}}]-[{{pod}}]",
@@ -4435,7 +4448,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_prom_store_pending_batches{})",
+          "expr": "sum by (instance, pod) (greptime_prom_store_pending_batches)",
           "hide": false,
           "instant": false,
           "legendFormat": "batches-[{{instance}}]-[{{pod}}]",
@@ -4448,7 +4461,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_prom_store_pending_workers{})",
+          "expr": "sum by (instance, pod) (greptime_prom_store_pending_workers)",
           "hide": false,
           "instant": false,
           "legendFormat": "workers-[{{instance}}]-[{{pod}}]",
@@ -4550,7 +4563,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_mito_inflight_flush_count{})",
+          "expr": "sum by (instance, pod) (greptime_mito_inflight_flush_count)",
           "hide": false,
           "instant": false,
           "legendFormat": "flush-[{{instance}}]-[{{pod}}]",
@@ -4563,7 +4576,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_mito_inflight_compaction_count{})",
+          "expr": "sum by (instance, pod) (greptime_mito_inflight_compaction_count)",
           "hide": false,
           "instant": false,
           "legendFormat": "compaction-[{{instance}}]-[{{pod}}]",
@@ -4679,7 +4692,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)",
+          "expr": "sum(rate(process_cpu_seconds_total[$__rate_interval]) * 1000) by (instance, pod)",
           "instant": false,
           "legendFormat": "[{{ instance }}]-[{{ pod }}]-cpu",
           "range": true,
@@ -4692,7 +4705,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "max(greptime_cpu_limit_in_millicores{})",
+          "expr": "max(greptime_cpu_limit_in_millicores)",
           "hide": false,
           "instant": false,
           "legendFormat": "limit",
@@ -4796,7 +4809,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)",
+          "expr": "sum(rate(process_cpu_seconds_total[$__rate_interval]) * 1000) by (instance, pod)",
           "instant": false,
           "legendFormat": "[{{ instance }}]-[{{ pod }}]",
           "range": true,
@@ -4809,7 +4822,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "max(greptime_cpu_limit_in_millicores{})",
+          "expr": "max(greptime_cpu_limit_in_millicores)",
           "hide": false,
           "instant": false,
           "legendFormat": "limit",
@@ -4913,7 +4926,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)",
+          "expr": "sum(rate(process_cpu_seconds_total[$__rate_interval]) * 1000) by (instance, pod)",
           "instant": false,
           "legendFormat": "[{{ instance }}]-[{{ pod }}]",
           "range": true,
@@ -4926,7 +4939,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "max(greptime_cpu_limit_in_millicores{})",
+          "expr": "max(greptime_cpu_limit_in_millicores)",
           "hide": false,
           "instant": false,
           "legendFormat": "limit",
@@ -5029,7 +5042,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(process_resident_memory_bytes{}) by (instance, pod)",
+          "expr": "sum(process_resident_memory_bytes) by (instance, pod)",
           "instant": false,
           "legendFormat": "[{{ instance }}]-[{{ pod }}]",
           "range": true,
@@ -5041,7 +5054,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "max(greptime_memory_limit_in_bytes{})",
+          "expr": "max(greptime_memory_limit_in_bytes)",
           "hide": false,
           "instant": false,
           "legendFormat": "limit",
@@ -5144,7 +5157,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(process_resident_memory_bytes{}) by (instance, pod)",
+          "expr": "sum(process_resident_memory_bytes) by (instance, pod)",
           "instant": false,
           "legendFormat": "[{{instance}}]-[{{ pod }}]",
           "range": true,
@@ -5156,7 +5169,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "max(greptime_memory_limit_in_bytes{})",
+          "expr": "max(greptime_memory_limit_in_bytes)",
           "hide": false,
           "instant": false,
           "legendFormat": "limit",
@@ -5259,7 +5272,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(process_resident_memory_bytes{}) by (instance, pod)",
+          "expr": "sum(process_resident_memory_bytes) by (instance, pod)",
           "instant": false,
           "legendFormat": "[{{ instance }}]-[{{ pod }}]-resident",
           "range": true,
@@ -5271,7 +5284,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "max(greptime_memory_limit_in_bytes{})",
+          "expr": "max(greptime_memory_limit_in_bytes)",
           "hide": false,
           "instant": false,
           "legendFormat": "limit",
@@ -5375,7 +5388,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)",
+          "expr": "sum(rate(process_cpu_seconds_total[$__rate_interval]) * 1000) by (instance, pod)",
           "instant": false,
           "legendFormat": "[{{ instance }}]-[{{ pod }}]",
           "range": true,
@@ -5388,7 +5401,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "max(greptime_cpu_limit_in_millicores{})",
+          "expr": "max(greptime_cpu_limit_in_millicores)",
           "hide": false,
           "instant": false,
           "legendFormat": "limit",
@@ -5491,7 +5504,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(process_resident_memory_bytes{}) by (instance, pod)",
+          "expr": "sum(process_resident_memory_bytes) by (instance, pod)",
           "instant": false,
           "legendFormat": "[{{ instance }}]-[{{ pod }}]",
           "range": true,
@@ -5503,7 +5516,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "max(greptime_memory_limit_in_bytes{})",
+          "expr": "max(greptime_memory_limit_in_bytes)",
           "hide": false,
           "instant": false,
           "legendFormat": "limit",
@@ -5618,7 +5631,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "mysql",
@@ -5631,7 +5644,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "postgres",
@@ -5644,7 +5657,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_http_promql_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "promql",
@@ -5657,7 +5670,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_sql_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_http_sql_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "http-sql",
@@ -5670,7 +5683,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_frontend_grpc_handle_query_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "grpc-query",
@@ -5772,7 +5785,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(greptime_servers_mysql_query_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(greptime_servers_mysql_query_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "mysql-p95",
@@ -5785,7 +5798,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_mysql_query_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_mysql_query_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "mysql-p99",
@@ -5798,7 +5811,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(greptime_servers_postgres_query_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(greptime_servers_postgres_query_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "postgres-p95",
@@ -5811,7 +5824,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_postgres_query_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_postgres_query_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "postgres-p99",
@@ -5824,7 +5837,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(greptime_servers_http_promql_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(greptime_servers_http_promql_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "promql-p95",
@@ -5837,7 +5850,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_promql_elapsed_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(greptime_servers_http_promql_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "promql-p99",
@@ -5850,7 +5863,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_mysql_query_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "mysql-avg",
@@ -5863,7 +5876,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_postgres_query_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_postgres_query_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "postgres-avg",
@@ -5876,7 +5889,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_servers_http_promql_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_servers_http_promql_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_servers_http_promql_elapsed_sum[$__rate_interval])) / sum(rate(greptime_servers_http_promql_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "promql-avg",
@@ -5889,7 +5902,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_frontend_grpc_handle_query_elapsed_sum{}[$__rate_interval])) / sum(rate(greptime_frontend_grpc_handle_query_elapsed_count{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_frontend_grpc_handle_query_elapsed_sum[$__rate_interval])) / sum(rate(greptime_frontend_grpc_handle_query_elapsed_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "grpc-query-avg",
@@ -6425,7 +6438,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_servers_mysql_connection_count{})",
+          "expr": "sum by (instance, pod) (greptime_servers_mysql_connection_count)",
           "hide": false,
           "instant": false,
           "legendFormat": "mysql-connections-[{{instance}}]-[{{pod}}]",
@@ -6438,7 +6451,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_servers_postgres_connection_count{})",
+          "expr": "sum by (instance, pod) (greptime_servers_postgres_connection_count)",
           "hide": false,
           "instant": false,
           "legendFormat": "postgres-connections-[{{instance}}]-[{{pod}}]",
@@ -6451,7 +6464,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (rate(greptime_servers_mysql_prepared_count{}[$__rate_interval]))",
+          "expr": "sum by (instance, pod) (rate(greptime_servers_mysql_prepared_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "mysql-prepared-[{{instance}}]-[{{pod}}]",
@@ -6464,7 +6477,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (rate(greptime_servers_postgres_prepared_count{}[$__rate_interval]))",
+          "expr": "sum by (instance, pod) (rate(greptime_servers_postgres_prepared_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "postgres-prepared-[{{instance}}]-[{{pod}}]",
@@ -6791,7 +6804,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_count[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{path}}]-[{{code}}]",
               "range": true,
@@ -6890,7 +6903,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, path, code) (rate(greptime_servers_grpc_requests_elapsed_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, path, code) (rate(greptime_servers_grpc_requests_elapsed_bucket[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{path}}]-[{{method}}]-[{{code}}]-p99",
               "range": true,
@@ -6902,7 +6915,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_sum{}[$__rate_interval])) / sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_sum[$__rate_interval])) / sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{path}}]-[{{code}}]-avg",
@@ -7004,7 +7017,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(pod, instance)(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(pod, instance)(rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]",
               "range": true,
@@ -7106,7 +7119,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "histogram_quantile(0.99, sum by(pod, instance, le) (rate(greptime_servers_mysql_query_elapsed_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(pod, instance, le) (rate(greptime_servers_mysql_query_elapsed_bucket[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{ instance }}]-[{{ pod }}]-p99",
               "range": true,
@@ -7118,7 +7131,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(pod, instance) (rate(greptime_servers_mysql_query_elapsed_sum{}[$__rate_interval])) / sum by(pod, instance) (rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(pod, instance) (rate(greptime_servers_mysql_query_elapsed_sum[$__rate_interval])) / sum by(pod, instance) (rate(greptime_servers_mysql_query_elapsed_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-avg",
@@ -7220,7 +7233,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(pod, instance)(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(pod, instance)(rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]",
               "range": true,
@@ -7319,7 +7332,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(pod,instance,le) (rate(greptime_servers_postgres_query_elapsed_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(pod,instance,le) (rate(greptime_servers_postgres_query_elapsed_bucket[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-p99",
               "range": true,
@@ -7331,7 +7344,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(pod, instance) (rate(greptime_servers_postgres_query_elapsed_sum{}[$__rate_interval])) / sum by(pod, instance) (rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(pod, instance) (rate(greptime_servers_postgres_query_elapsed_sum[$__rate_interval])) / sum by(pod, instance) (rate(greptime_servers_postgres_query_elapsed_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-avg",
@@ -7447,7 +7460,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_count[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{request_type}}]",
               "range": true,
@@ -7548,7 +7561,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, request_type) (rate(greptime_grpc_region_request_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, request_type) (rate(greptime_grpc_region_request_bucket[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{request_type}}]",
               "range": true,
@@ -7560,7 +7573,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_sum{}[$__rate_interval])) / sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_sum[$__rate_interval])) / sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{request_type}}]-avg",
@@ -7793,7 +7806,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (rate(greptime_datanode_region_request_fail_count{}[$__rate_interval]))",
+          "expr": "sum by (instance, pod) (rate(greptime_datanode_region_request_fail_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "request-fail-[{{instance}}]-[{{pod}}]",
@@ -7806,7 +7819,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (rate(greptime_datanode_region_failed_insert_count{}[$__rate_interval]))",
+          "expr": "sum by (instance, pod) (rate(greptime_datanode_region_failed_insert_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "failed-insert-[{{instance}}]-[{{pod}}]",
@@ -7908,7 +7921,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (rate(greptime_mito_write_reject_total{}[$__rate_interval]))",
+          "expr": "sum by (instance, pod) (rate(greptime_mito_write_reject_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "reject-[{{instance}}]-[{{pod}}]",
@@ -7921,7 +7934,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (rate(greptime_mito_write_stall_total{}[$__rate_interval]))",
+          "expr": "sum by (instance, pod) (rate(greptime_mito_write_stall_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "stall-[{{instance}}]-[{{pod}}]",
@@ -7934,7 +7947,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (greptime_mito_write_stalling_count{})",
+          "expr": "sum by (instance, pod) (greptime_mito_write_stalling_count)",
           "hide": false,
           "instant": false,
           "legendFormat": "active-stalling-[{{instance}}]-[{{pod}}]",
@@ -8036,7 +8049,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (rate(greptime_mito_flush_failure_total{}[$__rate_interval]))",
+          "expr": "sum by (instance, pod) (rate(greptime_mito_flush_failure_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "flush-[{{instance}}]-[{{pod}}]",
@@ -8049,7 +8062,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, pod) (rate(greptime_mito_compaction_failure_total{}[$__rate_interval]))",
+          "expr": "sum by (instance, pod) (rate(greptime_mito_compaction_failure_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "compaction-[{{instance}}]-[{{pod}}]",
@@ -8151,7 +8164,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_gc_runs_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_gc_runs_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "runs",
@@ -8164,7 +8177,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_gc_errors_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_gc_errors_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "errors",
@@ -8177,7 +8190,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_gc_files_deleted_total{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_gc_files_deleted_total[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "files-deleted",
@@ -8190,7 +8203,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_gc_orphaned_index_files{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_gc_orphaned_index_files[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "orphaned-index-files",
@@ -8203,7 +8216,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(greptime_mito_gc_skipped_unparsable_files{}[$__rate_interval]))",
+          "expr": "sum(rate(greptime_mito_gc_skipped_unparsable_files[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "skipped-unparsable",
@@ -8305,7 +8318,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(greptime_mito_gc_duration_seconds_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(greptime_mito_gc_duration_seconds_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "{{stage}}-p99",
@@ -8318,7 +8331,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (stage) (rate(greptime_mito_gc_duration_seconds_sum{}[$__rate_interval])) / sum by (stage) (rate(greptime_mito_gc_duration_seconds_count{}[$__rate_interval]))",
+          "expr": "sum by (stage) (rate(greptime_mito_gc_duration_seconds_sum[$__rate_interval])) / sum by (stage) (rate(greptime_mito_gc_duration_seconds_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "{{stage}}-avg",
@@ -8430,7 +8443,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_count[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{type}}]",
               "range": true,
@@ -8531,7 +8544,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, type) (rate(greptime_mito_handle_request_elapsed_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, type) (rate(greptime_mito_handle_request_elapsed_bucket[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{type}}]",
               "range": true,
@@ -8543,7 +8556,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_sum{}[$__rate_interval])) / sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_sum[$__rate_interval])) / sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{type}}]-avg",
@@ -8645,7 +8658,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by(instance, pod, worker, le) (rate(greptime_mito_request_wait_time_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.95, sum by(instance, pod, worker, le) (rate(greptime_mito_request_wait_time_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{worker}}]-p95",
@@ -8658,7 +8671,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, worker, le) (rate(greptime_mito_request_wait_time_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, worker, le) (rate(greptime_mito_request_wait_time_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{worker}}]-p99",
@@ -8671,7 +8684,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, worker) (rate(greptime_mito_request_wait_time_sum{}[$__rate_interval])) / sum by(instance, pod, worker) (rate(greptime_mito_request_wait_time_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, worker) (rate(greptime_mito_request_wait_time_sum[$__rate_interval])) / sum by(instance, pod, worker) (rate(greptime_mito_request_wait_time_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{worker}}]-avg",
@@ -8773,7 +8786,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "greptime_mito_write_buffer_bytes{}",
+              "expr": "greptime_mito_write_buffer_bytes",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]",
               "range": true,
@@ -8874,7 +8887,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (instance, pod) (rate(greptime_mito_write_rows_total{}[$__rate_interval]))",
+              "expr": "sum by (instance, pod) (rate(greptime_mito_write_rows_total[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]",
               "range": true,
@@ -8975,7 +8988,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod) (rate(greptime_mito_read_stage_elapsed_count{ stage=\"total\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod) (rate(greptime_mito_read_stage_elapsed_count{stage=\"total\"}[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]",
               "range": true,
@@ -9076,7 +9089,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{stage}}]",
               "range": true,
@@ -9088,7 +9101,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, stage) (rate(greptime_mito_read_stage_elapsed_sum{}[$__rate_interval])) / sum by(instance, pod, stage) (rate(greptime_mito_read_stage_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, stage) (rate(greptime_mito_read_stage_elapsed_sum[$__rate_interval])) / sum by(instance, pod, stage) (rate(greptime_mito_read_stage_elapsed_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{stage}}]-avg",
@@ -9192,7 +9205,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_write_stage_elapsed_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_write_stage_elapsed_bucket[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{stage}}]",
               "range": true,
@@ -9204,7 +9217,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, stage) (rate(greptime_mito_write_stage_elapsed_sum{}[$__rate_interval])) / sum by(instance, pod, stage) (rate(greptime_mito_write_stage_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, stage) (rate(greptime_mito_write_stage_elapsed_sum[$__rate_interval])) / sum by(instance, pod, stage) (rate(greptime_mito_write_stage_elapsed_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{stage}}]-avg",
@@ -9304,7 +9317,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "greptime_mito_cache_bytes{}",
+              "expr": "greptime_mito_cache_bytes",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{type}}]",
               "range": true,
@@ -9750,7 +9763,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (instance,pod, type) (rate(greptime_mito_cache_miss{}[$__rate_interval]))",
+              "expr": "sum by (instance,pod, type) (rate(greptime_mito_cache_miss[$__rate_interval]))",
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{type}}]",
               "range": true,
               "refId": "A"
@@ -9864,7 +9877,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, reason) (rate(greptime_mito_flush_requests_total{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, reason) (rate(greptime_mito_flush_requests_total[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{reason}}]",
               "range": true,
@@ -9965,7 +9978,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.95, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{type}}]-p95",
@@ -9978,7 +9991,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by (instance, pod, le, type) (rate(greptime_mito_flush_elapsed_bucket[$__rate_interval])))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{type}}]-p99",
@@ -9991,7 +10004,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_sum{}[$__rate_interval])) / sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_sum[$__rate_interval])) / sum by (instance, pod, type) (rate(greptime_mito_flush_elapsed_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{type}}]-avg",
@@ -10059,9 +10072,22 @@
                   }
                 ]
               },
-              "unit": "bytes"
+              "unit": "Bps"
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".*-files$"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "h": 8,
@@ -10093,7 +10119,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (instance, pod) (rate(greptime_mito_flush_bytes_total{}[$__rate_interval]))",
+              "expr": "sum by (instance, pod) (rate(greptime_mito_flush_bytes_total[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-bytes",
@@ -10106,7 +10132,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (instance, pod) (rate(greptime_mito_flush_file_total{}[$__rate_interval]))",
+              "expr": "sum by (instance, pod) (rate(greptime_mito_flush_file_total[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-files",
@@ -10309,7 +10335,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{ instance }}]-[{{pod}}]",
               "range": true,
@@ -10511,7 +10537,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le) (rate(greptime_mito_compaction_total_elapsed_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le) (rate(greptime_mito_compaction_total_elapsed_bucket[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-p99",
               "range": true,
@@ -10523,7 +10549,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_sum{}[$__rate_interval])) / sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_sum[$__rate_interval])) / sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-avg",
@@ -10625,7 +10651,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{stage}}]-p99",
               "range": true,
@@ -10637,7 +10663,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_sum{}[$__rate_interval]))/sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_sum[$__rate_interval]))/sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{stage}}]-avg",
@@ -11063,9 +11089,22 @@
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "rowsps"
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".*-bytes$"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "Bps"
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "x": 16,
@@ -11686,7 +11725,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum(greptime_lease_expired_region{})",
+              "expr": "sum(greptime_lease_expired_region)",
               "hide": false,
               "instant": false,
               "legendFormat": "lease-expired",
@@ -11814,7 +11853,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum(rate(greptime_frontend_heartbeat_send_count{}[$__rate_interval]))",
+              "expr": "sum(rate(greptime_frontend_heartbeat_send_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "frontend-send",
@@ -11827,7 +11866,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum(rate(greptime_frontend_heartbeat_recv_count{}[$__rate_interval]))",
+              "expr": "sum(rate(greptime_frontend_heartbeat_recv_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "frontend-recv",
@@ -11840,7 +11879,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum(rate(greptime_datanode_heartbeat_send_count{}[$__rate_interval]))",
+              "expr": "sum(rate(greptime_datanode_heartbeat_send_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "datanode-send",
@@ -11853,7 +11892,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum(rate(greptime_datanode_heartbeat_recv_count{}[$__rate_interval]))",
+              "expr": "sum(rate(greptime_datanode_heartbeat_recv_count[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "datanode-recv",
@@ -13153,7 +13192,7 @@
                   }
                 ]
               },
-              "unit": "s"
+              "unit": "ops"
             },
             "overrides": []
           },
@@ -14655,7 +14694,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]",
               "range": true,
@@ -14755,7 +14794,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation=~\"read|Reader::read\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation=~\"read|Reader::read\"}[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]",
               "range": true,
@@ -14867,7 +14906,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{ operation=~\"read|Reader::read\"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation=~\"read|Reader::read\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{operation=~\"read|Reader::read\"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation=~\"read|Reader::read\"}[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-avg",
@@ -14968,7 +15007,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation=~\"write|Writer::write|Writer::close\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation=~\"write|Writer::write|Writer::close\"}[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]",
               "range": true,
@@ -15068,7 +15107,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{ operation =~ \"Writer::write|Writer::close|write\"}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{operation =~ \"Writer::write|Writer::close|write\"}[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]",
               "range": true,
@@ -15080,7 +15119,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{ operation=~\"write|Writer::write|Writer::close\"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation=~\"write|Writer::write|Writer::close\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{operation=~\"write|Writer::write|Writer::close\"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation=~\"write|Writer::write|Writer::close\"}[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-avg",
@@ -15181,7 +15220,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme) (rate(opendal_operation_duration_seconds_count{ operation=\"list\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme) (rate(opendal_operation_duration_seconds_count{operation=\"list\"}[$__rate_interval]))",
               "instant": false,
               "interval": "",
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]",
@@ -15282,7 +15321,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{ operation=\"list\"}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{operation=\"list\"}[$__rate_interval])))",
               "instant": false,
               "interval": "",
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]",
@@ -15295,7 +15334,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{ operation=\"list\"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation=\"list\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{operation=\"list\"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation=\"list\"}[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-avg",
@@ -15396,7 +15435,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]",
               "range": true,
@@ -15496,7 +15535,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{ operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval])))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]",
               "range": true,
@@ -15508,7 +15547,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{ operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{ operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_sum{operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval])) / sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation!~\"read|Reader::read|write|Writer::write|Writer::close|list|stat\"}[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-avg",
@@ -15610,7 +15649,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum{}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum[$__rate_interval]))",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -15712,7 +15751,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod, scheme, operation, error) (rate(opendal_operation_errors_total{ error!=\"NotFound\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, scheme, operation, error) (rate(opendal_operation_errors_total{error!=\"NotFound\"}[$__rate_interval]))",
               "instant": false,
               "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-[{{error}}]",
               "range": true,
@@ -17091,7 +17130,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "greptime_trigger_count{}",
+              "expr": "greptime_trigger_count",
               "legendFormat": "__auto",
               "range": true,
               "refId": "A"

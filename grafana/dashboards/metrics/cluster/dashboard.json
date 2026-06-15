@@ -2214,9 +2214,22 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "rowsps"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "Bps"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "x": 0,
@@ -10059,9 +10072,22 @@
                   }
                 ]
               },
-              "unit": "bytes"
+              "unit": "Bps"
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".*-files$"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "h": 8,
@@ -11063,9 +11089,22 @@
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "rowsps"
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".*-bytes$"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "Bps"
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "x": 16,
@@ -13153,7 +13192,7 @@
                   }
                 ]
               },
-              "unit": "s"
+              "unit": "ops"
             },
             "overrides": []
           },
