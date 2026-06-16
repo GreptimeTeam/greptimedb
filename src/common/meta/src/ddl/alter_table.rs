@@ -127,7 +127,7 @@ impl AlterTableProcedure {
 
         // Safety: Checked in `AlterTableProcedure::new`.
         let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
-        if matches!(alter_kind, Kind::RenameTable { .. }) || is_metadata_only_alter(alter_kind) {
+        if is_metadata_only_alter(alter_kind) {
             self.data.state = AlterTableState::UpdateMetadata;
         } else {
             self.data.state = AlterTableState::SubmitAlterRegionRequests;
@@ -343,6 +343,7 @@ impl AlterTableProcedure {
 
 fn is_metadata_only_alter(alter_kind: &Kind) -> bool {
     match alter_kind {
+        Kind::RenameTable { .. } => true,
         Kind::SetTableOptions(SetTableOptions { table_options }) => {
             table_options.len() == 1 && table_options[0].key.as_str() == REPARTITION_COLUMN_HINT_KEY
         }
