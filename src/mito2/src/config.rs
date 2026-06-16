@@ -156,9 +156,6 @@ pub struct MitoConfig {
     /// Defaults to [`OnExhaustedPolicy::Fail`], which intentionally differs from
     /// [`OnExhaustedPolicy::default()`].
     pub scan_memory_on_exhausted: OnExhaustedPolicy,
-    /// Whether to record per-region query load metrics while scanning.
-    pub enable_region_query_load_report: bool,
-
     /// Index configs.
     pub index: IndexConfig,
     /// Inverted index configs.
@@ -223,7 +220,6 @@ impl Default for MitoConfig {
             allow_stale_entries: false,
             scan_memory_limit: MemoryLimit::default(),
             scan_memory_on_exhausted: OnExhaustedPolicy::Fail,
-            enable_region_query_load_report: false,
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),

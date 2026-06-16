@@ -171,7 +171,6 @@
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.scan_memory_limit` | String | `unlimited` | Memory limit for table scans across all queries.<br/>Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.scan_memory_on_exhausted` | String | `fail` | Controls what happens when a scan cannot get memory immediately.<br/>"fail" (default) fails fast and is the recommended option for most users.<br/>"wait" / "wait(<duration>)" waits for memory to become available. This is mainly<br/>for advanced tuning in bursty workloads where temporary contention is common and<br/>higher latency is acceptable.<br/>"wait" means "wait(10s)", not unlimited waiting. |
-| `region_engine.mito.enable_region_query_load_report` | Bool | `false` | Whether to record per-region query load metrics while scanning.<br/>Metrics include CPU time and scanned bytes collected by RegionScanExec.<br/>Default to false. |
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.schedule_compaction_after_edit` | Bool | `true` | Whether to allow to schedule a compaction after a successful region edit.<br/><br/>Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.<br/>Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.<br/>Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit. |
 | `region_engine.mito.default_flat_format` | Bool | `true` | Whether to enable flat format as the default SST format. |
@@ -568,7 +567,6 @@
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.scan_memory_limit` | String | `unlimited` | Memory limit for table scans across all queries.<br/>Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.scan_memory_on_exhausted` | String | `fail` | Controls what happens when a scan cannot get memory immediately.<br/>"fail" (default) fails fast and is the recommended option for most users.<br/>"wait" / "wait(<duration>)" waits for memory to become available. This is mainly<br/>for advanced tuning in bursty workloads where temporary contention is common and<br/>higher latency is acceptable.<br/>"wait" means "wait(10s)", not unlimited waiting. |
-| `region_engine.mito.enable_region_query_load_report` | Bool | `false` | Whether to record per-region query load metrics while scanning.<br/>Metrics include CPU time and scanned bytes collected by RegionScanExec.<br/>Default to false. |
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.schedule_compaction_after_edit` | Bool | `true` | Whether to allow to schedule a compaction after a successful region edit.<br/><br/>Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.<br/>Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.<br/>Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit. |
 | `region_engine.mito.default_flat_format` | Bool | `true` | Whether to enable flat format as the default SST format. |
@@ -611,6 +609,7 @@
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
+| `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |

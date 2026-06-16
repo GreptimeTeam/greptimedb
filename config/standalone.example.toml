@@ -668,11 +668,6 @@ scan_memory_limit = "unlimited"
 ## "wait" means "wait(10s)", not unlimited waiting.
 scan_memory_on_exhausted = "fail"
 
-## Whether to record per-region query load metrics while scanning.
-## Metrics include CPU time and scanned bytes collected by RegionScanExec.
-## Default to false.
-enable_region_query_load_report = false
-
 ## Minimum time interval between two compactions.
 ## To align with the old behavior, the default value is 0 (no restrictions).
 min_compaction_interval = "0m"

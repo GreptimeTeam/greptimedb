@@ -171,6 +171,7 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     plugins: Plugins,
+    enable_region_query_load_report: bool,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -196,9 +197,19 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             file_ref_manager,
             plugins,
             partition_expr_fetcher,
+            enable_region_query_load_report: false,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_enable_region_query_load_report(
+        mut self,
+        enable_region_query_load_report: bool,
+    ) -> Self {
+        self.enable_region_query_load_report = enable_region_query_load_report;
+        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -248,6 +259,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             config,
             wal_raw_entry_reader,
             scan_memory_tracker,
+            enable_region_query_load_report: self.enable_region_query_load_report,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         };
@@ -723,6 +735,8 @@ struct EngineInner {
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
+    /// Whether to record per-region query load metrics while scanning.
+    enable_region_query_load_report: bool,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -1077,7 +1091,7 @@ impl EngineInner {
             CacheStrategy::EnableAll(cache_manager),
         )
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
-        .with_enable_region_query_load_report(self.config.enable_region_query_load_report)
+        .with_enable_region_query_load_report(self.enable_region_query_load_report)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
@@ -1453,6 +1467,7 @@ impl MitoEngine {
                 config,
                 wal_raw_entry_reader,
                 scan_memory_tracker,
+                enable_region_query_load_report: false,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
             }),
