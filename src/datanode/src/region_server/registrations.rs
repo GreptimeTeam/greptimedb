@@ -32,7 +32,9 @@ use session::context::QueryContextRef;
 use session::query_id::QueryId;
 use store_api::storage::RegionId;
 
-pub(super) const REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
+use crate::metrics;
+
+pub(super) const REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES: usize = 512 * 1024;
 
 type QueryRemoteDynFilterRegs = HashMap<RemoteDynFilterId, RegisteredDynFilter>;
 
@@ -110,6 +112,21 @@ pub(super) enum RemoteDynFilterUpdateOutcome {
     AlreadyComplete,
     PayloadTooLarge,
     DecodeFailed,
+}
+
+impl RemoteDynFilterUpdateOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MissingRegistration => "missing_registration",
+            Self::Buffered => "buffered",
+            Self::Applied => "applied",
+            Self::Idempotent => "idempotent",
+            Self::Stale => "stale",
+            Self::AlreadyComplete => "already_complete",
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::DecodeFailed => "decode_failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -455,6 +472,7 @@ pub(super) fn register_initial_dyn_filter_regs(
                     PendingDynFilterUpdate::from_initial_reg(reg),
                     region_id,
                 ));
+                metrics::REMOTE_DYN_FILTER_RUNTIME_REGISTRY_ENTRIES.inc();
                 registered_filter_ids.push(filter_id);
             }
         }
@@ -501,15 +519,31 @@ pub(super) fn apply_remote_dyn_filter_update(
             payload.len(),
             REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES
         );
-        return RemoteDynFilterUpdateOutcome::PayloadTooLarge;
+        let outcome = RemoteDynFilterUpdateOutcome::PayloadTooLarge;
+        metrics::REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
+            .with_label_values(&[outcome.as_str()])
+            .inc();
+        metrics::REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
+            .with_label_values(&[outcome.as_str()])
+            .inc();
+        return outcome;
     }
+
+    metrics::REMOTE_DYN_FILTER_PAYLOAD_BYTES.observe(payload.len() as f64);
 
     let Some(query_regs) = regs_by_query.get_query(query_id) else {
         warn!(
             "Ignored remote dynamic filter update without query registration, query_id: {}, filter_id: {}",
             query_id, filter_id
         );
-        return RemoteDynFilterUpdateOutcome::MissingRegistration;
+        let outcome = RemoteDynFilterUpdateOutcome::MissingRegistration;
+        metrics::REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
+            .with_label_values(&[outcome.as_str()])
+            .inc();
+        metrics::REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
+            .with_label_values(&[outcome.as_str()])
+            .inc();
+        return outcome;
     };
 
     let mut query_regs = query_regs.lock().unwrap();
@@ -518,10 +552,34 @@ pub(super) fn apply_remote_dyn_filter_update(
             "Ignored remote dynamic filter update without filter registration, query_id: {}, filter_id: {}",
             query_id, filter_id
         );
-        return RemoteDynFilterUpdateOutcome::MissingRegistration;
+        let outcome = RemoteDynFilterUpdateOutcome::MissingRegistration;
+        metrics::REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
+            .with_label_values(&[outcome.as_str()])
+            .inc();
+        metrics::REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
+            .with_label_values(&[outcome.as_str()])
+            .inc();
+        return outcome;
     };
 
-    registered.apply_or_buffer_update(payload, generation, is_complete)
+    let outcome = registered.apply_or_buffer_update(payload, generation, is_complete);
+    match outcome {
+        RemoteDynFilterUpdateOutcome::PayloadTooLarge
+        | RemoteDynFilterUpdateOutcome::DecodeFailed
+        | RemoteDynFilterUpdateOutcome::MissingRegistration
+        | RemoteDynFilterUpdateOutcome::Stale
+        | RemoteDynFilterUpdateOutcome::AlreadyComplete => {
+            metrics::REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
+                .with_label_values(&[outcome.as_str()])
+                .inc();
+        }
+        _ => {}
+    }
+    metrics::REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
+        .with_label_values(&[outcome.as_str()])
+        .inc();
+
+    outcome
 }
 
 pub(super) fn unregister_remote_dyn_filter(
@@ -534,7 +592,11 @@ pub(super) fn unregister_remote_dyn_filter(
             "Ignored remote dynamic filter unregister without query registration, query_id: {}, filter_id: {}",
             query_id, filter_id
         );
-        return RemoteDynFilterUpdateOutcome::MissingRegistration;
+        let outcome = RemoteDynFilterUpdateOutcome::MissingRegistration;
+        metrics::REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
+            .with_label_values(&[outcome.as_str()])
+            .inc();
+        return outcome;
     };
 
     let (registered, should_remove_query) = {
@@ -544,8 +606,13 @@ pub(super) fn unregister_remote_dyn_filter(
                 "Ignored remote dynamic filter unregister without filter registration, query_id: {}, filter_id: {}",
                 query_id, filter_id
             );
-            return RemoteDynFilterUpdateOutcome::MissingRegistration;
+            let outcome = RemoteDynFilterUpdateOutcome::MissingRegistration;
+            metrics::REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
+                .with_label_values(&[outcome.as_str()])
+                .inc();
+            return outcome;
         };
+        metrics::REMOTE_DYN_FILTER_RUNTIME_REGISTRY_ENTRIES.dec();
         let should_remove_query = locked.is_empty();
         (registered, should_remove_query)
     };
@@ -555,7 +622,12 @@ pub(super) fn unregister_remote_dyn_filter(
         regs_by_query.remove_query_if_empty(query_id, &query_regs);
     }
 
-    RemoteDynFilterUpdateOutcome::Applied
+    let outcome = RemoteDynFilterUpdateOutcome::Applied;
+    metrics::REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
+        .with_label_values(&[outcome.as_str()])
+        .inc();
+
+    outcome
 }
 
 pub(super) fn remove_initial_dyn_filter_regs(
@@ -583,6 +655,7 @@ pub(super) fn remove_initial_dyn_filter_regs(
                 .unwrap_or(false);
 
             if should_remove_filter && let Some(registered) = locked.remove(filter_id) {
+                metrics::REMOTE_DYN_FILTER_RUNTIME_REGISTRY_ENTRIES.dec();
                 removed_filters.push(registered);
             }
         }

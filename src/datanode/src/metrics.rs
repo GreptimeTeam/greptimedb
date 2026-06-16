@@ -91,4 +91,38 @@ lazy_static! {
         &[REGION_REQUEST_TYPE]
     )
     .unwrap();
+
+    /// Remote dynamic filter update apply outcomes, labeled with the outcome.
+    pub static ref REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_datanode_remote_dyn_filter_update_apply_total",
+        "remote dynamic filter update apply outcomes",
+        &["result"]
+    )
+    .unwrap();
+
+    /// Remote dynamic filter update drops, labeled with drop reason.
+    pub static ref REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_datanode_remote_dyn_filter_update_drop_total",
+        "remote dynamic filter update drops by reason",
+        &["reason"]
+    )
+    .unwrap();
+
+    /// Current count of remote dynamic filter runtime registry entries.
+    pub static ref REMOTE_DYN_FILTER_RUNTIME_REGISTRY_ENTRIES: IntGauge = register_int_gauge!(
+        "greptime_datanode_remote_dyn_filter_runtime_registry_entries",
+        "current remote dynamic filter registry entry count",
+    )
+    .unwrap();
+
+    /// Remote dynamic filter payload bytes received.
+    pub static ref REMOTE_DYN_FILTER_PAYLOAD_BYTES: Histogram = register_histogram!(
+        "greptime_datanode_remote_dyn_filter_payload_bytes",
+        "remote dynamic filter payload bytes received",
+        vec![
+            128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0,
+            65536.0, 131072.0, 262144.0, 524288.0,
+        ]
+    )
+    .unwrap();
 }

@@ -99,6 +99,33 @@ lazy_static! {
         "total number of query memory allocations rejected"
     )
     .unwrap();
+
+    /// Remote dynamic filter fanout RPC results, labeled with status.
+    pub static ref REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_query_remote_dyn_filter_update_rpc_total",
+        "remote dynamic filter fanout RPC results",
+        &["status"]
+    )
+    .unwrap();
+
+    /// Remote dynamic filter fanout payload bytes.
+    pub static ref REMOTE_DYN_FILTER_PAYLOAD_BYTES: Histogram = register_histogram!(
+        "greptime_query_remote_dyn_filter_payload_bytes",
+        "remote dynamic filter fanout payload bytes",
+        vec![
+            128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0,
+            65536.0, 131072.0, 262144.0, 524288.0,
+        ]
+    )
+    .unwrap();
+
+    /// Remote dynamic filter encode results, labeled with result.
+    pub static ref REMOTE_DYN_FILTER_ENCODE_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_query_remote_dyn_filter_encode_total",
+        "remote dynamic filter encode results",
+        &["result"]
+    )
+    .unwrap();
 }
 
 /// A stream to call the callback once a RecordBatch stream is done.
