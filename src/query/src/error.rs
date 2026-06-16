@@ -467,9 +467,8 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            BuildBackend { .. } | ListObjects { .. } | GetRegionMetadata { .. } => {
-                RetryHint::Retryable
-            }
+            BuildBackend { source, .. } | ListObjects { source, .. } => source.retry_hint(),
+            GetRegionMetadata { .. } => RetryHint::Retryable,
             ParseFileFormat { source, .. } | InferSchema { source, .. } => source.retry_hint(),
             Catalog { source, .. } => source.retry_hint(),
             CreateRecordBatch { source, .. } => source.retry_hint(),
