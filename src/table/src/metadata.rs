@@ -415,12 +415,25 @@ impl TableMeta {
             }
         );
 
-        self.schema
+        let column_index = self
+            .schema
             .column_index_by_name(column_name)
             .with_context(|| error::ColumnNotExistsSnafu {
                 column_name,
                 table_name,
             })?;
+
+        if let Some(time_index) = self.schema.timestamp_index() {
+            ensure!(
+                column_index != time_index,
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"
+                    ),
+                }
+            );
+        }
 
         let mut new_options = self.options.clone();
         new_options.extra_options.insert(
@@ -1747,6 +1760,30 @@ mod tests {
             .unwrap();
 
         assert!(err.to_string().contains("Column missing not exists"));
+    }
+
+    #[test]
+    fn test_set_repartition_column_hint_rejects_time_index_column() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetRepartitionColumnHint {
+            column_name: "ts".to_string(),
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+
+        assert!(
+            err.to_string()
+                .contains("cannot set repartition.column.hint to the time index column")
+        );
     }
 
     #[test]

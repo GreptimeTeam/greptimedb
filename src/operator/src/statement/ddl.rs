@@ -2308,6 +2308,7 @@ pub fn create_table_info(
         &mut table_options,
         &column_name_to_index_map,
         &partition_key_indices,
+        &create_table.time_index,
     )?;
 
     let meta = TableMeta {
@@ -2349,6 +2350,7 @@ fn validate_repartition_column_hint(
     table_options: &mut TableOptions,
     column_name_to_index_map: &HashMap<String, usize>,
     partition_key_indices: &[usize],
+    time_index: &str,
 ) -> Result<()> {
     let Some(column_name) = table_options
         .extra_options
@@ -2384,6 +2386,13 @@ fn validate_repartition_column_hint(
     column_name_to_index_map
         .get(&column_name)
         .context(ColumnNotFoundSnafu { msg: &column_name })?;
+
+    ensure!(
+        column_name != time_index,
+        InvalidPartitionRuleSnafu {
+            reason: format!("cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"),
+        }
+    );
 
     table_options
         .extra_options
@@ -2970,6 +2979,26 @@ WITH ('repartition.column.hint' = 'region_id')",
         assert!(
             err.to_string()
                 .contains("Cannot find column by name: region")
+        );
+    }
+
+    #[test]
+    fn test_create_table_with_time_index_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'ts')",
+        );
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot set repartition.column.hint to the time index column")
         );
     }
 
