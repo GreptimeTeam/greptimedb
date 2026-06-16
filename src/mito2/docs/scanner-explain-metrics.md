@@ -19,6 +19,48 @@ areas:
 - Reader, filter, fetch, metadata cache, or index apply metrics that are merged
   into scanner explain output.
 
+## Output Layout
+
+A scanner line has three layers of information:
+
+- Scanner display fields: the text after the scanner name and before
+  DataFusion's trailing `metrics=[...]`. These fields are produced by the
+  scanner `DisplayAs` implementation.
+- `metrics_per_partition`: verbose-only scanner internals collected by
+  `PartitionMetrics`.
+- DataFusion aggregate metrics: the trailing `metrics=[...]` section collected
+  by the physical execution plan.
+
+Normal mode layout:
+
+```text
+<Scanner>: region=<region>, <scanner display fields> metrics=[<DataFusion aggregate metrics>]
+```
+
+Verbose mode layout:
+
+```text
+<Scanner>: region=<region>, {
+  "partition_count": {...},
+  "projection": [...],
+  "filters": [...],
+  "dyn_filters": [...],
+  "files": [...],
+  "flat_format": true,
+  "metrics_per_partition": [
+    {
+      "partition": <partition>,
+      "metrics": {
+        <ScanMetricsSet fields>,
+        "fetch_metrics": {...},
+        "metadata_cache_metrics": {...},
+        "top_file_metrics": {...}
+      }
+    }
+  ]
+} metrics=[<DataFusion aggregate metrics>]
+```
+
 ## Normal Mode
 
 `EXPLAIN ANALYZE` prints the scanner display line and the aggregate DataFusion
