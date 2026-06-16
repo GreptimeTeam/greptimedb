@@ -165,6 +165,7 @@ impl ErrorExt for Error {
             | Error::ConvertMetaRequest { source, .. }
             | Error::ConvertMetaResponse { source, .. }
             | Error::GetFlowStat { source, .. } => source.retry_hint(),
+            Error::CreateChannel { source, .. } => source.retry_hint(),
             _ => RetryHint::NonRetryable,
         }
     }

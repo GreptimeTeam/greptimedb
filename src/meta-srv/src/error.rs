@@ -1300,7 +1300,12 @@ impl ErrorExt for Error {
             Error::RetryLater { .. }
             | Error::RetryLaterWithSource { .. }
             | Error::MailboxTimeout { .. }
-            | Error::NoEnoughAvailableNode { .. } => RetryHint::Retryable,
+            | Error::NoEnoughAvailableNode { .. }
+            | Error::NoLeader { .. }
+            | Error::LeaderLeaseExpired { .. }
+            | Error::LeaderLeaseChanged { .. }
+            | Error::PeerUnavailable { .. }
+            | Error::RegionOperatingRace { .. } => RetryHint::Retryable,
 
             Error::AllocateRegions { source, .. } | Error::DeallocateRegions { source, .. }
                 if source.retry_hint().is_retryable() =>

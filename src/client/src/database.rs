@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_tonic_status_fallback_uses_status_code() {
+    fn test_from_tonic_status_fallback() {
         let mut headers = HeaderMap::new();
         headers.insert(
             GREPTIME_DB_HEADER_ERROR_CODE,

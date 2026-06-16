@@ -1273,9 +1273,13 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            RetryLater { .. } | GetLatestCacheRetryExceeded { .. } | NoLeader { .. } => {
-                RetryHint::Retryable
-            }
+            RetryLater { .. }
+            | GetLatestCacheRetryExceeded { .. }
+            | NoLeader { .. }
+            | ElectionNoLeader { .. }
+            | ElectionLeaderLeaseExpired { .. }
+            | ElectionLeaderLeaseChanged { .. }
+            | RegionOperatingRace { .. } => RetryHint::Retryable,
             WriteObject { error, .. } | ReadObject { error, .. } => {
                 retry_hint_from_opendal_error(error)
             }

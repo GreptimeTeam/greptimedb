@@ -885,6 +885,9 @@ impl ErrorExt for Error {
             MetricEngine { source, .. } => source.retry_hint(),
             SubmitBatch { source, .. } => source.retry_hint(),
 
+            MemoryLimitExceeded { source, .. } => source.retry_hint(),
+            CollectRecordbatch { source, .. } => source.retry_hint(),
+
             TooManyConcurrentRequests { .. } => RetryHint::Retryable,
 
             _ => RetryHint::NonRetryable,

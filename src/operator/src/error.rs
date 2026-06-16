@@ -1119,6 +1119,11 @@ impl ErrorExt for Error {
             Error::BuildRecordBatch { source, .. } => source.retry_hint(),
             Error::DecodeFlightData { source, .. } => source.retry_hint(),
             Error::SqlCommon { source, .. } => source.retry_hint(),
+            Error::ConvertSchema { source, .. } => source.retry_hint(),
+            Error::WriteStreamToFile { source, .. } => source.retry_hint(),
+            Error::PrepareFileTable { source, .. } | Error::InferFileTableSchema { source, .. } => {
+                source.retry_hint()
+            }
             #[cfg(feature = "enterprise")]
             Error::TriggerQuerier { source, .. } => source.retry_hint(),
             _ => RetryHint::NonRetryable,

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use object_store::error::retry_hint_from_opendal_error;
 use snafu::{Location, Snafu};
 
 use crate::PoisonKey;
@@ -308,6 +309,7 @@ impl ErrorExt for Error {
             Error::ProcedureExec { source, .. } => source.retry_hint(),
             Error::StartRemoveOutdatedMetaTask { source, .. }
             | Error::StopRemoveOutdatedMetaTask { source, .. } => source.retry_hint(),
+            Error::DeleteState { error, .. } => retry_hint_from_opendal_error(error),
             Error::RetryTimesExceeded { .. } | Error::RollbackTimesExceeded { .. } => {
                 RetryHint::NonRetryable
             }
