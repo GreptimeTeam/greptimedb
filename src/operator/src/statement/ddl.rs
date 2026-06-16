@@ -89,7 +89,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, TableOptions,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
+    TableOptions,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -2300,8 +2301,15 @@ pub fn create_table_info(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let table_options = TableOptions::try_from_iter(&create_table.table_options)
+    let mut table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
+
+    validate_repartition_column_hint(
+        &mut table_options,
+        &column_name_to_index_map,
+        &partition_key_indices,
+        &create_table.time_index,
+    )?;
 
     let meta = TableMeta {
         schema,
@@ -2336,6 +2344,61 @@ pub fn create_table_info(
         table_type: TableType::Base,
     };
     Ok(table_info)
+}
+
+fn validate_repartition_column_hint(
+    table_options: &mut TableOptions,
+    column_name_to_index_map: &HashMap<String, usize>,
+    partition_key_indices: &[usize],
+    time_index: &str,
+) -> Result<()> {
+    let Some(column_name) = table_options
+        .extra_options
+        .get(REPARTITION_COLUMN_HINT_KEY)
+        .map(|value| value.trim().to_string())
+    else {
+        return Ok(());
+    };
+
+    ensure!(
+        !column_name.is_empty(),
+        InvalidPartitionRuleSnafu {
+            reason: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
+        }
+    );
+
+    ensure!(
+        !column_name.contains(','),
+        InvalidPartitionRuleSnafu {
+            reason: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
+        }
+    );
+
+    ensure!(
+        partition_key_indices.is_empty(),
+        InvalidPartitionRuleSnafu {
+            reason: format!(
+                "cannot set {REPARTITION_COLUMN_HINT_KEY} on a table with partition metadata"
+            ),
+        }
+    );
+
+    column_name_to_index_map
+        .get(&column_name)
+        .context(ColumnNotFoundSnafu { msg: &column_name })?;
+
+    ensure!(
+        column_name != time_index,
+        InvalidPartitionRuleSnafu {
+            reason: format!("cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"),
+        }
+    );
+
+    table_options
+        .extra_options
+        .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), column_name);
+
+    Ok(())
 }
 
 fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>> {
@@ -2819,6 +2882,144 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
         assert!(err.to_string().contains("duplicate partition column"));
         assert!(err.to_string().contains("device_id"));
+    }
+
+    fn create_expr_from_sql(sql: &str) -> CreateTableExpr {
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        match &result[0] {
+            Statement::CreateTable(create) => {
+                expr_helper::create_to_expr(create, &QueryContext::arc()).unwrap()
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_create_table_with_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = ' host ')",
+        );
+
+        let table_info = create_table_info(&expr, vec![]).unwrap();
+        assert_eq!(
+            table_info
+                .meta
+                .options
+                .extra_options
+                .get(REPARTITION_COLUMN_HINT_KEY),
+            Some(&"host".to_string())
+        );
+    }
+
+    #[test]
+    fn test_create_table_with_empty_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = '')",
+        );
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("repartition.column.hint expects exactly one column name")
+        );
+    }
+
+    #[test]
+    fn test_create_table_with_multiple_repartition_column_hints() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  region_id STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'host,region_id')",
+        );
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("repartition.column.hint expects exactly one column name")
+        );
+    }
+
+    #[test]
+    fn test_create_table_with_missing_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'region_id')",
+        );
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot find column by name: region")
+        );
+    }
+
+    #[test]
+    fn test_create_table_with_time_index_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'ts')",
+        );
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot set repartition.column.hint to the time index column")
+        );
+    }
+
+    #[test]
+    fn test_create_partitioned_table_with_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'host')",
+        );
+
+        let err = create_table_info(&expr, vec!["host".to_string()]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot set repartition.column.hint on a table with partition metadata")
+        );
     }
 
     #[tokio::test]
