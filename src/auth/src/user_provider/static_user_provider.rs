@@ -17,7 +17,8 @@ use snafu::OptionExt;
 
 use crate::error::{InvalidConfigSnafu, Result};
 use crate::user_provider::{
-    UserInfoMap, authenticate_with_credential, load_credential_from_file, parse_credential_line,
+    PgAuthInfo, UserInfoMap, authenticate_with_credential, load_credential_from_file,
+    parse_credential_line, postgres_auth_info_with_credential,
 };
 use crate::{Identity, Password, UserInfoRef, UserProvider};
 
@@ -65,6 +66,10 @@ impl UserProvider for StaticUserProvider {
 
     async fn authenticate(&self, id: Identity<'_>, pwd: Password<'_>) -> Result<UserInfoRef> {
         authenticate_with_credential(&self.users, id, pwd)
+    }
+
+    async fn postgres_auth_info(&self, id: Identity<'_>) -> Result<PgAuthInfo> {
+        postgres_auth_info_with_credential(&self.users, id)
     }
 
     async fn authorize(

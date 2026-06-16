@@ -16,8 +16,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use auth::UserProviderRef;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
+use auth::{UserProviderRef, format_pg_scram_sha256_password_verifier, user_provider_from_option};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
@@ -43,12 +43,6 @@ fn create_postgres_server(
     tls: TlsOption,
     auth_info: Option<DatabaseAuthInfo>,
 ) -> Result<Box<dyn Server>> {
-    let instance = Arc::new(create_testing_instance(table));
-    let io_runtime = RuntimeBuilder::default()
-        .worker_threads(4)
-        .thread_name("postgres-io-handlers")
-        .build()
-        .unwrap();
     let user_provider: Option<UserProviderRef> = if check_pwd {
         let mut provider = MockUserProvider::default();
         if let Some(info) = auth_info {
@@ -58,6 +52,20 @@ fn create_postgres_server(
     } else {
         None
     };
+    create_postgres_server_with_user_provider(table, tls, user_provider)
+}
+
+fn create_postgres_server_with_user_provider(
+    table: TableRef,
+    tls: TlsOption,
+    user_provider: Option<UserProviderRef>,
+) -> Result<Box<dyn Server>> {
+    let instance = Arc::new(create_testing_instance(table));
+    let io_runtime = RuntimeBuilder::default()
+        .worker_threads(4)
+        .thread_name("postgres-io-handlers")
+        .build()
+        .unwrap();
 
     let tls_server_config = Arc::new(
         ReloadableTlsServerConfig::try_new(tls.clone())
@@ -73,6 +81,21 @@ fn create_postgres_server(
         user_provider,
         None,
     )))
+}
+
+async fn start_test_server_with_user_provider(
+    user_provider: UserProviderRef,
+) -> Result<(Box<dyn Server>, u16)> {
+    common_telemetry::init_default_ut_logging();
+    let _ = install_default_crypto_provider();
+
+    let table = MemTable::default_numbers_table();
+    let mut postgres_server =
+        create_postgres_server_with_user_provider(table, Default::default(), Some(user_provider))?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    postgres_server.start(listening).await.unwrap();
+    let server_addr = postgres_server.bind_addr().unwrap();
+    Ok((postgres_server, server_addr.port()))
 }
 
 #[tokio::test]
@@ -135,6 +158,61 @@ async fn test_schema_validating() -> Result<()> {
     assert!(fail.is_err());
     pg_server.shutdown().await.unwrap();
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pg_scram_sha256_auth() -> Result<()> {
+    let verifier =
+        format_pg_scram_sha256_password_verifier(b"greptime", b"pg-scram-salt", 4096).unwrap();
+    let user_provider =
+        user_provider_from_option(&format!("static_user_provider:cmd:greptime={verifier}"))
+            .unwrap();
+    let (postgres_server, server_port) =
+        start_test_server_with_user_provider(user_provider).await?;
+
+    let client = create_plain_connection_with_credentials(server_port, "greptime", "greptime")
+        .await
+        .unwrap();
+    let rows = client
+        .simple_query("SELECT uint32s FROM numbers LIMIT 1")
+        .await;
+    assert_eq!(unwrap_results(rows.unwrap().as_ref())[0], "0");
+
+    let wrong_password =
+        create_plain_connection_with_credentials(server_port, "greptime", "wrong").await;
+    assert!(wrong_password.is_err());
+
+    let unknown_user =
+        create_plain_connection_with_credentials(server_port, "not_found", "greptime").await;
+    assert!(unknown_user.is_err());
+
+    postgres_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pg_cleartext_auth_fallback() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    let table = MemTable::default_numbers_table();
+    let mut postgres_server = create_postgres_server(table, true, Default::default(), None)?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    postgres_server.start(listening).await.unwrap();
+    let server_port = postgres_server.bind_addr().unwrap().port();
+
+    let client = create_plain_connection_with_credentials(server_port, "greptime", "greptime")
+        .await
+        .unwrap();
+    let rows = client
+        .simple_query("SELECT uint32s FROM numbers LIMIT 1")
+        .await;
+    assert_eq!(unwrap_results(rows.unwrap().as_ref())[0], "0");
+
+    let wrong_password =
+        create_plain_connection_with_credentials(server_port, "greptime", "wrong").await;
+    assert!(wrong_password.is_err());
+
+    postgres_server.shutdown().await.unwrap();
     Ok(())
 }
 
@@ -428,6 +506,19 @@ async fn create_plain_connection(
     } else {
         format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
     };
+    let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
+    let _handle = tokio::spawn(conn);
+    Ok(client)
+}
+
+async fn create_plain_connection_with_credentials(
+    port: u16,
+    username: &str,
+    password: &str,
+) -> std::result::Result<Client, PgError> {
+    let url = format!(
+        "host=127.0.0.1 port={port} user={username} password={password} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}",
+    );
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     let _handle = tokio::spawn(conn);
     Ok(client)

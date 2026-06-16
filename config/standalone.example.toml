@@ -13,8 +13,10 @@ default_column_prefix = "greptime"
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
 ## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
-## "mysql_native_password:<hex_sha1_sha1_password>"
-## "pbkdf2_sha256" protects passwords at rest but is not compatible with mysql_native_password.
+## "mysql_native_password:<hex_sha1_sha1_password>",
+## "pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"
+## "pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest.
+## "mysql_native_password" is MySQL-specific and falls back to cleartext password auth for PostgreSQL.
 ## @toml2docs:none-default
 #+ user_provider = "static_user_provider:file:/path/to/users"
 

@@ -20,7 +20,10 @@ use common_telemetry::{info, warn};
 use snafu::ResultExt;
 
 use crate::error::{FileWatchSnafu, Result};
-use crate::user_provider::{UserInfoMap, authenticate_with_credential, load_credential_from_file};
+use crate::user_provider::{
+    PgAuthInfo, UserInfoMap, authenticate_with_credential, load_credential_from_file,
+    postgres_auth_info_with_credential,
+};
 use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const WATCH_FILE_USER_PROVIDER: &str = "watch_file_user_provider";
@@ -81,6 +84,11 @@ impl UserProvider for WatchFileUserProvider {
     async fn authenticate(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfoRef> {
         let users = self.users.lock().expect("users credential must be valid");
         authenticate_with_credential(&users, id, password)
+    }
+
+    async fn postgres_auth_info(&self, id: Identity<'_>) -> Result<PgAuthInfo> {
+        let users = self.users.lock().expect("users credential must be valid");
+        postgres_auth_info_with_credential(&users, id)
     }
 
     async fn authorize(&self, _: &str, _: &str, _: &UserInfoRef) -> Result<()> {
