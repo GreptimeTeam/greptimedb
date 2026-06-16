@@ -545,7 +545,7 @@ async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
         .sql(
             "CREATE TABLE metrics (\
                 ts TIMESTAMP TIME INDEX, \
-                host STRING PRIMARY KEY, \
+                host STRING, \
                 cpu DOUBLE \
             ) ENGINE=mito",
             schema,
