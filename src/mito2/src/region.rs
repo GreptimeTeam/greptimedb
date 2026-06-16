@@ -29,11 +29,13 @@ use common_base::hash::partition_expr_version;
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
 use partition::expr::PartitionExpr;
+use prometheus::IntGauge;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::metadata::RegionMetadataRef;
+use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
@@ -54,6 +56,7 @@ use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
+use crate::metrics::REGION_WRITTEN_BYTES_SINCE_OPEN;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::sst::file::FileMeta;
@@ -172,8 +175,12 @@ pub struct MitoRegion {
     /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id] for current region,
     /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id`.
     pub(crate) topic_latest_entry_id: AtomicU64,
-    /// The total bytes written to the region.
-    pub(crate) written_bytes: Arc<AtomicU64>,
+    /// Bytes written to the region since open.
+    pub(crate) written_bytes: IntGauge,
+    /// Query CPU time accumulated since region opened, in nanoseconds.
+    query_cpu_time: IntGauge,
+    /// Query scanned bytes accumulated since region opened.
+    query_scanned_bytes: IntGauge,
     /// manifest stats
     stats: ManifestStats,
 }
@@ -208,6 +215,47 @@ impl StagingPartitionInfo {
 }
 
 impl MitoRegion {
+    pub(crate) fn new_region_metrics(region_id: RegionId) -> (IntGauge, IntGauge, IntGauge) {
+        let region_id = region_id.as_u64().to_string();
+        (
+            REGION_WRITTEN_BYTES_SINCE_OPEN.with_label_values(&[&region_id]),
+            REGION_QUERY_CPU_TIME.with_label_values(&[&region_id]),
+            REGION_QUERY_SCANNED_BYTES.with_label_values(&[&region_id]),
+        )
+    }
+
+    pub(crate) fn region_metrics(&self) -> (&IntGauge, &IntGauge, &IntGauge) {
+        (
+            &self.written_bytes,
+            &self.query_cpu_time,
+            &self.query_scanned_bytes,
+        )
+    }
+
+    pub(crate) fn reset_region_metrics(
+        written_bytes: &IntGauge,
+        query_cpu_time: &IntGauge,
+        query_scanned_bytes: &IntGauge,
+    ) {
+        written_bytes.set(0);
+        query_cpu_time.set(0);
+        query_scanned_bytes.set(0);
+    }
+
+    fn remove_region_metrics(&self) {
+        let region_id = self.region_id.as_u64().to_string();
+        let labels = &[region_id.as_str()];
+        if let Err(e) = REGION_WRITTEN_BYTES_SINCE_OPEN.remove_label_values(labels) {
+            warn!(e; "Failed to remove region written bytes metric, region_id: {}", self.region_id);
+        }
+        if let Err(e) = REGION_QUERY_CPU_TIME.remove_label_values(labels) {
+            warn!(e; "Failed to remove region query cpu time metric, region_id: {}", self.region_id);
+        }
+        if let Err(e) = REGION_QUERY_SCANNED_BYTES.remove_label_values(labels) {
+            warn!(e; "Failed to remove region query scanned bytes metric, region_id: {}", self.region_id);
+        }
+    }
+
     /// Stop background managers for this region.
     pub(crate) async fn stop(&self) {
         self.manifest_ctx
@@ -643,7 +691,10 @@ impl MitoRegion {
         let file_removed_cnt = self.stats.file_removed_cnt();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
-        let written_bytes = self.written_bytes.load(Ordering::Relaxed);
+        let (written_bytes, query_cpu_time, query_scanned_bytes) = self.region_metrics();
+        let written_bytes = written_bytes.get() as u64;
+        let query_cpu_time = query_cpu_time.get() as u64;
+        let query_scanned_bytes = query_scanned_bytes.get() as u64;
 
         RegionStatistic {
             num_rows,
@@ -661,6 +712,8 @@ impl MitoRegion {
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
             written_bytes,
+            query_cpu_time,
+            query_scanned_bytes,
         }
     }
 
@@ -975,6 +1028,12 @@ impl MitoRegion {
                 )
             })
             .unwrap_or(false)
+    }
+}
+
+impl Drop for MitoRegion {
+    fn drop(&mut self) {
+        self.remove_region_metrics();
     }
 }
 
@@ -1793,6 +1852,9 @@ mod tests {
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
         ));
+        let (written_bytes, query_cpu_time, query_scanned_bytes) =
+            MitoRegion::new_region_metrics(metadata.region_id);
+        MitoRegion::reset_region_metrics(&written_bytes, &query_cpu_time, &query_scanned_bytes);
 
         MitoRegion {
             region_id: metadata.region_id,
@@ -1805,7 +1867,9 @@ mod tests {
             last_schedule_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
-            written_bytes: Arc::new(AtomicU64::new(0)),
+            written_bytes,
+            query_cpu_time,
+            query_scanned_bytes,
             stats: ManifestStats::default(),
         }
     }
@@ -2152,6 +2216,9 @@ mod tests {
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
         ));
+        let (written_bytes, query_cpu_time, query_scanned_bytes) =
+            MitoRegion::new_region_metrics(metadata.region_id);
+        MitoRegion::reset_region_metrics(&written_bytes, &query_cpu_time, &query_scanned_bytes);
 
         let region = MitoRegion {
             region_id: metadata.region_id,
@@ -2164,7 +2231,9 @@ mod tests {
             last_schedule_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
-            written_bytes: Arc::new(AtomicU64::new(0)),
+            written_bytes,
+            query_cpu_time,
+            query_scanned_bytes,
             stats: ManifestStats::default(),
         };
 

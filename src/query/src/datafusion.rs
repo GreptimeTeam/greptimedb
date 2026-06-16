@@ -513,6 +513,7 @@ impl QueryEngine for DatafusionQueryEngine {
                 .extensions
                 .insert(DistPlannerOptions {
                     allow_query_fallback: true,
+                    enable_region_query_load_report: false,
                 });
         } else if let Some(fallback) = query_ctx.extension(QUERY_FALLBACK_HINT) {
             // also check the query context for fallback hint
@@ -524,6 +525,7 @@ impl QueryEngine for DatafusionQueryEngine {
                     .extensions
                     .insert(DistPlannerOptions {
                         allow_query_fallback: true,
+                        enable_region_query_load_report: false,
                     });
             }
         }

@@ -373,6 +373,9 @@ impl RegionOpener {
             self.intermediate_manager,
         ));
         let now = self.time_provider.current_time_millis();
+        let (written_bytes, query_cpu_time, query_scanned_bytes) =
+            MitoRegion::new_region_metrics(region_id);
+        MitoRegion::reset_region_metrics(&written_bytes, &query_cpu_time, &query_scanned_bytes);
 
         Ok(Arc::new(MitoRegion {
             region_id,
@@ -397,7 +400,9 @@ impl RegionOpener {
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(flushed_entry_id),
-            written_bytes: Arc::new(AtomicU64::new(0)),
+            written_bytes,
+            query_cpu_time,
+            query_scanned_bytes,
             stats: self.stats,
         }))
     }
@@ -625,6 +630,9 @@ impl RegionOpener {
         }
 
         let now = self.time_provider.current_time_millis();
+        let (written_bytes, query_cpu_time, query_scanned_bytes) =
+            MitoRegion::new_region_metrics(self.region_id);
+        MitoRegion::reset_region_metrics(&written_bytes, &query_cpu_time, &query_scanned_bytes);
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -642,7 +650,9 @@ impl RegionOpener {
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
-            written_bytes: Arc::new(AtomicU64::new(0)),
+            written_bytes,
+            query_cpu_time,
+            query_scanned_bytes,
             stats: self.stats.clone(),
         };
 

@@ -13,7 +13,10 @@
 // limitations under the License.
 
 use lazy_static::lazy_static;
-use prometheus::{HistogramVec, register_histogram_vec};
+use prometheus::{HistogramVec, IntGaugeVec, register_histogram_vec, register_int_gauge_vec};
+
+/// Region id label.
+pub const REGION_LABEL: &str = "region_id";
 
 lazy_static! {
     pub static ref CONVERT_REGION_BULK_REQUEST: HistogramVec = register_histogram_vec!(
@@ -24,6 +27,20 @@ lazy_static! {
             0.001, 0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.10, 0.15, 0.2, 0.3, 0.4, 0.5, 1.0, 1.5,
             2.0, 2.5, 3.0, 4.0, 5.0
         ]
+    )
+    .unwrap();
+    /// Query CPU time accumulated by each region since the region opened.
+    pub static ref REGION_QUERY_CPU_TIME: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_region_query_cpu_time",
+        "mito region query CPU time since open in nanoseconds",
+        &[REGION_LABEL]
+    )
+    .unwrap();
+    /// Query scanned bytes accumulated by each region since the region opened.
+    pub static ref REGION_QUERY_SCANNED_BYTES: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_region_query_scanned_bytes",
+        "mito region query scanned bytes since open",
+        &[REGION_LABEL]
     )
     .unwrap();
 }

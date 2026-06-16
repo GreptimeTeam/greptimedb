@@ -31,6 +31,8 @@ pub struct StreamMetrics {
     output_bytes: Count,
     /// Elapsed time used to `poll` the stream
     poll_elapsed: Time,
+    /// CPU time used to compute scan output.
+    elapsed_compute: Time,
     /// Elapsed time used to `.await`ing the stream
     await_elapsed: Time,
 }
@@ -46,6 +48,7 @@ impl StreamMetrics {
             output_rows: MetricBuilder::new(metrics).output_rows(partition),
             output_bytes: MetricBuilder::new(metrics).output_bytes(partition),
             poll_elapsed: MetricBuilder::new(metrics).subset_time("elapsed_poll", partition),
+            elapsed_compute: MetricBuilder::new(metrics).elapsed_compute(partition),
             await_elapsed: MetricBuilder::new(metrics).subset_time("elapsed_await", partition),
         }
     }
@@ -68,6 +71,10 @@ impl StreamMetrics {
     /// Return a timer guard that records the time elapsed in poll
     pub fn poll_timer(&self) -> ScopedTimerGuard<'_> {
         self.poll_elapsed.timer()
+    }
+
+    pub fn record_elapsed_compute(&self, duration: Duration) {
+        self.elapsed_compute.add_duration(duration);
     }
 
     pub fn record_await_duration(&self, duration: Duration) {

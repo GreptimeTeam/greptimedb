@@ -47,6 +47,7 @@ use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
+use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
@@ -72,6 +73,7 @@ pub struct RegionScanExec {
     // TODO(ruihang): handle TimeWindowed dist via this parameter
     distribution: Option<TimeSeriesDistribution>,
     explain_verbose: bool,
+    enable_region_query_load_report: bool,
     query_memory_tracker: Option<QueryMemoryTracker>,
 }
 
@@ -88,6 +90,10 @@ impl std::fmt::Debug for RegionScanExec {
             .field("is_partition_set", &self.is_partition_set)
             .field("distribution", &self.distribution)
             .field("explain_verbose", &self.explain_verbose)
+            .field(
+                "enable_region_query_load_report",
+                &self.enable_region_query_load_report,
+            )
             .finish()
     }
 }
@@ -231,6 +237,7 @@ impl RegionScanExec {
             is_partition_set: false,
             distribution: request.distribution,
             explain_verbose: false,
+            enable_region_query_load_report: request.enable_region_query_load_report,
             query_memory_tracker,
         })
     }
@@ -304,6 +311,7 @@ impl RegionScanExec {
             is_partition_set: true,
             distribution: self.distribution,
             explain_verbose: self.explain_verbose,
+            enable_region_query_load_report: self.enable_region_query_load_report,
             query_memory_tracker: self.query_memory_tracker.clone(),
         })
     }
@@ -399,7 +407,9 @@ impl ExecutionPlan for RegionScanExec {
 
         let ctx = QueryScanContext {
             explain_verbose: self.explain_verbose,
+            enable_region_query_load_report: self.enable_region_query_load_report,
         };
+        let region_id = self.scanner.lock().unwrap().metadata().region_id;
         let stream = self
             .scanner
             .lock()
@@ -420,6 +430,11 @@ impl ExecutionPlan for RegionScanExec {
             metric: stream_metrics,
             span,
             await_timer: None,
+            enable_region_query_load_report: self.enable_region_query_load_report,
+            region_id,
+            cpu_time: 0,
+            scanned_bytes: 0,
+            reported: false,
         }))
     }
 
@@ -500,6 +515,27 @@ pub struct StreamWithMetricWrapper {
     metric: StreamMetrics,
     span: Span,
     await_timer: Option<Instant>,
+    enable_region_query_load_report: bool,
+    region_id: store_api::storage::RegionId,
+    cpu_time: u64,
+    scanned_bytes: u64,
+    reported: bool,
+}
+
+impl StreamWithMetricWrapper {
+    fn report_region_query_load(&mut self) {
+        if !self.enable_region_query_load_report || self.reported {
+            return;
+        }
+        self.reported = true;
+        let region_id = self.region_id.as_u64().to_string();
+        REGION_QUERY_CPU_TIME
+            .with_label_values(&[&region_id])
+            .add(self.cpu_time as i64);
+        REGION_QUERY_SCANNED_BYTES
+            .with_label_values(&[&region_id])
+            .add(self.scanned_bytes as i64);
+    }
 }
 
 impl Stream for StreamWithMetricWrapper {
@@ -507,11 +543,16 @@ impl Stream for StreamWithMetricWrapper {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let _enter = this.span.enter();
+        let enter = this.span.enter();
+        let poll_start = Instant::now();
         let poll_timer = this.metric.poll_timer();
         this.await_timer.get_or_insert(Instant::now());
         let poll_result = this.stream.poll_next_unpin(cx);
         drop(poll_timer);
+        let poll_elapsed = poll_start.elapsed();
+        this.metric.record_elapsed_compute(poll_elapsed);
+        this.cpu_time = this.cpu_time.saturating_add(poll_elapsed.as_nanos() as u64);
+        drop(enter);
         match poll_result {
             Poll::Ready(Some(result)) => {
                 if let Some(instant) = this.await_timer.take() {
@@ -523,6 +564,7 @@ impl Stream for StreamWithMetricWrapper {
                         // we don't record elapsed time here
                         // since it's calling storage api involving I/O ops
                         let batch_bytes = record_batch.buffer_memory_size();
+                        this.scanned_bytes = this.scanned_bytes.saturating_add(batch_bytes as u64);
                         this.metric.record_output_bytes(batch_bytes);
                         this.metric.record_output(record_batch.num_rows());
                         Poll::Ready(Some(Ok(record_batch.into_df_record_batch())))
@@ -530,7 +572,10 @@ impl Stream for StreamWithMetricWrapper {
                     Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
                 }
             }
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(None) => {
+                this.report_region_query_load();
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
     }

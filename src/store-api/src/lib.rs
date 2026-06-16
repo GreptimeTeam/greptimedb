@@ -19,7 +19,7 @@ pub mod data_source;
 pub mod logstore;
 pub mod metadata;
 pub mod metric_engine_consts;
-mod metrics;
+pub mod metrics;
 pub mod mito_engine_options;
 pub mod path_utils;
 pub mod region_engine;

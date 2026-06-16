@@ -25,6 +25,65 @@ async fn test_engine_close_region() {
     test_engine_close_region_with_format(true).await;
 }
 
+#[tokio::test]
+async fn test_engine_close_region_removes_region_metrics() {
+    let mut env = TestEnv::with_prefix("close-metrics").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(9000, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    {
+        let region = engine.get_region(region_id).unwrap();
+        region.written_bytes.set(1);
+        let (_, query_cpu_time, query_scanned_bytes) = region.region_metrics();
+        query_cpu_time.add(7);
+        query_scanned_bytes.add(42);
+    }
+
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+    assert!(!engine.is_region_exists(region_id));
+
+    let metrics = prometheus::gather();
+    assert_region_metric_missing(
+        &metrics,
+        "greptime_mito_region_written_bytes_since_open",
+        region_id,
+    );
+    assert_region_metric_missing(&metrics, "greptime_mito_region_query_cpu_time", region_id);
+    assert_region_metric_missing(
+        &metrics,
+        "greptime_mito_region_query_scanned_bytes",
+        region_id,
+    );
+}
+
+fn assert_region_metric_missing(
+    metrics: &[prometheus::proto::MetricFamily],
+    metric_name: &str,
+    region_id: RegionId,
+) {
+    let exists = metrics
+        .iter()
+        .find(|metric| metric.name() == metric_name)
+        .is_some_and(|metric| {
+            metric.metric.iter().any(|metric| {
+                metric.label.iter().any(|label| {
+                    label.name() == "region_id" && label.value() == region_id.as_u64().to_string()
+                })
+            })
+        });
+
+    assert!(!exists, "metric {metric_name} still exists for {region_id}");
+}
+
 async fn test_engine_close_region_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("close").await;
     let engine = env

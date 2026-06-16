@@ -15,7 +15,7 @@
 //! Basic tests for mito engine.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use api::v1::helper::row;
 use api::v1::value::ValueData;
@@ -131,7 +131,7 @@ async fn test_write_to_region_with_format(flat_format: bool) {
     };
     put_rows(&engine, region_id, rows).await;
     let region = engine.get_region(region_id).unwrap();
-    assert!(region.written_bytes.load(Ordering::Relaxed) > 0);
+    assert!(region.written_bytes.get() > 0);
 }
 
 #[apply(multiple_log_store_factories)]
@@ -220,7 +220,7 @@ async fn test_region_replay_with_format(factory: Option<LogStoreFactory>, flat_f
 
     // The replay won't update the write bytes rate meter.
     let region = engine.get_region(region_id).unwrap();
-    assert_eq!(region.written_bytes.load(Ordering::Relaxed), 0);
+    assert_eq!(region.written_bytes.get(), 0);
 
     let request = ScanRequest::default();
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();
@@ -718,6 +718,134 @@ async fn test_region_usage_with_format(flat_format: bool) {
     // region total usage
     // Some memtables may share items.
     assert!(region_stat.estimated_disk_size() > 3000);
+}
+
+#[tokio::test]
+async fn test_region_statistic_reports_region_query_load() {
+    let mut engine = TestEnv::new().await;
+    let engine = engine
+        .create_engine(MitoConfig {
+            auto_flush_interval: Duration::ZERO,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let (_, query_cpu_time, query_scanned_bytes) = region.region_metrics();
+    query_cpu_time.add(7);
+    query_scanned_bytes.add(42);
+
+    let region_stat = region.region_statistic();
+    assert_eq!(region_stat.query_cpu_time, 7);
+    assert_eq!(region_stat.query_scanned_bytes, 42);
+}
+
+#[tokio::test]
+async fn test_region_load_metrics_exposed_to_prometheus() {
+    let mut engine = TestEnv::new().await;
+    let engine = engine
+        .create_engine(MitoConfig {
+            auto_flush_interval: Duration::ZERO,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 1),
+        },
+    )
+    .await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let (_, query_cpu_time, query_scanned_bytes) = region.region_metrics();
+    query_cpu_time.add(7);
+    query_scanned_bytes.add(42);
+
+    let metrics = prometheus::gather();
+    assert_region_metric_value(
+        &metrics,
+        "greptime_mito_region_written_bytes_since_open",
+        region_id,
+        region.written_bytes.get(),
+    );
+    assert_region_metric_value(
+        &metrics,
+        "greptime_mito_region_query_cpu_time",
+        region_id,
+        7,
+    );
+    assert_region_metric_value(
+        &metrics,
+        "greptime_mito_region_query_scanned_bytes",
+        region_id,
+        42,
+    );
+}
+
+#[tokio::test]
+async fn test_region_metrics_preserve_existing_query_load() {
+    let mut engine = TestEnv::new().await;
+    let engine = engine
+        .create_engine(MitoConfig {
+            auto_flush_interval: Duration::ZERO,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let (_, query_cpu_time, query_scanned_bytes) = region.region_metrics();
+    query_cpu_time.add(7);
+    query_scanned_bytes.add(42);
+
+    assert_eq!(query_cpu_time.get(), 7);
+    assert_eq!(query_scanned_bytes.get(), 42);
+}
+
+fn assert_region_metric_value(
+    metrics: &[prometheus::proto::MetricFamily],
+    metric_name: &str,
+    region_id: RegionId,
+    expected: i64,
+) {
+    let metric = metrics
+        .iter()
+        .find(|metric| metric.name() == metric_name)
+        .and_then(|metric| {
+            metric.metric.iter().find(|metric| {
+                metric.label.iter().any(|label| {
+                    label.name() == "region_id" && label.value() == region_id.as_u64().to_string()
+                })
+            })
+        })
+        .unwrap_or_else(|| panic!("missing metric {metric_name} for region {region_id}"));
+
+    assert_eq!(metric.gauge.value() as i64, expected);
 }
 
 #[tokio::test]

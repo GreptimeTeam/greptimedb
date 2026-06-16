@@ -497,17 +497,9 @@ impl MergeScanExec {
 
                 // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
-                    let output_bytes = scan_output_bytes(&metrics);
+                    let load = region_scan_load(&metrics);
                     let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
-                    let value = read_meter!(
-                        c,
-                        s,
-                        ReadItem {
-                            cpu_time: metrics.elapsed_compute as u64,
-                            table_scan: output_bytes as u64,
-                        },
-                        current_channel as u8
-                    );
+                    let value = read_meter!(c, s, load, current_channel as u8);
                     metric.record_greptime_exec_cost(value as usize);
 
                     // record metrics from sub sgates
@@ -929,6 +921,13 @@ fn scan_output_bytes(metrics: &RecordBatchMetrics) -> usize {
         .sum()
 }
 
+fn region_scan_load(metrics: &RecordBatchMetrics) -> ReadItem {
+    ReadItem {
+        cpu_time: metrics.elapsed_compute as u64,
+        table_scan: scan_output_bytes(metrics) as u64,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MergeScanMetric {
     /// Nanosecond elapsed till the scan operator is ready to emit data
@@ -1276,5 +1275,22 @@ mod tests {
         };
 
         assert_eq!(scan_output_bytes(&metrics), 60);
+    }
+
+    #[test]
+    fn region_scan_load_uses_cpu_time_and_output_bytes() {
+        let metrics = RecordBatchMetrics {
+            elapsed_compute: 7,
+            plan_metrics: vec![PlanMetrics {
+                plan: "RegionScanExec: region=1".to_string(),
+                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 42)],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(region_scan_load(&metrics).cpu_time, 7);
+        assert_eq!(region_scan_load(&metrics).table_scan, 42);
     }
 }

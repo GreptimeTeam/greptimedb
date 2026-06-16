@@ -29,6 +29,8 @@ pub const FLUSH_REASON: &str = "reason";
 pub const FILE_TYPE_LABEL: &str = "file_type";
 /// Region worker id label.
 pub const WORKER_LABEL: &str = "worker";
+/// Region id label.
+pub const REGION_LABEL: &str = "region_id";
 /// Partition label.
 pub const PARTITION_LABEL: &str = "partition";
 /// Staging dir type label.
@@ -113,6 +115,13 @@ lazy_static! {
         "greptime_mito_write_rows_total",
         "mito write rows total",
         &[TYPE_LABEL]
+    )
+    .unwrap();
+    /// Bytes written to each region since the region opened.
+    pub static ref REGION_WRITTEN_BYTES_SINCE_OPEN: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_region_written_bytes_since_open",
+        "mito region written bytes since open",
+        &[REGION_LABEL]
     )
     .unwrap();
 }
