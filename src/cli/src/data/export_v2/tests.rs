@@ -33,6 +33,44 @@ use crate::data::sql::escape_sql_identifier;
 use crate::database::DatabaseClient;
 use crate::error::{FileIoSnafu, InvalidArgumentsSnafu, OtherSnafu, Result};
 
+struct TestConnection {
+    addr: String,
+    catalog: String,
+    auth_basic: Option<String>,
+}
+
+impl TestConnection {
+    fn from_env() -> Self {
+        Self {
+            addr: env::var("GREPTIME_ADDR").unwrap_or_else(|_| "127.0.0.1:4000".to_string()),
+            catalog: env::var("GREPTIME_CATALOG").unwrap_or_else(|_| "greptime".to_string()),
+            auth_basic: env::var("GREPTIME_AUTH_BASIC").ok(),
+        }
+    }
+
+    fn client(&self) -> DatabaseClient {
+        DatabaseClient::new(
+            self.addr.clone(),
+            self.catalog.clone(),
+            self.auth_basic.clone(),
+            Duration::from_secs(60),
+            None,
+            false,
+        )
+    }
+}
+
+fn path_to_uri(path: &std::path::Path) -> Result<String> {
+    Url::from_directory_path(path)
+        .map(|url| url.to_string())
+        .map_err(|_| {
+            InvalidArgumentsSnafu {
+                msg: "invalid temp dir path".to_string(),
+            }
+            .build()
+        })
+}
+
 async fn query_count(database_client: &DatabaseClient, schema: &str, table: &str) -> Result<u64> {
     let sql = format!("SELECT COUNT(*) FROM {}", escape_sql_identifier(table));
     let rows = database_client.sql(&sql, schema).await?;
@@ -138,14 +176,7 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
         .await?;
 
     let src_dir = tempdir().context(FileIoSnafu)?;
-    let src_uri = Url::from_directory_path(src_dir.path())
-        .map_err(|_| {
-            InvalidArgumentsSnafu {
-                msg: "invalid temp dir path".to_string(),
-            }
-            .build()
-        })?
-        .to_string();
+    let src_uri = path_to_uri(src_dir.path())?;
 
     let mut export_args = vec![
         "export-v2-create",
@@ -308,14 +339,7 @@ async fn import_v2_ddl_dry_run_e2e() -> Result<()> {
         .await?;
 
     let src_dir = tempdir().context(FileIoSnafu)?;
-    let src_uri = Url::from_directory_path(src_dir.path())
-        .map_err(|_| {
-            InvalidArgumentsSnafu {
-                msg: "invalid temp dir path".to_string(),
-            }
-            .build()
-        })?
-        .to_string();
+    let src_uri = path_to_uri(src_dir.path())?;
 
     let mut export_args = vec![
         "export-v2-create",
@@ -419,14 +443,7 @@ async fn export_import_v2_data_roundtrip_e2e() -> Result<()> {
     let expected_rows = query_count(&database_client, schema, "metrics").await?;
 
     let src_dir = tempdir().context(FileIoSnafu)?;
-    let src_uri = Url::from_directory_path(src_dir.path())
-        .map_err(|_| {
-            InvalidArgumentsSnafu {
-                msg: "invalid temp dir path".to_string(),
-            }
-            .build()
-        })?
-        .to_string();
+    let src_uri = path_to_uri(src_dir.path())?;
 
     let mut export_args = vec![
         "export-v2-create",
@@ -521,19 +538,10 @@ async fn export_import_v2_data_roundtrip_e2e() -> Result<()> {
 #[tokio::test]
 #[ignore]
 async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
-    let addr = env::var("GREPTIME_ADDR").unwrap_or_else(|_| "127.0.0.1:4000".to_string());
-    let catalog = env::var("GREPTIME_CATALOG").unwrap_or_else(|_| "greptime".to_string());
-    let auth_basic = env::var("GREPTIME_AUTH_BASIC").ok();
+    let conn = TestConnection::from_env();
     let schema = "test_db_import_resume_completed_chunk";
 
-    let database_client = DatabaseClient::new(
-        addr.clone(),
-        catalog.clone(),
-        auth_basic.clone(),
-        Duration::from_secs(60),
-        None,
-        false,
-    );
+    let database_client = conn.client();
 
     database_client
         .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
@@ -561,23 +569,16 @@ async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
         .await?;
 
     let src_dir = tempdir().context(FileIoSnafu)?;
-    let src_uri = Url::from_directory_path(src_dir.path())
-        .map_err(|_| {
-            InvalidArgumentsSnafu {
-                msg: "invalid temp dir path".to_string(),
-            }
-            .build()
-        })?
-        .to_string();
+    let src_uri = path_to_uri(src_dir.path())?;
 
     let mut export_args = vec![
         "export-v2-create",
         "--addr",
-        &addr,
+        &conn.addr,
         "--to",
         &src_uri,
         "--catalog",
-        &catalog,
+        &conn.catalog,
         "--schemas",
         schema,
         "--start-time",
@@ -591,7 +592,7 @@ async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
         "--progress",
         "never",
     ];
-    if let Some(auth) = &auth_basic {
+    if let Some(auth) = &conn.auth_basic {
         export_args.push("--auth-basic");
         export_args.push(auth);
     }
@@ -630,11 +631,11 @@ async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
     let mut partial_import_args = vec![
         "import-v2",
         "--addr",
-        &addr,
+        &conn.addr,
         "--from",
         &src_uri,
         "--catalog",
-        &catalog,
+        &conn.catalog,
         "--schemas",
         schema,
         "--task-parallelism",
@@ -642,7 +643,7 @@ async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
         "--progress",
         "never",
     ];
-    if let Some(auth) = &auth_basic {
+    if let Some(auth) = &conn.auth_basic {
         partial_import_args.push("--auth-basic");
         partial_import_args.push(auth);
     }
@@ -672,8 +673,8 @@ async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
 
     let mut import_state = ImportState::new(
         full_manifest.snapshot_id.to_string(),
-        addr.clone(),
-        catalog.clone(),
+        conn.addr.clone(),
+        conn.catalog.clone(),
         &schemas,
         tasks,
     );
@@ -696,11 +697,11 @@ async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
     let mut import_args = vec![
         "import-v2",
         "--addr",
-        &addr,
+        &conn.addr,
         "--from",
         &src_uri,
         "--catalog",
-        &catalog,
+        &conn.catalog,
         "--schemas",
         schema,
         "--state-path",
@@ -710,7 +711,7 @@ async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
         "--progress",
         "never",
     ];
-    if let Some(auth) = &auth_basic {
+    if let Some(auth) = &conn.auth_basic {
         import_args.push("--auth-basic");
         import_args.push(auth);
     }
@@ -775,14 +776,7 @@ async fn import_v2_fails_on_incomplete_snapshot_e2e() -> Result<()> {
         .await?;
 
     let src_dir = tempdir().context(FileIoSnafu)?;
-    let src_uri = Url::from_directory_path(src_dir.path())
-        .map_err(|_| {
-            InvalidArgumentsSnafu {
-                msg: "invalid temp dir path".to_string(),
-            }
-            .build()
-        })?
-        .to_string();
+    let src_uri = path_to_uri(src_dir.path())?;
 
     let mut export_args = vec![
         "export-v2-create",
@@ -910,14 +904,7 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
     let expected_rows_a = query_count(&database_client, schema_a, "metrics").await?;
 
     let src_dir = tempdir().context(FileIoSnafu)?;
-    let src_uri = Url::from_directory_path(src_dir.path())
-        .map_err(|_| {
-            InvalidArgumentsSnafu {
-                msg: "invalid temp dir path".to_string(),
-            }
-            .build()
-        })?
-        .to_string();
+    let src_uri = path_to_uri(src_dir.path())?;
 
     let mut export_args = vec![
         "export-v2-create",
@@ -1035,14 +1022,7 @@ async fn export_import_v2_skipped_chunk_e2e() -> Result<()> {
         .await?;
 
     let src_dir = tempdir().context(FileIoSnafu)?;
-    let src_uri = Url::from_directory_path(src_dir.path())
-        .map_err(|_| {
-            InvalidArgumentsSnafu {
-                msg: "invalid temp dir path".to_string(),
-            }
-            .build()
-        })?
-        .to_string();
+    let src_uri = path_to_uri(src_dir.path())?;
 
     let mut export_args = vec![
         "export-v2-create",
