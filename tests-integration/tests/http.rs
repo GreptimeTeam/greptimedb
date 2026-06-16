@@ -157,6 +157,8 @@ macro_rules! http_tests {
                 test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
+                test_splunk_health,
+                test_splunk_health_is_public,
                 test_log_query,
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
@@ -1402,6 +1404,68 @@ pub async fn test_metrics_api(store_type: StorageType) {
     // Comment in the metrics text.
     assert!(body.contains("# HELP"));
     guard.remove_all().await;
+}
+
+pub async fn test_splunk_health(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_splunk_health").await;
+    let client = TestClient::new(app).await;
+
+    // The HEC health endpoint returns 200 with the HEC health body.
+    let res = client
+        .get("/v1/splunk/services/collector/health")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    assert_eq!(json["text"], "HEC is healthy");
+    assert_eq!(json["code"], 17);
+
+    // The versioned alias `/health/1.0` serves the same handler.
+    let res = client
+        .get("/v1/splunk/services/collector/health/1.0")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    assert_eq!(json["text"], "HEC is healthy");
+    assert_eq!(json["code"], 17);
+
+    // Query parameters (e.g. `ack`, `token`) are tolerated and ignored rather
+    // than rejected
+    for path in [
+        "/v1/splunk/services/collector/health?ack=true&token=xyz",
+        "/v1/splunk/services/collector/health/1.0?ack=true&token=xyz",
+    ] {
+        let res = client.get(path).send().await;
+        assert_eq!(StatusCode::OK, res.status());
+    }
+
+    guard.remove_all().await;
+}
+
+pub async fn test_splunk_health_is_public(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
+        store_type,
+        "test_splunk_health_is_public",
+        Some(user_provider),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // The health endpoint is registered in `PUBLIC_API_PREFIX`, so it must
+    // succeed without credentials even when a user provider is configured.
+    let res = client
+        .get("/v1/splunk/services/collector/health")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+
 }
 
 pub async fn test_health_api(store_type: StorageType) {

@@ -104,6 +104,7 @@ pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
 pub mod result;
+pub mod splunk;
 mod timeout;
 pub mod utils;
 
@@ -126,8 +127,12 @@ const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
-pub static PUBLIC_API_PREFIX: [&str; 3] =
-    ["/v1/influxdb/ping", "/v1/influxdb/health", "/v1/health"];
+pub static PUBLIC_API_PREFIX: [&str; 4] = [
+    "/v1/influxdb/ping",
+    "/v1/influxdb/health",
+    "/v1/health",
+    "/v1/splunk/services/collector/health",
+];
 
 #[derive(Default)]
 pub struct HttpServer {
@@ -673,7 +678,12 @@ impl HttpServerBuilder {
             &format!("/{HTTP_API_VERSION}/elasticsearch/"),
             Router::new()
                 .route("/", routing::get(elasticsearch::handle_get_version))
-                .with_state(log_state),
+                .with_state(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/splunk"),
+            HttpServer::route_splunk(log_state),
         );
 
         Self { router, ..self }
@@ -926,6 +936,19 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(log_state)
+    }
+
+    fn route_splunk<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            .route(
+                "/services/collector/health",
+                routing::get(splunk::handle_health),
+            )
+            .route(
+                "/services/collector/health/1.0",
+                routing::get(splunk::handle_health),
             )
             .with_state(log_state)
     }
