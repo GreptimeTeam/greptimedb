@@ -13,3 +13,7 @@ Run benchmarks in this crate:
 ```bash
 cargo bench -p mito2 -F test
 ```
+
+## Developer Docs
+
+- [Scanner explain metrics](docs/scanner-explain-metrics.md)
