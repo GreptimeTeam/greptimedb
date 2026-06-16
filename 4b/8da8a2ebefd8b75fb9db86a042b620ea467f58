@@ -1,0 +1,19 @@
+src/metric-engine/src/error.rs
+  s_abc59d71f18a4d::t_1d6b6f3352bb25 18,467-491
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "4b8da8a2ebefd8b75fb9db86a042b620ea467f58",
+  "prompts": {},
+  "sessions": {
+    "s_abc59d71f18a4d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a7bfa0affeEwe6BgYqF7nPHZ",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
