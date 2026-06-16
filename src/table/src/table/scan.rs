@@ -572,10 +572,7 @@ impl Stream for StreamWithMetricWrapper {
                     Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
                 }
             }
-            Poll::Ready(None) => {
-                this.report_region_query_load();
-                Poll::Ready(None)
-            }
+            Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -591,6 +588,12 @@ impl DfRecordBatchStream for StreamWithMetricWrapper {
     }
 }
 
+impl Drop for StreamWithMetricWrapper {
+    fn drop(&mut self) {
+        self.report_region_query_load();
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
@@ -601,12 +604,20 @@ mod test {
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
-    use futures::TryStreamExt;
+    use futures::{StreamExt, TryStreamExt};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
     use store_api::region_engine::SinglePartitionScanner;
     use store_api::storage::RegionId;
 
     use super::*;
+
+    fn reset_region_query_metrics(region_id: RegionId) {
+        let region_id = region_id.as_u64().to_string();
+        let labels = &[region_id.as_str()];
+        let _ = REGION_QUERY_CPU_TIME.remove_label_values(labels);
+        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(labels);
+    }
 
     #[tokio::test]
     async fn test_simple_table_scan() {
@@ -684,5 +695,56 @@ mod test {
 
         let result = plan.execute(0, ctx.task_ctx());
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn report_region_query_load_when_stream_is_dropped() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+
+        let batch1 = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1, 2])) as _],
+        )
+        .unwrap();
+        let batch2 = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([3, 4])) as _],
+        )
+        .unwrap();
+        let expected_scanned_bytes = batch1.buffer_memory_size() as i64;
+        let region_id = RegionId::new(1234, 9876);
+        reset_region_query_metrics(region_id);
+
+        let recordbatches = RecordBatches::try_new(schema, vec![batch1, batch2]).unwrap();
+        let metric = ExecutionPlanMetricsSet::new();
+        let stream_metrics = StreamMetrics::new(&metric, 0);
+        let mut stream = StreamWithMetricWrapper {
+            stream: recordbatches.as_stream(),
+            metric: stream_metrics,
+            span: common_telemetry::tracing::info_span!("test_region_query_load"),
+            await_timer: None,
+            enable_region_query_load_report: true,
+            region_id,
+            cpu_time: 0,
+            scanned_bytes: 0,
+            reported: false,
+        };
+
+        assert!(stream.next().await.unwrap().is_ok());
+        drop(stream);
+
+        let region_id = region_id.as_u64().to_string();
+        assert_eq!(
+            REGION_QUERY_SCANNED_BYTES
+                .with_label_values(&[&region_id])
+                .get(),
+            expected_scanned_bytes
+        );
+
+        reset_region_query_metrics(RegionId::from_u64(region_id.parse().unwrap()));
     }
 }
