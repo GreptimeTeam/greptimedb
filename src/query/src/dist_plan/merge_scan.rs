@@ -47,6 +47,7 @@ use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
+use table::table::scan::REGION_SCAN_EXEC_NAME;
 use table::table_name::TableName;
 use tokio::time::Instant;
 use tracing::{Instrument, Span};
@@ -496,13 +497,14 @@ impl MergeScanExec {
 
                 // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
+                    let output_bytes = scan_output_bytes(&metrics);
                     let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
                     let value = read_meter!(
                         c,
                         s,
                         ReadItem {
                             cpu_time: metrics.elapsed_compute as u64,
-                            table_scan: metrics.memory_usage as u64
+                            table_scan: output_bytes as u64,
                         },
                         current_channel as u8
                     );
@@ -916,6 +918,17 @@ impl DisplayAs for MergeScanExec {
     }
 }
 
+/// Extract total `output_bytes` from [`RegionScanExec`] plan nodes.
+fn scan_output_bytes(metrics: &RecordBatchMetrics) -> usize {
+    metrics
+        .plan_metrics
+        .iter()
+        .filter(|pm| pm.plan_name == REGION_SCAN_EXEC_NAME)
+        .flat_map(|pm| &pm.metrics)
+        .filter_map(|(name, value)| (name == "output_bytes").then_some(*value))
+        .sum()
+}
+
 #[derive(Debug, Clone)]
 struct MergeScanMetric {
     /// Nanosecond elapsed till the scan operator is ready to emit data
@@ -969,6 +982,7 @@ mod tests {
 
     use async_trait::async_trait;
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
+    use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
@@ -1209,5 +1223,58 @@ mod tests {
 
         assert_eq!(exec.captured_remote_dyn_filters().len(), 1);
         assert!(matches!(propagation.filters.as_slice(), [PushedDown::Yes]));
+    }
+
+    #[test]
+    fn scan_output_bytes_uses_plan_name() {
+        let metrics = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "SeqScan: region=1".to_string(),
+                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 42)],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(scan_output_bytes(&metrics), 42);
+    }
+
+    #[test]
+    fn scan_output_bytes_defaults_to_zero_without_region_scan() {
+        let metrics = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "ProjectionExec".to_string(),
+                plan_name: "ProjectionExec".to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 42)],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(scan_output_bytes(&metrics), 0);
+    }
+
+    #[test]
+    fn scan_output_bytes_sums_multiple_region_scans() {
+        let metrics = RecordBatchMetrics {
+            plan_metrics: vec![
+                PlanMetrics {
+                    plan: "RegionScanExec: region=1".to_string(),
+                    plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                    level: 0,
+                    metrics: vec![("output_bytes".to_string(), 42)],
+                },
+                PlanMetrics {
+                    plan: "RegionScanExec: region=2".to_string(),
+                    plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                    level: 0,
+                    metrics: vec![("output_bytes".to_string(), 18)],
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(scan_output_bytes(&metrics), 60);
     }
 }

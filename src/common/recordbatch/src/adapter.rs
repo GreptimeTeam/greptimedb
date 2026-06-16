@@ -366,6 +366,7 @@ impl ExecutionPlanVisitor for MetricCollector {
         let Some(metric) = plan.metrics() else {
             self.record_batch_metrics.plan_metrics.push(PlanMetrics {
                 plan: plan.name().to_string(),
+                plan_name: plan.name().to_string(),
                 level: self.current_level,
                 metrics: vec![],
             });
@@ -380,6 +381,7 @@ impl ExecutionPlanVisitor for MetricCollector {
             .timestamps_removed();
         let mut plan_metric = PlanMetrics {
             plan: one_line(plan, self.verbose).to_string(),
+            plan_name: plan.name().to_string(),
             level: self.current_level,
             metrics: Vec::with_capacity(metric.iter().size_hint().0),
         };
@@ -519,6 +521,9 @@ impl Display for RecordBatchMetrics {
 pub struct PlanMetrics {
     /// The plan name
     pub plan: String,
+    /// The stable execution plan name.
+    #[serde(default)]
+    pub plan_name: String,
     /// The level of the plan, starts from 0
     pub level: usize,
     /// An ordered key-value list of metrics.
@@ -914,6 +919,22 @@ mod test {
         assert!(metrics.region_watermarks.is_empty());
         assert_eq!(metrics.elapsed_compute, 12);
         assert_eq!(metrics.memory_usage, 34);
+    }
+
+    #[test]
+    fn test_plan_metrics_deserializes_without_plan_name() {
+        let metrics: RecordBatchMetrics = serde_json::from_value(json!({
+            "elapsed_compute": 12,
+            "memory_usage": 34,
+            "plan_metrics": [{
+                "plan": "SeqScan: region=1",
+                "level": 0,
+                "metrics": []
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(metrics.plan_metrics[0].plan_name, "");
     }
 
     #[test]
