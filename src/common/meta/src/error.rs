@@ -1278,8 +1278,7 @@ impl ErrorExt for Error {
             | NoLeader { .. }
             | ElectionNoLeader { .. }
             | ElectionLeaderLeaseExpired { .. }
-            | ElectionLeaderLeaseChanged { .. }
-            | RegionOperatingRace { .. } => RetryHint::Retryable,
+            | ElectionLeaderLeaseChanged { .. } => RetryHint::Retryable,
             WriteObject { error, .. } | ReadObject { error, .. } => {
                 retry_hint_from_opendal_error(error)
             }

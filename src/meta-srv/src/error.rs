@@ -1304,8 +1304,7 @@ impl ErrorExt for Error {
             | Error::NoLeader { .. }
             | Error::LeaderLeaseExpired { .. }
             | Error::LeaderLeaseChanged { .. }
-            | Error::PeerUnavailable { .. }
-            | Error::RegionOperatingRace { .. } => RetryHint::Retryable,
+            | Error::PeerUnavailable { .. } => RetryHint::Retryable,
 
             Error::AllocateRegions { source, .. } | Error::DeallocateRegions { source, .. }
                 if source.retry_hint().is_retryable() =>

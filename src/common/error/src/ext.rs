@@ -87,37 +87,7 @@ pub fn retry_hint_from_io_error(error: &std::io::Error) -> RetryHint {
         | ErrorKind::ResourceBusy
         | ErrorKind::Interrupted => RetryHint::Retryable,
 
-        ErrorKind::NotFound
-        | ErrorKind::PermissionDenied
-        | ErrorKind::AddrInUse
-        | ErrorKind::AddrNotAvailable
-        | ErrorKind::AlreadyExists
-        | ErrorKind::NotADirectory
-        | ErrorKind::IsADirectory
-        | ErrorKind::DirectoryNotEmpty
-        | ErrorKind::ReadOnlyFilesystem
-        | ErrorKind::InvalidInput
-        | ErrorKind::InvalidData
-        | ErrorKind::WriteZero
-        | ErrorKind::StorageFull
-        | ErrorKind::NotSeekable
-        | ErrorKind::QuotaExceeded
-        | ErrorKind::FileTooLarge
-        | ErrorKind::ExecutableFileBusy
-        | ErrorKind::Deadlock
-        | ErrorKind::CrossesDevices
-        | ErrorKind::TooManyLinks
-        | ErrorKind::InvalidFilename
-        | ErrorKind::ArgumentListTooLong
-        | ErrorKind::Unsupported
-        | ErrorKind::UnexpectedEof
-        | ErrorKind::OutOfMemory
-        | ErrorKind::Other => RetryHint::NonRetryable,
-
-        unclassified_or_future_kind => {
-            let _ = unclassified_or_future_kind;
-            RetryHint::NonRetryable
-        }
+        _ => RetryHint::NonRetryable,
     }
 }
 

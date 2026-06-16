@@ -362,6 +362,7 @@ impl Error {
             || matches!(self, Error::RetryLater { clean_poisons, .. } if *clean_poisons)
     }
 
+    #[cfg(test)]
     /// Creates a new [Error::RetryLater] or [Error::External] error from source `err` according
     /// to its [RetryHint].
     pub fn from_error_ext<E: ErrorExt + Send + Sync + 'static>(err: E) -> Self {

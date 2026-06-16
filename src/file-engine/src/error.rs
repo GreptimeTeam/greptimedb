@@ -250,8 +250,3 @@ impl ErrorExt for Error {
     }
 }
 
-impl From<Error> for common_procedure::Error {
-    fn from(e: Error) -> common_procedure::Error {
-        common_procedure::Error::from_error_ext(e)
-    }
-}
