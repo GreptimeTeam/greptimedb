@@ -68,6 +68,7 @@ enum PgAuthenticationState {
         verifier: PgScramSha256Verifier,
         user_info: Option<UserInfoRef>,
         channel_binding: String,
+        nonce: String,
         client_first_bare: String,
         server_first: String,
     },
@@ -394,6 +395,7 @@ impl PostgresServerHandlerInner {
                     verifier,
                     user_info,
                     channel_binding: client_first.channel_binding,
+                    nonce,
                     client_first_bare: client_first.bare,
                     server_first,
                 };
@@ -403,6 +405,7 @@ impl PostgresServerHandlerInner {
                 verifier,
                 user_info,
                 channel_binding,
+                nonce,
                 client_first_bare,
                 server_first,
             } => {
@@ -411,6 +414,9 @@ impl PostgresServerHandlerInner {
                     return Ok(PgAuthenticationResult::Failed);
                 };
                 if client_final.channel_binding != channel_binding {
+                    return Ok(PgAuthenticationResult::Failed);
+                }
+                if client_final.nonce != nonce {
                     return Ok(PgAuthenticationResult::Failed);
                 }
 
@@ -488,6 +494,7 @@ impl ScramClientFirst {
 
 struct ScramClientFinal {
     channel_binding: String,
+    nonce: String,
     without_proof: String,
     proof: String,
 }
@@ -501,16 +508,16 @@ impl ScramClientFinal {
         let channel_binding = without_proof
             .split(',')
             .find_map(|chunk| chunk.strip_prefix("c="))?;
-        if !without_proof
+        let nonce = without_proof
             .split(',')
-            .any(|chunk| chunk.strip_prefix("r=").is_some())
-            || proof.is_empty()
-        {
+            .find_map(|chunk| chunk.strip_prefix("r="))?;
+        if nonce.is_empty() || proof.is_empty() {
             return None;
         }
 
         Some(Self {
             channel_binding: channel_binding.to_string(),
+            nonce: nonce.to_string(),
             without_proof,
             proof,
         })
@@ -601,6 +608,7 @@ mod tests {
         let message = b"c=biws,r=clientnonceservernonce,p=dGVzdA==";
         let client_final = ScramClientFinal::parse(message).unwrap();
         assert_eq!("biws", client_final.channel_binding);
+        assert_eq!("clientnonceservernonce", client_final.nonce);
         assert_eq!(
             "c=biws,r=clientnonceservernonce",
             client_final.without_proof
@@ -609,5 +617,6 @@ mod tests {
 
         assert!(ScramClientFinal::parse(b"r=nonce,p=dGVzdA==").is_none());
         assert!(ScramClientFinal::parse(b"c=biws,r=nonce").is_none());
+        assert!(ScramClientFinal::parse(b"c=biws,r=,p=dGVzdA==").is_none());
     }
 }
