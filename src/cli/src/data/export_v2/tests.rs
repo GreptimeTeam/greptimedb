@@ -100,6 +100,22 @@ async fn query_count(database_client: &DatabaseClient, schema: &str, table: &str
     }
 }
 
+async fn query_hosts(database_client: &DatabaseClient, schema: &str) -> Result<Vec<String>> {
+    let rows = database_client
+        .sql("SELECT host FROM metrics ORDER BY host", schema)
+        .await?
+        .unwrap_or_default();
+    rows.into_iter()
+        .map(|row| match row.first() {
+            Some(Value::String(value)) => Ok(value.clone()),
+            _ => InvalidArgumentsSnafu {
+                msg: "unexpected host value".to_string(),
+            }
+            .fail(),
+        })
+        .collect()
+}
+
 #[tokio::test]
 #[ignore]
 async fn export_import_v2_schema_parity_e2e() -> Result<()> {
@@ -726,6 +742,8 @@ async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
 
     let actual_rows = query_count(&database_client, schema, "metrics").await?;
     assert_eq!(actual_rows, 2);
+    let hosts = query_hosts(&database_client, schema).await?;
+    assert_eq!(hosts, vec!["h1".to_string(), "h2".to_string()]);
     assert!(!import_state_path.exists());
 
     database_client
