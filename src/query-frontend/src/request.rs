@@ -54,6 +54,11 @@ impl QueryFrontendRequest {
     pub fn key(&self) -> QueryKey {
         QueryKey::from(self)
     }
+
+    /// Converts this request into its exact identity [`QueryKey`].
+    pub fn into_key(self) -> QueryKey {
+        QueryKey::from(self)
+    }
 }
 
 impl fmt::Debug for QueryFrontendRequest {

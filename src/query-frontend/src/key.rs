@@ -73,6 +73,20 @@ impl From<&QueryFrontendRequest> for QueryKey {
     }
 }
 
+impl From<QueryFrontendRequest> for QueryKey {
+    fn from(request: QueryFrontendRequest) -> Self {
+        Self {
+            db: request.db,
+            read_preference: request.read_preference,
+            query: request.query,
+            start: request.start,
+            end: request.end,
+            step: request.step,
+            lookback: request.lookback,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +175,16 @@ mod tests {
         let request = test_request();
         assert_eq!(base(), request.key());
         assert_eq!("db", request.key().db());
+    }
+
+    #[test]
+    fn owned_request_converts_into_key() {
+        let request = test_request();
+        let borrowed_key = request.key();
+        let owned_key = request.into_key();
+
+        assert_eq!(borrowed_key, owned_key);
+        assert_eq!("db", owned_key.db());
     }
 
     #[test]
