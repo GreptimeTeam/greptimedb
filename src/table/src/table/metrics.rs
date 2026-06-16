@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use datafusion::physical_plan::metrics::{
-    Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, ScopedTimerGuard, Time, Timestamp,
+    Count, ExecutionPlanMetricsSet, MetricBuilder, ScopedTimerGuard, Time, Timestamp,
 };
 
 /// This metrics struct is used to record and hold metrics like memory usage
@@ -25,10 +25,10 @@ use datafusion::physical_plan::metrics::{
 pub struct StreamMetrics {
     /// Timestamp when the stream finished
     end_time: Timestamp,
-    /// Used memory in bytes
-    mem_used: Gauge,
     /// Number of rows in output
     output_rows: Count,
+    /// Number of bytes in output
+    output_bytes: Count,
     /// Elapsed time used to `poll` the stream
     poll_elapsed: Time,
     /// Elapsed time used to `.await`ing the stream
@@ -36,26 +36,26 @@ pub struct StreamMetrics {
 }
 
 impl StreamMetrics {
-    /// Create a new MemoryUsageMetrics structure, and set `start_time` to now
+    /// Create a new [`StreamMetrics`] structure, and set `start_time` to now.
     pub fn new(metrics: &ExecutionPlanMetricsSet, partition: usize) -> Self {
         let start_time = MetricBuilder::new(metrics).start_timestamp(partition);
         start_time.record();
 
         Self {
             end_time: MetricBuilder::new(metrics).end_timestamp(partition),
-            mem_used: MetricBuilder::new(metrics).mem_used(partition),
             output_rows: MetricBuilder::new(metrics).output_rows(partition),
+            output_bytes: MetricBuilder::new(metrics).output_bytes(partition),
             poll_elapsed: MetricBuilder::new(metrics).subset_time("elapsed_poll", partition),
             await_elapsed: MetricBuilder::new(metrics).subset_time("elapsed_await", partition),
         }
     }
 
-    pub fn record_mem_usage(&self, mem_used: usize) {
-        self.mem_used.add(mem_used);
-    }
-
     pub fn record_output(&self, num_rows: usize) {
         self.output_rows.add(num_rows);
+    }
+
+    pub fn record_output_bytes(&self, num_bytes: usize) {
+        self.output_bytes.add(num_bytes);
     }
 
     /// Record the end time of the query
