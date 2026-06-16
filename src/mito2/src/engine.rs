@@ -236,6 +236,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             self.file_ref_manager,
             self.partition_expr_fetcher.clone(),
             self.plugins,
+            self.enable_region_query_load_report,
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));

@@ -72,7 +72,7 @@ use store_api::storage::{ColumnId, RegionId};
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::config::MitoConfig;
 use crate::engine::listener::EventListenerRef;
-use crate::engine::{MITO_ENGINE_NAME, MitoEngine};
+use crate::engine::{MITO_ENGINE_NAME, MitoEngine, MitoEngineBuilder};
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
@@ -304,19 +304,39 @@ impl TestEnv {
             .await
     }
 
+    pub(crate) async fn new_mito_engine_with_region_query_load_report(
+        &self,
+        config: MitoConfig,
+        enable_region_query_load_report: bool,
+    ) -> MitoEngine {
+        self.new_mito_engine_with_options(config, Plugins::new(), enable_region_query_load_report)
+            .await
+    }
+
     pub(crate) async fn new_mito_engine_with_plugins(
         &self,
         config: MitoConfig,
         plugins: Plugins,
+    ) -> MitoEngine {
+        self.new_mito_engine_with_options(config, plugins, false)
+            .await
+    }
+
+    async fn new_mito_engine_with_options(
+        &self,
+        config: MitoConfig,
+        plugins: Plugins,
+        enable_region_query_load_report: bool,
     ) -> MitoEngine {
         async fn create<S: LogStore>(
             zelf: &TestEnv,
             config: MitoConfig,
             log_store: Arc<S>,
             plugins: Plugins,
+            enable_region_query_load_report: bool,
         ) -> MitoEngine {
             let data_home = zelf.data_home().display().to_string();
-            MitoEngine::new(
+            MitoEngineBuilder::new(
                 &data_home,
                 config,
                 log_store,
@@ -326,14 +346,50 @@ impl TestEnv {
                 zelf.partition_expr_fetcher.clone(),
                 plugins,
             )
+            .with_enable_region_query_load_report(enable_region_query_load_report)
+            .try_build()
             .await
             .unwrap()
         }
 
         match self.log_store.as_ref().unwrap().clone() {
-            LogStoreImpl::RaftEngine(log_store) => create(self, config, log_store, plugins).await,
-            LogStoreImpl::Kafka(log_store) => create(self, config, log_store, plugins).await,
+            LogStoreImpl::RaftEngine(log_store) => {
+                create(
+                    self,
+                    config,
+                    log_store,
+                    plugins,
+                    enable_region_query_load_report,
+                )
+                .await
+            }
+            LogStoreImpl::Kafka(log_store) => {
+                create(
+                    self,
+                    config,
+                    log_store,
+                    plugins,
+                    enable_region_query_load_report,
+                )
+                .await
+            }
         }
+    }
+
+    /// Creates a new engine with specific config and region query load report option under this env.
+    pub async fn create_engine_with_region_query_load_report(
+        &mut self,
+        config: MitoConfig,
+        enable_region_query_load_report: bool,
+    ) -> MitoEngine {
+        let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
+
+        let object_store_manager = Arc::new(object_store_manager);
+        self.log_store = Some(log_store.clone());
+        self.object_store_manager = Some(object_store_manager.clone());
+
+        self.new_mito_engine_with_region_query_load_report(config, enable_region_query_load_report)
+            .await
     }
 
     /// Creates a new engine with specific config under this env.
@@ -559,6 +615,7 @@ impl TestEnv {
                 self.file_ref_manager.clone(),
                 self.partition_expr_fetcher.clone(),
                 Plugins::new(),
+                false,
             )
             .await
             .unwrap(),
@@ -570,6 +627,7 @@ impl TestEnv {
                 self.file_ref_manager.clone(),
                 self.partition_expr_fetcher.clone(),
                 Plugins::new(),
+                false,
             )
             .await
             .unwrap(),

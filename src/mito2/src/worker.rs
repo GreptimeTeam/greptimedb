@@ -164,6 +164,7 @@ impl WorkerGroup {
     /// Starts a worker group.
     ///
     /// The number of workers should be power of two.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start<S: LogStore>(
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
@@ -172,6 +173,7 @@ impl WorkerGroup {
         file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
+        enable_region_query_load_report: bool,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = Arc::new(
@@ -256,6 +258,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    enable_region_query_load_report,
                 }
                 .start()
             })
@@ -465,6 +468,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    enable_region_query_load_report: false,
                 }
                 .start()
             })
@@ -558,6 +562,7 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
+    enable_region_query_load_report: bool,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -622,6 +627,7 @@ impl<S: LogStore> WorkerStarter<S> {
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
             plugins: self.plugins,
+            enable_region_query_load_report: self.enable_region_query_load_report,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -897,6 +903,8 @@ struct RegionWorkerLoop<S> {
     flush_semaphore: Arc<Semaphore>,
     /// Plugins for flush hooks.
     plugins: Plugins,
+    /// Whether to create per-region query load metrics while opening regions.
+    enable_region_query_load_report: bool,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

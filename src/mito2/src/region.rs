@@ -178,9 +178,9 @@ pub struct MitoRegion {
     /// Bytes written to the region since open.
     pub(crate) written_bytes: IntGauge,
     /// Query CPU time accumulated since region opened, in nanoseconds.
-    query_cpu_time: IntGauge,
+    query_cpu_time: Option<IntGauge>,
     /// Query scanned bytes accumulated since region opened.
-    query_scanned_bytes: IntGauge,
+    query_scanned_bytes: Option<IntGauge>,
     /// manifest stats
     stats: ManifestStats,
 }
@@ -215,43 +215,62 @@ impl StagingPartitionInfo {
 }
 
 impl MitoRegion {
-    pub(crate) fn new_region_metrics(region_id: RegionId) -> (IntGauge, IntGauge, IntGauge) {
+    pub(crate) fn new_region_metrics(
+        region_id: RegionId,
+        enable_region_query_load_report: bool,
+    ) -> (IntGauge, Option<IntGauge>, Option<IntGauge>) {
         let region_id = region_id.as_u64().to_string();
-        (
-            REGION_WRITTEN_BYTES_SINCE_OPEN.with_label_values(&[&region_id]),
-            REGION_QUERY_CPU_TIME.with_label_values(&[&region_id]),
-            REGION_QUERY_SCANNED_BYTES.with_label_values(&[&region_id]),
-        )
+        let bytes_written = REGION_WRITTEN_BYTES_SINCE_OPEN.with_label_values(&[&region_id]);
+
+        let (query_cpu_time, query_scanned_bytes) = if enable_region_query_load_report {
+            (
+                Some(REGION_QUERY_CPU_TIME.with_label_values(&[&region_id])),
+                Some(REGION_QUERY_SCANNED_BYTES.with_label_values(&[&region_id])),
+            )
+        } else {
+            (None, None)
+        };
+
+        (bytes_written, query_cpu_time, query_scanned_bytes)
     }
 
-    pub(crate) fn region_metrics(&self) -> (&IntGauge, &IntGauge, &IntGauge) {
+    pub(crate) fn region_metrics(&self) -> (&IntGauge, Option<&IntGauge>, Option<&IntGauge>) {
         (
             &self.written_bytes,
-            &self.query_cpu_time,
-            &self.query_scanned_bytes,
+            self.query_cpu_time.as_ref(),
+            self.query_scanned_bytes.as_ref(),
         )
     }
 
     pub(crate) fn reset_region_metrics(
         written_bytes: &IntGauge,
-        query_cpu_time: &IntGauge,
-        query_scanned_bytes: &IntGauge,
+        query_cpu_time: Option<&IntGauge>,
+        query_scanned_bytes: Option<&IntGauge>,
     ) {
         written_bytes.set(0);
-        query_cpu_time.set(0);
-        query_scanned_bytes.set(0);
+        if let Some(query_cpu_time) = query_cpu_time {
+            query_cpu_time.set(0);
+        }
+        if let Some(query_scanned_bytes) = query_scanned_bytes {
+            query_scanned_bytes.set(0);
+        }
     }
 
-    fn remove_region_metrics(&self) {
+    fn remove_region_metrics(&mut self) {
         let region_id = self.region_id.as_u64().to_string();
         let labels = &[region_id.as_str()];
         if let Err(e) = REGION_WRITTEN_BYTES_SINCE_OPEN.remove_label_values(labels) {
             warn!(e; "Failed to remove region written bytes metric, region_id: {}", self.region_id);
         }
-        if let Err(e) = REGION_QUERY_CPU_TIME.remove_label_values(labels) {
+
+        if self.query_cpu_time.take().is_some()
+            && let Err(e) = REGION_QUERY_CPU_TIME.remove_label_values(labels)
+        {
             warn!(e; "Failed to remove region query cpu time metric, region_id: {}", self.region_id);
         }
-        if let Err(e) = REGION_QUERY_SCANNED_BYTES.remove_label_values(labels) {
+        if self.query_scanned_bytes.take().is_some()
+            && let Err(e) = REGION_QUERY_SCANNED_BYTES.remove_label_values(labels)
+        {
             warn!(e; "Failed to remove region query scanned bytes metric, region_id: {}", self.region_id);
         }
     }
@@ -693,8 +712,10 @@ impl MitoRegion {
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
         let (written_bytes, query_cpu_time, query_scanned_bytes) = self.region_metrics();
         let written_bytes = written_bytes.get() as u64;
-        let query_cpu_time = query_cpu_time.get() as u64;
-        let query_scanned_bytes = query_scanned_bytes.get() as u64;
+        let query_cpu_time = query_cpu_time.map(|gauge| gauge.get() as u64).unwrap_or(0);
+        let query_scanned_bytes = query_scanned_bytes
+            .map(|gauge| gauge.get() as u64)
+            .unwrap_or(0);
 
         RegionStatistic {
             num_rows,
@@ -1852,8 +1873,12 @@ mod tests {
             None,
         ));
         let (written_bytes, query_cpu_time, query_scanned_bytes) =
-            MitoRegion::new_region_metrics(metadata.region_id);
-        MitoRegion::reset_region_metrics(&written_bytes, &query_cpu_time, &query_scanned_bytes);
+            MitoRegion::new_region_metrics(metadata.region_id, false);
+        MitoRegion::reset_region_metrics(
+            &written_bytes,
+            query_cpu_time.as_ref(),
+            query_scanned_bytes.as_ref(),
+        );
 
         MitoRegion {
             region_id: metadata.region_id,
@@ -2216,8 +2241,12 @@ mod tests {
             None,
         ));
         let (written_bytes, query_cpu_time, query_scanned_bytes) =
-            MitoRegion::new_region_metrics(metadata.region_id);
-        MitoRegion::reset_region_metrics(&written_bytes, &query_cpu_time, &query_scanned_bytes);
+            MitoRegion::new_region_metrics(metadata.region_id, false);
+        MitoRegion::reset_region_metrics(
+            &written_bytes,
+            query_cpu_time.as_ref(),
+            query_scanned_bytes.as_ref(),
+        );
 
         let region = MitoRegion {
             region_id: metadata.region_id,

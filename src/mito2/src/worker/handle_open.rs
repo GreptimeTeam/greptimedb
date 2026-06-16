@@ -105,6 +105,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.file_ref_manager.clone(),
             self.partition_expr_fetcher.clone(),
         )
+        .enable_region_query_load_report(self.enable_region_query_load_report)
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
         .hook(self.plugins.get())

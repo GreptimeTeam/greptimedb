@@ -28,7 +28,9 @@ async fn test_engine_close_region() {
 #[tokio::test]
 async fn test_engine_close_region_removes_region_metrics() {
     let mut env = TestEnv::with_prefix("close-metrics").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine_with_region_query_load_report(MitoConfig::default(), true)
+        .await;
 
     let region_id = RegionId::new(9000, 1);
     let request = CreateRequestBuilder::new().build();
@@ -41,6 +43,8 @@ async fn test_engine_close_region_removes_region_metrics() {
         let region = engine.get_region(region_id).unwrap();
         region.written_bytes.set(1);
         let (_, query_cpu_time, query_scanned_bytes) = region.region_metrics();
+        let query_cpu_time = query_cpu_time.unwrap();
+        let query_scanned_bytes = query_scanned_bytes.unwrap();
         query_cpu_time.add(7);
         query_scanned_bytes.add(42);
     }
