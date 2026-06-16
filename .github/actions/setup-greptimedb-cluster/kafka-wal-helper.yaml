@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: kafka-wal-helper
-          image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/kafka_wal_helper:0.0.2
+          image: localhost:5001/greptime/kafka-wal-helper:latest
           imagePullPolicy: IfNotPresent
           args:
             - "--addr"
