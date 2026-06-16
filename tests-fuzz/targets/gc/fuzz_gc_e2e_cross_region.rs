@@ -32,6 +32,7 @@ struct TargetInput {
     multi_region: bool,
     repartition_like: bool,
     follower_like: bool,
+    pre_gc_protection: bool,
 }
 
 impl Arbitrary<'_> for TargetInput {
@@ -53,6 +54,8 @@ impl Arbitrary<'_> for TargetInput {
                 .unwrap_or_else(|| rng.random_bool(0.25)),
             follower_like: get_fuzz_override::<bool>("FOLLOWER_LIKE")
                 .unwrap_or_else(|| rng.random_bool(0.25)),
+            pre_gc_protection: get_fuzz_override::<bool>("PRE_GC_PROTECTION")
+                .unwrap_or_else(|| rng.random_bool(0.20)),
         })
     }
 }
@@ -66,14 +69,16 @@ fuzz_target!(|input: TargetInput| {
         .block_on(phase3_harness::run_phase3_e2e_gc_cycle(Phase3E2eInput {
             seed: input.seed,
             flush_rounds: input.flush_rounds,
-            full_file_listing: input.full_file_listing,
+            full_file_listing: input.full_file_listing || input.pre_gc_protection,
             compaction_wait_secs: input.compaction_wait_secs,
-            table_shape: if input.multi_region {
+            table_shape: if input.multi_region || input.pre_gc_protection {
                 Phase3E2eTableShape::MultiRegion
             } else {
                 Phase3E2eTableShape::SingleRegion
             },
-            scenario_kind: if input.repartition_like && input.multi_region {
+            scenario_kind: if input.pre_gc_protection {
+                Phase3E2eScenarioKind::RepartitionPreGcProtection
+            } else if input.repartition_like && input.multi_region {
                 Phase3E2eScenarioKind::RepartitionLike
             } else if input.follower_like && input.multi_region {
                 Phase3E2eScenarioKind::FollowerLike

@@ -25,10 +25,11 @@ use common_procedure_test::new_test_procedure_context;
 use common_telemetry::info;
 use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::DatanodeWalConfig;
-use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions};
+use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions, Region2Peers};
 use mito2::gc::GcConfig;
 use mito2::sst::location::parse_file_id_type_from_path;
-use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
+use store_api::path_utils::{region_dir, region_name};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, GcReport, RegionId};
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{StorageType, execute_sql, get_test_store_config};
 
@@ -43,6 +44,7 @@ pub enum Phase3E2eScenarioKind {
     CompactGc,
     RepartitionLike,
     FollowerLike,
+    RepartitionPreGcProtection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +70,7 @@ impl Phase3E2eScenarioKind {
             Self::CompactGc => "compact_gc",
             Self::RepartitionLike => "repartition_like",
             Self::FollowerLike => "follower_like",
+            Self::RepartitionPreGcProtection => "repartition_pre_gc_protection",
         }
     }
 
@@ -76,6 +79,7 @@ impl Phase3E2eScenarioKind {
             "compact_gc" => Ok(Self::CompactGc),
             "repartition_like" => Ok(Self::RepartitionLike),
             "follower_like" => Ok(Self::FollowerLike),
+            "repartition_pre_gc_protection" => Ok(Self::RepartitionPreGcProtection),
             other => Err(format!("unknown phase3 scenario_kind: {other}")),
         }
     }
@@ -202,6 +206,26 @@ pub struct Phase3RepartitionEvidence {
 }
 
 #[derive(Debug)]
+pub struct Phase3PreGcProtectionEvidence {
+    pub dropped_source_region: RegionId,
+    pub destination_region: RegionId,
+    pub protected_file_ids: HashSet<FileId>,
+    pub acquired_file_refs_source: HashSet<FileRef>,
+    pub acquired_cross_region_refs_source: HashSet<RegionId>,
+    pub source_paths_before_gc: BTreeSet<String>,
+    pub source_paths_after_gc: BTreeSet<String>,
+    pub destination_manifest_protected_after_gc: HashSet<FileId>,
+    pub source_in_route_before: bool,
+    pub source_in_route_after: bool,
+    pub table_repart_before_gc: Option<TableRepartValue>,
+    pub gc_report: GcReport,
+    /// Orphan pressure file written into the dropped source region to guarantee
+    /// GC has unprotected files to delete during full-listing.
+    pub orphan_pressure_file_id: FileId,
+    pub orphan_pressure_path: String,
+}
+
+#[derive(Debug)]
 pub struct Phase3E2eEvidence {
     pub target_name: &'static str,
     pub seed: u64,
@@ -218,6 +242,7 @@ pub struct Phase3E2eEvidence {
     pub manifest_after_gc: BTreeSet<String>,
     pub gc_report: GcReport,
     pub repartition_evidence: Option<Phase3RepartitionEvidence>,
+    pub pre_gc_protection_evidence: Option<Phase3PreGcProtectionEvidence>,
     pub follower_required_files: HashSet<FileId>,
     pub count_output: String,
     pub replay_trace: Vec<String>,
@@ -345,6 +370,10 @@ pub fn validate_phase3_mode_comparison(
 }
 
 pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence {
+    if input.scenario_kind == Phase3E2eScenarioKind::RepartitionPreGcProtection {
+        return run_repartition_pre_gc_protection_scenario(input).await;
+    }
+
     common_telemetry::init_default_ut_logging();
 
     let cluster_name = format!("phase3-gc-e2e-{}", input.seed);
@@ -399,7 +428,9 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
 
     let gc_report = run_batch_gc(&cluster, regions.clone(), input.full_file_listing).await;
     let repartition_evidence = match input.scenario_kind {
-        Phase3E2eScenarioKind::CompactGc | Phase3E2eScenarioKind::FollowerLike => None,
+        Phase3E2eScenarioKind::CompactGc
+        | Phase3E2eScenarioKind::FollowerLike
+        | Phase3E2eScenarioKind::RepartitionPreGcProtection => None,
         Phase3E2eScenarioKind::RepartitionLike => {
             Some(run_repartition_like_update(&cluster, &regions).await)
         }
@@ -413,7 +444,9 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
                 panic!("failed to collect follower-like protected files: {err}")
             })
         }
-        Phase3E2eScenarioKind::CompactGc | Phase3E2eScenarioKind::RepartitionLike => HashSet::new(),
+        Phase3E2eScenarioKind::CompactGc
+        | Phase3E2eScenarioKind::RepartitionLike
+        | Phase3E2eScenarioKind::RepartitionPreGcProtection => HashSet::new(),
     };
     let count_output = query_count_output(&instance, &table_name).await;
 
@@ -438,6 +471,7 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
         manifest_after_gc,
         gc_report,
         repartition_evidence,
+        pre_gc_protection_evidence: None,
         follower_required_files,
         count_output,
         replay_trace: vec![
@@ -543,7 +577,9 @@ pub fn validate_phase3_e2e_evidence(evidence: &Phase3E2eEvidence) -> Result<(), 
         ));
     }
 
-    if deleted_file_ids != deleted_path_ids {
+    if evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionPreGcProtection
+        && deleted_file_ids != deleted_path_ids
+    {
         return Err(format!(
             "gc_report deleted_files mismatch object-store diff; report={:?} diff={:?}; {} trace={:?}",
             deleted_file_ids,
@@ -553,7 +589,9 @@ pub fn validate_phase3_e2e_evidence(evidence: &Phase3E2eEvidence) -> Result<(), 
         ));
     }
 
-    if evidence.manifest_after_gc != evidence.sst_after_gc {
+    if evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionPreGcProtection
+        && evidence.manifest_after_gc != evidence.sst_after_gc
+    {
         return Err(format!(
             "manifest/object-store SST sets diverged after GC; {} trace={:?}",
             evidence.concise_summary(),
@@ -584,13 +622,16 @@ pub fn validate_phase3_e2e_evidence(evidence: &Phase3E2eEvidence) -> Result<(), 
     }
 
     validate_repartition_evidence(evidence)?;
+    validate_pre_gc_protection_evidence(evidence)?;
 
     Ok(())
 }
 
 fn validate_repartition_evidence(evidence: &Phase3E2eEvidence) -> Result<(), String> {
     match evidence.scenario_kind {
-        Phase3E2eScenarioKind::CompactGc | Phase3E2eScenarioKind::FollowerLike => {
+        Phase3E2eScenarioKind::CompactGc
+        | Phase3E2eScenarioKind::FollowerLike
+        | Phase3E2eScenarioKind::RepartitionPreGcProtection => {
             if evidence.repartition_evidence.is_some() {
                 return Err(format!(
                     "{} scenario unexpectedly recorded repartition evidence; {} trace={:?}",
@@ -665,6 +706,255 @@ fn validate_repartition_evidence(evidence: &Phase3E2eEvidence) -> Result<(), Str
     Ok(())
 }
 
+fn validate_pre_gc_protection_evidence(evidence: &Phase3E2eEvidence) -> Result<(), String> {
+    if evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionPreGcProtection {
+        if evidence.pre_gc_protection_evidence.is_some() {
+            return Err(format!(
+                "non-protection scenario {} unexpectedly recorded pre-GC protection evidence; {} trace={:?}",
+                evidence.scenario_kind.as_seed_value(),
+                evidence.concise_summary(),
+                evidence.replay_trace,
+            ));
+        }
+        return Ok(());
+    }
+
+    let Some(prot) = &evidence.pre_gc_protection_evidence else {
+        return Err(format!(
+            "repartition_pre_gc_protection scenario missing pre-GC protection evidence; {} trace={:?}",
+            evidence.concise_summary(),
+            evidence.replay_trace,
+        ));
+    };
+
+    if !evidence.full_file_listing {
+        return Err(format!(
+            "repartition_pre_gc_protection must use full-listing GC; {} trace={:?}",
+            evidence.concise_summary(),
+            evidence.replay_trace,
+        ));
+    }
+
+    if !prot.source_in_route_before {
+        return Err(format!(
+            "dropped source region {:?} was not in table route before merge; evidence={:?}",
+            prot.dropped_source_region, prot,
+        ));
+    }
+
+    if prot.source_in_route_after {
+        return Err(format!(
+            "dropped source region {:?} still in table route after merge; evidence={:?}",
+            prot.dropped_source_region, prot,
+        ));
+    }
+
+    let repart = prot.table_repart_before_gc.as_ref().ok_or_else(|| {
+        format!(
+            "missing table_repart metadata before GC; evidence={:?}",
+            prot,
+        )
+    })?;
+
+    let dst_set = repart
+        .src_to_dst
+        .get(&prot.dropped_source_region)
+        .ok_or_else(|| {
+            format!(
+                "table_repart does not contain dropped source {:?}; repart={:?}",
+                prot.dropped_source_region, repart,
+            )
+        })?;
+
+    if !dst_set.contains(&prot.destination_region) {
+        return Err(format!(
+            "table_repart for source {:?} does not contain destination {:?}; repart={:?}",
+            prot.dropped_source_region, prot.destination_region, repart,
+        ));
+    }
+
+    if prot.protected_file_ids.is_empty() {
+        return Err(format!(
+            "no protected file ids found in destination {:?} manifest; evidence={:?}",
+            prot.destination_region, prot,
+        ));
+    }
+
+    let source_before_ids = collect_file_ids_from_paths(prot.source_paths_before_gc.clone())?;
+    if !source_before_ids.is_superset(&prot.protected_file_ids) {
+        let missing: Vec<_> = prot
+            .protected_file_ids
+            .difference(&source_before_ids)
+            .collect();
+        return Err(format!(
+            "protected file ids were not present in source object-store paths before GC: {:?}; evidence={:?}",
+            missing, prot,
+        ));
+    }
+
+    // Validate the orphan pressure file exists before GC and is not protected.
+    if prot
+        .protected_file_ids
+        .contains(&prot.orphan_pressure_file_id)
+    {
+        return Err(format!(
+            "orphan pressure file {:?} must NOT be in protected_file_ids; evidence={:?}",
+            prot.orphan_pressure_file_id, prot,
+        ));
+    }
+    if !source_before_ids.contains(&prot.orphan_pressure_file_id) {
+        return Err(format!(
+            "orphan pressure file {:?} not found in source object-store paths before GC; evidence={:?}",
+            prot.orphan_pressure_file_id, prot,
+        ));
+    }
+
+    let unprotected_source_before_ids: HashSet<FileId> = source_before_ids
+        .difference(&prot.protected_file_ids)
+        .copied()
+        .collect();
+    if !unprotected_source_before_ids.contains(&prot.orphan_pressure_file_id) {
+        return Err(format!(
+            "orphan pressure file {:?} was not classified as unprotected before GC; unprotected={:?}; evidence={:?}",
+            prot.orphan_pressure_file_id, unprotected_source_before_ids, prot,
+        ));
+    }
+
+    if !prot
+        .acquired_cross_region_refs_source
+        .contains(&prot.destination_region)
+    {
+        return Err(format!(
+            "acquired cross_region_refs[{:?}] does not contain destination {:?}; cross_region_refs={:?}",
+            prot.dropped_source_region,
+            prot.destination_region,
+            prot.acquired_cross_region_refs_source,
+        ));
+    }
+
+    if prot.acquired_file_refs_source.is_empty() {
+        return Err(format!(
+            "acquired file_refs[{:?}] is empty; evidence={:?}",
+            prot.dropped_source_region, prot,
+        ));
+    }
+
+    if !prot
+        .acquired_file_refs_source
+        .iter()
+        .all(|file_ref| file_ref.region_id == prot.dropped_source_region)
+    {
+        return Err(format!(
+            "acquired file_refs contained refs not attributed to dropped source {:?}; refs={:?}",
+            prot.dropped_source_region, prot.acquired_file_refs_source,
+        ));
+    }
+
+    let acquired_file_ids: HashSet<FileId> = prot
+        .acquired_file_refs_source
+        .iter()
+        .map(|r| r.file_id)
+        .collect();
+    if !acquired_file_ids.is_superset(&prot.protected_file_ids) {
+        return Err(format!(
+            "acquired file_refs[{:?}] does not cover all protected file ids; acquired={:?} protected={:?}",
+            prot.dropped_source_region, acquired_file_ids, prot.protected_file_ids,
+        ));
+    }
+
+    if !prot
+        .gc_report
+        .processed_regions
+        .contains(&prot.dropped_source_region)
+    {
+        return Err(format!(
+            "gc_report.processed_regions does not contain dropped source {:?}; report={:?}",
+            prot.dropped_source_region, prot.gc_report,
+        ));
+    }
+
+    if !prot.gc_report.need_retry_regions.is_empty() {
+        return Err(format!(
+            "gc_report has unexpected need_retry_regions: {:?}; evidence={:?}",
+            prot.gc_report.need_retry_regions, prot,
+        ));
+    }
+
+    let deleted: HashSet<FileId> = prot
+        .gc_report
+        .deleted_files
+        .get(&prot.dropped_source_region)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    let deleted_protected: Vec<_> = deleted.intersection(&prot.protected_file_ids).collect();
+    if !deleted_protected.is_empty() {
+        return Err(format!(
+            "GC deleted protected files from dropped source {:?}: deleted={:?} protected={:?}",
+            prot.dropped_source_region, deleted_protected, prot.protected_file_ids,
+        ));
+    }
+
+    let source_after_ids = collect_file_ids_from_paths(prot.source_paths_after_gc.clone())?;
+
+    let deleted_unprotected = deleted
+        .intersection(&unprotected_source_before_ids)
+        .next()
+        .is_some();
+    let removed_unprotected = unprotected_source_before_ids
+        .difference(&source_after_ids)
+        .next()
+        .is_some();
+    if !deleted_unprotected && !removed_unprotected {
+        return Err(format!(
+            "dropped source GC did not show deletion pressure on unprotected files; unprotected_before={:?} deleted={:?} source_after={:?}; evidence={:?}",
+            unprotected_source_before_ids, deleted, source_after_ids, prot,
+        ));
+    }
+
+    // The orphan pressure file must have been removed by GC.
+    let orphan_deleted_by_report = deleted.contains(&prot.orphan_pressure_file_id);
+    let orphan_missing_from_storage = !source_after_ids.contains(&prot.orphan_pressure_file_id);
+    if !orphan_deleted_by_report && !orphan_missing_from_storage {
+        return Err(format!(
+            "orphan pressure file {:?} was not deleted by GC; in-report={} in-storage-after={}; evidence={:?}",
+            prot.orphan_pressure_file_id,
+            orphan_deleted_by_report,
+            source_after_ids.contains(&prot.orphan_pressure_file_id),
+            prot,
+        ));
+    }
+
+    if !source_after_ids.is_superset(&prot.protected_file_ids) {
+        let missing: Vec<_> = prot
+            .protected_file_ids
+            .difference(&source_after_ids)
+            .collect();
+        return Err(format!(
+            "protected file ids missing from object store after GC: {:?}; evidence={:?}",
+            missing, prot,
+        ));
+    }
+
+    if !prot
+        .destination_manifest_protected_after_gc
+        .is_superset(&prot.protected_file_ids)
+    {
+        let missing: Vec<_> = prot
+            .protected_file_ids
+            .difference(&prot.destination_manifest_protected_after_gc)
+            .collect();
+        return Err(format!(
+            "destination manifest stopped referencing protected origin-source files after GC: {:?}; evidence={:?}",
+            missing, prot,
+        ));
+    }
+
+    Ok(())
+}
+
 fn phase3_scenario_trace_step(scenario_kind: Phase3E2eScenarioKind) -> &'static str {
     match scenario_kind {
         Phase3E2eScenarioKind::CompactGc => "run compact_gc scenario checks",
@@ -672,6 +962,9 @@ fn phase3_scenario_trace_step(scenario_kind: Phase3E2eScenarioKind) -> &'static 
             "run post-GC repartition metadata reconciliation checks"
         }
         Phase3E2eScenarioKind::FollowerLike => "run follower_like protected-set checks",
+        Phase3E2eScenarioKind::RepartitionPreGcProtection => {
+            "run pre-GC cross-region deletion protection checks"
+        }
     }
 }
 
@@ -689,6 +982,343 @@ fn collect_object_store_deleted_file_ids(
 
 fn default_phase3_seed_corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/phase3_e2e")
+}
+
+/// Write an orphan `.parquet` file into the dropped source region's object-store
+/// directory. The file is intentionally absent from every manifest and
+/// `FileRefsManifest`, so full-listing GC will detect it as deletable orphan.
+///
+/// Returns the orphan `FileId` and the full object-store path.
+async fn write_orphan_pressure_file(
+    cluster: &GreptimeDbCluster,
+    dropped_source: RegionId,
+) -> (FileId, String) {
+    let datanode = cluster
+        .datanode_instances
+        .values()
+        .next()
+        .expect("cluster must have at least one datanode");
+    let mito = datanode
+        .region_server()
+        .mito_engine()
+        .expect("datanode must have a mito engine");
+    let object_store = mito.object_store_manager().default_object_store().clone();
+
+    let orphan_file_id = FileId::random();
+    let region_dir_path = region_dir("greptime/public", dropped_source);
+    let orphan_path = format!("{}{}.parquet", region_dir_path, orphan_file_id);
+
+    object_store
+        .write(&orphan_path, "orphan")
+        .await
+        .expect("writing orphan pressure file must succeed");
+
+    info!(
+        "Wrote orphan pressure file: path={} file_id={:?}",
+        orphan_path, orphan_file_id
+    );
+
+    (orphan_file_id, orphan_path)
+}
+
+async fn run_repartition_pre_gc_protection_scenario(input: Phase3E2eInput) -> Phase3E2eEvidence {
+    assert!(
+        input.full_file_listing,
+        "repartition_pre_gc_protection requires full_file_listing=true"
+    );
+    assert_eq!(
+        input.table_shape,
+        Phase3E2eTableShape::MultiRegion,
+        "repartition_pre_gc_protection requires a multi-region table"
+    );
+
+    common_telemetry::init_default_ut_logging();
+
+    let cluster_name = format!("phase3-gc-e2e-{}", input.seed);
+    let (store_config, _store_guard) = get_test_store_config(&StorageType::File);
+    let home_dir = Arc::new(create_temp_dir("phase3_gc_e2e_home"));
+    let cluster = GreptimeDbClusterBuilder::new(&cluster_name)
+        .await
+        .with_datanodes(2)
+        .with_shared_home_dir(home_dir)
+        .with_store_config(store_config)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            lingering_time: Some(Duration::ZERO),
+            ..Default::default()
+        })
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .build(false)
+        .await;
+
+    let instance = cluster.fe_instance().clone();
+    let metasrv = cluster.metasrv.clone();
+    let table_name = format!("phase3_gc_table_{}", input.seed);
+
+    // --- Step 1: Create multi-region append mode table ---
+    create_append_mode_table(&instance, &table_name, Phase3E2eTableShape::MultiRegion).await;
+
+    // --- Step 2: Insert and flush data ---
+    generate_ssts(
+        &instance,
+        &table_name,
+        input.flush_rounds,
+        Phase3E2eTableShape::MultiRegion,
+    )
+    .await;
+
+    // --- Step 3: Compact ---
+    compact_table(&instance, &table_name, input.compaction_wait_secs).await;
+
+    let regions_before =
+        get_table_regions(metasrv.table_metadata_manager(), &instance, &table_name).await;
+    assert!(
+        regions_before.len() > 1,
+        "pre-merge multi-region table must have more than 1 region, got {:?}",
+        regions_before
+    );
+
+    let sst_before_compaction = cluster.list_sst_files_from_all_datanodes().await;
+
+    // --- Step 4: Execute real SQL MERGE PARTITION ---
+    let merge_sql = format!("ALTER TABLE {table_name} MERGE PARTITION (host < 'm', host >= 'm')");
+    let _ = execute_sql(&instance, &merge_sql).await;
+
+    // Wait for the merge procedure to fully complete and routes to converge
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let regions_after =
+        get_table_regions(metasrv.table_metadata_manager(), &instance, &table_name).await;
+    let regions_after_set: BTreeSet<RegionId> = regions_after.iter().copied().collect();
+
+    // --- Step 5: Identify dropped source and destination ---
+    let table_repart_mgr = metasrv.table_metadata_manager().table_repart_manager();
+    let table_id = regions_before[0].table_id();
+    let table_repart_before_gc = table_repart_mgr.get(table_id).await.unwrap();
+
+    // The dropped source is a region that was in table route before merge but not after
+    let dropped_source = regions_before
+        .iter()
+        .copied()
+        .find(|r| !regions_after_set.contains(r))
+        .expect("there must be a dropped source region after merge");
+
+    let source_in_route_before = regions_before.contains(&dropped_source);
+    let source_in_route_after = regions_after_set.contains(&dropped_source);
+
+    // The destination is any region that is active after merge and in the same table
+    let destination_region = regions_after[0];
+
+    // --- Step 6: Inspect destination manifest for cross-region files ---
+    let all_regions = cluster.list_all_regions().await;
+    let dest_region_ref = all_regions
+        .get(&destination_region)
+        .expect("destination region must be present in cluster after merge");
+    let dest_manifest_entries = dest_region_ref.manifest_sst_entries().await;
+
+    let protected_file_ids: HashSet<FileId> = dest_manifest_entries
+        .iter()
+        .filter(|e| e.origin_region_id == dropped_source)
+        .filter_map(|e| FileId::parse_str(&e.file_id).ok())
+        .collect();
+
+    info!(
+        "Pre-GC protection scenario: dropped_source={:?} destination={:?} protected_file_ids={:?}",
+        dropped_source, destination_region, protected_file_ids,
+    );
+
+    assert!(
+        !protected_file_ids.is_empty(),
+        "destination manifest must contain files from the dropped source region; \
+         dropped_source={:?} destination={:?} entries_cnt={}",
+        dropped_source,
+        destination_region,
+        dest_manifest_entries.len(),
+    );
+
+    // --- Write an orphan pressure file so full-listing GC always has deletable files ---
+    let (orphan_pressure_file_id, orphan_pressure_path) =
+        write_orphan_pressure_file(&cluster, dropped_source).await;
+
+    let sst_before_gc = cluster.list_sst_files_from_all_datanodes().await;
+
+    // Collect source region paths after merge but before GC.
+    let source_paths_before_gc: BTreeSet<String> = sst_before_gc
+        .iter()
+        .filter(|path| path_belongs_to_region(path, dropped_source))
+        .cloned()
+        .collect();
+
+    // --- Step 7: Build route override for the dropped source ---
+    let (_, table_route) = metasrv
+        .table_metadata_manager()
+        .table_route_manager()
+        .get_physical_table_route(table_id)
+        .await
+        .unwrap();
+
+    let leader_peer = table_route
+        .region_routes
+        .iter()
+        .find_map(|r| r.leader_peer.clone())
+        .expect("table route must have at least one leader peer");
+
+    let mut region_routes_override = Region2Peers::new();
+    region_routes_override.insert(dropped_source, (leader_peer, Vec::new()));
+
+    // --- Step 8: Run full-listing BatchGcProcedure for the dropped source ---
+    // Manually drive state machine to inspect intermediate state
+    let mut procedure = BatchGcProcedure::new(
+        cluster.metasrv.mailbox().clone(),
+        cluster.metasrv.table_metadata_manager().clone(),
+        cluster.metasrv.options().grpc.server_addr.clone(),
+        vec![dropped_source],
+        true, // full_file_listing
+        Duration::from_secs(10),
+        region_routes_override,
+    );
+
+    let procedure_ctx = new_test_procedure_context();
+
+    // Execute Start -> Acquiring
+    let status = procedure.execute(&procedure_ctx).await.unwrap();
+    assert!(
+        matches!(status, Status::Executing { .. }),
+        "expected Executing after Start, got {:?}",
+        status
+    );
+
+    // Execute Acquiring -> Gcing
+    let status = procedure.execute(&procedure_ctx).await.unwrap();
+    assert!(
+        matches!(status, Status::Executing { .. }),
+        "expected Executing after Acquiring, got {:?}",
+        status
+    );
+
+    // Inspect acquired file_refs
+    let file_refs = procedure.file_refs_for_test().clone();
+    let acquired_file_refs_source: HashSet<FileRef> = file_refs
+        .file_refs
+        .get(&dropped_source)
+        .cloned()
+        .unwrap_or_default();
+    let acquired_cross_region_refs_source: HashSet<RegionId> = file_refs
+        .cross_region_refs
+        .get(&dropped_source)
+        .cloned()
+        .unwrap_or_default();
+
+    info!(
+        "Acquired after Acquiring state: file_refs[{:?}]={:?} cross_region_refs[{:?}]={:?}",
+        dropped_source,
+        acquired_file_refs_source,
+        dropped_source,
+        acquired_cross_region_refs_source,
+    );
+
+    // Execute Gcing -> UpdateRepartition
+    let status = procedure.execute(&procedure_ctx).await.unwrap();
+    assert!(
+        matches!(status, Status::Executing { .. }),
+        "expected Executing after Gcing, got {:?}",
+        status
+    );
+
+    // Execute UpdateRepartition -> Done
+    let status = procedure.execute(&procedure_ctx).await.unwrap();
+    let gc_report = match status {
+        Status::Done { output } => {
+            let report =
+                BatchGcProcedure::cast_result(output.expect("GC procedure must return output"))
+                    .unwrap();
+            info!("GC report: {:?}", report);
+            report
+        }
+        other => panic!("expected Done after UpdateRepartition, got {:?}", other),
+    };
+
+    // --- Step 9: Collect post-GC evidence ---
+    let sst_after_gc = cluster.list_sst_files_from_all_datanodes().await;
+    let manifest_after_gc = cluster.list_sst_files_from_manifests().await;
+    let count_output = query_count_output(&instance, &table_name).await;
+
+    let source_paths_after_gc: BTreeSet<String> = sst_after_gc
+        .iter()
+        .filter(|path| path_belongs_to_region(path, dropped_source))
+        .cloned()
+        .collect();
+
+    let all_regions_after_gc = cluster.list_all_regions().await;
+    let destination_manifest_protected_after_gc: HashSet<FileId> = all_regions_after_gc
+        .get(&destination_region)
+        .expect("destination region must still be present after GC")
+        .manifest_sst_entries()
+        .await
+        .iter()
+        .filter(|e| e.origin_region_id == dropped_source)
+        .filter_map(|e| FileId::parse_str(&e.file_id).ok())
+        .collect();
+
+    let pre_gc_protection_evidence = Phase3PreGcProtectionEvidence {
+        dropped_source_region: dropped_source,
+        destination_region,
+        protected_file_ids,
+        acquired_file_refs_source,
+        acquired_cross_region_refs_source,
+        source_paths_before_gc,
+        source_paths_after_gc: source_paths_after_gc.clone(),
+        destination_manifest_protected_after_gc,
+        source_in_route_before,
+        source_in_route_after,
+        table_repart_before_gc,
+        gc_report: gc_report.clone(),
+        orphan_pressure_file_id,
+        orphan_pressure_path: orphan_pressure_path.clone(),
+    };
+
+    let all_regions_evidence: Vec<RegionId> = regions_before.clone();
+
+    let evidence = Phase3E2eEvidence {
+        target_name: "fuzz_gc_e2e_cross_region",
+        seed: input.seed,
+        flush_rounds: input.flush_rounds,
+        full_file_listing: input.full_file_listing,
+        compaction_wait_secs: input.compaction_wait_secs,
+        table_shape: input.table_shape,
+        scenario_kind: input.scenario_kind,
+        table_name: table_name.clone(),
+        regions: all_regions_evidence,
+        sst_before_compaction,
+        sst_after_compaction: sst_before_gc,
+        sst_after_gc,
+        manifest_after_gc,
+        gc_report,
+        repartition_evidence: None,
+        pre_gc_protection_evidence: Some(pre_gc_protection_evidence),
+        follower_required_files: HashSet::new(),
+        count_output,
+        replay_trace: vec![
+            format!("create multi_region append-mode table"),
+            format!("generate {} flush rounds", input.flush_rounds),
+            "compact table to create removable SSTs".to_string(),
+            format!("execute ALTER TABLE MERGE PARTITION (host < 'm', host >= 'm')"),
+            format!(
+                "identify dropped source {:?} and destination {:?}",
+                dropped_source, destination_region
+            ),
+            format!("run pre-GC cross-region deletion protection checks"),
+        ],
+    };
+
+    validate_phase3_e2e_evidence(&evidence)
+        .unwrap_or_else(|err| panic!("Phase 3 Pre-GC Protection invariant violation: {err}"));
+
+    evidence
 }
 
 fn load_phase3_seed_corpus_inputs() -> Result<Vec<Phase3E2eInput>, String> {
@@ -760,6 +1390,12 @@ fn collect_file_ids_from_paths(paths: BTreeSet<String>) -> Result<HashSet<FileId
                 .map_err(|err| format!("failed to parse file id from path {path}: {err}"))
         })
         .collect()
+}
+
+fn path_belongs_to_region(path: &str, region_id: RegionId) -> bool {
+    let expected_region_dir = region_name(region_id.table_id(), region_id.region_sequence());
+    path.split('/')
+        .any(|segment| segment == expected_region_dir)
 }
 
 fn intersect(left: &HashSet<FileId>, right: &HashSet<FileId>) -> Vec<FileId> {
@@ -1200,6 +1836,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_phase3_e2e_repartition_pre_gc_protection() {
+        let evidence = run_phase3_e2e_gc_cycle(Phase3E2eInput {
+            seed: 61,
+            flush_rounds: 4,
+            full_file_listing: true,
+            compaction_wait_secs: 2,
+            table_shape: Phase3E2eTableShape::MultiRegion,
+            scenario_kind: Phase3E2eScenarioKind::RepartitionPreGcProtection,
+        })
+        .await;
+
+        let prot = evidence
+            .pre_gc_protection_evidence
+            .as_ref()
+            .expect("pre-GC protection evidence must be present");
+
+        assert!(prot.source_in_route_before);
+        assert!(!prot.source_in_route_after);
+        assert!(!prot.protected_file_ids.is_empty());
+        assert!(
+            prot.acquired_cross_region_refs_source
+                .contains(&prot.destination_region)
+        );
+        assert!(!prot.acquired_file_refs_source.is_empty());
+        assert!(
+            prot.gc_report
+                .processed_regions
+                .contains(&prot.dropped_source_region)
+        );
+        assert!(prot.gc_report.need_retry_regions.is_empty());
+
+        let deleted: HashSet<FileId> = prot
+            .gc_report
+            .deleted_files
+            .get(&prot.dropped_source_region)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let deleted_protected: HashSet<_> =
+            deleted.intersection(&prot.protected_file_ids).collect();
+        assert!(
+            deleted_protected.is_empty(),
+            "protected files should not be deleted: {:?}",
+            deleted_protected
+        );
+
+        let source_after_ids =
+            collect_file_ids_from_paths(prot.source_paths_after_gc.clone()).unwrap();
+        assert!(
+            source_after_ids.is_superset(&prot.protected_file_ids),
+            "protected file ids must still exist in object store after GC"
+        );
+        assert!(
+            !source_after_ids.contains(&prot.orphan_pressure_file_id),
+            "orphan pressure file {:?} must have been removed from storage by GC",
+            prot.orphan_pressure_file_id,
+        );
+
+        assert!(evidence.count_output.contains("16"));
+    }
+
+    #[tokio::test]
     async fn test_phase3_e2e_replay_corpus() {
         let inputs = load_phase3_seed_corpus_inputs().unwrap();
 
@@ -1243,6 +1942,7 @@ mod tests {
             manifest_after_gc: BTreeSet::from([path]),
             gc_report: report,
             repartition_evidence: None,
+            pre_gc_protection_evidence: None,
             follower_required_files: HashSet::new(),
             count_output: "12".to_string(),
             replay_trace: vec!["replay".to_string()],
@@ -1283,6 +1983,7 @@ mod tests {
             manifest_after_gc: BTreeSet::new(),
             gc_report: report,
             repartition_evidence: None,
+            pre_gc_protection_evidence: None,
             follower_required_files: HashSet::from([file_id]),
             count_output: "12".to_string(),
             replay_trace: vec!["replay".to_string()],

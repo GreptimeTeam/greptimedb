@@ -271,6 +271,12 @@ impl BatchGcProcedure {
         }
     }
 
+    /// Returns a reference to the acquired file refs manifest. Only available in test/mock builds.
+    #[cfg(feature = "mock")]
+    pub fn file_refs_for_test(&self) -> &FileRefsManifest {
+        &self.data.file_refs
+    }
+
     pub fn cast_result(res: Arc<dyn Any>) -> Result<GcReport> {
         res.downcast_ref::<GcReport>().cloned().ok_or_else(|| {
             error::UnexpectedSnafu {
