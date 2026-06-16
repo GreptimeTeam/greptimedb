@@ -142,45 +142,47 @@ partition number and a `metrics` object.
 Example with synthetic values:
 
 ```json
-"metrics_per_partition": [
-  {
-    "partition": 0,
-    "metrics": {
-      "prepare_scan_cost": "500us",
-      "build_reader_cost": "2ms",
-      "scan_cost": "8ms",
-      "yield_cost": "1ms",
-      "total_cost": "12ms",
-      "num_rows": 128,
-      "num_batches": 4,
-      "num_mem_ranges": 1,
-      "num_file_ranges": 1,
-      "build_parts_cost": "1ms",
-      "sst_scan_cost": "6ms",
-      "rg_total": 3,
-      "rows_before_filter": 4096,
-      "num_sst_record_batches": 2,
-      "num_sst_batches": 2,
-      "num_sst_rows": 96,
-      "first_poll": "600us",
-      "convert_cost": "300us",
-      "rg_bloom_filtered": 1,
-      "rows_bloom_filtered": 1024,
-      "fetch_metrics": {
-        "total_fetch_elapsed": "2ms",
-        "page_cache_hit": 2,
-        "cache_miss": 1
+{
+  "metrics_per_partition": [
+    {
+      "partition": 0,
+      "metrics": {
+        "prepare_scan_cost": "500us",
+        "build_reader_cost": "2ms",
+        "scan_cost": "8ms",
+        "yield_cost": "1ms",
+        "total_cost": "12ms",
+        "num_rows": 128,
+        "num_batches": 4,
+        "num_mem_ranges": 1,
+        "num_file_ranges": 1,
+        "build_parts_cost": "1ms",
+        "sst_scan_cost": "6ms",
+        "rg_total": 3,
+        "rows_before_filter": 4096,
+        "num_sst_record_batches": 2,
+        "num_sst_batches": 2,
+        "num_sst_rows": 96,
+        "first_poll": "600us",
+        "convert_cost": "300us",
+        "rg_bloom_filtered": 1,
+        "rows_bloom_filtered": 1024,
+        "fetch_metrics": {
+          "total_fetch_elapsed": "2ms",
+          "page_cache_hit": 2,
+          "cache_miss": 1
+        },
+        "metadata_cache_metrics": {
+          "metadata_load_cost": "100us",
+          "mem_cache_hit": 1
+        },
+        "build_ranges_peak_mem_size": 2048,
+        "num_peak_range_builders": 1,
+        "stream_eof": true
       },
-      "metadata_cache_metrics": {
-        "metadata_load_cost": "100us",
-        "mem_cache_hit": 1
-      },
-      "build_ranges_peak_mem_size": 2048,
-      "num_peak_range_builders": 1,
-      "stream_eof": true
     }
-  }
-]
+  ]
+}
 ```
 
 ## Shared Partition Metrics
