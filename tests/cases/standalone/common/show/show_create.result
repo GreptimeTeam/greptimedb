@@ -106,11 +106,11 @@ SHOW CREATE TABLE hint_table;
 | Table      | Create Table                              |
 +------------+-------------------------------------------+
 | hint_table | CREATE TABLE IF NOT EXISTS "hint_table" ( |
-|            |   "host" STRING NULL,                    |
-|            |   "ts" TIMESTAMP(3) NOT NULL,            |
-|            |   "cpu" DOUBLE NULL,                     |
-|            |   TIME INDEX ("ts"),                     |
-|            |   PRIMARY KEY ("host")                   |
+|            |   "host" STRING NULL,                     |
+|            |   "ts" TIMESTAMP(3) NOT NULL,             |
+|            |   "cpu" DOUBLE NULL,                      |
+|            |   TIME INDEX ("ts"),                      |
+|            |   PRIMARY KEY ("host")                    |
 |            | )                                         |
 |            |                                           |
 |            | ENGINE=mito                               |
@@ -138,22 +138,22 @@ Affected Rows: 0
 
 SHOW CREATE TABLE alter_hint_table;
 
-+------------------+-----------------------------------------------+
-| Table            | Create Table                                  |
-+------------------+-----------------------------------------------+
++------------------+-------------------------------------------------+
+| Table            | Create Table                                    |
++------------------+-------------------------------------------------+
 | alter_hint_table | CREATE TABLE IF NOT EXISTS "alter_hint_table" ( |
-|                  |   "host" STRING NULL,                        |
-|                  |   "ts" TIMESTAMP(3) NOT NULL,                |
-|                  |   "cpu" DOUBLE NULL,                         |
-|                  |   TIME INDEX ("ts"),                         |
-|                  |   PRIMARY KEY ("host")                       |
-|                  | )                                             |
-|                  |                                               |
-|                  | ENGINE=mito                                   |
-|                  | WITH(                                         |
-|                  |   'repartition.column.hint' = 'host'          |
-|                  | )                                             |
-+------------------+-----------------------------------------------+
+|                  |   "host" STRING NULL,                           |
+|                  |   "ts" TIMESTAMP(3) NOT NULL,                   |
+|                  |   "cpu" DOUBLE NULL,                            |
+|                  |   TIME INDEX ("ts"),                            |
+|                  |   PRIMARY KEY ("host")                          |
+|                  | )                                               |
+|                  |                                                 |
+|                  | ENGINE=mito                                     |
+|                  | WITH(                                           |
+|                  |   'repartition.column.hint' = 'host'            |
+|                  | )                                               |
++------------------+-------------------------------------------------+
 
 ALTER TABLE alter_hint_table UNSET 'repartition.column.hint';
 
@@ -161,20 +161,20 @@ Affected Rows: 0
 
 SHOW CREATE TABLE alter_hint_table;
 
-+------------------+-----------------------------------------------+
-| Table            | Create Table                                  |
-+------------------+-----------------------------------------------+
++------------------+-------------------------------------------------+
+| Table            | Create Table                                    |
++------------------+-------------------------------------------------+
 | alter_hint_table | CREATE TABLE IF NOT EXISTS "alter_hint_table" ( |
-|                  |   "host" STRING NULL,                        |
-|                  |   "ts" TIMESTAMP(3) NOT NULL,                |
-|                  |   "cpu" DOUBLE NULL,                         |
-|                  |   TIME INDEX ("ts"),                         |
-|                  |   PRIMARY KEY ("host")                       |
-|                  | )                                             |
-|                  |                                               |
-|                  | ENGINE=mito                                   |
-|                  |                                               |
-+------------------+-----------------------------------------------+
+|                  |   "host" STRING NULL,                           |
+|                  |   "ts" TIMESTAMP(3) NOT NULL,                   |
+|                  |   "cpu" DOUBLE NULL,                            |
+|                  |   TIME INDEX ("ts"),                            |
+|                  |   PRIMARY KEY ("host")                          |
+|                  | )                                               |
+|                  |                                                 |
+|                  | ENGINE=mito                                     |
+|                  |                                                 |
++------------------+-------------------------------------------------+
 
 DROP TABLE alter_hint_table;
 
@@ -513,3 +513,4 @@ show create table table_comment_in_cjk;
 drop table table_comment_in_cjk;
 
 Affected Rows: 0
+
