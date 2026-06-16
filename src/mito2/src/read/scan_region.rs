@@ -1060,6 +1060,9 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
+        if compaction {
+            self.enable_region_query_load_report = false;
+        }
         self
     }
 
@@ -2086,6 +2089,18 @@ mod tests {
         // No files to read.
         let no_files = new_scan_input(metadata, filters).await.with_files(vec![]);
         assert!(build_scan_fingerprint(&no_files).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compaction_scan_input_disables_region_query_load_report() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let input = new_scan_input(metadata, vec![col("k0").eq(lit("foo"))])
+            .await
+            .with_enable_region_query_load_report(true)
+            .with_compaction(true);
+
+        assert!(input.compaction);
+        assert!(!input.enable_region_query_load_report);
     }
 
     #[tokio::test]
