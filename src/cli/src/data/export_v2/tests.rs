@@ -584,9 +584,7 @@ async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
         return Ok(());
     }
 
-    let addr = env::var("GREPTIME_ADDR").unwrap_or_else(|_| "127.0.0.1:4000".to_string());
-    let catalog = env::var("GREPTIME_CATALOG").unwrap_or_else(|_| "greptime".to_string());
-    let auth_basic = env::var("GREPTIME_AUTH_BASIC").ok();
+    let conn = TestConnection::from_env();
     let bucket = env::var("GT_MINIO_BUCKET").expect("checked above");
     let access_key_id = env::var("GT_MINIO_ACCESS_KEY_ID").expect("checked above");
     let secret_access_key = env::var("GT_MINIO_ACCESS_KEY").expect("checked above");
@@ -613,15 +611,15 @@ async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
         ]);
     };
     let append_auth_args = |args: &mut Vec<String>| {
-        if let Some(auth) = &auth_basic {
+        if let Some(auth) = &conn.auth_basic {
             args.extend(["--auth-basic".to_string(), auth.clone()]);
         }
     };
 
     let database_client = DatabaseClient::new(
-        addr.clone(),
-        catalog.clone(),
-        auth_basic.clone(),
+        conn.addr.clone(),
+        conn.catalog.clone(),
+        conn.auth_basic.clone(),
         Duration::from_secs(60),
         None,
         false,
@@ -658,11 +656,11 @@ async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
     let mut export_args = vec![
         "export-v2-create".to_string(),
         "--addr".to_string(),
-        addr.clone(),
+        conn.addr.clone(),
         "--to".to_string(),
         snapshot_uri.clone(),
         "--catalog".to_string(),
-        catalog.clone(),
+        conn.catalog.clone(),
         "--schemas".to_string(),
         schema.to_string(),
         "--start-time".to_string(),
@@ -712,11 +710,11 @@ async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
     let mut import_args = vec![
         "import-v2".to_string(),
         "--addr".to_string(),
-        addr.clone(),
+        conn.addr.clone(),
         "--from".to_string(),
         snapshot_uri.clone(),
         "--catalog".to_string(),
-        catalog.clone(),
+        conn.catalog.clone(),
         "--schemas".to_string(),
         schema.to_string(),
         "--task-parallelism".to_string(),
