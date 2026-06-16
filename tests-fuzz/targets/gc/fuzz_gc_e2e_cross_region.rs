@@ -33,12 +33,17 @@ struct TargetInput {
     repartition_like: bool,
     follower_like: bool,
     pre_gc_protection: bool,
+    admin_gc_dropped: bool,
 }
 
 impl Arbitrary<'_> for TargetInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = get_fuzz_override::<u64>("SEED").unwrap_or(u.arbitrary()?);
         let mut rng = ChaChaRng::seed_from_u64(seed);
+        let admin_gc_dropped =
+            get_fuzz_override::<bool>("ADMIN_GC_DROPPED").unwrap_or_else(|| rng.random_bool(0.12));
+        let pre_gc_protection = get_fuzz_override::<bool>("PRE_GC_PROTECTION")
+            .unwrap_or_else(|| !admin_gc_dropped && rng.random_bool(0.20));
 
         Ok(Self {
             seed,
@@ -54,8 +59,8 @@ impl Arbitrary<'_> for TargetInput {
                 .unwrap_or_else(|| rng.random_bool(0.25)),
             follower_like: get_fuzz_override::<bool>("FOLLOWER_LIKE")
                 .unwrap_or_else(|| rng.random_bool(0.25)),
-            pre_gc_protection: get_fuzz_override::<bool>("PRE_GC_PROTECTION")
-                .unwrap_or_else(|| rng.random_bool(0.20)),
+            pre_gc_protection,
+            admin_gc_dropped,
         })
     }
 }
@@ -69,15 +74,20 @@ fuzz_target!(|input: TargetInput| {
         .block_on(phase3_harness::run_phase3_e2e_gc_cycle(Phase3E2eInput {
             seed: input.seed,
             flush_rounds: input.flush_rounds,
-            full_file_listing: input.full_file_listing || input.pre_gc_protection,
+            full_file_listing: input.full_file_listing
+                || input.pre_gc_protection
+                || input.admin_gc_dropped,
             compaction_wait_secs: input.compaction_wait_secs,
-            table_shape: if input.multi_region || input.pre_gc_protection {
+            table_shape: if input.multi_region || input.pre_gc_protection || input.admin_gc_dropped
+            {
                 Phase3E2eTableShape::MultiRegion
             } else {
                 Phase3E2eTableShape::SingleRegion
             },
             scenario_kind: if input.pre_gc_protection {
                 Phase3E2eScenarioKind::RepartitionPreGcProtection
+            } else if input.admin_gc_dropped {
+                Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
             } else if input.repartition_like && input.multi_region {
                 Phase3E2eScenarioKind::RepartitionLike
             } else if input.follower_like && input.multi_region {
