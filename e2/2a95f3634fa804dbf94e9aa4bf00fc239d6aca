@@ -1,0 +1,14 @@
+src/common/error/src/ext.rs
+  h_623774b620da8e 90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "e22a95f3634fa804dbf94e9aa4bf00fc239d6aca",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
