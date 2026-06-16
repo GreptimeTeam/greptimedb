@@ -908,18 +908,25 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
     }
     database_client
         .sql(
-            "INSERT INTO metrics (ts, host, cpu) VALUES ('2025-01-01T00:00:00Z', 'a1', 1.0)",
+            "INSERT INTO metrics (ts, host, cpu) VALUES \
+             ('2025-01-01T00:00:00Z', 'a1', 1.0), \
+             ('2025-01-01T01:00:00Z', 'a2', 1.5)",
             schema_a,
         )
         .await?;
     database_client
         .sql(
-            "INSERT INTO metrics (ts, host, cpu) VALUES ('2025-01-01T00:00:00Z', 'b1', 2.0)",
+            "INSERT INTO metrics (ts, host, cpu) VALUES \
+             ('2025-01-01T00:00:00Z', 'b1', 2.0), \
+             ('2025-01-01T01:00:00Z', 'b2', 2.5)",
             schema_b,
         )
         .await?;
 
     let expected_rows_a = query_count(&database_client, schema_a, "metrics").await?;
+    assert_eq!(expected_rows_a, 2);
+    let expected_rows_b = query_count(&database_client, schema_b, "metrics").await?;
+    assert_eq!(expected_rows_b, 2);
 
     let src_dir = tempdir().context(FileIoSnafu)?;
     let src_uri = path_to_uri(src_dir.path())?;
@@ -936,6 +943,16 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
         schema_a,
         "--schemas",
         schema_b,
+        "--start-time",
+        "2025-01-01T00:00:00Z",
+        "--end-time",
+        "2025-01-01T02:00:00Z",
+        "--chunk-time-window",
+        "1h",
+        "--chunk-parallelism",
+        "2",
+        "--progress",
+        "never",
     ];
     if let Some(auth) = &auth_basic {
         export_args.push("--auth-basic");
@@ -950,12 +967,24 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
         .await
         .context(OtherSnafu)?;
 
+    let verify_cmd = ExportVerifyCommand::parse_from(["export-v2-verify", "--snapshot", &src_uri]);
+    verify_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)?;
+
     for schema in [schema_a, schema_b] {
         database_client
             .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
             .await?;
     }
 
+    let import_state_dir = tempdir().context(FileIoSnafu)?;
+    let import_state_path = import_state_dir.path().join("import-state.json");
+    let import_state_path = import_state_path.to_string_lossy().into_owned();
     let mut import_args = vec![
         "import-v2",
         "--addr",
@@ -966,6 +995,12 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
         &catalog,
         "--schemas",
         schema_a,
+        "--task-parallelism",
+        "2",
+        "--state-path",
+        &import_state_path,
+        "--progress",
+        "never",
     ];
     if let Some(auth) = &auth_basic {
         import_args.push("--auth-basic");
