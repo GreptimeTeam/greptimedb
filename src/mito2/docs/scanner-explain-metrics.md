@@ -24,13 +24,6 @@ areas:
 `EXPLAIN ANALYZE` prints the scanner display line and the aggregate DataFusion
 execution metrics for the scanner plan node.
 
-The scanner display line includes:
-
-- `partition_count`: the number of partition ranges and the number of memtable,
-  SST file, and extension ranges considered by the scanner.
-- `selector`: present when a series row selector is attached.
-- `distribution`: present when distribution information is attached.
-
 Normal mode does not print `metrics_per_partition`, file metadata, projection,
 or filter details from the scanner display.
 
@@ -56,17 +49,50 @@ SeqScan: region=0(1, 0), "partition_count":{"count":2, "mem_ranges":1, "files":1
 ## Verbose Mode
 
 `EXPLAIN ANALYZE VERBOSE` prints the same aggregate DataFusion metrics and adds
-scanner details to the display line:
+more scanner details to the display line.
 
-- `projection`: output column names.
-- `filters`: static physical predicate expressions.
-- `dyn_filters`: dynamic filter expressions.
-- `vector_index_k`: vector index limit when the vector index feature is enabled
-  and the scan uses it.
-- `files`: SST file metadata, including file id, time range, row count, file
-  size, and index size.
-- `metrics_per_partition`: per-partition scanner metrics collected by
-  `PartitionMetrics`.
+## Scanner Display Fields
+
+The scanner display text appears before DataFusion's trailing `metrics=[...]`
+section. It explains what the scanner is going to read and which predicates or
+projections are attached to it.
+
+| Field | Mode | Meaning | When present |
+| --- | --- | --- | --- |
+| Scanner name | All | The physical scanner, such as `SeqScan`, `SeriesScan`, or `UnorderedScan`. | Always. |
+| `region` | All | Region id scanned by this plan node. | Always. |
+| `partition_count.count` | All | Number of partition ranges in the scanner. | Always. |
+| `partition_count.mem_ranges` | All | Number of memtable ranges in all partition ranges. | Always. |
+| `partition_count.files` | All | Number of SST files in the scan input before range expansion. | Always. |
+| `partition_count.file_ranges` | All | Number of SST file ranges in all partition ranges. | Always. |
+| `partition_count.other_ranges` | All | Number of extension or non-memtable, non-SST ranges. | Nonzero only. |
+| `selector` | All | Series row selector attached to the scan. | When a series row selector is attached. |
+| `distribution` | All | Distribution information attached to the scan. | When distribution is attached. |
+| `projection` | Verbose | Output column names after projection pruning. This is useful for checking whether column pruning reached the scanner. | When the output schema is not empty. |
+| `filters` | Verbose | Static physical predicate expressions pushed into the scanner. These predicates may drive row-group pruning, index application, and precise filtering. | When static predicates exist. |
+| `dyn_filters` | Verbose | Dynamic filter expressions attached after plan creation. These can change during execution as upstream operators produce filter values. | When dynamic filters exist. |
+| `vector_index_k` | Verbose | Vector index top-k value used by vector search. | When the vector index feature is enabled and the scan uses vector index search. |
+| `files` | Verbose | SST file metadata for files in the scan input. Each entry includes `file_id`, `time_range_start`, `time_range_end`, `rows`, `size`, and `index_size`. | When SST files are present. |
+| `flat_format` | Verbose | Whether the scan input is expected to use flat format. | Always in verbose mode. |
+| `extension_ranges` | Verbose | Enterprise extension ranges attached to the scan. | Enterprise builds only, when extension ranges exist. |
+| `metrics_per_partition` | Verbose | Per-partition scanner metrics collected by `PartitionMetrics`. | Verbose mode after partitions have metrics. |
+
+Example scanner display fields with synthetic values:
+
+```text
+UnorderedScan: region=0(1, 0), {"partition_count":{"count":4, "mem_ranges":1, "files":2, "file_ranges":3}, "projection": ["host", "ts", "value"], "filters": ["host = Utf8(\"demo\")"], "dyn_filters": ["ts@1 < @runtime_filter"], "files": [{"file_id":"0(1, 0)/00000000-0000-0000-0000-000000000001","time_range_start":"1000::Millisecond","time_range_end":"2000::Millisecond","rows":1024,"size":65536,"index_size":4096}], "flat_format": true, "metrics_per_partition": [...]}
+```
+
+Each `files` entry contains:
+
+| Field | Meaning |
+| --- | --- |
+| `file_id` | Region file id of the SST file. |
+| `time_range_start` | Inclusive start of the file time range, formatted as `value::unit`. |
+| `time_range_end` | Inclusive end of the file time range, formatted as `value::unit`. |
+| `rows` | Number of rows recorded in the file metadata. |
+| `size` | SST file size in bytes. |
+| `index_size` | Total index size in bytes recorded for the file. |
 
 The `metrics_per_partition` value is a list of objects. Each object contains the
 partition number and a `metrics` object.
