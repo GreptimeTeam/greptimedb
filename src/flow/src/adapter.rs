@@ -128,7 +128,6 @@ impl Default for FlownodeOptions {
             query: QueryOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
-                enable_region_query_load_report: false,
                 memory_pool_size: MemoryLimit::default(),
             },
             memory: MemoryOptions::default(),

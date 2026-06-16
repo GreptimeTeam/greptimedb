@@ -133,13 +133,12 @@ impl QueryEngineState {
         if options.parallelism > 0 {
             session_config = session_config.with_target_partitions(options.parallelism);
         }
-        if options.allow_query_fallback || options.enable_region_query_load_report {
+        if options.allow_query_fallback {
             session_config
                 .options_mut()
                 .extensions
                 .insert(DistPlannerOptions {
                     allow_query_fallback: options.allow_query_fallback,
-                    enable_region_query_load_report: options.enable_region_query_load_report,
                 });
         }
 

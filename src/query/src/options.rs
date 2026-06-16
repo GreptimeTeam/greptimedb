@@ -39,8 +39,6 @@ pub struct QueryOptions {
     pub parallelism: usize,
     /// Whether to allow query fallback when push down fails.
     pub allow_query_fallback: bool,
-    /// Whether to report per-region query load through heartbeat region stats.
-    pub enable_region_query_load_report: bool,
     /// Memory pool size for query execution. Setting it to 0 disables the limit (unbounded).
     /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
     /// When this limit is reached, queries will fail with ResourceExhausted error.
@@ -53,7 +51,6 @@ impl Default for QueryOptions {
         Self {
             parallelism: 0,
             allow_query_fallback: false,
-            enable_region_query_load_report: false,
             memory_pool_size: MemoryLimit::default(),
         }
     }
@@ -553,10 +550,5 @@ mod flow_extension_tests {
             parsed.incremental_after_seqs,
             Some(HashMap::from([(1, 10)]))
         );
-    }
-
-    #[test]
-    fn query_options_disable_region_query_load_report_by_default() {
-        assert!(!QueryOptions::default().enable_region_query_load_report);
     }
 }

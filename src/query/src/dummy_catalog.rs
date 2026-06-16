@@ -44,7 +44,6 @@ use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::RegionScanExec;
 
-use crate::dist_plan::DistPlannerOptions;
 use crate::error::{GetRegionMetadataSnafu, Result};
 use crate::options::{FlowIncrementalMode, FlowQueryExtensions};
 
@@ -176,7 +175,7 @@ impl TableProvider for DummyTableProvider {
 
     async fn scan(
         &self,
-        state: &dyn Session,
+        _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -185,13 +184,6 @@ impl TableProvider for DummyTableProvider {
         request.projection_input = projection.map(|p| p.clone().into());
         request.filters = filters.to_vec();
         request.limit = limit;
-        request.enable_region_query_load_report = state
-            .config_options()
-            .extensions
-            .get::<DistPlannerOptions>()
-            .map(|options| options.enable_region_query_load_report)
-            .unwrap_or(false);
-
         if let Some(query_ctx) = &self.query_ctx {
             let is_sink_scan = is_sink_scan(query_ctx, self.region_id)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;

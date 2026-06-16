@@ -113,7 +113,6 @@
 | `flow.num_workers` | Integer | `0` | The number of flow worker in flownode.<br/>Not setting(or set to 0) this value will use the number of CPU cores divided by 2. |
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
-| `query.enable_region_query_load_report` | Bool | `false` | Whether to report per-region query load metrics through heartbeat region stats.<br/>Metrics include CPU time and scanned bytes collected by RegionScanExec.<br/>Default to false. |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
@@ -172,6 +171,7 @@
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.scan_memory_limit` | String | `unlimited` | Memory limit for table scans across all queries.<br/>Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.scan_memory_on_exhausted` | String | `fail` | Controls what happens when a scan cannot get memory immediately.<br/>"fail" (default) fails fast and is the recommended option for most users.<br/>"wait" / "wait(<duration>)" waits for memory to become available. This is mainly<br/>for advanced tuning in bursty workloads where temporary contention is common and<br/>higher latency is acceptable.<br/>"wait" means "wait(10s)", not unlimited waiting. |
+| `region_engine.mito.enable_region_query_load_report` | Bool | `false` | Whether to record per-region query load metrics while scanning.<br/>Metrics include CPU time and scanned bytes collected by RegionScanExec.<br/>Default to false. |
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.schedule_compaction_after_edit` | Bool | `true` | Whether to allow to schedule a compaction after a successful region edit.<br/><br/>Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.<br/>Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.<br/>Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit. |
 | `region_engine.mito.default_flat_format` | Bool | `true` | Whether to enable flat format as the default SST format. |
@@ -316,7 +316,6 @@
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.allow_query_fallback` | Bool | `false` | Whether to allow query fallback when push down optimize fails.<br/>Default to false, meaning when push down optimize failed, return error msg |
-| `query.enable_region_query_load_report` | Bool | `false` | Whether to report per-region query load metrics through heartbeat region stats.<br/>Metrics include CPU time and scanned bytes collected by RegionScanExec.<br/>Default to false. |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans (only applies to datanodes). |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
@@ -509,7 +508,6 @@
 | `wal.overwrite_entry_start_id` | Bool | `false` | Ignore missing entries during read WAL.<br/>**It's only used when the provider is `kafka`**.<br/><br/>This option ensures that when Kafka messages are deleted, the system<br/>can still successfully replay memtable data without throwing an<br/>out-of-range error.<br/>However, enabling this option might lead to unexpected data loss,<br/>as the system will skip over missing entries instead of treating<br/>them as critical errors. |
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
-| `query.enable_region_query_load_report` | Bool | `false` | Whether to report per-region query load metrics through heartbeat region stats.<br/>Metrics include CPU time and scanned bytes collected by RegionScanExec.<br/>Default to false. |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
@@ -570,6 +568,7 @@
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.scan_memory_limit` | String | `unlimited` | Memory limit for table scans across all queries.<br/>Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.scan_memory_on_exhausted` | String | `fail` | Controls what happens when a scan cannot get memory immediately.<br/>"fail" (default) fails fast and is the recommended option for most users.<br/>"wait" / "wait(<duration>)" waits for memory to become available. This is mainly<br/>for advanced tuning in bursty workloads where temporary contention is common and<br/>higher latency is acceptable.<br/>"wait" means "wait(10s)", not unlimited waiting. |
+| `region_engine.mito.enable_region_query_load_report` | Bool | `false` | Whether to record per-region query load metrics while scanning.<br/>Metrics include CPU time and scanned bytes collected by RegionScanExec.<br/>Default to false. |
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.schedule_compaction_after_edit` | Bool | `true` | Whether to allow to schedule a compaction after a successful region edit.<br/><br/>Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.<br/>Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.<br/>Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit. |
 | `region_engine.mito.default_flat_format` | Bool | `true` | Whether to enable flat format as the default SST format. |

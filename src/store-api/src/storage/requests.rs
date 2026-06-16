@@ -136,8 +136,6 @@ pub struct ScanRequest {
     pub vector_search: Option<VectorSearchRequest>,
     /// Optional hint from query-driven JSON type concretization.
     pub json_type_hint: HashMap<String, JsonNativeType>,
-    /// Whether to record per-region query load while scanning.
-    pub enable_region_query_load_report: bool,
 }
 
 impl ScanRequest {

@@ -1077,6 +1077,7 @@ impl EngineInner {
             CacheStrategy::EnableAll(cache_manager),
         )
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
+        .with_enable_region_query_load_report(self.config.enable_region_query_load_report)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())

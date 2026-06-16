@@ -318,6 +318,10 @@ impl RegionScanner for UnorderedScan {
         self.stream_ctx.input.mapper.metadata().clone()
     }
 
+    fn enable_region_query_load_report(&self) -> bool {
+        self.stream_ctx.input.enable_region_query_load_report
+    }
+
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.properties.prepare(request);
 

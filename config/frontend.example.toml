@@ -268,11 +268,6 @@ parallelism = 0
 ## Default to false, meaning when push down optimize failed, return error msg
 allow_query_fallback = false
 
-## Whether to report per-region query load metrics through heartbeat region stats.
-## Metrics include CPU time and scanned bytes collected by RegionScanExec.
-## Default to false.
-enable_region_query_load_report = false
-
 ## Memory pool size for query execution operators (aggregation, sorting, join).
 ## Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").
 ## Setting it to 0 disables the limit (unbounded, default behavior).

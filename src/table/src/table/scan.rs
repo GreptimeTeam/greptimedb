@@ -226,6 +226,7 @@ impl RegionScanExec {
         ));
         let append_mode = scanner_props.append_mode();
         let total_rows = scanner_props.total_rows();
+        let enable_region_query_load_report = scanner.enable_region_query_load_report();
         Ok(Self {
             scanner: Arc::new(Mutex::new(scanner)),
             arrow_schema,
@@ -237,7 +238,7 @@ impl RegionScanExec {
             is_partition_set: false,
             distribution: request.distribution,
             explain_verbose: false,
-            enable_region_query_load_report: request.enable_region_query_load_report,
+            enable_region_query_load_report,
             query_memory_tracker,
         })
     }
@@ -407,7 +408,6 @@ impl ExecutionPlan for RegionScanExec {
 
         let ctx = QueryScanContext {
             explain_verbose: self.explain_verbose,
-            enable_region_query_load_report: self.enable_region_query_load_report,
         };
         let region_id = self.scanner.lock().unwrap().metadata().region_id;
         let stream = self

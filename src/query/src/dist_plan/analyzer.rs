@@ -59,7 +59,6 @@ const OTHER_PHY_PART_COL_PLACEHOLDER: &str = "__OTHER_PHYSICAL_PART_COLS_PLACEHO
 #[derive(Debug, Clone)]
 pub struct DistPlannerOptions {
     pub allow_query_fallback: bool,
-    pub enable_region_query_load_report: bool,
 }
 
 impl ConfigExtension for DistPlannerOptions {
@@ -86,18 +85,11 @@ impl ExtensionOptions for DistPlannerOptions {
     }
 
     fn entries(&self) -> Vec<datafusion::config::ConfigEntry> {
-        vec![
-            datafusion::config::ConfigEntry {
-                key: "allow_query_fallback".to_string(),
-                value: Some(self.allow_query_fallback.to_string()),
-                description: "Allow query fallback to fallback plan rewriter",
-            },
-            datafusion::config::ConfigEntry {
-                key: "enable_region_query_load_report".to_string(),
-                value: Some(self.enable_region_query_load_report.to_string()),
-                description: "Report per-region query load through heartbeat region stats",
-            },
-        ]
+        vec![datafusion::config::ConfigEntry {
+            key: "allow_query_fallback".to_string(),
+            value: Some(self.allow_query_fallback.to_string()),
+            description: "Allow query fallback to fallback plan rewriter",
+        }]
     }
 }
 

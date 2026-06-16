@@ -422,8 +422,6 @@ impl PrepareRequest {
 pub struct QueryScanContext {
     /// Whether the query is EXPLAIN ANALYZE VERBOSE.
     pub explain_verbose: bool,
-    /// Whether to record per-region query load while scanning.
-    pub enable_region_query_load_report: bool,
 }
 
 /// A scanner that provides a way to scan the region concurrently.
@@ -441,6 +439,11 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 
     /// Returns the metadata of the region.
     fn metadata(&self) -> RegionMetadataRef;
+
+    /// Returns whether to record per-region query load while scanning.
+    fn enable_region_query_load_report(&self) -> bool {
+        false
+    }
 
     /// Prepares the scanner with the given partition ranges.
     ///

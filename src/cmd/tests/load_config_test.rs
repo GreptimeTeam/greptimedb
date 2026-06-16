@@ -252,7 +252,6 @@ fn test_load_flownode_example_config() {
             query: QueryOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
-                enable_region_query_load_report: false,
                 memory_pool_size: MemoryLimit::Percentage(50),
             },
             meta_client: Some(MetaClientOptions {

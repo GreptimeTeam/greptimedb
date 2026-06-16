@@ -398,11 +398,6 @@ max_running_procedures = 128
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
 
-## Whether to report per-region query load metrics through heartbeat region stats.
-## Metrics include CPU time and scanned bytes collected by RegionScanExec.
-## Default to false.
-enable_region_query_load_report = false
-
 ## Memory pool size for query execution operators (aggregation, sorting, join).
 ## Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").
 ## Setting it to 0 disables the limit (unbounded, default behavior).
@@ -672,6 +667,11 @@ scan_memory_limit = "unlimited"
 ## higher latency is acceptable.
 ## "wait" means "wait(10s)", not unlimited waiting.
 scan_memory_on_exhausted = "fail"
+
+## Whether to record per-region query load metrics while scanning.
+## Metrics include CPU time and scanned bytes collected by RegionScanExec.
+## Default to false.
+enable_region_query_load_report = false
 
 ## Minimum time interval between two compactions.
 ## To align with the old behavior, the default value is 0 (no restrictions).
