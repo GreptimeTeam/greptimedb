@@ -1545,7 +1545,7 @@ groups:
         - title: Index IO Bytes
           type: timeseries
           description: Index read and write byte rates by operation and file type for puffin and intermediate files.
-          unit: bytes
+          unit: Bps
           queries:
             - expr: sum by (type, file_type) (rate(greptime_index_io_bytes_total[$__rate_interval]))
               datasource:
