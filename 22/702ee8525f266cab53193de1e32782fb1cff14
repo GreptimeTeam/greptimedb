@@ -1,0 +1,19 @@
+src/query/src/error.rs
+  s_6f37a87c040350::t_edf65535ee44c7 470-471
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "22702ee8525f266cab53193de1e32782fb1cff14",
+  "prompts": {},
+  "sessions": {
+    "s_6f37a87c040350": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_134b6d57dffe40NokZLE8B4SGt",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
