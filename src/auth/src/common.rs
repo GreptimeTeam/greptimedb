@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use common_base::secrets::SecretString;
 use digest::Digest;
@@ -39,6 +39,11 @@ pub const MAX_PBKDF2_SHA256_SALT_LEN: usize = 1024;
 pub const PG_SCRAM_SHA256_KEY_LEN: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Process-wide secret used to derive a stable mock salt for unknown users, so
+/// the SCRAM `server-first-message` can't be used to enumerate usernames.
+static PG_SCRAM_MOCK_SECRET: LazyLock<[u8; PG_SCRAM_SHA256_KEY_LEN]> =
+    LazyLock::new(rand::random);
 
 /// construct a [`UserInfo`](crate::user_info::UserInfo) impl with name
 /// use default username `greptime` if None is provided
@@ -292,6 +297,21 @@ impl PgScramSha256Verifier {
         Self::new(iterations, salt, stored_key, server_key)
     }
 
+    /// Builds a throwaway verifier for an unknown user. The salt is derived
+    /// deterministically from the username and a process-wide secret, so the
+    /// SCRAM `server-first-message` (salt + iterations) stays stable per
+    /// username and indistinguishable from a real user across reconnects. No
+    /// PBKDF2 is run (avoids a CPU-exhaustion DoS keyed on unknown usernames),
+    /// and the random keys guarantee the client proof never matches.
+    pub fn mock_for_unknown_user(username: &[u8]) -> Self {
+        Self {
+            iterations: DEFAULT_PBKDF2_SHA256_ITERATIONS,
+            salt: hmac_sha256(PG_SCRAM_MOCK_SECRET.as_slice(), username),
+            stored_key: rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>().to_vec(),
+            server_key: rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>().to_vec(),
+        }
+    }
+
     pub fn iterations(&self) -> u32 {
         self.iterations
     }
@@ -469,6 +489,27 @@ mod tests {
         assert_eq!(
             "pg_scram_sha256:4096:73616c74:945e1c466fc9932efadc23781edc5d1e78d5e10f005933652af1a6105154f084:b9bf0e811b1fb6793671c0cc3adedf7c75cd72291191092ad65878c5a02aad2c",
             verifier
+        );
+    }
+
+    #[test]
+    fn test_mock_verifier_is_stable_per_username() {
+        let alice = PgScramSha256Verifier::mock_for_unknown_user(b"alice");
+        let alice_again = PgScramSha256Verifier::mock_for_unknown_user(b"alice");
+        let bob = PgScramSha256Verifier::mock_for_unknown_user(b"bob");
+
+        // Same username must yield the same salt and iterations across reconnects,
+        // otherwise the SCRAM server-first message leaks user (non-)existence.
+        assert_eq!(alice.salt(), alice_again.salt());
+        assert_ne!(alice.salt(), bob.salt());
+        assert_eq!(alice.iterations(), DEFAULT_PBKDF2_SHA256_ITERATIONS);
+
+        // The mock verifier must never accept a client proof.
+        assert!(
+            alice
+                .verify_client_proof(b"auth-message", &[0u8; PG_SCRAM_SHA256_KEY_LEN])
+                .unwrap()
+                .is_none()
         );
     }
 }

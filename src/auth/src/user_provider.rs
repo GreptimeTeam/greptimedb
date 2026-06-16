@@ -370,15 +370,11 @@ pub(crate) fn postgres_auth_info_with_credential(
                 return Ok(PgAuthInfo::Cleartext);
             }
 
-            let salt = rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>();
-            let password = rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>();
-            let verifier = PgScramSha256Verifier::from_password(
-                &password,
-                &salt,
-                crate::DEFAULT_PBKDF2_SHA256_ITERATIONS,
-            )?;
+            // Unknown user: hand back a deterministic mock verifier so the SCRAM
+            // handshake is indistinguishable from a real user, without running
+            // PBKDF2 or leaking existence through an unstable salt.
             Ok(PgAuthInfo::ScramSha256 {
-                verifier,
+                verifier: PgScramSha256Verifier::mock_for_unknown_user(username.as_bytes()),
                 user_info: None,
             })
         }
