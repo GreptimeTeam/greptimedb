@@ -26,6 +26,8 @@ use super::command::{ExportCreateCommand, ExportVerifyCommand};
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::manifest::ChunkStatus;
 use crate::data::import_v2::ImportV2Command;
+use crate::data::import_v2::coordinator::build_import_tasks;
+use crate::data::import_v2::state::{ImportState, ImportTaskStatus, save_import_state};
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage};
 use crate::data::sql::escape_sql_identifier;
 use crate::database::DatabaseClient;
@@ -508,6 +510,222 @@ async fn export_import_v2_data_roundtrip_e2e() -> Result<()> {
 
     let actual_rows = query_count(&database_client, schema, "metrics").await?;
     assert_eq!(actual_rows, expected_rows);
+
+    database_client
+        .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
+        .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore]
+async fn import_v2_resume_from_completed_chunk_e2e() -> Result<()> {
+    let addr = env::var("GREPTIME_ADDR").unwrap_or_else(|_| "127.0.0.1:4000".to_string());
+    let catalog = env::var("GREPTIME_CATALOG").unwrap_or_else(|_| "greptime".to_string());
+    let auth_basic = env::var("GREPTIME_AUTH_BASIC").ok();
+    let schema = "test_db_import_resume_completed_chunk";
+
+    let database_client = DatabaseClient::new(
+        addr.clone(),
+        catalog.clone(),
+        auth_basic.clone(),
+        Duration::from_secs(60),
+        None,
+        false,
+    );
+
+    database_client
+        .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
+        .await?;
+    database_client
+        .sql_in_public(&format!("CREATE DATABASE {schema}"))
+        .await?;
+    database_client
+        .sql(
+            "CREATE TABLE metrics (\
+                ts TIMESTAMP TIME INDEX, \
+                host STRING PRIMARY KEY, \
+                cpu DOUBLE \
+            ) ENGINE=mito",
+            schema,
+        )
+        .await?;
+    database_client
+        .sql(
+            "INSERT INTO metrics (ts, host, cpu) VALUES \
+             ('2025-01-01T00:00:00Z', 'h1', 1.0), \
+             ('2025-01-01T01:00:00Z', 'h2', 2.0)",
+            schema,
+        )
+        .await?;
+
+    let src_dir = tempdir().context(FileIoSnafu)?;
+    let src_uri = Url::from_directory_path(src_dir.path())
+        .map_err(|_| {
+            InvalidArgumentsSnafu {
+                msg: "invalid temp dir path".to_string(),
+            }
+            .build()
+        })?
+        .to_string();
+
+    let mut export_args = vec![
+        "export-v2-create",
+        "--addr",
+        &addr,
+        "--to",
+        &src_uri,
+        "--catalog",
+        &catalog,
+        "--schemas",
+        schema,
+        "--start-time",
+        "2025-01-01T00:00:00Z",
+        "--end-time",
+        "2025-01-01T02:00:00Z",
+        "--chunk-time-window",
+        "1h",
+        "--chunk-parallelism",
+        "1",
+        "--progress",
+        "never",
+    ];
+    if let Some(auth) = &auth_basic {
+        export_args.push("--auth-basic");
+        export_args.push(auth);
+    }
+    let export_cmd = ExportCreateCommand::parse_from(export_args);
+    export_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)?;
+
+    let storage_config = ObjectStoreConfig::default();
+    let storage = OpenDalStorage::from_uri(&src_uri, &storage_config)
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+    let full_manifest = storage
+        .read_manifest()
+        .await
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+    assert_eq!(full_manifest.chunks.len(), 2);
+
+    database_client
+        .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
+        .await?;
+
+    let mut partial_manifest = full_manifest.clone();
+    partial_manifest.chunks.truncate(1);
+    storage
+        .write_manifest(&partial_manifest)
+        .await
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+
+    let mut partial_import_args = vec![
+        "import-v2",
+        "--addr",
+        &addr,
+        "--from",
+        &src_uri,
+        "--catalog",
+        &catalog,
+        "--schemas",
+        schema,
+        "--task-parallelism",
+        "1",
+        "--progress",
+        "never",
+    ];
+    if let Some(auth) = &auth_basic {
+        partial_import_args.push("--auth-basic");
+        partial_import_args.push(auth);
+    }
+    let partial_import_cmd = ImportV2Command::parse_from(partial_import_args);
+    partial_import_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)?;
+
+    let rows_after_partial_import = query_count(&database_client, schema, "metrics").await?;
+    assert_eq!(rows_after_partial_import, 1);
+
+    storage
+        .write_manifest(&full_manifest)
+        .await
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+
+    let import_state_dir = tempdir().context(FileIoSnafu)?;
+    let import_state_path = import_state_dir.path().join("import-state.json");
+    let schemas = vec![schema.to_string()];
+    let tasks = build_import_tasks(&full_manifest.chunks, &schemas);
+    assert_eq!(tasks.len(), 2);
+
+    let mut import_state = ImportState::new(
+        full_manifest.snapshot_id.to_string(),
+        addr.clone(),
+        catalog.clone(),
+        &schemas,
+        tasks,
+    );
+    import_state.mark_ddl_completed();
+    import_state
+        .set_task_status(
+            full_manifest.chunks[0].id,
+            schema,
+            ImportTaskStatus::Completed,
+            None,
+        )
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+    save_import_state(&import_state_path, &import_state)
+        .await
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+
+    let import_state_path_arg = import_state_path.to_string_lossy().into_owned();
+    let mut import_args = vec![
+        "import-v2",
+        "--addr",
+        &addr,
+        "--from",
+        &src_uri,
+        "--catalog",
+        &catalog,
+        "--schemas",
+        schema,
+        "--state-path",
+        &import_state_path_arg,
+        "--task-parallelism",
+        "1",
+        "--progress",
+        "never",
+    ];
+    if let Some(auth) = &auth_basic {
+        import_args.push("--auth-basic");
+        import_args.push(auth);
+    }
+    let import_cmd = ImportV2Command::parse_from(import_args);
+    import_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)?;
+
+    let actual_rows = query_count(&database_client, schema, "metrics").await?;
+    assert_eq!(actual_rows, 2);
+    assert!(!import_state_path.exists());
 
     database_client
         .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
