@@ -179,7 +179,7 @@ Example with synthetic values:
         "build_ranges_peak_mem_size": 2048,
         "num_peak_range_builders": 1,
         "stream_eof": true
-      },
+      }
     }
   ]
 }
