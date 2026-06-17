@@ -197,7 +197,12 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         extensions.inverted_index_options = Some(HashMap::new().into());
     }
 
-    if let Some(json_extension) = column_schema.extension_type::<JsonExtensionType>()? {
+    if column_schema
+        .data_type
+        .as_json()
+        .is_some_and(|json_type| json_type.is_json2())
+        && let Some(json_extension) = column_schema.extension_type::<JsonExtensionType>()?
+    {
         let settings = json_extension
             .metadata()
             .json_structure_settings
@@ -479,6 +484,67 @@ WITH(
   format = 'csv',
   location = 'foo.csv'
 )"#,
+            sql
+        );
+    }
+
+    #[test]
+    fn test_show_create_legacy_json_with_json_extension() {
+        let mut json_column = ColumnSchema::new("j", ConcreteDataType::json_datatype(), true);
+        json_column
+            .with_extension_type(&JsonExtensionType::new(Arc::new(
+                datatypes::extension::json::JsonMetadata {
+                    json_structure_settings: Some(datatypes::json::JsonStructureSettings::default()),
+                },
+            )))
+            .unwrap();
+
+        let table_schema = SchemaRef::new(Schema::new(vec![
+            json_column,
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let table_name = "legacy_json";
+        let meta = TableMetaBuilder::empty()
+            .schema(table_schema)
+            .primary_key_indices(vec![])
+            .value_indices(vec![0])
+            .engine("mito".to_string())
+            .next_column_id(0)
+            .options(Default::default())
+            .created_on(Default::default())
+            .build()
+            .unwrap();
+
+        let info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(1024)
+                .table_version(0 as TableVersion)
+                .name(table_name)
+                .schema_name("public")
+                .catalog_name("greptime")
+                .desc(None)
+                .table_type(TableType::Base)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+
+        let stmt = create_table_stmt(&info, None, '"').unwrap();
+        let sql = format!("\n{}", stmt);
+        assert_eq!(
+            r#"
+CREATE TABLE IF NOT EXISTS "legacy_json" (
+  "j" JSON NULL,
+  "ts" TIMESTAMP(3) NOT NULL,
+  TIME INDEX ("ts")
+)
+ENGINE=mito
+"#,
             sql
         );
     }

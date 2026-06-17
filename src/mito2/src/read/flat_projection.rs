@@ -25,7 +25,7 @@ use common_recordbatch::error::{
 use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
-use datatypes::extension::json::is_json_extension_type;
+use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::types::json_type::JsonNativeType;
@@ -118,7 +118,10 @@ impl FlatProjectionMapper {
                 .and_then(|x| x.get(&schema.name))
                 .cloned()
                 .map(ConcreteDataType::json2)
-                && schema.data_type.is_json()
+                && schema
+                    .data_type
+                    .as_json()
+                    .is_some_and(|json_type| json_type.is_json2())
             {
                 schema.data_type = concretized;
             }
@@ -142,10 +145,13 @@ impl FlatProjectionMapper {
             && !json_type_hint.is_empty()
         {
             for (column_id, data_type) in batch_schema.iter_mut() {
-                if let Some(concretized) = metadata
-                    .column_by_id(*column_id)
-                    .and_then(|x| json_type_hint.get(&x.column_schema.name).cloned())
-                    .map(ConcreteDataType::json2)
+                if data_type
+                    .as_json()
+                    .is_some_and(|json_type| json_type.is_json2())
+                    && let Some(concretized) = metadata
+                        .column_by_id(*column_id)
+                        .and_then(|x| json_type_hint.get(&x.column_schema.name).cloned())
+                        .map(ConcreteDataType::json2)
                 {
                     *data_type = concretized;
                 }
@@ -260,7 +266,7 @@ impl FlatProjectionMapper {
                 .input_arrow_schema
                 .fields()
                 .iter()
-                .filter(|&field| is_json_extension_type(field))
+                .filter(|&field| is_structured_json_field(field))
                 .map(|field| (field.name().clone(), field.data_type().clone()))
                 .collect();
             to_flat_sst_arrow_schema(&self.metadata, &options)
@@ -321,7 +327,7 @@ impl FlatProjectionMapper {
             }
 
             let field = &self.output_schema.arrow_schema().fields()[output_idx];
-            if is_json_extension_type(field) {
+            if is_structured_json_field(field) {
                 array = JsonArray::from(&array)
                     .try_align(field.data_type())
                     .context(DataTypesSnafu)?;
@@ -546,5 +552,62 @@ impl DfBatchAssembler {
             columns.push(vector);
         }
         RecordBatch::to_df_record_batch(self.output_arrow_schema_with_internal.clone(), columns)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::types::json_type::JsonObjectType;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
+
+    use super::*;
+
+    fn metadata_with_legacy_json() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "j",
+                    ConcreteDataType::json_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            });
+        Arc::new(builder.build().unwrap())
+    }
+
+    #[test]
+    fn test_json_type_hint_does_not_concretize_legacy_json() {
+        let metadata = metadata_with_legacy_json();
+        let hint = HashMap::from([(
+            "j".to_string(),
+            JsonNativeType::Object(JsonObjectType::from([(
+                "a".to_string(),
+                JsonNativeType::i64(),
+            )])),
+        )]);
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &metadata,
+            vec![0, 1],
+            ReadColumns::from_deduped_column_ids([0, 1]),
+            Some(&hint),
+        )
+        .unwrap();
+
+        assert_eq!(
+            mapper.batch_schema()[0],
+            (0, ConcreteDataType::json_datatype())
+        );
     }
 }
