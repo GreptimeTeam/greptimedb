@@ -34,6 +34,7 @@ use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::metadata::RegionMetadataRef;
+use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
@@ -208,6 +209,13 @@ impl StagingPartitionInfo {
 }
 
 impl MitoRegion {
+    fn remove_region_metrics(&self) {
+        let region_id = self.region_id.as_u64().to_string();
+        let labels = &[region_id.as_str()];
+        let _ = REGION_QUERY_CPU_TIME.remove_label_values(labels);
+        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(labels);
+    }
+
     /// Stop background managers for this region.
     pub(crate) async fn stop(&self) {
         self.manifest_ctx
@@ -975,6 +983,12 @@ impl MitoRegion {
                 )
             })
             .unwrap_or(false)
+    }
+}
+
+impl Drop for MitoRegion {
+    fn drop(&mut self) {
+        self.remove_region_metrics();
     }
 }
 
