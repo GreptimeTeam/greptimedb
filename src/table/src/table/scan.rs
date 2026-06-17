@@ -507,12 +507,11 @@ impl Stream for StreamWithMetricWrapper {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let enter = this.span.enter();
+        let _enter = this.span.enter();
         let poll_timer = this.metric.poll_timer();
         this.await_timer.get_or_insert(Instant::now());
         let poll_result = this.stream.poll_next_unpin(cx);
         drop(poll_timer);
-        drop(enter);
         match poll_result {
             Poll::Ready(Some(result)) => {
                 if let Some(instant) = this.await_timer.take() {

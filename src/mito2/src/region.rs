@@ -29,7 +29,6 @@ use common_base::hash::partition_expr_version;
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
 use partition::expr::PartitionExpr;
-use prometheus::IntGauge;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
@@ -55,7 +54,6 @@ use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
-use crate::metrics::REGION_WRITTEN_BYTES_SINCE_OPEN;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::sst::file::FileMeta;
@@ -174,8 +172,8 @@ pub struct MitoRegion {
     /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id] for current region,
     /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id`.
     pub(crate) topic_latest_entry_id: AtomicU64,
-    /// Bytes written to the region since open.
-    pub(crate) written_bytes: IntGauge,
+    /// The total bytes written to the region.
+    pub(crate) written_bytes: Arc<AtomicU64>,
     /// manifest stats
     stats: ManifestStats,
 }
@@ -210,27 +208,6 @@ impl StagingPartitionInfo {
 }
 
 impl MitoRegion {
-    pub(crate) fn new_region_metrics(region_id: RegionId) -> IntGauge {
-        let region_id = region_id.as_u64().to_string();
-        REGION_WRITTEN_BYTES_SINCE_OPEN.with_label_values(&[&region_id])
-    }
-
-    pub(crate) fn region_metrics(&self) -> &IntGauge {
-        &self.written_bytes
-    }
-
-    pub(crate) fn reset_region_metrics(written_bytes: &IntGauge) {
-        written_bytes.set(0);
-    }
-
-    fn remove_region_metrics(&mut self) {
-        let region_id = self.region_id.as_u64().to_string();
-        let labels = &[region_id.as_str()];
-        if let Err(e) = REGION_WRITTEN_BYTES_SINCE_OPEN.remove_label_values(labels) {
-            warn!(e; "Failed to remove region written bytes metric, region_id: {}", self.region_id);
-        }
-    }
-
     /// Stop background managers for this region.
     pub(crate) async fn stop(&self) {
         self.manifest_ctx
@@ -666,7 +643,7 @@ impl MitoRegion {
         let file_removed_cnt = self.stats.file_removed_cnt();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
-        let written_bytes = self.region_metrics().get() as u64;
+        let written_bytes = self.written_bytes.load(Ordering::Relaxed);
 
         RegionStatistic {
             num_rows,
@@ -998,12 +975,6 @@ impl MitoRegion {
                 )
             })
             .unwrap_or(false)
-    }
-}
-
-impl Drop for MitoRegion {
-    fn drop(&mut self) {
-        self.remove_region_metrics();
     }
 }
 
@@ -1745,6 +1716,7 @@ pub fn parse_partition_expr(partition_expr_str: Option<&str>) -> Result<Option<P
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
 
     use common_datasource::compression::CompressionType;
     use common_test_util::temp_dir::create_temp_dir;
@@ -1821,8 +1793,6 @@ mod tests {
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
         ));
-        let written_bytes = MitoRegion::new_region_metrics(metadata.region_id);
-        MitoRegion::reset_region_metrics(&written_bytes);
 
         MitoRegion {
             region_id: metadata.region_id,
@@ -1835,7 +1805,7 @@ mod tests {
             last_schedule_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
-            written_bytes,
+            written_bytes: Arc::new(AtomicU64::new(0)),
             stats: ManifestStats::default(),
         }
     }
@@ -2182,8 +2152,6 @@ mod tests {
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
         ));
-        let written_bytes = MitoRegion::new_region_metrics(metadata.region_id);
-        MitoRegion::reset_region_metrics(&written_bytes);
 
         let region = MitoRegion {
             region_id: metadata.region_id,
@@ -2196,7 +2164,7 @@ mod tests {
             last_schedule_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
-            written_bytes,
+            written_bytes: Arc::new(AtomicU64::new(0)),
             stats: ManifestStats::default(),
         };
 

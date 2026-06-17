@@ -138,7 +138,7 @@ impl QueryEngineState {
                 .options_mut()
                 .extensions
                 .insert(DistPlannerOptions {
-                    allow_query_fallback: options.allow_query_fallback,
+                    allow_query_fallback: true,
                 });
         }
 

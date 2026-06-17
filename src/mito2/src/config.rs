@@ -156,6 +156,7 @@ pub struct MitoConfig {
     /// Defaults to [`OnExhaustedPolicy::Fail`], which intentionally differs from
     /// [`OnExhaustedPolicy::default()`].
     pub scan_memory_on_exhausted: OnExhaustedPolicy,
+
     /// Index configs.
     pub index: IndexConfig,
     /// Inverted index configs.

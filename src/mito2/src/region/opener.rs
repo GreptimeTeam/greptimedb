@@ -373,8 +373,6 @@ impl RegionOpener {
             self.intermediate_manager,
         ));
         let now = self.time_provider.current_time_millis();
-        let written_bytes = MitoRegion::new_region_metrics(region_id);
-        MitoRegion::reset_region_metrics(&written_bytes);
 
         Ok(Arc::new(MitoRegion {
             region_id,
@@ -399,7 +397,7 @@ impl RegionOpener {
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(flushed_entry_id),
-            written_bytes,
+            written_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats,
         }))
     }
@@ -627,8 +625,6 @@ impl RegionOpener {
         }
 
         let now = self.time_provider.current_time_millis();
-        let written_bytes = MitoRegion::new_region_metrics(self.region_id);
-        MitoRegion::reset_region_metrics(&written_bytes);
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -646,7 +642,7 @@ impl RegionOpener {
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
-            written_bytes,
+            written_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats.clone(),
         };
 

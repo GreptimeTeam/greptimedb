@@ -14,10 +14,10 @@
 
 use std::mem;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use api::v1::{BulkWalEntry, Mutation, OpType, Rows, WalEntry, WriteHint};
 use futures::stream::{FuturesUnordered, StreamExt};
-use prometheus::IntGauge;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
@@ -108,7 +108,7 @@ pub(crate) struct RegionWriteCtx {
     /// Rows to delete.
     pub(crate) delete_num: usize,
     /// The total bytes written to the region.
-    pub(crate) written_bytes: Option<IntGauge>,
+    pub(crate) written_bytes: Option<Arc<AtomicU64>>,
 }
 
 impl RegionWriteCtx {
@@ -117,7 +117,7 @@ impl RegionWriteCtx {
         region_id: RegionId,
         version_control: &VersionControlRef,
         provider: Provider,
-        written_bytes: Option<IntGauge>,
+        written_bytes: Option<Arc<AtomicU64>>,
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,
@@ -265,7 +265,7 @@ impl RegionWriteCtx {
         if let Some(written_bytes) = &self.written_bytes {
             let new_memory_usage = mutable_memtable.memory_usage();
             let bytes = new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
-            written_bytes.add(bytes as i64);
+            written_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
         // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
         // to decrease `next_sequence` and `next_entry_id` by 1.
@@ -348,7 +348,7 @@ impl RegionWriteCtx {
         if let Some(written_bytes) = &self.written_bytes {
             let new_memory_usage = mutable_memtable.memory_usage();
             let bytes = new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
-            written_bytes.add(bytes as i64);
+            written_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
         self.version_control
             .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);

@@ -164,7 +164,6 @@ impl WorkerGroup {
     /// Starts a worker group.
     ///
     /// The number of workers should be power of two.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start<S: LogStore>(
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
