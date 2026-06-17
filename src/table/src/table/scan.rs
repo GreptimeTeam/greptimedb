@@ -544,13 +544,15 @@ impl Stream for StreamWithMetricWrapper {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         let enter = this.span.enter();
-        let poll_start = Instant::now();
+        let poll_start = this.enable_region_query_load_report.then(Instant::now);
         let poll_timer = this.metric.poll_timer();
         this.await_timer.get_or_insert(Instant::now());
         let poll_result = this.stream.poll_next_unpin(cx);
         drop(poll_timer);
-        let poll_elapsed = poll_start.elapsed();
-        this.cpu_time = this.cpu_time.saturating_add(poll_elapsed.as_nanos() as u64);
+        if let Some(poll_start) = poll_start {
+            let poll_elapsed = poll_start.elapsed();
+            this.cpu_time = this.cpu_time.saturating_add(poll_elapsed.as_nanos() as u64);
+        }
         drop(enter);
         match poll_result {
             Poll::Ready(Some(result)) => {
