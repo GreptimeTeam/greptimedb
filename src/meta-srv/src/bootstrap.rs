@@ -24,6 +24,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::election::CANDIDATE_LEASE_SECS;
 use common_meta::election::etcd::EtcdElection;
 use common_meta::kv_backend::chroot::ChrootKvBackend;

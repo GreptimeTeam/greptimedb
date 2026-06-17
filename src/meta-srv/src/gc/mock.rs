@@ -91,7 +91,6 @@ pub struct MockSchedulerCtx {
     pub last_gc_regions_full_file_listing: Arc<Mutex<Vec<bool>>>,
     pub last_gc_regions_route_overrides: Arc<Mutex<Vec<Region2Peers>>>,
     pub region_live_files: Arc<Mutex<HashMap<RegionId, HashSet<FileId>>>>,
-    pub region_protected_files: Arc<Mutex<HashMap<RegionId, HashSet<FileId>>>>,
     pub regions_require_full_listing: Arc<Mutex<HashSet<RegionId>>>,
     pub dropped_regions: Arc<Mutex<HashSet<RegionId>>>,
 }

@@ -157,10 +157,6 @@ impl ScenarioFixtureBuilder {
                 HashSet::from([dropped_reachable, dropped_protected]),
             ),
         ]);
-        let mut region_protected_files = HashMap::from([
-            (active_region_id, HashSet::from([active_protected])),
-            (dropped_region_id, HashSet::from([dropped_protected])),
-        ]);
         let mut regions_require_full_listing = HashSet::new();
         let mut dropped_regions = HashSet::new();
 
@@ -184,7 +180,6 @@ impl ScenarioFixtureBuilder {
             reachable_files.extend([reachable, protected]);
             protected_files.insert(protected);
             region_live_files.insert(region_id, HashSet::from([reachable, protected]));
-            region_protected_files.insert(region_id, HashSet::from([protected]));
             if idx == 0 {
                 regions_require_full_listing.insert(region_id);
             }
@@ -225,7 +220,6 @@ impl ScenarioFixtureBuilder {
             gc_reports: Arc::new(Mutex::new(gc_reports)),
             gc_regions_success_after_retries: Arc::new(Mutex::new(retry_targets)),
             region_live_files: Arc::new(Mutex::new(region_live_files)),
-            region_protected_files: Arc::new(Mutex::new(region_protected_files)),
             regions_require_full_listing: Arc::new(Mutex::new(regions_require_full_listing)),
             dropped_regions: Arc::new(Mutex::new(dropped_regions)),
             ..Default::default()
