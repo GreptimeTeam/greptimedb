@@ -1583,6 +1583,50 @@ pub async fn test_splunk_logs(store_type: StorageType) {
     assert_eq!(StatusCode::BAD_REQUEST, res.status());
     assert!(res.text().await.contains("\"code\":7"));
 
+    // 6. A custom pipeline (via `x-greptime-pipeline-name`) overrides identity and
+    //    owns the schema: this one keeps host/event/timestamp and drops source/sourcetype.
+    let pipeline_yaml = r#"
+transform:
+  - field: host
+    type: string
+    index: tag
+  - field: event
+    type: string
+  - field: greptime_timestamp
+    type: time
+    index: timestamp
+"#;
+    let res = client
+        .post("/v1/pipelines/splunk_custom")
+        .header("Content-Type", "application/x-yaml")
+        .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+        .body(pipeline_yaml)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "create pipeline failed");
+
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("x-greptime-pipeline-name"),
+        HeaderValue::from_static("splunk_custom"),
+    ));
+    let res = send_req(
+        &client,
+        headers,
+        "/v1/splunk/services/collector/event?table=splunk_custom_tbl",
+        br#"{"event":"hi","time":1700000010,"host":"web-09","source":"s","sourcetype":"st"}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let create = query(&client, "show create table splunk_custom_tbl").await;
+    assert!(create.contains("host"), "custom pipeline kept host: {create}");
+    assert!(
+        !create.contains("sourcetype"),
+        "custom pipeline should have dropped sourcetype (identity would keep it): {create}"
+    );
+
     guard.remove_all().await;
 }
 
