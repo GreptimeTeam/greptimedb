@@ -1627,6 +1627,41 @@ transform:
         "custom pipeline should have dropped sourcetype (identity would keep it): {create}"
     );
 
+    // 7. Auth failures return HEC codes: missing token -> 2 (401), bad token -> 4 (403).
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        event_path,
+        br#"{"event":"x","time":1700000020}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::UNAUTHORIZED, res.status());
+    assert!(res.text().await.contains("\"code\":2"));
+
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("authorization"),
+                HeaderValue::from_static("Splunk baduser:badpass"),
+            ),
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+        ],
+        event_path,
+        br#"{"event":"x","time":1700000021}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::FORBIDDEN, res.status());
+    assert!(res.text().await.contains("\"code\":4"));
+
     guard.remove_all().await;
 }
 

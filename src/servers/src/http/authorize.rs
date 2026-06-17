@@ -41,6 +41,7 @@ use crate::http::result::error_result::ErrorResponse;
 use crate::http::splunk::is_splunk_request;
 use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_API_PREFIX};
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
+
 /// AuthState is a holder state for [`UserProviderRef`]
 /// during [`check_http_auth`] function in axum's middleware
 #[derive(Clone)]
@@ -69,6 +70,7 @@ pub async fn inner_auth<B>(
 
     let query_ctx = query_ctx_builder.build();
     let need_auth = need_auth(&req);
+    let is_splunk = is_splunk_request(&req);
 
     // 2. check if auth is needed
     let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
@@ -87,6 +89,14 @@ pub async fn inner_auth<B>(
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
+            if is_splunk {
+                // HEC: missing header -> 2 ("token is required"), else 4 ("invalid token").
+                let (status, code) = match &e {
+                    error::Error::NotFoundAuthHeader { .. } => (StatusCode::UNAUTHORIZED, 2),
+                    _ => (StatusCode::FORBIDDEN, 4),
+                };
+                return Err(splunk_hec_err(status, code));
+            }
             return Err(err_response(e));
         }
     };
@@ -111,6 +121,10 @@ pub async fn inner_auth<B>(
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
+            // HEC: bad credentials -> 4 ("invalid token", 403).
+            if is_splunk {
+                return Err(splunk_hec_err(StatusCode::FORBIDDEN, 4));
+            }
             Err(err_response(e))
         }
     }
@@ -125,6 +139,16 @@ pub async fn check_http_auth(
         Ok(req) => next.run(req).await,
         Err(resp) => resp,
     }
+}
+
+/// HEC-shaped auth error (`{"text","code"}`) so Splunk clients can branch on `code`.
+fn splunk_hec_err(status: StatusCode, code: u32) -> Response {
+    let text = match code {
+        2 => "Token is required",
+        4 => "Invalid token",
+        _ => "Unauthorized",
+    };
+    (status, axum::Json(serde_json::json!({ "text": text, "code": code }))).into_response()
 }
 
 fn err_response(err: impl ErrorExt) -> Response {
