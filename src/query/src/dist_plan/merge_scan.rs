@@ -948,10 +948,10 @@ fn report_region_query_load(
     let load = region_scan_load(metrics);
     REGION_QUERY_CPU_TIME
         .with_label_values(&[&region_id])
-        .add(load.cpu_time as i64);
+        .inc_by(load.cpu_time);
     REGION_QUERY_SCANNED_BYTES
         .with_label_values(&[&region_id])
-        .add(load.table_scan as i64);
+        .inc_by(load.table_scan);
 }
 
 #[derive(Debug, Clone)]
