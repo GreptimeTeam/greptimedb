@@ -33,13 +33,14 @@ use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{
     self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
-    NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
+    NotFoundAuthHeaderSnafu, NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu,
+    UrlDecodeSnafu,
 };
 use crate::http::header::{GREPTIME_TIMEZONE_HEADER_NAME, GreptimeDbName};
 use crate::http::result::error_result::ErrorResponse;
+use crate::http::splunk::is_splunk_request;
 use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_API_PREFIX};
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
-
 /// AuthState is a holder state for [`UserProviderRef`]
 /// during [`check_http_auth`] function in axum's middleware
 #[derive(Clone)]
@@ -203,10 +204,33 @@ fn get_influxdb_credentials<B>(request: &Request<B>) -> Result<Option<(Username,
     }
 }
 
+fn get_splunk_credentials<B>(request: &Request<B>) -> Result<Option<(Username, Password)>> {
+    let Some(header) = request.headers().get(http::header::AUTHORIZATION) else {
+        return Ok(None);
+    };
+    let (auth_scheme, credential) = header
+        .to_str()
+        .context(InvalidAuthHeaderInvisibleASCIISnafu)?
+        .split_once(' ')
+        .context(InvalidAuthHeaderSnafu)?;
+
+    let (username, password) = match auth_scheme.to_lowercase().as_str() {
+        "splunk" => {
+            let (u, p) = credential.split_once(':').context(InvalidAuthHeaderSnafu)?;
+            (u.to_string(), p.to_string().into())
+        }
+        "basic" => decode_basic(credential)?,
+        _ => UnsupportedAuthSchemeSnafu { name: auth_scheme }.fail()?,
+    };
+    Ok(Some((username, password)))
+}
+
 pub fn extract_username_and_password<B>(request: &Request<B>) -> Result<(Username, Password)> {
     Ok(if is_influxdb_request(request) {
         // compatible with influxdb auth
         get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
+    } else if is_splunk_request(request) {
+        get_splunk_credentials(request)?.context(NotFoundAuthHeaderSnafu)?
     } else {
         // normal http auth
         let scheme = auth_header(request)?;
@@ -358,6 +382,59 @@ mod tests {
             .unwrap();
 
         assert!(need_auth(&req));
+    }
+
+    #[test]
+    fn test_splunk_auth() {
+        let splunk_uri = "http://127.0.0.1/v1/splunk/services/collector/event";
+        let splunk_req = |auth: Option<&str>| {
+            let mut req = Request::builder().uri(splunk_uri);
+            if let Some(auth) = auth {
+                req = req.header(http::header::AUTHORIZATION, auth);
+            }
+            req.body(()).unwrap()
+        };
+
+        // is_splunk_request matches our mount, not other endpoints.
+        assert!(is_splunk_request(&splunk_req(None)));
+        assert!(!is_splunk_request(
+            &Request::builder()
+                .uri("http://127.0.0.1/v1/influxdb/write")
+                .body(())
+                .unwrap()
+        ));
+        assert!(!is_splunk_request(
+            &Request::builder()
+                .uri("http://127.0.0.1/v1/sql")
+                .body(())
+                .unwrap()
+        ));
+
+        // `Splunk <user:pass>` -> (user, pass).
+        let (username, password) =
+            get_splunk_credentials(&splunk_req(Some("Splunk teamA:secretA")))
+                .unwrap()
+                .unwrap();
+        assert_eq!(username, "teamA");
+        assert_eq!(password.expose_secret(), "secretA");
+
+        // standard Basic is also accepted (parity with influxdb).
+        let basic = basic_auth("u", "p");
+        let (username, password) = get_splunk_credentials(&splunk_req(Some(&basic)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(username, "u");
+        assert_eq!(password.expose_secret(), "p");
+
+        // missing header -> None; token without ':' -> error.
+        assert!(get_splunk_credentials(&splunk_req(None)).unwrap().is_none());
+        assert!(get_splunk_credentials(&splunk_req(Some("Splunk no_colon_token"))).is_err());
+
+        // full dispatch routes a splunk request through the splunk scheme.
+        let (username, password) =
+            extract_username_and_password(&splunk_req(Some("Splunk teamA:secretA"))).unwrap();
+        assert_eq!(username, "teamA");
+        assert_eq!(password.expose_secret(), "secretA");
     }
 
     #[test]

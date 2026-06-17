@@ -950,6 +950,21 @@ impl HttpServer {
                 "/services/collector/health/1.0",
                 routing::get(splunk::handle_health),
             )
+            // The event endpoint plus its base and versioned aliases all serve
+            // the same handler (Splunk JSON event protocol).
+            .route(
+                "/services/collector/event",
+                routing::post(splunk::handle_event),
+            )
+            .route("/services/collector", routing::post(splunk::handle_event))
+            .route(
+                "/services/collector/event/1.0",
+                routing::post(splunk::handle_event),
+            )
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
             .with_state(log_state)
     }
 

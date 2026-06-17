@@ -159,6 +159,7 @@ macro_rules! http_tests {
                 test_elasticsearch_logs_with_index,
                 test_splunk_health,
                 test_splunk_health_is_public,
+                test_splunk_logs,
                 test_log_query,
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
@@ -1465,7 +1466,124 @@ pub async fn test_splunk_health_is_public(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
+}
 
+pub async fn test_splunk_logs(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
+        store_type,
+        "test_splunk_logs",
+        Some(user_provider),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // Authenticated SQL query (the user-provider harness requires auth on /v1/sql).
+    async fn query(client: &TestClient, sql: &str) -> String {
+        let res = client
+            .get(format!("/v1/sql?sql={sql}").as_str())
+            .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "query failed: {sql}");
+        res.text().await
+    }
+
+    // HEC `Authorization: Splunk <user:pass>` + JSON content type.
+    let splunk_headers = || {
+        vec![
+            (
+                HeaderName::from_static("authorization"),
+                HeaderValue::from_static("Splunk greptime_user:greptime_pwd"),
+            ),
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+        ]
+    };
+    let event_path = "/v1/splunk/services/collector/event";
+
+    // 1. Ingest a HEC batch (no `index` -> default `splunk_logs` table).
+    let body = concat!(
+        r#"{"event":"login ok","time":1700000000,"host":"web-01","source":"auth.log","sourcetype":"syslog","fields":{"region":"us-east"}}"#,
+        "\n",
+        r#"{"event":"login fail","time":1700000001,"host":"web-02","source":"auth.log","sourcetype":"syslog","fields":{"region":"us-west"}}"#,
+    );
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        event_path,
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    assert!(res.text().await.contains("\"code\":0"));
+
+    // 2. Rows landed with the right values (proves route + auth + parse + insert,
+    //    and that the default table name is `splunk_logs`).
+    let rows = get_rows_from_output(
+        &query(
+            &client,
+            "select host, region, event from splunk_logs order by host",
+        )
+        .await,
+    );
+    assert_eq!(
+        rows,
+        r#"[["web-01","us-east","login ok"],["web-02","us-west","login fail"]]"#
+    );
+
+    // 3. host/source/sourcetype + `fields` keys are tags (i.e. primary key).
+    let create = query(&client, "show create table splunk_logs").await;
+    let pk = create
+        .split("PRIMARY KEY")
+        .nth(1)
+        .expect("splunk_logs should have a PRIMARY KEY");
+    for col in ["host", "source", "sourcetype", "region"] {
+        assert!(
+            pk.contains(col),
+            "expected `{col}` in primary key: {create}"
+        );
+    }
+
+    // 4. A brand-new `fields` key on a later write also becomes a tag (dynamic
+    //    tag column added to the existing table's primary key).
+    let body2 = r#"{"event":"deploy","time":1700000002,"host":"web-03","source":"deploy.log","sourcetype":"syslog","fields":{"datacenter":"dc1"}}"#;
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        event_path,
+        body2.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let create = query(&client, "show create table splunk_logs").await;
+    let pk = create.split("PRIMARY KEY").nth(1).unwrap();
+    assert!(
+        pk.contains("datacenter"),
+        "expected dynamically-added `datacenter` in primary key: {create}"
+    );
+
+    // 5. An invalid `?table=` override returns HEC code 7 ("incorrect index").
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        "/v1/splunk/services/collector/event?table=bad%20name",
+        br#"{"event":"x","time":1700000003}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":7"));
+
+    guard.remove_all().await;
 }
 
 pub async fn test_health_api(store_type: StorageType) {

@@ -384,7 +384,7 @@ pub async fn delete_pipeline(
 
 /// Transform NDJSON array into a single array
 /// always return an array
-fn transform_ndjson_array_factory(
+pub(crate) fn transform_ndjson_array_factory(
     values: impl IntoIterator<Item = Result<VrlValue, serde_json::Error>>,
     ignore_error: bool,
 ) -> Result<Vec<VrlValue>> {
