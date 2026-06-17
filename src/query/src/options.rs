@@ -43,6 +43,9 @@ pub struct QueryOptions {
     /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
     /// When this limit is reached, queries will fail with ResourceExhausted error.
     pub memory_pool_size: MemoryLimit,
+    /// Whether to expose per-region query load metrics.
+    #[serde(skip)]
+    pub enable_per_region_metrics: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -52,6 +55,7 @@ impl Default for QueryOptions {
             parallelism: 0,
             allow_query_fallback: false,
             memory_pool_size: MemoryLimit::default(),
+            enable_per_region_metrics: false,
         }
     }
 }

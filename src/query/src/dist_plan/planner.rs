@@ -108,6 +108,7 @@ pub struct DistExtensionPlanner {
     catalog_manager: CatalogManagerRef,
     partition_rule_manager: PartitionRuleManagerRef,
     region_query_handler: RegionQueryHandlerRef,
+    enable_per_region_metrics: bool,
 }
 
 impl DistExtensionPlanner {
@@ -115,11 +116,13 @@ impl DistExtensionPlanner {
         catalog_manager: CatalogManagerRef,
         partition_rule_manager: PartitionRuleManagerRef,
         region_query_handler: RegionQueryHandlerRef,
+        enable_per_region_metrics: bool,
     ) -> Self {
         Self {
             catalog_manager,
             partition_rule_manager,
             region_query_handler,
+            enable_per_region_metrics,
         }
     }
 }
@@ -180,6 +183,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             session_state.config().target_partitions(),
             merge_scan.partition_cols().clone(),
             merge_scan.remote_dyn_filter_producer_id(),
+            self.enable_per_region_metrics,
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }

@@ -184,7 +184,6 @@ impl TableProvider for DummyTableProvider {
         request.projection_input = projection.map(|p| p.clone().into());
         request.filters = filters.to_vec();
         request.limit = limit;
-
         if let Some(query_ctx) = &self.query_ctx {
             let is_sink_scan = is_sink_scan(query_ctx, self.region_id)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;

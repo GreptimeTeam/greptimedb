@@ -129,6 +129,7 @@ impl Default for FlownodeOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
                 memory_pool_size: MemoryLimit::default(),
+                enable_per_region_metrics: false,
             },
             memory: MemoryOptions::default(),
         }

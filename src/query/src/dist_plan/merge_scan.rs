@@ -46,6 +46,7 @@ use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
+use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::storage::RegionId;
 use table::table::scan::REGION_SCAN_EXEC_NAME;
 use table::table_name::TableName;
@@ -221,6 +222,7 @@ pub struct MergeScanExec {
     captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
     target_partition: usize,
     partition_cols: AliasMapping,
+    enable_per_region_metrics: bool,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -246,6 +248,7 @@ impl MergeScanExec {
         target_partition: usize,
         partition_cols: AliasMapping,
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
+        enable_per_region_metrics: bool,
     ) -> Result<Self> {
         // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
         // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
@@ -322,6 +325,7 @@ impl MergeScanExec {
             captured_remote_dyn_filters: Arc::default(),
             target_partition,
             partition_cols,
+            enable_per_region_metrics,
         })
     }
 
@@ -497,17 +501,9 @@ impl MergeScanExec {
 
                 // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
-                    let output_bytes = scan_output_bytes(&metrics);
+                    let load = region_scan_load(&metrics);
                     let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
-                    let value = read_meter!(
-                        c,
-                        s,
-                        ReadItem {
-                            cpu_time: metrics.elapsed_compute as u64,
-                            table_scan: output_bytes as u64,
-                        },
-                        current_channel as u8
-                    );
+                    let value = read_meter!(c, s, load, current_channel as u8);
                     metric.record_greptime_exec_cost(value as usize);
 
                     // record metrics from sub sgates
@@ -598,6 +594,7 @@ impl MergeScanExec {
             captured_remote_dyn_filters: self.captured_remote_dyn_filters.clone(),
             target_partition: self.target_partition,
             partition_cols: self.partition_cols.clone(),
+            enable_per_region_metrics: self.enable_per_region_metrics,
         })
     }
 
@@ -929,6 +926,37 @@ fn scan_output_bytes(metrics: &RecordBatchMetrics) -> usize {
         .sum()
 }
 
+fn region_scan_load(metrics: &RecordBatchMetrics) -> ReadItem {
+    ReadItem {
+        cpu_time: metrics.elapsed_compute as u64,
+        table_scan: scan_output_bytes(metrics) as u64,
+    }
+}
+
+fn report_region_query_load(region_id: RegionId, load: &ReadItem) {
+    let region_id = region_id.to_string();
+    REGION_QUERY_CPU_TIME
+        .with_label_values(&[&region_id])
+        .inc_by(load.cpu_time);
+    REGION_QUERY_SCANNED_BYTES
+        .with_label_values(&[&region_id])
+        .inc_by(load.table_scan);
+}
+
+impl Drop for MergeScanExec {
+    fn drop(&mut self) {
+        if !self.enable_per_region_metrics {
+            return;
+        }
+
+        let metrics = self.sub_stage_metrics.lock().unwrap();
+        for (region_id, metrics) in metrics.iter() {
+            let load = region_scan_load(metrics);
+            report_region_query_load(*region_id, &load);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MergeScanMetric {
     /// Nanosecond elapsed till the scan operator is ready to emit data
@@ -1147,6 +1175,7 @@ mod tests {
             target_partition,
             partition_cols,
             Some(remote_dyn_filter_producer_id),
+            false,
         )
         .unwrap();
 
@@ -1200,6 +1229,7 @@ mod tests {
             1,
             AliasMapping::new(),
             Some(remote_dyn_filter_producer_id),
+            false,
         )
         .unwrap();
         let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
@@ -1276,5 +1306,69 @@ mod tests {
         };
 
         assert_eq!(scan_output_bytes(&metrics), 60);
+    }
+
+    #[test]
+    fn merge_scan_reports_region_query_load_on_drop() {
+        use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
+
+        let region_id = RegionId::new(1024, 10002);
+        let region_id_label = region_id.to_string();
+        let labels = [&region_id_label];
+        let _ = REGION_QUERY_CPU_TIME.remove_label_values(&labels);
+        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(&labels);
+
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i32).alias("col1")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let schema = plan.schema().as_arrow().clone();
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            vec![region_id],
+            plan,
+            &schema,
+            Arc::new(TestRegionQueryHandler),
+            QueryContext::arc(),
+            1,
+            AliasMapping::new(),
+            None,
+            true,
+        )
+        .unwrap();
+
+        let metrics = RecordBatchMetrics {
+            elapsed_compute: 42,
+            plan_metrics: vec![PlanMetrics {
+                plan: "RegionScanExec: region=1".to_string(),
+                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 24)],
+            }],
+            ..Default::default()
+        };
+        exec.sub_stage_metrics
+            .lock()
+            .unwrap()
+            .insert(region_id, metrics);
+
+        assert_eq!(REGION_QUERY_CPU_TIME.with_label_values(&labels).get(), 0);
+        assert_eq!(
+            REGION_QUERY_SCANNED_BYTES.with_label_values(&labels).get(),
+            0
+        );
+
+        drop(exec);
+
+        assert_eq!(REGION_QUERY_CPU_TIME.with_label_values(&labels).get(), 42);
+        assert_eq!(
+            REGION_QUERY_SCANNED_BYTES.with_label_values(&labels).get(),
+            24
+        );
+
+        let _ = REGION_QUERY_CPU_TIME.remove_label_values(&labels);
+        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(&labels);
     }
 }

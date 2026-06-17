@@ -306,6 +306,10 @@ log_format = "text"
 ## The maximum amount of log files.
 max_log_files = 720
 
+## Whether to enable per-region metrics.
+## Default to false.
+enable_per_region_metrics = false
+
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"
 

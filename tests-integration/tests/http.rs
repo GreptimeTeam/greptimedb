@@ -1612,6 +1612,7 @@ read_preference = "Leader"
 max_log_files = 720
 append_stdout = true
 enable_otlp_tracing = false
+enable_per_region_metrics = false
 
 [[region_engine]]
 
