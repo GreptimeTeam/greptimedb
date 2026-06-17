@@ -46,6 +46,7 @@ pub enum Phase3E2eScenarioKind {
     FollowerLike,
     RepartitionPreGcProtection,
     RepartitionAdminGcDroppedRegion,
+    PostMigrationAdminGc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +74,7 @@ impl Phase3E2eScenarioKind {
             Self::FollowerLike => "follower_like",
             Self::RepartitionPreGcProtection => "repartition_pre_gc_protection",
             Self::RepartitionAdminGcDroppedRegion => "admin_gc_dropped_region",
+            Self::PostMigrationAdminGc => "post_migration_admin_gc",
         }
     }
 
@@ -83,6 +85,7 @@ impl Phase3E2eScenarioKind {
             "follower_like" => Ok(Self::FollowerLike),
             "repartition_pre_gc_protection" => Ok(Self::RepartitionPreGcProtection),
             "admin_gc_dropped_region" => Ok(Self::RepartitionAdminGcDroppedRegion),
+            "post_migration_admin_gc" => Ok(Self::PostMigrationAdminGc),
             other => Err(format!("unknown phase3 scenario_kind: {other}")),
         }
     }
@@ -247,6 +250,23 @@ pub struct Phase3AdminGcDroppedRegionEvidence {
 }
 
 #[derive(Debug)]
+pub struct Phase3PostMigrationAdminGcEvidence {
+    pub migrated_region: RegionId,
+    pub from_peer_id: u64,
+    pub to_peer_id: u64,
+    pub migration_procedure_id: String,
+    pub migration_procedure_state: String,
+    pub leader_after_migration: u64,
+    pub leader_after_gc: u64,
+    pub admin_gc_output: String,
+    pub orphan_pressure_file_id: FileId,
+    pub orphan_pressure_path: String,
+    pub obsolete_source_file_ids_before_gc: HashSet<FileId>,
+    pub source_paths_before_gc: BTreeSet<String>,
+    pub source_paths_after_gc: BTreeSet<String>,
+}
+
+#[derive(Debug)]
 pub struct Phase3E2eEvidence {
     pub target_name: &'static str,
     pub seed: u64,
@@ -265,6 +285,7 @@ pub struct Phase3E2eEvidence {
     pub repartition_evidence: Option<Phase3RepartitionEvidence>,
     pub pre_gc_protection_evidence: Option<Phase3PreGcProtectionEvidence>,
     pub admin_gc_dropped_evidence: Option<Phase3AdminGcDroppedRegionEvidence>,
+    pub post_migration_admin_gc_evidence: Option<Phase3PostMigrationAdminGcEvidence>,
     pub follower_required_files: HashSet<FileId>,
     pub count_output: String,
     pub replay_trace: Vec<String>,
@@ -400,6 +421,10 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
         return run_repartition_admin_gc_dropped_region_scenario(input).await;
     }
 
+    if input.scenario_kind == Phase3E2eScenarioKind::PostMigrationAdminGc {
+        return run_post_migration_admin_gc_scenario(input).await;
+    }
+
     common_telemetry::init_default_ut_logging();
 
     let cluster_name = format!("phase3-gc-e2e-{}", input.seed);
@@ -457,7 +482,8 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
         Phase3E2eScenarioKind::CompactGc
         | Phase3E2eScenarioKind::FollowerLike
         | Phase3E2eScenarioKind::RepartitionPreGcProtection
-        | Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion => None,
+        | Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
+        | Phase3E2eScenarioKind::PostMigrationAdminGc => None,
         Phase3E2eScenarioKind::RepartitionLike => {
             Some(run_repartition_like_update(&cluster, &regions).await)
         }
@@ -474,7 +500,8 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
         Phase3E2eScenarioKind::CompactGc
         | Phase3E2eScenarioKind::RepartitionLike
         | Phase3E2eScenarioKind::RepartitionPreGcProtection
-        | Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion => HashSet::new(),
+        | Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
+        | Phase3E2eScenarioKind::PostMigrationAdminGc => HashSet::new(),
     };
     let count_output = query_count_output(&instance, &table_name).await;
 
@@ -501,6 +528,7 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
         repartition_evidence,
         pre_gc_protection_evidence: None,
         admin_gc_dropped_evidence: None,
+        post_migration_admin_gc_evidence: None,
         follower_required_files,
         count_output,
         replay_trace: vec![
@@ -608,6 +636,7 @@ pub fn validate_phase3_e2e_evidence(evidence: &Phase3E2eEvidence) -> Result<(), 
 
     if evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionPreGcProtection
         && evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
+        && evidence.scenario_kind != Phase3E2eScenarioKind::PostMigrationAdminGc
         && deleted_file_ids != deleted_path_ids
     {
         return Err(format!(
@@ -621,6 +650,7 @@ pub fn validate_phase3_e2e_evidence(evidence: &Phase3E2eEvidence) -> Result<(), 
 
     if evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionPreGcProtection
         && evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
+        && evidence.scenario_kind != Phase3E2eScenarioKind::PostMigrationAdminGc
         && evidence.manifest_after_gc != evidence.sst_after_gc
     {
         return Err(format!(
@@ -655,6 +685,7 @@ pub fn validate_phase3_e2e_evidence(evidence: &Phase3E2eEvidence) -> Result<(), 
     validate_repartition_evidence(evidence)?;
     validate_pre_gc_protection_evidence(evidence)?;
     validate_admin_gc_dropped_evidence(evidence)?;
+    validate_post_migration_admin_gc_evidence(evidence)?;
 
     Ok(())
 }
@@ -664,7 +695,8 @@ fn validate_repartition_evidence(evidence: &Phase3E2eEvidence) -> Result<(), Str
         Phase3E2eScenarioKind::CompactGc
         | Phase3E2eScenarioKind::FollowerLike
         | Phase3E2eScenarioKind::RepartitionPreGcProtection
-        | Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion => {
+        | Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
+        | Phase3E2eScenarioKind::PostMigrationAdminGc => {
             if evidence.repartition_evidence.is_some() {
                 return Err(format!(
                     "{} scenario unexpectedly recorded repartition evidence; {} trace={:?}",
@@ -1000,6 +1032,9 @@ fn phase3_scenario_trace_step(scenario_kind: Phase3E2eScenarioKind) -> &'static 
         }
         Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion => {
             "run admin GC_REGIONS on dropped source region"
+        }
+        Phase3E2eScenarioKind::PostMigrationAdminGc => {
+            "run admin GC_REGIONS after region migration"
         }
     }
 }
@@ -1337,6 +1372,7 @@ async fn run_repartition_pre_gc_protection_scenario(input: Phase3E2eInput) -> Ph
         repartition_evidence: None,
         pre_gc_protection_evidence: Some(pre_gc_protection_evidence),
         admin_gc_dropped_evidence: None,
+        post_migration_admin_gc_evidence: None,
         follower_required_files: HashSet::new(),
         count_output,
         replay_trace: vec![
@@ -1582,6 +1618,7 @@ async fn run_repartition_admin_gc_dropped_region_scenario(
         repartition_evidence: None,
         pre_gc_protection_evidence: None,
         admin_gc_dropped_evidence: Some(admin_gc_dropped_evidence),
+        post_migration_admin_gc_evidence: None,
         follower_required_files: HashSet::new(),
         count_output,
         replay_trace: vec![
@@ -1772,6 +1809,432 @@ fn validate_admin_gc_dropped_evidence(evidence: &Phase3E2eEvidence) -> Result<()
     }
 
     // 10. Count still correct (validated in outer validator via count_output check)
+
+    Ok(())
+}
+
+async fn run_post_migration_admin_gc_scenario(input: Phase3E2eInput) -> Phase3E2eEvidence {
+    assert!(
+        input.full_file_listing,
+        "post_migration_admin_gc requires full_file_listing=true"
+    );
+    assert_eq!(
+        input.table_shape,
+        Phase3E2eTableShape::MultiRegion,
+        "post_migration_admin_gc requires a multi-region table"
+    );
+
+    common_telemetry::init_default_ut_logging();
+
+    let cluster_name = format!("phase3-gc-e2e-{}", input.seed);
+    let (store_config, _store_guard) = get_test_store_config(&StorageType::File);
+    let home_dir = Arc::new(create_temp_dir("phase3_gc_e2e_home"));
+    let cluster = GreptimeDbClusterBuilder::new(&cluster_name)
+        .await
+        .with_datanodes(3)
+        .with_shared_home_dir(home_dir)
+        .with_store_config(store_config)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            // `None` means files tracked in manifest.removed_files are eligible immediately.
+            // `Some(Duration::ZERO)` can still race same-timestamp remove records.
+            lingering_time: None,
+            unknown_file_lingering_time: Duration::ZERO,
+            ..Default::default()
+        })
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .build(false)
+        .await;
+
+    let instance = cluster.fe_instance().clone();
+    let metasrv = cluster.metasrv.clone();
+    let table_name = format!("phase3_gc_table_{}", input.seed);
+
+    // --- Step 1: Create multi-region append mode table ---
+    create_append_mode_table(&instance, &table_name, Phase3E2eTableShape::MultiRegion).await;
+
+    // --- Step 2: Insert and flush data ---
+    let flush_rounds = input.flush_rounds.max(4);
+    generate_ssts(
+        &instance,
+        &table_name,
+        flush_rounds,
+        Phase3E2eTableShape::MultiRegion,
+    )
+    .await;
+
+    // --- Step 3: Compact ---
+    compact_table(&instance, &table_name, input.compaction_wait_secs).await;
+
+    let regions = get_table_regions(metasrv.table_metadata_manager(), &instance, &table_name).await;
+    assert!(
+        regions.len() > 1,
+        "multi-region table must have more than 1 region, got {:?}",
+        regions
+    );
+
+    let sst_before_compaction = cluster.list_sst_files_from_all_datanodes().await;
+
+    // --- Step 4: Pick an active region and get its current leader ---
+    let table_id = regions[0].table_id();
+    let (_, table_route) = metasrv
+        .table_metadata_manager()
+        .table_route_manager()
+        .get_physical_table_route(table_id)
+        .await
+        .unwrap();
+
+    // Pick the first region that has a leader
+    let target_region_route = table_route
+        .region_routes
+        .iter()
+        .find(|r| r.leader_peer.is_some())
+        .expect("must have at least one region with a leader");
+    let migrated_region = target_region_route.region.id;
+    let from_peer = target_region_route
+        .leader_peer
+        .as_ref()
+        .expect("leader peer must be present");
+    let from_peer_id = from_peer.id;
+
+    // Pick a different datanode as target (datanode IDs are 1..=3 with 3 datanodes)
+    let to_peer_id = if from_peer_id == 1 { 2 } else { 1 };
+
+    info!(
+        "Post-migration-admin-gc scenario: migrating region={:?} from={} to={}",
+        migrated_region, from_peer_id, to_peer_id,
+    );
+
+    // --- Step 5: Execute SQL ADMIN migrate_region ---
+    let migrate_sql = format!(
+        "ADMIN migrate_region({}, {}, {}, 60)",
+        migrated_region.as_u64(),
+        from_peer_id,
+        to_peer_id
+    );
+    info!("Executing migration: {}", migrate_sql);
+    let migrate_output = execute_sql(&instance, &migrate_sql).await;
+    let migration_output = migrate_output.data.pretty_print().await;
+    let migration_procedure_id = first_pretty_table_value(&migration_output).unwrap_or_else(|| {
+        panic!("failed to parse migration procedure id from {migration_output}")
+    });
+    info!(
+        "Migration procedure submitted: id={} output={}",
+        migration_procedure_id, migration_output,
+    );
+
+    let migration_procedure_state =
+        wait_procedure_done(&instance, &migration_procedure_id, Duration::from_secs(60)).await;
+    info!(
+        "Migration procedure finished: id={} state={}",
+        migration_procedure_id, migration_procedure_state,
+    );
+
+    // --- Step 6: Confirm leader changed to to_peer ---
+    let wait_start = tokio::time::Instant::now();
+    let wait_timeout = Duration::from_secs(30);
+    let leader_after_migration;
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let (_, route) = metasrv
+            .table_metadata_manager()
+            .table_route_manager()
+            .get_physical_table_route(table_id)
+            .await
+            .unwrap();
+        let region_route = route
+            .region_routes
+            .iter()
+            .find(|r| r.region.id == migrated_region)
+            .expect("migrated region must still be in table route");
+        if let Some(peer) = &region_route.leader_peer {
+            if peer.id == to_peer_id {
+                leader_after_migration = peer.id;
+                info!(
+                    "Migration completed: leader for region {:?} is now {:?}",
+                    migrated_region, peer,
+                );
+                break;
+            }
+        }
+        if wait_start.elapsed() > wait_timeout {
+            panic!(
+                "Timed out waiting for region {:?} leader to become {}; current leader={:?}",
+                migrated_region, to_peer_id, region_route.leader_peer,
+            );
+        }
+    }
+
+    // --- Step 7: Verify region still exists in cluster ---
+    let all_regions = cluster.list_all_regions().await;
+    assert!(
+        all_regions.contains_key(&migrated_region),
+        "migrated region {:?} must still exist in cluster after migration",
+        migrated_region,
+    );
+
+    // --- Step 8: Write orphan pressure file to the active migrated region ---
+    let (orphan_pressure_file_id, orphan_pressure_path) =
+        write_orphan_pressure_file(&cluster, migrated_region).await;
+
+    let sst_before_gc = cluster.list_sst_files_from_all_datanodes().await;
+    let manifest_before_gc = cluster.list_sst_files_from_manifests().await;
+
+    let source_paths_before_gc: BTreeSet<String> = sst_before_gc
+        .iter()
+        .filter(|path| path_belongs_to_region(path, migrated_region))
+        .cloned()
+        .collect();
+    let source_before_ids = collect_file_ids_from_paths(source_paths_before_gc.clone()).unwrap();
+    let manifest_before_ids = collect_file_ids_from_paths(manifest_before_gc).unwrap();
+    let mut obsolete_source_file_ids_before_gc: HashSet<FileId> = source_before_ids
+        .difference(&manifest_before_ids)
+        .copied()
+        .collect();
+    obsolete_source_file_ids_before_gc.remove(&orphan_pressure_file_id);
+    assert!(
+        !obsolete_source_file_ids_before_gc.is_empty(),
+        "post-migration scenario must create compacted obsolete source files before GC; \
+         migrated_region={:?} source_before={:?} manifest_before={:?} orphan={:?}",
+        migrated_region,
+        source_before_ids,
+        manifest_before_ids,
+        orphan_pressure_file_id,
+    );
+
+    // --- Step 9: Execute ADMIN GC_REGIONS SQL ---
+    let gc_sql = format!("ADMIN GC_REGIONS({}, true)", migrated_region.as_u64());
+    info!("Executing admin GC after migration: {}", gc_sql);
+    let gc_output = execute_sql(&instance, &gc_sql).await;
+    let admin_gc_output = gc_output.data.pretty_print().await;
+    info!("Admin GC output: {}", admin_gc_output);
+
+    // Wait for the GC procedure to fully complete
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // --- Step 10: Collect post-GC evidence ---
+    let sst_after_gc = cluster.list_sst_files_from_all_datanodes().await;
+    let manifest_after_gc = cluster.list_sst_files_from_manifests().await;
+    let count_output = query_count_output(&instance, &table_name).await;
+
+    let source_paths_after_gc: BTreeSet<String> = sst_after_gc
+        .iter()
+        .filter(|path| path_belongs_to_region(path, migrated_region))
+        .cloned()
+        .collect();
+
+    // Verify leader still to_peer after GC
+    let (_, route_after_gc) = metasrv
+        .table_metadata_manager()
+        .table_route_manager()
+        .get_physical_table_route(table_id)
+        .await
+        .unwrap();
+    let region_route_after_gc = route_after_gc
+        .region_routes
+        .iter()
+        .find(|r| r.region.id == migrated_region)
+        .expect("migrated region must still be in table route after GC");
+    let leader_after_gc = region_route_after_gc
+        .leader_peer
+        .as_ref()
+        .map(|p| p.id)
+        .unwrap_or(0);
+
+    let post_migration_admin_gc_evidence = Phase3PostMigrationAdminGcEvidence {
+        migrated_region,
+        from_peer_id,
+        to_peer_id,
+        migration_procedure_id,
+        migration_procedure_state,
+        leader_after_migration,
+        leader_after_gc,
+        admin_gc_output: admin_gc_output.clone(),
+        orphan_pressure_file_id,
+        orphan_pressure_path: orphan_pressure_path.clone(),
+        obsolete_source_file_ids_before_gc,
+        source_paths_before_gc: source_paths_before_gc.clone(),
+        source_paths_after_gc: source_paths_after_gc.clone(),
+    };
+
+    let all_regions_evidence: Vec<RegionId> = regions.clone();
+    let gc_report = GcReport::default();
+
+    let evidence = Phase3E2eEvidence {
+        target_name: "fuzz_gc_e2e_cross_region",
+        seed: input.seed,
+        flush_rounds,
+        full_file_listing: input.full_file_listing,
+        compaction_wait_secs: input.compaction_wait_secs,
+        table_shape: input.table_shape,
+        scenario_kind: input.scenario_kind,
+        table_name: table_name.clone(),
+        regions: all_regions_evidence,
+        sst_before_compaction,
+        sst_after_compaction: sst_before_gc,
+        sst_after_gc,
+        manifest_after_gc,
+        gc_report,
+        repartition_evidence: None,
+        pre_gc_protection_evidence: None,
+        admin_gc_dropped_evidence: None,
+        post_migration_admin_gc_evidence: Some(post_migration_admin_gc_evidence),
+        follower_required_files: HashSet::new(),
+        count_output,
+        replay_trace: vec![
+            "create multi_region append-mode table".to_string(),
+            format!("generate {} flush rounds", flush_rounds),
+            "compact table".to_string(),
+            format!(
+                "migrate region {:?} from peer {} to peer {}",
+                migrated_region, from_peer_id, to_peer_id
+            ),
+            format!(
+                "execute ADMIN GC_REGIONS({}, true)",
+                migrated_region.as_u64()
+            ),
+            "run post-migration admin GC validation checks".to_string(),
+        ],
+    };
+
+    validate_phase3_e2e_evidence(&evidence)
+        .unwrap_or_else(|err| panic!("Phase 3 Post-Migration Admin GC invariant violation: {err}"));
+
+    evidence
+}
+
+fn validate_post_migration_admin_gc_evidence(evidence: &Phase3E2eEvidence) -> Result<(), String> {
+    if evidence.scenario_kind != Phase3E2eScenarioKind::PostMigrationAdminGc {
+        if evidence.post_migration_admin_gc_evidence.is_some() {
+            return Err(format!(
+                "non-post-migration scenario {} unexpectedly recorded post-migration-admin-gc evidence; {} trace={:?}",
+                evidence.scenario_kind.as_seed_value(),
+                evidence.concise_summary(),
+                evidence.replay_trace,
+            ));
+        }
+        return Ok(());
+    }
+
+    let Some(ev) = &evidence.post_migration_admin_gc_evidence else {
+        return Err(format!(
+            "post_migration_admin_gc scenario missing post-migration admin GC evidence; {} trace={:?}",
+            evidence.concise_summary(),
+            evidence.replay_trace,
+        ));
+    };
+
+    if !evidence.full_file_listing {
+        return Err(format!(
+            "post_migration_admin_gc must use full-listing GC; {} trace={:?}",
+            evidence.concise_summary(),
+            evidence.replay_trace,
+        ));
+    }
+
+    // 1. Migration leader is to_peer
+    if ev.leader_after_migration != ev.to_peer_id {
+        return Err(format!(
+            "region {:?} leader after migration {} != to_peer {}; evidence={:?}",
+            ev.migrated_region, ev.leader_after_migration, ev.to_peer_id, ev,
+        ));
+    }
+    if !ev.migration_procedure_state.contains("Done") {
+        return Err(format!(
+            "migration procedure {} did not finish successfully before GC; state={}; evidence={:?}",
+            ev.migration_procedure_id, ev.migration_procedure_state, ev,
+        ));
+    }
+    if ev.leader_after_gc != ev.to_peer_id {
+        return Err(format!(
+            "region {:?} leader after GC {} != to_peer {}; evidence={:?}",
+            ev.migrated_region, ev.leader_after_gc, ev.to_peer_id, ev,
+        ));
+    }
+
+    // 2. admin GC output indicates at least 1 processed region
+    if !ev.admin_gc_output.contains("1") {
+        return Err(format!(
+            "admin GC output does not indicate processed_regions=1; output={}",
+            ev.admin_gc_output,
+        ));
+    }
+
+    // 3. orphan exists before GC
+    let source_before_ids = collect_file_ids_from_paths(ev.source_paths_before_gc.clone())?;
+    if !source_before_ids.contains(&ev.orphan_pressure_file_id) {
+        return Err(format!(
+            "orphan pressure file {:?} not found before GC; evidence={:?}",
+            ev.orphan_pressure_file_id, ev,
+        ));
+    }
+    if ev.obsolete_source_file_ids_before_gc.is_empty() {
+        return Err(format!(
+            "post-migration scenario did not record compacted obsolete source files before GC; evidence={:?}",
+            ev,
+        ));
+    }
+    if !ev
+        .obsolete_source_file_ids_before_gc
+        .is_subset(&source_before_ids)
+    {
+        return Err(format!(
+            "recorded obsolete source files were not present before GC; obsolete={:?} before={:?}; evidence={:?}",
+            ev.obsolete_source_file_ids_before_gc, source_before_ids, ev,
+        ));
+    }
+
+    // 4. The post-migration active-region GC should still do real deletion work
+    // by removing compacted obsolete SSTs. Unknown orphan files are recorded as
+    // a probe but are not required to be deleted for active regions.
+    let source_after_ids = collect_file_ids_from_paths(ev.source_paths_after_gc.clone())?;
+    let deleted_source_ids: HashSet<FileId> = source_before_ids
+        .difference(&source_after_ids)
+        .copied()
+        .collect();
+    if deleted_source_ids.is_empty() {
+        return Err(format!(
+            "post-migration ADMIN GC did not delete any source-region files; before={:?} after={:?}; evidence={:?}",
+            source_before_ids, source_after_ids, ev,
+        ));
+    }
+    let deleted_obsolete_ids: HashSet<FileId> = deleted_source_ids
+        .intersection(&ev.obsolete_source_file_ids_before_gc)
+        .copied()
+        .collect();
+    if deleted_obsolete_ids.is_empty() {
+        return Err(format!(
+            "post-migration ADMIN GC did not delete recorded compacted obsolete files; obsolete={:?} deleted={:?}; evidence={:?}",
+            ev.obsolete_source_file_ids_before_gc, deleted_source_ids, ev,
+        ));
+    }
+    if !source_after_ids.contains(&ev.orphan_pressure_file_id) {
+        return Err(format!(
+            "active-region orphan probe {:?} was unexpectedly deleted; deleted={:?}; evidence={:?}",
+            ev.orphan_pressure_file_id, deleted_source_ids, ev,
+        ));
+    }
+
+    // 5. manifest-reachable file ids after GC are all in object-store after GC
+    let manifest_after_ids = collect_file_ids_from_paths(evidence.manifest_after_gc.clone())?;
+    let object_store_after_ids = collect_file_ids_from_paths(evidence.sst_after_gc.clone())?;
+    if !manifest_after_ids.is_subset(&object_store_after_ids) {
+        let missing: Vec<_> = manifest_after_ids
+            .difference(&object_store_after_ids)
+            .collect();
+        return Err(format!(
+            "manifest-reachable files missing from object store after GC: {:?}; {} trace={:?}",
+            missing,
+            evidence.concise_summary(),
+            evidence.replay_trace,
+        ));
+    }
+
+    // 6. Row count still correct (checked in outer validator)
 
     Ok(())
 }
@@ -2104,6 +2567,64 @@ async fn query_count_output(
     execute_sql(instance, &sql).await.data.pretty_print().await
 }
 
+fn first_pretty_table_value(output: &str) -> Option<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if !line.starts_with('|') {
+                return None;
+            }
+            let cells = line
+                .trim_matches('|')
+                .split('|')
+                .map(str::trim)
+                .collect::<Vec<_>>();
+            let value = cells.first().copied().unwrap_or_default();
+            let lower_value = value.to_ascii_lowercase();
+            if value.is_empty()
+                || lower_value.contains("migrate_region")
+                || lower_value.contains("procedure_state")
+                || lower_value.contains("gc_regions")
+            {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        })
+        .next()
+}
+
+async fn wait_procedure_done(
+    instance: &Arc<frontend::instance::Instance>,
+    procedure_id: &str,
+    timeout: Duration,
+) -> String {
+    let wait_start = tokio::time::Instant::now();
+    loop {
+        let sql = format!("ADMIN procedure_state('{procedure_id}')");
+        let output = execute_sql(instance, &sql).await.data.pretty_print().await;
+        let state = first_pretty_table_value(&output)
+            .unwrap_or_else(|| panic!("failed to parse procedure_state output: {output}"));
+        if state.contains("\"status\":\"Done\"") || state.contains("Done") {
+            return state;
+        }
+        if state.contains("Failed")
+            || state.contains("Retrying")
+            || state.contains("RollingBack")
+            || state.contains("PrepareRollback")
+            || state.contains("Poisoned")
+        {
+            panic!("procedure {procedure_id} entered non-success state: {state}");
+        }
+        assert!(
+            wait_start.elapsed() <= timeout,
+            "timed out waiting for procedure {procedure_id} to finish; last state={state}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2427,6 +2948,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_phase3_e2e_post_migration_admin_gc() {
+        let evidence = run_phase3_e2e_gc_cycle(Phase3E2eInput {
+            seed: 81,
+            flush_rounds: 4,
+            full_file_listing: true,
+            compaction_wait_secs: 2,
+            table_shape: Phase3E2eTableShape::MultiRegion,
+            scenario_kind: Phase3E2eScenarioKind::PostMigrationAdminGc,
+        })
+        .await;
+
+        let ev = evidence
+            .post_migration_admin_gc_evidence
+            .as_ref()
+            .expect("post-migration admin GC evidence must be present");
+
+        // leader after migration is to_peer
+        assert_eq!(ev.leader_after_migration, ev.to_peer_id);
+        assert_eq!(ev.leader_after_gc, ev.to_peer_id);
+
+        // admin GC output indicates processed_regions >= 1
+        assert!(
+            ev.admin_gc_output.contains("1"),
+            "admin GC output should indicate processed_regions=1, got: {}",
+            ev.admin_gc_output
+        );
+
+        // Active-region GC should still remove compacted obsolete SSTs after migration.
+        let source_before_ids =
+            collect_file_ids_from_paths(ev.source_paths_before_gc.clone()).unwrap();
+        let source_after_ids =
+            collect_file_ids_from_paths(ev.source_paths_after_gc.clone()).unwrap();
+        assert!(!ev.obsolete_source_file_ids_before_gc.is_empty());
+        let deleted_source_ids: HashSet<FileId> = source_before_ids
+            .difference(&source_after_ids)
+            .copied()
+            .collect();
+        let deleted_obsolete_ids: HashSet<FileId> = deleted_source_ids
+            .intersection(&ev.obsolete_source_file_ids_before_gc)
+            .copied()
+            .collect();
+        assert!(
+            !deleted_obsolete_ids.is_empty(),
+            "post-migration GC should delete at least one compacted obsolete source-region file"
+        );
+        assert!(
+            source_after_ids.contains(&ev.orphan_pressure_file_id),
+            "active-region orphan probe should remain until active unknown-file GC semantics change"
+        );
+
+        // manifest-reachable files all still exist in object store after GC
+        let manifest_after_ids =
+            collect_file_ids_from_paths(evidence.manifest_after_gc.clone()).unwrap();
+        let object_store_after_ids =
+            collect_file_ids_from_paths(evidence.sst_after_gc.clone()).unwrap();
+        assert!(
+            manifest_after_ids.is_subset(&object_store_after_ids),
+            "manifest-reachable files must all be in object store after GC"
+        );
+
+        // count still correct
+        assert!(evidence.count_output.contains("16"));
+    }
+
+    #[tokio::test]
     async fn test_phase3_e2e_replay_corpus() {
         let inputs = load_phase3_seed_corpus_inputs().unwrap();
 
@@ -2472,6 +3058,7 @@ mod tests {
             repartition_evidence: None,
             pre_gc_protection_evidence: None,
             admin_gc_dropped_evidence: None,
+            post_migration_admin_gc_evidence: None,
             follower_required_files: HashSet::new(),
             count_output: "12".to_string(),
             replay_trace: vec!["replay".to_string()],
@@ -2514,6 +3101,7 @@ mod tests {
             repartition_evidence: None,
             pre_gc_protection_evidence: None,
             admin_gc_dropped_evidence: None,
+            post_migration_admin_gc_evidence: None,
             follower_required_files: HashSet::from([file_id]),
             count_output: "12".to_string(),
             replay_trace: vec!["replay".to_string()],
