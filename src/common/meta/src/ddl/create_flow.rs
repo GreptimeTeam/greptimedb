@@ -45,7 +45,7 @@ use crate::key::flow::flow_info::{FlowInfoValue, FlowStatus};
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
-use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
+use crate::lock_key::{CatalogLock, FlowNameLock};
 use crate::metrics;
 use crate::peer::Peer;
 use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
@@ -378,16 +378,9 @@ impl Procedure for CreateFlowProcedure {
     fn lock_key(&self) -> LockKey {
         let catalog_name = &self.data.task.catalog_name;
         let flow_name = &self.data.task.flow_name;
-        let sink_table_name = &self.data.task.sink_table_name;
 
         LockKey::new(vec![
             CatalogLock::Read(catalog_name).into(),
-            TableNameLock::new(
-                &sink_table_name.catalog_name,
-                &sink_table_name.schema_name,
-                &sink_table_name.catalog_name,
-            )
-            .into(),
             FlowNameLock::new(catalog_name, flow_name).into(),
         ])
     }

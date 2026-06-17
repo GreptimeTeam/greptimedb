@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use api::v1::flow::CreateRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_procedure::Status;
+use common_procedure::{Procedure, Status};
 use common_procedure_test::execute_procedure_until_done;
 use table::table_name::TableName;
 
@@ -703,6 +703,33 @@ fn create_test_flow_task_for_serialization() -> CreateFlowTask {
         sql: "SELECT * FROM source_table".to_string(),
         flow_options: HashMap::new(),
     }
+}
+
+#[test]
+fn test_create_flow_lock_key_does_not_lock_sink_table_name() {
+    let task = create_test_flow_task_for_serialization();
+    let query_ctx = test_query_context();
+    let ddl_context = new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler)));
+    let procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+
+    let lock_keys = procedure.lock_key().get_keys();
+
+    assert!(
+        lock_keys.contains(&"Share(\"__catalog_lock/test_catalog\")".to_string()),
+        "lock keys should include the catalog read lock, got: {lock_keys:?}"
+    );
+    assert!(
+        lock_keys.contains(&"Exclusive(\"__flow_name_lock/test_catalog.test_flow\")".to_string()),
+        "lock keys should include the flow name lock, got: {lock_keys:?}"
+    );
+    assert_eq!(
+        lock_keys
+            .iter()
+            .filter(|key| key.contains("__table_name_lock"))
+            .count(),
+        0,
+        "sink table name lock should be acquired by the nested create table procedure, got: {lock_keys:?}"
+    );
 }
 
 #[test]
