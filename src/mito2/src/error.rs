@@ -16,7 +16,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_memory_manager;
@@ -26,6 +26,7 @@ use common_time::timestamp::TimeUnit;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
+use object_store::error::retry_hint_from_opendal_error;
 use partition::error::Error as PartitionError;
 use prost::DecodeError;
 use snafu::{Location, Snafu};
@@ -1497,5 +1498,81 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            ReadParquet { .. }
+            | WriteParquet { .. }
+            | RejectWrite { .. }
+            | Download { .. }
+            | Upload { .. }
+            | RegionState { .. }
+            | UpdateManifest { .. }
+            | RegionStopped { .. }
+            | RegionBusy { .. }
+            | FlushableRegionState { .. } => RetryHint::Retryable,
+
+            OpenDal { error, .. }
+            | DeleteSsts { error, .. }
+            | DeleteIndex { error, .. }
+            | DeleteIndexes { error, .. } => retry_hint_from_opendal_error(error),
+
+            WriteWal { source, .. }
+            | ReadWal { source, .. }
+            | DeleteWal { source, .. }
+            | FetchManifests { source, .. }
+            | External { source, .. } => source.retry_hint(),
+
+            OpenRegion { source, .. }
+            | WriteGroup { source, .. }
+            | FlushRegion { source, .. }
+            | BuildIndexAsync { source, .. }
+            | CompactRegion { source, .. }
+            | EditRegion { source, .. }
+            | ScanSeries { source, .. }
+            | PruneFile { source, .. } => source.retry_hint(),
+
+            DataTypeMismatch { source, .. }
+            | ConvertVector { source, .. }
+            | ConvertValue { source, .. }
+            | IndexOptions { source, .. }
+            | CastVector { source, .. } => source.retry_hint(),
+
+            BuildIndexApplier { source, .. }
+            | PushIndexValue { source, .. }
+            | ApplyInvertedIndex { source, .. }
+            | IndexFinish { source, .. } => source.retry_hint(),
+
+            ApplyBloomFilterIndex { source, .. }
+            | PushBloomFilterValue { source, .. }
+            | BloomFilterFinish { source, .. } => source.retry_hint(),
+
+            PuffinReadBlob { source, .. }
+            | PuffinAddBlob { source, .. }
+            | PuffinInitStager { source, .. }
+            | PuffinBuildReader { source, .. }
+            | PuffinPurgeStager { source, .. } => source.retry_hint(),
+
+            CreateFulltextCreator { source, .. }
+            | FulltextPushText { source, .. }
+            | FulltextFinish { source, .. }
+            | ApplyFulltextIndex { source, .. } => source.retry_hint(),
+
+            InvalidRegionRequest { source, .. } => source.retry_hint(),
+            InvalidPartitionExpr { source, .. } => source.retry_hint(),
+            RecordBatch { source, .. } => source.retry_hint(),
+            GetSchemaMetadata { source, .. } => source.retry_hint(),
+            CompactionMemoryExhausted { source, .. } => source.retry_hint(),
+            ConvertBulkWalEntry { source, .. } => source.retry_hint(),
+            Encode { source, .. } | Decode { source, .. } => source.retry_hint(),
+
+            #[cfg(feature = "enterprise")]
+            ScanExternalRange { source, .. } => source.retry_hint(),
+
+            _ => RetryHint::NonRetryable,
+        }
     }
 }

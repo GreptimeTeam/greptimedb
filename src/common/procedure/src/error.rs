@@ -15,9 +15,10 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use object_store::error::retry_hint_from_opendal_error;
 use snafu::{Location, Snafu};
 
 use crate::PoisonKey;
@@ -293,6 +294,28 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::RetryLater { .. } => RetryHint::Retryable,
+            Error::External { source, .. }
+            | Error::PutState { source, .. }
+            | Error::DeleteStates { source, .. }
+            | Error::ListState { source, .. }
+            | Error::PutPoison { source, .. }
+            | Error::DeletePoison { source, .. }
+            | Error::GetPoison { source, .. }
+            | Error::CheckStatus { source, .. } => source.retry_hint(),
+            Error::ProcedureExec { source, .. } => source.retry_hint(),
+            Error::StartRemoveOutdatedMetaTask { source, .. }
+            | Error::StopRemoveOutdatedMetaTask { source, .. } => source.retry_hint(),
+            Error::DeleteState { error, .. } => retry_hint_from_opendal_error(error),
+            Error::RetryTimesExceeded { .. } | Error::RollbackTimesExceeded { .. } => {
+                RetryHint::NonRetryable
+            }
+            _ => RetryHint::NonRetryable,
+        }
+    }
 }
 
 impl Error {
@@ -339,13 +362,70 @@ impl Error {
             || matches!(self, Error::RetryLater { clean_poisons, .. } if *clean_poisons)
     }
 
+    #[cfg(test)]
     /// Creates a new [Error::RetryLater] or [Error::External] error from source `err` according
-    /// to its [StatusCode].
+    /// to its [RetryHint].
     pub fn from_error_ext<E: ErrorExt + Send + Sync + 'static>(err: E) -> Self {
-        if err.status_code().is_retryable() {
+        if err.retry_hint().is_retryable() {
             Error::retry_later(err)
         } else {
             Error::external(err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_error::mock::MockError;
+
+    use super::*;
+
+    #[test]
+    fn test_retry_later_hint_is_retryable() {
+        let err = Error::retry_later(MockError::new(StatusCode::Internal));
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_external_forwards_retry_hint() {
+        let source = Error::retry_later(MockError::new(StatusCode::Internal));
+        let err = Error::external(source);
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_retry_exceeded_hint_is_non_retryable() {
+        let source = Arc::new(Error::retry_later(MockError::new(StatusCode::Internal)));
+        let err = Error::RetryTimesExceeded {
+            source: source.clone(),
+            procedure_id: ProcedureId::random(),
+        };
+
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+
+        let err = Error::RollbackTimesExceeded {
+            source,
+            procedure_id: ProcedureId::random(),
+        };
+
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+    }
+
+    #[test]
+    fn test_from_error_ext_uses_retry_hint() {
+        let err = Error::from_error_ext(Error::retry_later(MockError::new(
+            StatusCode::InvalidArguments,
+        )));
+        assert!(err.is_retry_later());
+
+        let err = Error::from_error_ext(MockError::new(StatusCode::InvalidArguments));
+        assert!(!err.is_retry_later());
+
+        let err = Error::from_error_ext(MockError::new(StatusCode::Internal));
+        assert!(!err.is_retry_later());
     }
 }

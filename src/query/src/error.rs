@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::time::{Duration, TryFromFloatSecsError};
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_query::error::datafusion_status_code;
@@ -461,6 +461,29 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            BuildBackend { source, .. } | ListObjects { source, .. } => source.retry_hint(),
+            GetRegionMetadata { .. } => RetryHint::Retryable,
+            ParseFileFormat { source, .. } | InferSchema { source, .. } => source.retry_hint(),
+            Catalog { source, .. } => source.retry_hint(),
+            CreateRecordBatch { source, .. } => source.retry_hint(),
+            PartitionRuleManager { source, .. } => source.retry_hint(),
+            QueryExecution { source, .. } | QueryPlan { source, .. } => source.retry_hint(),
+            Sql { source, .. } => source.retry_hint(),
+            ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.retry_hint(),
+            RegionQuery { source, .. } => source.retry_hint(),
+            TableMutation { source, .. } => source.retry_hint(),
+            GetFulltextOptions { source, .. }
+            | GetSkippingIndexOptions { source, .. }
+            | GetVectorIndexOptions { source, .. }
+            | Datatypes { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
     }
 }
 

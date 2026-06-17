@@ -14,17 +14,105 @@
 
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
+use std::io::ErrorKind;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use snafu::{FromString, Snafu};
 
 use crate::status_code::StatusCode;
 
+/// Describes whether an error instance is safe and useful to retry.
+///
+/// This is intentionally separate from [`StatusCode`]: status code describes the
+/// error category exposed to users, while retry hint describes retry policy for
+/// this specific error instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryHint {
+    /// The operation may succeed if retried later.
+    Retryable,
+    /// Retrying the same operation is not expected to help.
+    ///
+    /// This is the default for errors that do not explicitly opt in to retry.
+    NonRetryable,
+}
+
+const RETRY_HINT_RETRYABLE: &str = "retryable";
+const RETRY_HINT_NON_RETRYABLE: &str = "non_retryable";
+
+impl RetryHint {
+    pub fn is_retryable(self) -> bool {
+        matches!(self, RetryHint::Retryable)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RetryHint::Retryable => RETRY_HINT_RETRYABLE,
+            RetryHint::NonRetryable => RETRY_HINT_NON_RETRYABLE,
+        }
+    }
+}
+
+impl FromStr for RetryHint {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            RETRY_HINT_RETRYABLE => Ok(RetryHint::Retryable),
+            RETRY_HINT_NON_RETRYABLE => Ok(RetryHint::NonRetryable),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Converts a [`std::io::Error`] into a conservative [`RetryHint`].
+///
+/// This helper classifies known transient I/O conditions as retryable and treats
+/// request, permission, filesystem-capacity, and data-shape errors as
+/// non-retryable. `std::io::ErrorKind` is non-exhaustive, so future or
+/// unclassified kinds are considered non-retryable until reviewed explicitly.
+pub fn retry_hint_from_io_error(error: &std::io::Error) -> RetryHint {
+    match error.kind() {
+        ErrorKind::ConnectionRefused
+        | ErrorKind::ConnectionReset
+        | ErrorKind::HostUnreachable
+        | ErrorKind::NetworkUnreachable
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::NotConnected
+        | ErrorKind::NetworkDown
+        | ErrorKind::BrokenPipe
+        | ErrorKind::WouldBlock
+        | ErrorKind::StaleNetworkFileHandle
+        | ErrorKind::TimedOut
+        | ErrorKind::ResourceBusy
+        | ErrorKind::Interrupted => RetryHint::Retryable,
+
+        _ => RetryHint::NonRetryable,
+    }
+}
+
 /// Extension to [`Error`](std::error::Error) in std.
 pub trait ErrorExt: StackError {
     /// Map this error to [StatusCode].
     fn status_code(&self) -> StatusCode {
         StatusCode::Unknown
+    }
+
+    /// Returns the retry hint for this error instance.
+    ///
+    /// Implementations should return [`RetryHint::Retryable`] only when retrying the
+    /// same operation may succeed without changing the request. The default is
+    /// [`RetryHint::NonRetryable`] to avoid accidental retry loops.
+    fn retry_hint(&self) -> RetryHint {
+        RetryHint::NonRetryable
+    }
+
+    /// Returns whether this error instance is marked retryable.
+    ///
+    /// This is derived from [`Self::retry_hint`]. Transport-level retries, such as a
+    /// gRPC `Unavailable`, may still be handled separately by client code.
+    fn is_retryable(&self) -> bool {
+        self.retry_hint().is_retryable()
     }
 
     /// Returns the error as [Any](std::any::Any) so that it can be
@@ -192,6 +280,10 @@ impl std::error::Error for BoxedError {
 impl crate::ext::ErrorExt for BoxedError {
     fn status_code(&self) -> crate::status_code::StatusCode {
         self.inner.status_code()
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        self.inner.retry_hint()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
