@@ -37,9 +37,8 @@ use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, Schema, SchemaRef, UInt32Type,
 };
 use datatypes::data_type::DataType;
-use datatypes::extension::json::is_json_extension_type;
+use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::{MutableVector, Vector};
-use datatypes::schema::ext::ArrowSchemaExt;
 use datatypes::types::JsonType;
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
@@ -435,7 +434,7 @@ impl UnorderedPart {
 
         // Get the schema from the first part
         let schema = self.parts[0].batch.schema();
-        let concatenated = if schema.has_json_extension_field() {
+        let concatenated = if schema.fields().iter().any(is_structured_json_field) {
             let (schema, batches) = align_parts(&self.parts)?;
             arrow::compute::concat_batches(&schema, &batches).context(ComputeArrowSnafu)?
         } else {
@@ -496,7 +495,7 @@ fn align_parts(parts: &[BulkPart]) -> Result<(SchemaRef, Vec<RecordBatch>)> {
     let mut merged_types = HashMap::new();
     let mut aligned_fields = Vec::with_capacity(base_schema.fields().len());
     for (i, field) in base_schema.fields().iter().enumerate() {
-        if is_json_extension_type(field) {
+        if is_structured_json_field(field) {
             let mut merged = JsonType::from(field.data_type());
             rest.iter()
                 .try_fold(&mut merged, |acc, x| {
@@ -775,13 +774,13 @@ impl BulkPartConverter {
 }
 
 fn align_schema_with_json_array(schema: SchemaRef, columns: &[ArrayRef]) -> SchemaRef {
-    if schema.fields().iter().all(|f| !is_json_extension_type(f)) {
+    if schema.fields().iter().all(|f| !is_structured_json_field(f)) {
         return schema;
     }
 
     let mut fields = Vec::with_capacity(schema.fields().len());
     for (field, array) in schema.fields().iter().zip(columns) {
-        if !is_json_extension_type(field) {
+        if !is_structured_json_field(field) {
             fields.push(field.clone());
             continue;
         }

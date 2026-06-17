@@ -107,3 +107,11 @@ impl ExtensionType for JsonExtensionType {
 pub fn is_json_extension_type(field: &FieldRef) -> bool {
     field.extension_type_name() == Some(JsonExtensionType::NAME)
 }
+
+/// Check if this field is a structured JSON field.
+///
+/// Legacy JSONB columns may carry JSON extension metadata due to old metadata versions, but their
+/// physical Arrow type is still Binary. They must not enter structured JSON alignment paths.
+pub fn is_structured_json_field(field: &FieldRef) -> bool {
+    is_json_extension_type(field) && matches!(field.data_type(), DataType::Struct(_))
+}

@@ -31,7 +31,7 @@ use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
-use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::extension::json::is_structured_json_field;
 use datatypes::types::json_type::JsonNativeType;
 use futures::StreamExt;
 use itertools::Itertools;
@@ -443,7 +443,9 @@ impl ScanRegion {
             .metadata
             .schema
             .arrow_schema()
-            .has_json_extension_field()
+            .fields()
+            .iter()
+            .any(is_structured_json_field)
             .then_some(&self.request.json_type_hint)
             .inspect(|json_type_hint| {
                 debug!(
