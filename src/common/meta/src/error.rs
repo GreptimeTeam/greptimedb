@@ -29,6 +29,14 @@ use table::metadata::TableId;
 use crate::DatanodeId;
 use crate::peer::Peer;
 
+mod retry_hint;
+
+pub use retry_hint::retry_hint_from_etcd_error;
+#[cfg(feature = "mysql_kvbackend")]
+pub use retry_hint::retry_hint_from_sqlx_error;
+#[cfg(feature = "pg_kvbackend")]
+pub use retry_hint::{retry_hint_from_postgres_error, retry_hint_from_postgres_pool_error};
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -1280,6 +1288,9 @@ impl ErrorExt for Error {
             | ElectionNoLeader { .. }
             | ElectionLeaderLeaseExpired { .. }
             | ElectionLeaderLeaseChanged { .. } => RetryHint::Retryable,
+            ConnectEtcd { error, .. } | EtcdFailed { error, .. } | EtcdTxnFailed { error, .. } => {
+                retry_hint_from_etcd_error(error)
+            }
             WriteObject { error, .. } | ReadObject { error, .. } => {
                 retry_hint_from_opendal_error(error)
             }
@@ -1307,6 +1318,19 @@ impl ErrorExt for Error {
             ConvertAlterTableRequest { source, .. } => source.retry_hint(),
             ConvertColumnDef { source, .. } => source.retry_hint(),
             GetCache { source, .. } => source.retry_hint(),
+            #[cfg(feature = "pg_kvbackend")]
+            PostgresExecution { error, .. } | PostgresTransaction { error, .. } => {
+                retry_hint_from_postgres_error(error)
+            }
+            #[cfg(feature = "pg_kvbackend")]
+            GetPostgresClient { error, .. } => retry_hint_from_postgres_pool_error(error),
+            #[cfg(feature = "mysql_kvbackend")]
+            MySqlExecution { error, .. }
+            | CreateMySqlPool { error, .. }
+            | AcquireMySqlClient { error, .. }
+            | MySqlTransaction { error, .. } => retry_hint_from_sqlx_error(error),
+            #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+            SqlExecutionTimeout { .. } => RetryHint::Retryable,
             _ => RetryHint::NonRetryable,
         }
     }
@@ -1406,6 +1430,18 @@ mod retry_hint_tests {
     fn test_get_cache_forwards_retry_hint() {
         let source = Arc::new(Error::retry_later(MockError::new(StatusCode::Internal)));
         let err = Error::GetCache { source };
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+    #[test]
+    fn test_sql_execution_timeout_hint_is_retryable() {
+        let err = SqlExecutionTimeoutSnafu {
+            sql: "SELECT 1".to_string(),
+            duration: std::time::Duration::from_secs(1),
+        }
+        .build();
 
         assert_eq!(err.retry_hint(), RetryHint::Retryable);
     }
