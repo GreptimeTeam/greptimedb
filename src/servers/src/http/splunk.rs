@@ -565,6 +565,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_minimal_events_in_both_batch_forms() {
+        // Splunk docs "Example 3": minimal events (`event` + `time` only), sent both as
+        // concatenated objects (whitespace-separated) and as a JSON array.
+        let concatenated = r#"{
+  "event": "event 1",
+  "time": 1447828325
+}
+
+{
+  "event": "event 2",
+  "time": 1447828326
+}"#;
+        let array = r#"[
+  { "event": "event 1", "time": 1447828325 },
+  { "event": "event 2", "time": 1447828326 }
+]"#;
+
+        for body in [concatenated, array] {
+            let events = parse_hec_events(body.as_bytes()).unwrap();
+            assert_eq!(events.len(), 2);
+
+            let (table, map, tags) =
+                hec_event_to_map(events.into_iter().next().unwrap(), "splunk_logs", None).unwrap();
+            assert_eq!(table, "splunk_logs"); // no `index` -> default table
+            assert!(tags.is_empty()); // no host/source/sourcetype/fields
+            let VrlValue::Object(m) = map else {
+                panic!("expected object");
+            };
+            assert_eq!(m.get("event"), Some(&VrlValue::from(json!("event 1"))));
+            assert!(matches!(
+                m.get(greptime_timestamp()),
+                Some(VrlValue::Timestamp(dt)) if dt.timestamp() == 1447828325
+            ));
+            assert!(m.get("host").is_none());
+        }
+    }
+
+    #[test]
     fn map_keeps_event_object_for_pipeline_flattening() {
         let ev: VrlValue = json!({ "event": { "a": 1 } }).into();
         let (_, map, _) = hec_event_to_map(ev, "splunk_logs", None).unwrap();

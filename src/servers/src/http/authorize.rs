@@ -148,7 +148,11 @@ fn splunk_hec_err(status: StatusCode, code: u32) -> Response {
         4 => "Invalid token",
         _ => "Unauthorized",
     };
-    (status, axum::Json(serde_json::json!({ "text": text, "code": code }))).into_response()
+    (
+        status,
+        axum::Json(serde_json::json!({ "text": text, "code": code })),
+    )
+        .into_response()
 }
 
 fn err_response(err: impl ErrorExt) -> Response {

@@ -1614,14 +1614,18 @@ transform:
         &client,
         headers,
         "/v1/splunk/services/collector/event?table=splunk_custom_tbl",
-        br#"{"event":"hi","time":1700000010,"host":"web-09","source":"s","sourcetype":"st"}"#.to_vec(),
+        br#"{"event":"hi","time":1700000010,"host":"web-09","source":"s","sourcetype":"st"}"#
+            .to_vec(),
         false,
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
     let create = query(&client, "show create table splunk_custom_tbl").await;
-    assert!(create.contains("host"), "custom pipeline kept host: {create}");
+    assert!(
+        create.contains("host"),
+        "custom pipeline kept host: {create}"
+    );
     assert!(
         !create.contains("sourcetype"),
         "custom pipeline should have dropped sourcetype (identity would keep it): {create}"
