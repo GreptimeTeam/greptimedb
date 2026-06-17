@@ -571,16 +571,7 @@ async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
         "GT_MINIO_ACCESS_KEY",
         "GT_MINIO_ENDPOINT_URL",
     ];
-    let missing_env = required_env
-        .iter()
-        .filter(|key| env::var(key).is_err())
-        .copied()
-        .collect::<Vec<_>>();
-    if !missing_env.is_empty() {
-        eprintln!(
-            "skipping export_import_v2_minio_roundtrip_e2e; missing env vars: {}",
-            missing_env.join(", ")
-        );
+    if required_env.iter().any(|key| env::var(key).is_err()) {
         return Ok(());
     }
 
@@ -746,13 +737,8 @@ async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
     ];
     append_common_storage_args(&mut delete_args);
     let delete_cmd = ExportDeleteCommand::parse_from(delete_args);
-    match delete_cmd.build().await {
-        Ok(delete) => {
-            if let Err(err) = delete.do_work().await {
-                eprintln!("best-effort failed to delete snapshot {snapshot_uri}: {err}");
-            }
-        }
-        Err(err) => eprintln!("best-effort failed to build delete for {snapshot_uri}: {err}"),
+    if let Ok(delete) = delete_cmd.build().await {
+        let _ = delete.do_work().await;
     }
 
     database_client
