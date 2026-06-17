@@ -22,17 +22,13 @@ use datafusion_common::Result as DataFusionResult;
 use serde::{Deserialize, Serialize};
 
 use crate::request::{
-    DynFilterPayload, decode_physical_expr_from_bytes, encode_physical_expr_to_bytes,
+    DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES, decode_physical_expr_from_bytes,
+    encode_physical_expr_to_bytes,
 };
 
 pub const INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY: &str =
     "initial_remote_dyn_filter_registrations";
 pub const INITIAL_REMOTE_DYN_FILTER_REGS_MAX_COUNT: usize = 64;
-/// Raw encoded registration byte budget for initial remote dynamic filter registrations.
-///
-/// Counts proto payload bytes before JSON/base64 expansion, not the final extension size.
-pub const INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES: usize = 64 * 1024;
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialDynFilterRegs {
     #[serde(rename = "registrations")]
@@ -58,7 +54,7 @@ impl InitialDynFilterRegs {
     pub fn validate_default_bounds(&self) -> Result<(), String> {
         self.validate_bounds(
             INITIAL_REMOTE_DYN_FILTER_REGS_MAX_COUNT,
-            INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
         )
     }
 

@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use common_query::request::{
     DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
-    InitialDynFilterRegs,
+    InitialDynFilterRegs, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
 };
 use common_telemetry::warn;
 use dashmap::DashMap;
@@ -33,8 +33,6 @@ use session::query_id::QueryId;
 use store_api::storage::RegionId;
 
 use crate::metrics;
-
-pub(super) const REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES: usize = 512 * 1024;
 
 type QueryRemoteDynFilterRegs = HashMap<RemoteDynFilterId, RegisteredDynFilter>;
 
@@ -126,6 +124,17 @@ impl RemoteDynFilterUpdateOutcome {
             Self::PayloadTooLarge => "payload_too_large",
             Self::DecodeFailed => "decode_failed",
         }
+    }
+
+    fn is_drop(&self) -> bool {
+        matches!(
+            self,
+            Self::MissingRegistration
+                | Self::Stale
+                | Self::AlreadyComplete
+                | Self::PayloadTooLarge
+                | Self::DecodeFailed
+        )
     }
 }
 
@@ -563,17 +572,10 @@ pub(super) fn apply_remote_dyn_filter_update(
     };
 
     let outcome = registered.apply_or_buffer_update(payload, generation, is_complete);
-    match outcome {
-        RemoteDynFilterUpdateOutcome::PayloadTooLarge
-        | RemoteDynFilterUpdateOutcome::DecodeFailed
-        | RemoteDynFilterUpdateOutcome::MissingRegistration
-        | RemoteDynFilterUpdateOutcome::Stale
-        | RemoteDynFilterUpdateOutcome::AlreadyComplete => {
-            metrics::REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
-                .with_label_values(&[outcome.as_str()])
-                .inc();
-        }
-        _ => {}
+    if outcome.is_drop() {
+        metrics::REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
+            .with_label_values(&[outcome.as_str()])
+            .inc();
     }
     metrics::REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
         .with_label_values(&[outcome.as_str()])

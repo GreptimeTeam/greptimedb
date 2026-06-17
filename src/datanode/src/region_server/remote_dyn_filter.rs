@@ -352,6 +352,7 @@ mod tests {
     use common_query::request::{
         DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
         InitialDynFilterReg, InitialDynFilterRegs, InitialDynFilterSnapshot,
+        REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
     };
     use common_recordbatch::RecordBatches;
     use datafusion::arrow::datatypes::Schema as ArrowSchema;
@@ -370,9 +371,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::region_server::registrations::{
-        REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES, RemoteDynFilterRegistry,
-    };
+    use crate::region_server::registrations::RemoteDynFilterRegistry;
     use crate::tests::mock_region_server;
 
     #[derive(Debug, Clone)]

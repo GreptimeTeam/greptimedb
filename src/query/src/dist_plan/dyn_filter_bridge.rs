@@ -16,9 +16,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use common_query::request::{
-    DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
-    INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES, InitialDynFilterReg,
-    InitialDynFilterRegs, InitialDynFilterSnapshot,
+    DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
+    InitialDynFilterRegs, InitialDynFilterSnapshot, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
 };
 use datafusion_common::Result;
 use datafusion_physical_expr::PhysicalExpr;
@@ -169,7 +168,7 @@ fn initial_snapshot(
 
     let payload = match DynFilterPayload::from_datafusion_expr(
         &current,
-        INITIAL_REMOTE_DYN_FILTER_REGS_MAX_TOTAL_PROTO_BYTES,
+        REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
     ) {
         Ok(payload) => payload,
         Err(error) => {
@@ -485,10 +484,11 @@ mod tests {
 
     #[test]
     fn capture_remote_dyn_filters_for_pushdown_rejects_oversized_snapshots() {
+        let oversized_total_snapshot_bytes = REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES * 3 / 5;
         let parent_filters = vec![
-            test_dyn_filter_with_snapshot_payload("host", 0, 40 * 1024)
+            test_dyn_filter_with_snapshot_payload("host", 0, oversized_total_snapshot_bytes)
                 as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
-            test_dyn_filter_with_snapshot_payload("pod", 1, 40 * 1024)
+            test_dyn_filter_with_snapshot_payload("pod", 1, oversized_total_snapshot_bytes)
                 as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
         ];
 
