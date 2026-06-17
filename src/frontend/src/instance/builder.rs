@@ -240,6 +240,8 @@ impl FrontendBuilder {
             Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flow_service = FlowServiceOperator::new(flow_metadata_manager, node_manager.clone());
 
+        let mut query_options = self.options.query.clone();
+        query_options.enable_per_region_metrics = self.options.logging.enable_per_region_metrics;
         let query_engine = QueryEngineFactory::new_with_plugins(
             self.catalog_manager.clone(),
             Some(partition_manager.clone()),
@@ -249,7 +251,7 @@ impl FrontendBuilder {
             Some(Arc::new(flow_service)),
             true,
             plugins.clone(),
-            self.options.query.clone(),
+            query_options,
         )
         .query_engine();
 

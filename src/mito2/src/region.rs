@@ -35,7 +35,6 @@ use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::metadata::RegionMetadataRef;
-use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
@@ -177,10 +176,6 @@ pub struct MitoRegion {
     pub(crate) topic_latest_entry_id: AtomicU64,
     /// Bytes written to the region since open.
     pub(crate) written_bytes: IntGauge,
-    /// Query CPU time accumulated since region opened, in nanoseconds.
-    query_cpu_time: Option<IntGauge>,
-    /// Query scanned bytes accumulated since region opened.
-    query_scanned_bytes: Option<IntGauge>,
     /// manifest stats
     stats: ManifestStats,
 }
@@ -215,45 +210,17 @@ impl StagingPartitionInfo {
 }
 
 impl MitoRegion {
-    pub(crate) fn new_region_metrics(
-        region_id: RegionId,
-        enable_region_query_load_report: bool,
-    ) -> (IntGauge, Option<IntGauge>, Option<IntGauge>) {
+    pub(crate) fn new_region_metrics(region_id: RegionId) -> IntGauge {
         let region_id = region_id.as_u64().to_string();
-        let bytes_written = REGION_WRITTEN_BYTES_SINCE_OPEN.with_label_values(&[&region_id]);
-
-        let (query_cpu_time, query_scanned_bytes) = if enable_region_query_load_report {
-            (
-                Some(REGION_QUERY_CPU_TIME.with_label_values(&[&region_id])),
-                Some(REGION_QUERY_SCANNED_BYTES.with_label_values(&[&region_id])),
-            )
-        } else {
-            (None, None)
-        };
-
-        (bytes_written, query_cpu_time, query_scanned_bytes)
+        REGION_WRITTEN_BYTES_SINCE_OPEN.with_label_values(&[&region_id])
     }
 
-    pub(crate) fn region_metrics(&self) -> (&IntGauge, Option<&IntGauge>, Option<&IntGauge>) {
-        (
-            &self.written_bytes,
-            self.query_cpu_time.as_ref(),
-            self.query_scanned_bytes.as_ref(),
-        )
+    pub(crate) fn region_metrics(&self) -> &IntGauge {
+        &self.written_bytes
     }
 
-    pub(crate) fn reset_region_metrics(
-        written_bytes: &IntGauge,
-        query_cpu_time: Option<&IntGauge>,
-        query_scanned_bytes: Option<&IntGauge>,
-    ) {
+    pub(crate) fn reset_region_metrics(written_bytes: &IntGauge) {
         written_bytes.set(0);
-        if let Some(query_cpu_time) = query_cpu_time {
-            query_cpu_time.set(0);
-        }
-        if let Some(query_scanned_bytes) = query_scanned_bytes {
-            query_scanned_bytes.set(0);
-        }
     }
 
     fn remove_region_metrics(&mut self) {
@@ -261,17 +228,6 @@ impl MitoRegion {
         let labels = &[region_id.as_str()];
         if let Err(e) = REGION_WRITTEN_BYTES_SINCE_OPEN.remove_label_values(labels) {
             warn!(e; "Failed to remove region written bytes metric, region_id: {}", self.region_id);
-        }
-
-        if self.query_cpu_time.take().is_some()
-            && let Err(e) = REGION_QUERY_CPU_TIME.remove_label_values(labels)
-        {
-            warn!(e; "Failed to remove region query cpu time metric, region_id: {}", self.region_id);
-        }
-        if self.query_scanned_bytes.take().is_some()
-            && let Err(e) = REGION_QUERY_SCANNED_BYTES.remove_label_values(labels)
-        {
-            warn!(e; "Failed to remove region query scanned bytes metric, region_id: {}", self.region_id);
         }
     }
 
@@ -710,12 +666,7 @@ impl MitoRegion {
         let file_removed_cnt = self.stats.file_removed_cnt();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
-        let (written_bytes, query_cpu_time, query_scanned_bytes) = self.region_metrics();
-        let written_bytes = written_bytes.get() as u64;
-        let query_cpu_time = query_cpu_time.map(|gauge| gauge.get() as u64).unwrap_or(0);
-        let query_scanned_bytes = query_scanned_bytes
-            .map(|gauge| gauge.get() as u64)
-            .unwrap_or(0);
+        let written_bytes = self.region_metrics().get() as u64;
 
         RegionStatistic {
             num_rows,
@@ -733,8 +684,6 @@ impl MitoRegion {
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
             written_bytes,
-            query_cpu_time,
-            query_scanned_bytes,
         }
     }
 
@@ -1872,13 +1821,8 @@ mod tests {
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
         ));
-        let (written_bytes, query_cpu_time, query_scanned_bytes) =
-            MitoRegion::new_region_metrics(metadata.region_id, false);
-        MitoRegion::reset_region_metrics(
-            &written_bytes,
-            query_cpu_time.as_ref(),
-            query_scanned_bytes.as_ref(),
-        );
+        let written_bytes = MitoRegion::new_region_metrics(metadata.region_id);
+        MitoRegion::reset_region_metrics(&written_bytes);
 
         MitoRegion {
             region_id: metadata.region_id,
@@ -1892,8 +1836,6 @@ mod tests {
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
             written_bytes,
-            query_cpu_time,
-            query_scanned_bytes,
             stats: ManifestStats::default(),
         }
     }
@@ -2240,13 +2182,8 @@ mod tests {
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
         ));
-        let (written_bytes, query_cpu_time, query_scanned_bytes) =
-            MitoRegion::new_region_metrics(metadata.region_id, false);
-        MitoRegion::reset_region_metrics(
-            &written_bytes,
-            query_cpu_time.as_ref(),
-            query_scanned_bytes.as_ref(),
-        );
+        let written_bytes = MitoRegion::new_region_metrics(metadata.region_id);
+        MitoRegion::reset_region_metrics(&written_bytes);
 
         let region = MitoRegion {
             region_id: metadata.region_id,
@@ -2260,8 +2197,6 @@ mod tests {
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
             written_bytes,
-            query_cpu_time,
-            query_scanned_bytes,
             stats: ManifestStats::default(),
         };
 

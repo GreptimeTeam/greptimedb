@@ -248,8 +248,6 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
-    /// Whether to record per-region query load while scanning.
-    enable_region_query_load_report: bool,
     #[cfg(feature = "enterprise")]
     extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
@@ -273,19 +271,9 @@ impl ScanRegion {
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
-            enable_region_query_load_report: false,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
-    }
-
-    #[must_use]
-    pub(crate) fn with_enable_region_query_load_report(
-        mut self,
-        enable_region_query_load_report: bool,
-    ) -> Self {
-        self.enable_region_query_load_report = enable_region_query_load_report;
-        self
     }
 
     /// Sets maximum number of SST files to scan concurrently.
@@ -593,8 +581,7 @@ impl ScanRegion {
                     .snapshot_on_scan
                     .then_some(self.request.memtable_max_sequence)
                     .flatten(),
-            )
-            .with_enable_region_query_load_report(self.enable_region_query_load_report);
+            );
         #[cfg(feature = "vector_index")]
         let input = input
             .with_vector_index_applier(vector_index_applier)
@@ -835,8 +822,6 @@ pub struct ScanInput {
     explain_flat_format: bool,
     /// Snapshot upper bound bound at scan open and propagated back to the caller.
     pub(crate) snapshot_sequence: Option<SequenceNumber>,
-    /// Whether to record per-region query load while scanning.
-    pub(crate) enable_region_query_load_report: bool,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
     #[cfg(feature = "enterprise")]
@@ -874,21 +859,10 @@ impl ScanInput {
             distribution: None,
             explain_flat_format: false,
             snapshot_sequence: None,
-            enable_region_query_load_report: false,
             compaction: false,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
         }
-    }
-
-    /// Sets whether to record per-region query load while scanning.
-    #[must_use]
-    pub(crate) fn with_enable_region_query_load_report(
-        mut self,
-        enable_region_query_load_report: bool,
-    ) -> Self {
-        self.enable_region_query_load_report = enable_region_query_load_report;
-        self
     }
 
     /// Sets time range filter for time index.
@@ -1060,9 +1034,6 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
-        if compaction {
-            self.enable_region_query_load_report = false;
-        }
         self
     }
 
@@ -2089,18 +2060,6 @@ mod tests {
         // No files to read.
         let no_files = new_scan_input(metadata, filters).await.with_files(vec![]);
         assert!(build_scan_fingerprint(&no_files).is_none());
-    }
-
-    #[tokio::test]
-    async fn test_compaction_scan_input_disables_region_query_load_report() {
-        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let input = new_scan_input(metadata, vec![col("k0").eq(lit("foo"))])
-            .await
-            .with_enable_region_query_load_report(true)
-            .with_compaction(true);
-
-        assert!(input.compaction);
-        assert!(!input.enable_region_query_load_report);
     }
 
     #[tokio::test]

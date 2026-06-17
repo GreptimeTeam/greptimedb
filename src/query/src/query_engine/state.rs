@@ -233,6 +233,7 @@ impl QueryEngineState {
                 catalog_list.clone(),
                 partition_rule_manager,
                 region_query_handler.clone(),
+                options.enable_per_region_metrics,
             )))
             .with_optimizer_rules(optimizer.rules)
             .with_physical_optimizer_rules(physical_optimizer.rules)
@@ -511,6 +512,7 @@ impl DfQueryPlanner {
         catalog_manager: CatalogManagerRef,
         partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
+        enable_per_region_metrics: bool,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
             Arc::new(PromExtensionPlanner),
@@ -524,6 +526,7 @@ impl DfQueryPlanner {
                 catalog_manager,
                 partition_rule_manager,
                 region_query_handler,
+                enable_per_region_metrics,
             )));
             planners.push(Arc::new(MergeSortExtensionPlanner {}));
         }

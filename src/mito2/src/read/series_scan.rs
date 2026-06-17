@@ -343,10 +343,6 @@ impl RegionScanner for SeriesScan {
         self.stream_ctx.input.mapper.metadata().clone()
     }
 
-    fn enable_region_query_load_report(&self) -> bool {
-        self.stream_ctx.input.enable_region_query_load_report
-    }
-
     fn scan_partition(
         &self,
         ctx: &QueryScanContext,

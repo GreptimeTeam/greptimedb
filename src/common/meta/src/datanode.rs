@@ -302,10 +302,6 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             .and_then(|value| RegionStatistic::deserialize_from_slice(value))
             .unwrap_or_default();
 
-        // TODO(hl): add these two columns to region_statistics.
-        let _ = region_stat.query_cpu_time;
-        let _ = region_stat.query_scanned_bytes;
-
         Self {
             id: RegionId::from_u64(value.region_id),
             rcus: value.rcus,

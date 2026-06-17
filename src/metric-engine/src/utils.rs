@@ -63,8 +63,6 @@ pub fn get_region_statistic(mito: &MitoEngine, region_id: RegionId) -> Option<Re
                 metadata_manifest_version: metadata_stat.manifest.data_manifest_version(),
             },
             written_bytes: metadata_stat.written_bytes + data_stat.written_bytes,
-            query_cpu_time: metadata_stat.query_cpu_time + data_stat.query_cpu_time,
-            query_scanned_bytes: metadata_stat.query_scanned_bytes + data_stat.query_scanned_bytes,
             data_topic_latest_entry_id: data_stat.data_topic_latest_entry_id,
             metadata_topic_latest_entry_id: metadata_stat.metadata_topic_latest_entry_id,
         }),

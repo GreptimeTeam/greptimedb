@@ -124,7 +124,6 @@ pub(crate) struct RegionOpener {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     hook: Option<RegionHookRef>,
-    enable_region_query_load_report: bool,
 }
 
 impl RegionOpener {
@@ -164,16 +163,7 @@ impl RegionOpener {
             file_ref_manager,
             partition_expr_fetcher,
             hook: None,
-            enable_region_query_load_report: false,
         }
-    }
-
-    pub(crate) fn enable_region_query_load_report(
-        mut self,
-        enable_region_query_load_report: bool,
-    ) -> Self {
-        self.enable_region_query_load_report = enable_region_query_load_report;
-        self
     }
 
     /// Sets the region hook for observing manifest mutations.
@@ -383,13 +373,8 @@ impl RegionOpener {
             self.intermediate_manager,
         ));
         let now = self.time_provider.current_time_millis();
-        let (written_bytes, query_cpu_time, query_scanned_bytes) =
-            MitoRegion::new_region_metrics(region_id, self.enable_region_query_load_report);
-        MitoRegion::reset_region_metrics(
-            &written_bytes,
-            query_cpu_time.as_ref(),
-            query_scanned_bytes.as_ref(),
-        );
+        let written_bytes = MitoRegion::new_region_metrics(region_id);
+        MitoRegion::reset_region_metrics(&written_bytes);
 
         Ok(Arc::new(MitoRegion {
             region_id,
@@ -415,8 +400,6 @@ impl RegionOpener {
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(flushed_entry_id),
             written_bytes,
-            query_cpu_time,
-            query_scanned_bytes,
             stats: self.stats,
         }))
     }
@@ -644,13 +627,8 @@ impl RegionOpener {
         }
 
         let now = self.time_provider.current_time_millis();
-        let (written_bytes, query_cpu_time, query_scanned_bytes) =
-            MitoRegion::new_region_metrics(self.region_id, self.enable_region_query_load_report);
-        MitoRegion::reset_region_metrics(
-            &written_bytes,
-            query_cpu_time.as_ref(),
-            query_scanned_bytes.as_ref(),
-        );
+        let written_bytes = MitoRegion::new_region_metrics(self.region_id);
+        MitoRegion::reset_region_metrics(&written_bytes);
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -669,8 +647,6 @@ impl RegionOpener {
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             written_bytes,
-            query_cpu_time,
-            query_scanned_bytes,
             stats: self.stats.clone(),
         };
 

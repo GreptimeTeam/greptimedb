@@ -293,6 +293,7 @@ mod tests {
             32,
             partition_cols,
             Some(RemoteDynFilterProducerId::new(1)),
+            false,
         )
         .unwrap()
     }

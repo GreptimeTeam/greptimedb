@@ -440,11 +440,6 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Returns the metadata of the region.
     fn metadata(&self) -> RegionMetadataRef;
 
-    /// Returns whether to record per-region query load while scanning.
-    fn enable_region_query_load_report(&self) -> bool {
-        false
-    }
-
     /// Prepares the scanner with the given partition ranges.
     ///
     /// This method is for the planner to adjust the scanner's behavior based on the partition ranges.
@@ -519,12 +514,6 @@ pub struct RegionStatistic {
     #[serde(default)]
     /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
-    /// Query CPU time accumulated since region opened, in nanoseconds.
-    #[serde(default)]
-    pub query_cpu_time: u64,
-    /// Query scanned bytes accumulated since region opened.
-    #[serde(default)]
-    pub query_scanned_bytes: u64,
     /// The latest entry id of the region's remote WAL since last flush.
     /// For metric engine, there're two latest entry ids, one for data and one for metadata.
     /// TODO(weny): remove this two fields and use single instead.

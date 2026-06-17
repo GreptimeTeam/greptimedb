@@ -68,7 +68,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.file_ref_manager.clone(),
             self.partition_expr_fetcher.clone(),
         )
-        .enable_region_query_load_report(self.enable_region_query_load_report)
         .metadata_builder(builder)
         .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))
