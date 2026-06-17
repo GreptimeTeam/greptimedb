@@ -178,8 +178,7 @@ fn initial_snapshot(
         }
     };
 
-    // Current DataFusion exposes `wait_complete()`, but no non-blocking completion getter.
-    let is_complete = false;
+    let is_complete = alive_dyn_filter.is_complete();
     Some(InitialDynFilterSnapshot::new(
         payload,
         generation,
@@ -481,6 +480,31 @@ mod tests {
             snapshot.payload,
             DynFilterPayload::Datafusion(ref bytes) if !bytes.is_empty()
         ));
+    }
+
+    #[test]
+    fn capture_remote_dyn_filters_for_pushdown_attaches_complete_initial_snapshot() {
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 1)) as Arc<_>],
+            lit(true) as _,
+        ));
+        dyn_filter.update(lit(false) as _).unwrap();
+        dyn_filter.mark_complete();
+        let parent_filters = vec![dyn_filter as Arc<dyn datafusion::physical_plan::PhysicalExpr>];
+
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            parent_filters,
+        );
+
+        assert_eq!(pushdown.pushed_down, vec![true]);
+        let snapshot = pushdown.captured_dyn_filters[0]
+            .initial_registration
+            .initial_snapshot
+            .as_ref()
+            .unwrap();
+        assert_eq!(snapshot.generation, 2);
+        assert!(snapshot.is_complete);
     }
 
     #[test]
