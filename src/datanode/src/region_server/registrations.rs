@@ -34,8 +34,8 @@ use store_api::storage::RegionId;
 
 use crate::metrics::{
     REMOTE_DYN_FILTER_PAYLOAD_BYTES, REMOTE_DYN_FILTER_REGISTRY_ENTRIES,
-    REMOTE_DYN_FILTER_UNREGISTER_TOTAL, REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL,
-    REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL,
+    REMOTE_DYN_FILTER_UNREGISTER_TOTAL, REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL,
+    REMOTE_DYN_FILTER_UPDATE_OUTCOME_TOTAL,
 };
 
 type QueryRemoteDynFilterRegs = HashMap<RemoteDynFilterId, RegisteredDynFilter>;
@@ -143,7 +143,7 @@ impl RemoteDynFilterUpdateOutcome {
 }
 
 fn record_update_outcome(outcome: RemoteDynFilterUpdateOutcome) {
-    REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
+    REMOTE_DYN_FILTER_UPDATE_OUTCOME_TOTAL
         .with_label_values(&[outcome.as_str()])
         .inc();
     if outcome.is_drop() {

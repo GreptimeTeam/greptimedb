@@ -92,10 +92,10 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Remote dynamic filter update apply outcomes, labeled with the outcome.
-    pub static ref REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL: IntCounterVec = register_int_counter_vec!(
-        "greptime_datanode_remote_dyn_filter_update_apply_total",
-        "remote dynamic filter update apply outcomes",
+    /// Remote dynamic filter update processing outcomes, labeled with the outcome.
+    pub static ref REMOTE_DYN_FILTER_UPDATE_OUTCOME_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_datanode_remote_dyn_filter_update_outcome_total",
+        "remote dynamic filter update processing outcomes",
         &["result"]
     )
     .unwrap();
