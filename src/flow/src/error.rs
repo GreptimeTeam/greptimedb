@@ -18,7 +18,7 @@ use std::any::Any;
 
 use api::v1::CreateTableExpr;
 use arrow_schema::ArrowError;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, RetryHint};
 use common_error::{
     GREPTIME_DB_HEADER_ERROR_RETRY_HINT, define_into_tonic_status, from_err_code_msg_to_header,
 };
@@ -372,6 +372,35 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Self::FlowNotRecovered { .. } | Self::NoAvailableFrontend { .. } => {
+                RetryHint::Retryable
+            }
+
+            Self::InsertIntoFlow { source, .. }
+            | Self::CreateFlow { source, .. }
+            | Self::CreateSinkTable { source, .. }
+            | Self::External { source, .. } => source.retry_hint(),
+
+            Self::Time { source, .. } => source.retry_hint(),
+            Self::TableNotFoundMeta { source, .. } | Self::ListFlows { source, .. } => {
+                source.retry_hint()
+            }
+            Self::Datatypes { source, .. } => source.retry_hint(),
+            Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
+                source.retry_hint()
+            }
+            Self::MetaClientInit { source, .. } => source.retry_hint(),
+            Self::InvalidRequest { source, .. } => source.retry_hint(),
+            Self::SubstraitEncodeLogicalPlan { source, .. } => source.retry_hint(),
+            Self::ConvertColumnSchema { source, .. } => source.retry_hint(),
+            Self::InvalidClientConfig { source, .. } => source.retry_hint(),
+
+            _ => RetryHint::NonRetryable,
+        }
     }
 }
 
