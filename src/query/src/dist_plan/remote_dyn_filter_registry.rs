@@ -28,7 +28,10 @@ use store_api::storage::RegionId;
 use tokio::sync::{Notify, watch};
 
 use crate::dist_plan::FilterId;
-use crate::metrics;
+use crate::metrics::{
+    REMOTE_DYN_FILTER_ENCODE_TOTAL, REMOTE_DYN_FILTER_PAYLOAD_BYTES,
+    REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL,
+};
 use crate::region_query::RegionQueryHandlerRef;
 
 const REMOTE_DYN_FILTER_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
@@ -391,21 +394,21 @@ async fn fanout_snapshot_for_query(
         match DynFilterPayload::from_datafusion_expr(&current, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
         {
             Ok(DynFilterPayload::Datafusion(payload)) => {
-                metrics::REMOTE_DYN_FILTER_ENCODE_TOTAL
+                REMOTE_DYN_FILTER_ENCODE_TOTAL
                     .with_label_values(&["success"])
                     .inc();
-                metrics::REMOTE_DYN_FILTER_PAYLOAD_BYTES.observe(payload.len() as f64);
+                REMOTE_DYN_FILTER_PAYLOAD_BYTES.observe(payload.len() as f64);
                 payload
             }
             Ok(_) => {
-                metrics::REMOTE_DYN_FILTER_ENCODE_TOTAL
+                REMOTE_DYN_FILTER_ENCODE_TOTAL
                     .with_label_values(&["unsupported"])
                     .inc();
                 warn!("Ignored unsupported remote dynamic filter producer payload");
                 return true;
             }
             Err(error) => {
-                metrics::REMOTE_DYN_FILTER_ENCODE_TOTAL
+                REMOTE_DYN_FILTER_ENCODE_TOTAL
                     .with_label_values(&["error"])
                     .inc();
                 warn!(error; "Failed to encode remote dynamic filter producer snapshot");
@@ -467,7 +470,7 @@ async fn fanout_update_for_query(
         {
             ControlRpcResult::Ok(result) => {
                 if let Err(error) = result {
-                    metrics::REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
+                    REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
                         .with_label_values(&["error"])
                         .inc();
                     warn!(
@@ -478,18 +481,18 @@ async fn fanout_update_for_query(
                         subscriber.region_id()
                     );
                 } else {
-                    metrics::REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
+                    REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
                         .with_label_values(&["success"])
                         .inc();
                 }
             }
             ControlRpcResult::TimedOut => {
-                metrics::REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
+                REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
                     .with_label_values(&["timeout"])
                     .inc();
             }
             ControlRpcResult::LifecycleClosed => {
-                metrics::REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
+                REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
                     .with_label_values(&["cancelled"])
                     .inc();
                 return false;
