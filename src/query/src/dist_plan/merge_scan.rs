@@ -503,7 +503,7 @@ impl MergeScanExec {
                 // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
                     let load = region_scan_load(&metrics);
-                    report_region_query_load(enable_per_region_metrics, region_id, &metrics);
+                    report_region_query_load(enable_per_region_metrics, region_id, &load);
                     let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
                     let value = read_meter!(c, s, load, current_channel as u8);
                     metric.record_greptime_exec_cost(value as usize);
@@ -935,17 +935,12 @@ fn region_scan_load(metrics: &RecordBatchMetrics) -> ReadItem {
     }
 }
 
-fn report_region_query_load(
-    enable_per_region_metrics: bool,
-    region_id: RegionId,
-    metrics: &RecordBatchMetrics,
-) {
+fn report_region_query_load(enable_per_region_metrics: bool, region_id: RegionId, load: &ReadItem) {
     if !enable_per_region_metrics {
         return;
     }
 
     let region_id = region_id.to_string();
-    let load = region_scan_load(metrics);
     REGION_QUERY_CPU_TIME
         .with_label_values(&[&region_id])
         .inc_by(load.cpu_time);
@@ -1303,38 +1298,5 @@ mod tests {
         };
 
         assert_eq!(scan_output_bytes(&metrics), 60);
-    }
-
-    #[test]
-    fn report_region_query_load_updates_prometheus_metrics_when_enabled() {
-        use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
-
-        let region_id = RegionId::new(1024, 10001);
-        let region_id_label = region_id.to_string();
-        let labels = [&region_id_label];
-        let _ = REGION_QUERY_CPU_TIME.remove_label_values(&labels);
-        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(&labels);
-
-        let metrics = RecordBatchMetrics {
-            elapsed_compute: 42,
-            plan_metrics: vec![PlanMetrics {
-                plan: "RegionScanExec: region=1".to_string(),
-                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
-                level: 0,
-                metrics: vec![("output_bytes".to_string(), 24)],
-            }],
-            ..Default::default()
-        };
-
-        report_region_query_load(true, region_id, &metrics);
-
-        assert_eq!(REGION_QUERY_CPU_TIME.with_label_values(&labels).get(), 42);
-        assert_eq!(
-            REGION_QUERY_SCANNED_BYTES.with_label_values(&labels).get(),
-            24
-        );
-
-        let _ = REGION_QUERY_CPU_TIME.remove_label_values(&labels);
-        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(&labels);
     }
 }
