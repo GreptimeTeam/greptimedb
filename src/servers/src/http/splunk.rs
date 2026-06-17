@@ -60,9 +60,8 @@ pub(crate) const SPLUNK_API_PATH_NAME: &str = "/v1/splunk";
 const HEC_HEALTHY_CODE: u32 = 17;
 
 /// HEC response body `{"text", "code"}`; clients branch on `code`.
-/// `use<>`: the response owns `text`, so capture no lifetimes.
-fn hec_response(status: StatusCode, code: u32, text: &str) -> impl IntoResponse + use<> {
-    (status, axum::Json(json!({ "text": text, "code": code })))
+fn hec_response(status: StatusCode, code: u32, text: &str) -> axum::response::Response {
+    (status, axum::Json(json!({ "text": text, "code": code }))).into_response()
 }
 
 /// Parses a HEC body into a flat list of events. Handles both batch forms: objects
@@ -83,13 +82,18 @@ fn parse_hec_time(value: &VrlValue) -> Option<DateTime<Utc>> {
         VrlValue::Timestamp(dt) => return Some(*dt),
         _ => return None,
     };
+    if !n.is_finite() {
+        return None;
+    }
     const MILLIS_THRESHOLD: f64 = 1e12;
-    let nanos = if n >= MILLIS_THRESHOLD {
-        (n * 1000000.0) as i64
+    // Safe (`Option`-returning) constructors: out-of-range input yields `None`, not a panic.
+    if n >= MILLIS_THRESHOLD {
+        DateTime::from_timestamp_millis(n as i64)
     } else {
-        (n * 1000000000.0) as i64
-    };
-    Some(DateTime::from_timestamp_nanos(nanos))
+        let secs = n.floor() as i64;
+        let nsecs = ((n - n.floor()) * 1e9) as u32;
+        DateTime::from_timestamp(secs, nsecs)
+    }
 }
 
 /// Maps one HEC event to `(table, per-event map, tag names)`: `time`->timestamp,
@@ -154,17 +158,24 @@ fn hec_event_to_map(
     Some((table, VrlValue::Object(map), tag_names))
 }
 
-/// Retags `tag_columns` from `Field` to `Tag` (identity makes everything a Field) so
-/// the insert path adds them to the primary key. Identity-only: rebuilds under the
-/// default opt.
-fn apply_tag_columns(ctx_req: ContextReq, tag_columns: &HashSet<String>) -> ContextReq {
+/// Retags `Field` columns to `Tag` per table (identity makes everything a Field) so the
+/// insert path adds them to the primary key. Tags are scoped by table name so a batch
+/// targeting multiple tables can't cross-promote a same-named field. Identity-only:
+/// rebuilds under the default opt.
+fn apply_tag_columns(
+    ctx_req: ContextReq,
+    tag_columns: &HashMap<String, HashSet<String>>,
+) -> ContextReq {
     let mut reqs = ctx_req.all_req().collect::<Vec<_>>();
     for req in &mut reqs {
         let Some(rows) = req.rows.as_mut() else {
             continue;
         };
+        let Some(tags) = tag_columns.get(&req.table_name) else {
+            continue;
+        };
         for col in &mut rows.schema {
-            if tag_columns.contains(&col.column_name) {
+            if tags.contains(&col.column_name) {
                 col.semantic_type = SemanticType::Tag as i32;
             }
         }
@@ -214,7 +225,7 @@ async fn ingest_events(
     requests: Vec<PipelineIngestRequest>,
     query_ctx: QueryContextRef,
     pipeline_params: GreptimePipelineParams,
-    tag_columns: HashSet<String>,
+    tag_columns: HashMap<String, HashSet<String>>,
     apply_tags: bool,
 ) -> Result<HttpResponse> {
     let exec_timer = Instant::now();
@@ -273,11 +284,11 @@ pub async fn handle_event(
     // Map each event -> (table, per-event map, tag names); group by table.
     let query_table = params.table.as_deref();
     let mut by_table: HashMap<String, Vec<VrlValue>> = HashMap::new();
-    let mut tag_columns: HashSet<String> = HashSet::new();
+    let mut tag_columns: HashMap<String, HashSet<String>> = HashMap::new();
     for event in events {
         if let Some((table, map, tags)) = hec_event_to_map(event, DEFAULT_SPLUNK_TABLE, query_table)
         {
-            tag_columns.extend(tags);
+            tag_columns.entry(table.clone()).or_default().extend(tags);
             by_table.entry(table).or_default().push(map);
         }
     }
@@ -687,5 +698,56 @@ mod tests {
             Some(VrlValue::Timestamp(dt)) if dt.timestamp() == 1781714234
         ));
         assert!(matches!(m.get("event"), Some(VrlValue::Bytes(_)))); // event is a string
+    }
+
+    #[test]
+    fn tag_promotion_is_scoped_per_table() {
+        use api::v1::{ColumnDataType, ColumnSchema, RowInsertRequest, Rows};
+
+        fn field_col(name: &str) -> ColumnSchema {
+            ColumnSchema {
+                column_name: name.to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Field as i32,
+                datatype_extension: None,
+                options: None,
+            }
+        }
+        fn req(table: &str, cols: &[&str]) -> RowInsertRequest {
+            RowInsertRequest {
+                table_name: table.to_string(),
+                rows: Some(Rows {
+                    schema: cols.iter().map(|c| field_col(c)).collect(),
+                    rows: vec![],
+                }),
+            }
+        }
+
+        // One batch -> two tables, both with a `region` column. `region` is a tag in
+        // table "a" only; table "b"'s same-named field must NOT be promoted.
+        let ctx_req =
+            ContextReq::default_opt_with_reqs(vec![req("a", &["region"]), req("b", &["region"])]);
+        let mut tags: HashMap<String, HashSet<String>> = HashMap::new();
+        tags.insert("a".to_string(), HashSet::from(["region".to_string()]));
+        tags.insert("b".to_string(), HashSet::new());
+
+        let out = apply_tag_columns(ctx_req, &tags);
+
+        for r in out.ref_all_req() {
+            let region = r
+                .rows
+                .as_ref()
+                .unwrap()
+                .schema
+                .iter()
+                .find(|c| c.column_name == "region")
+                .unwrap();
+            let expected = match r.table_name.as_str() {
+                "a" => SemanticType::Tag as i32,
+                "b" => SemanticType::Field as i32, // would have been Tag before the per-table fix
+                other => panic!("unexpected table {other}"),
+            };
+            assert_eq!(region.semantic_type, expected, "table {}", r.table_name);
+        }
     }
 }
