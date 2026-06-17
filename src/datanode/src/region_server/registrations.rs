@@ -33,8 +33,9 @@ use session::query_id::QueryId;
 use store_api::storage::RegionId;
 
 use crate::metrics::{
-    REMOTE_DYN_FILTER_PAYLOAD_BYTES, REMOTE_DYN_FILTER_RUNTIME_REGISTRY_ENTRIES,
-    REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL, REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL,
+    REMOTE_DYN_FILTER_PAYLOAD_BYTES, REMOTE_DYN_FILTER_REGISTRY_ENTRIES,
+    REMOTE_DYN_FILTER_UNREGISTER_TOTAL, REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL,
+    REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL,
 };
 
 type QueryRemoteDynFilterRegs = HashMap<RemoteDynFilterId, RegisteredDynFilter>;
@@ -139,6 +140,23 @@ impl RemoteDynFilterUpdateOutcome {
                 | Self::DecodeFailed
         )
     }
+}
+
+fn record_update_outcome(outcome: RemoteDynFilterUpdateOutcome) {
+    REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
+        .with_label_values(&[outcome.as_str()])
+        .inc();
+    if outcome.is_drop() {
+        REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
+            .with_label_values(&[outcome.as_str()])
+            .inc();
+    }
+}
+
+fn record_unregister_outcome(outcome: RemoteDynFilterUpdateOutcome) {
+    REMOTE_DYN_FILTER_UNREGISTER_TOTAL
+        .with_label_values(&[outcome.as_str()])
+        .inc();
 }
 
 #[derive(Debug, Clone)]
@@ -484,7 +502,7 @@ pub(super) fn register_initial_dyn_filter_regs(
                     PendingDynFilterUpdate::from_initial_reg(reg),
                     region_id,
                 ));
-                REMOTE_DYN_FILTER_RUNTIME_REGISTRY_ENTRIES.inc();
+                REMOTE_DYN_FILTER_REGISTRY_ENTRIES.inc();
                 registered_filter_ids.push(filter_id);
             }
         }
@@ -532,12 +550,7 @@ pub(super) fn apply_remote_dyn_filter_update(
             REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES
         );
         let outcome = RemoteDynFilterUpdateOutcome::PayloadTooLarge;
-        REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
-            .with_label_values(&[outcome.as_str()])
-            .inc();
-        REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
-            .with_label_values(&[outcome.as_str()])
-            .inc();
+        record_update_outcome(outcome);
         return outcome;
     }
 
@@ -549,12 +562,7 @@ pub(super) fn apply_remote_dyn_filter_update(
             query_id, filter_id
         );
         let outcome = RemoteDynFilterUpdateOutcome::MissingRegistration;
-        REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
-            .with_label_values(&[outcome.as_str()])
-            .inc();
-        REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
-            .with_label_values(&[outcome.as_str()])
-            .inc();
+        record_update_outcome(outcome);
         return outcome;
     };
 
@@ -565,24 +573,12 @@ pub(super) fn apply_remote_dyn_filter_update(
             query_id, filter_id
         );
         let outcome = RemoteDynFilterUpdateOutcome::MissingRegistration;
-        REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
-            .with_label_values(&[outcome.as_str()])
-            .inc();
-        REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
-            .with_label_values(&[outcome.as_str()])
-            .inc();
+        record_update_outcome(outcome);
         return outcome;
     };
 
     let outcome = registered.apply_or_buffer_update(payload, generation, is_complete);
-    if outcome.is_drop() {
-        REMOTE_DYN_FILTER_UPDATE_DROP_TOTAL
-            .with_label_values(&[outcome.as_str()])
-            .inc();
-    }
-    REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
-        .with_label_values(&[outcome.as_str()])
-        .inc();
+    record_update_outcome(outcome);
 
     outcome
 }
@@ -598,9 +594,7 @@ pub(super) fn unregister_remote_dyn_filter(
             query_id, filter_id
         );
         let outcome = RemoteDynFilterUpdateOutcome::MissingRegistration;
-        REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
-            .with_label_values(&[outcome.as_str()])
-            .inc();
+        record_unregister_outcome(outcome);
         return outcome;
     };
 
@@ -612,12 +606,10 @@ pub(super) fn unregister_remote_dyn_filter(
                 query_id, filter_id
             );
             let outcome = RemoteDynFilterUpdateOutcome::MissingRegistration;
-            REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
-                .with_label_values(&[outcome.as_str()])
-                .inc();
+            record_unregister_outcome(outcome);
             return outcome;
         };
-        REMOTE_DYN_FILTER_RUNTIME_REGISTRY_ENTRIES.dec();
+        REMOTE_DYN_FILTER_REGISTRY_ENTRIES.dec();
         let should_remove_query = locked.is_empty();
         (registered, should_remove_query)
     };
@@ -628,9 +620,7 @@ pub(super) fn unregister_remote_dyn_filter(
     }
 
     let outcome = RemoteDynFilterUpdateOutcome::Applied;
-    REMOTE_DYN_FILTER_UPDATE_APPLY_TOTAL
-        .with_label_values(&[outcome.as_str()])
-        .inc();
+    record_unregister_outcome(outcome);
 
     outcome
 }
@@ -660,7 +650,7 @@ pub(super) fn remove_initial_dyn_filter_regs(
                 .unwrap_or(false);
 
             if should_remove_filter && let Some(registered) = locked.remove(filter_id) {
-                REMOTE_DYN_FILTER_RUNTIME_REGISTRY_ENTRIES.dec();
+                REMOTE_DYN_FILTER_REGISTRY_ENTRIES.dec();
                 removed_filters.push(registered);
             }
         }

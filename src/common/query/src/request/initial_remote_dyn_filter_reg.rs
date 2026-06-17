@@ -29,6 +29,9 @@ use crate::request::{
 pub const INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY: &str =
     "initial_remote_dyn_filter_registrations";
 pub const INITIAL_REMOTE_DYN_FILTER_REGS_MAX_COUNT: usize = 64;
+
+// Initial registration validation uses the shared remote dynamic filter payload budget.
+// It counts raw protobuf payload bytes before JSON/base64 expansion, not the final extension size.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialDynFilterRegs {
     #[serde(rename = "registrations")]
