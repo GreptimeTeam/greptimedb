@@ -283,6 +283,7 @@ fn bootstrap_state(state: &mut ModelState, rng: &mut ChaCha20Rng, max_regions: u
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_action_and_validate(
     state: &mut ModelState,
     action: &Action,
@@ -311,6 +312,7 @@ fn apply_action_and_validate(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_gc_step(
     state: &mut ModelState,
     mode: GcMode,
@@ -486,16 +488,16 @@ fn simulated_reachable_files(
             reachable.extend(region.manifest_files.iter().copied());
         }
 
-        if !fault_injection.ignore_temp_refs {
-            if let Some(temp_refs) = observed.temp_refs.file_refs_by_region.get(&region_id) {
-                reachable.extend(temp_refs.iter().copied());
-            }
+        if !fault_injection.ignore_temp_refs
+            && let Some(temp_refs) = observed.temp_refs.file_refs_by_region.get(&region_id)
+        {
+            reachable.extend(temp_refs.iter().copied());
         }
 
-        if !fault_injection.ignore_cross_region_refs {
-            if let Some(dsts) = observed.temp_refs.cross_region_refs.get(&region_id) {
-                queue.extend(dsts.iter().copied());
-            }
+        if !fault_injection.ignore_cross_region_refs
+            && let Some(dsts) = observed.temp_refs.cross_region_refs.get(&region_id)
+        {
+            queue.extend(dsts.iter().copied());
         }
     }
 
@@ -738,6 +740,7 @@ fn apply_deletions(state: &mut ModelState, deleted: &HashSet<FileRef>) {
     state.all_files.retain(|file| !deleted.contains(file));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn panic_with_trace(
     seed: u64,
     idx: usize,

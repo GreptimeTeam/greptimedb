@@ -1085,6 +1085,7 @@ fn collect_object_store_deleted_file_ids(
     )
 }
 
+#[allow(dead_code)]
 fn default_phase3_seed_corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/phase3_e2e")
 }
@@ -1987,15 +1988,15 @@ async fn run_post_migration_admin_gc_scenario(input: Phase3E2eInput) -> Phase3E2
             .iter()
             .find(|r| r.region.id == migrated_region)
             .expect("migrated region must still be in table route");
-        if let Some(peer) = &region_route.leader_peer {
-            if peer.id == to_peer_id {
-                leader_after_migration = peer.id;
-                info!(
-                    "Migration completed: leader for region {:?} is now {:?}",
-                    migrated_region, peer,
-                );
-                break;
-            }
+        if let Some(peer) = &region_route.leader_peer
+            && peer.id == to_peer_id
+        {
+            leader_after_migration = peer.id;
+            info!(
+                "Migration completed: leader for region {:?} is now {:?}",
+                migrated_region, peer,
+            );
+            break;
         }
         if wait_start.elapsed() > wait_timeout {
             panic!(
@@ -2276,6 +2277,7 @@ fn validate_post_migration_admin_gc_evidence(evidence: &Phase3E2eEvidence) -> Re
     Ok(())
 }
 
+#[allow(dead_code)]
 fn load_phase3_seed_corpus_inputs() -> Result<Vec<Phase3E2eInput>, String> {
     let seed_dir = std::env::var("GT_PHASE3_SEED_DIR")
         .map(PathBuf::from)
