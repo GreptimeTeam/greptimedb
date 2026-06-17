@@ -19,6 +19,7 @@ use common_macro::stack_trace_debug;
 use common_meta::DatanodeId;
 use common_procedure::ProcedureId;
 use common_runtime::JoinError;
+use common_wal::kafka::rskafka_client_error_to_retry_hint;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -1126,11 +1127,6 @@ impl Error {
     pub fn is_retryable(&self) -> bool {
         self.retry_hint().is_retryable()
     }
-
-    /// Returns `true` if the Kafka client has exhausted its internal retry.
-    fn is_retryable_kafka_client_error(err: &rskafka::client::error::Error) -> bool {
-        matches!(err, rskafka::client::error::Error::RetryFailed(_))
-    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -1314,16 +1310,9 @@ impl ErrorExt for Error {
 
             Error::DeleteRecords { error, .. }
             | Error::BuildPartitionClient { error, .. }
-            | Error::GetOffset { error, .. }
-                if Self::is_retryable_kafka_client_error(error) =>
-            {
-                RetryHint::Retryable
-            }
+            | Error::GetOffset { error, .. } => rskafka_client_error_to_retry_hint(error),
 
-            Error::DeleteRecords { .. }
-            | Error::BuildPartitionClient { .. }
-            | Error::GetOffset { .. }
-            | Error::PusherNotFound { .. }
+            Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
             | Error::ExceededDeadline { .. } => RetryHint::NonRetryable,
 
@@ -1431,20 +1420,21 @@ mod tests {
 
     #[test]
     fn test_kafka_non_retry_failed_errors_are_not_retryable() {
-        let delete_records_err = Err::<(), _>(KafkaClientError::Timeout)
+        let delete_records_err = Err::<(), _>(KafkaClientError::InvalidResponse("invalid".into()))
             .context(DeleteRecordsSnafu {
                 topic: "test_topic",
                 partition: 0,
                 offset: 1024u64,
             })
             .unwrap_err();
-        let build_partition_client_err = Err::<(), _>(KafkaClientError::Timeout)
-            .context(BuildPartitionClientSnafu {
-                topic: "test_topic",
-                partition: 0,
-            })
-            .unwrap_err();
-        let get_offset_err = Err::<(), _>(KafkaClientError::Timeout)
+        let build_partition_client_err =
+            Err::<(), _>(KafkaClientError::InvalidResponse("invalid".into()))
+                .context(BuildPartitionClientSnafu {
+                    topic: "test_topic",
+                    partition: 0,
+                })
+                .unwrap_err();
+        let get_offset_err = Err::<(), _>(KafkaClientError::InvalidResponse("invalid".into()))
             .context(GetOffsetSnafu {
                 topic: "test_topic",
             })

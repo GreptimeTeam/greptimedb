@@ -19,6 +19,7 @@ use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_procedure::ProcedureId;
+use common_wal::kafka::rskafka_client_error_to_retry_hint;
 use object_store::error::retry_hint_from_opendal_error;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
@@ -1282,6 +1283,12 @@ impl ErrorExt for Error {
             WriteObject { error, .. } | ReadObject { error, .. } => {
                 retry_hint_from_opendal_error(error)
             }
+            BuildKafkaClient { error, .. }
+            | BuildKafkaCtrlClient { error, .. }
+            | KafkaPartitionClient { error, .. }
+            | KafkaGetOffset { error, .. }
+            | ProduceRecord { error, .. }
+            | CreateKafkaWalTopic { error, .. } => rskafka_client_error_to_retry_hint(error),
             SubmitProcedure { source, .. }
             | QueryProcedure { source, .. }
             | WaitProcedure { source, .. }

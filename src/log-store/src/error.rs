@@ -18,6 +18,7 @@ use common_error::ext::{ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
+use common_wal::kafka::rskafka_client_error_to_retry_hint;
 use object_store::error::retry_hint_from_opendal_error;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
@@ -320,13 +321,6 @@ fn rskafka_client_error_to_status_code(error: &rskafka::client::error::Error) ->
         | rskafka::client::error::Error::RetryFailed(_) => StatusCode::Internal,
         rskafka::client::error::Error::Timeout => StatusCode::StorageUnavailable,
         _ => StatusCode::Internal,
-    }
-}
-
-fn rskafka_client_error_to_retry_hint(error: &rskafka::client::error::Error) -> RetryHint {
-    match error {
-        rskafka::client::error::Error::Timeout => RetryHint::Retryable,
-        _ => RetryHint::NonRetryable,
     }
 }
 
