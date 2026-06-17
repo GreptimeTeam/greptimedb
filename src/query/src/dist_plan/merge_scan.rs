@@ -945,6 +945,10 @@ fn report_region_query_load(region_id: RegionId, load: &ReadItem) {
 
 impl Drop for MergeScanExec {
     fn drop(&mut self) {
+        if !self.enable_per_region_metrics {
+            return;
+        }
+
         let metrics = self.sub_stage_metrics.lock().unwrap();
         for (region_id, metrics) in metrics.iter() {
             let load = region_scan_load(metrics);
