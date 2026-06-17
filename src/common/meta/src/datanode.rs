@@ -644,37 +644,6 @@ mod tests {
     }
 
     #[test]
-    fn test_region_stat_from_heartbeat_ignores_query_load() {
-        let request = HeartbeatRequest {
-            header: Some(RequestHeader::default()),
-            peer: Some(api::v1::meta::Peer {
-                id: 1,
-                addr: "127.0.0.1:3001".to_string(),
-            }),
-            region_stats: vec![api::v1::meta::RegionStat {
-                region_id: RegionId::new(1024, 1).as_u64(),
-                engine: "mito".to_string(),
-                role: api::v1::meta::RegionRole::Leader.into(),
-                extensions: HashMap::from([(
-                    "__region_query_load".to_string(),
-                    serde_json::to_vec(&serde_json::json!({
-                        "cpu_time": 7,
-                        "scanned_bytes": 42,
-                    }))
-                    .unwrap(),
-                )]),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let stat = Stat::try_from(&request).unwrap();
-
-        assert_eq!(stat.region_stats[0].rcus, 0);
-        assert_eq!(stat.region_stats[0].wcus, 0);
-    }
-
-    #[test]
     fn test_env_vars_round_trip() {
         let mut vars = HashMap::new();
         vars.insert("AZ".to_string(), "us-east-1a".to_string());

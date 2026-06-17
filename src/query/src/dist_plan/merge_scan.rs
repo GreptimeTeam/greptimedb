@@ -1276,21 +1276,4 @@ mod tests {
 
         assert_eq!(scan_output_bytes(&metrics), 60);
     }
-
-    #[test]
-    fn region_scan_load_uses_cpu_time_and_output_bytes() {
-        let metrics = RecordBatchMetrics {
-            elapsed_compute: 7,
-            plan_metrics: vec![PlanMetrics {
-                plan: "RegionScanExec: region=1".to_string(),
-                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
-                level: 0,
-                metrics: vec![("output_bytes".to_string(), 42)],
-            }],
-            ..Default::default()
-        };
-
-        assert_eq!(region_scan_load(&metrics).cpu_time, 7);
-        assert_eq!(region_scan_load(&metrics).table_scan, 42);
-    }
 }

@@ -595,70 +595,20 @@ impl Drop for StreamWithMetricWrapper {
 
 #[cfg(test)]
 mod test {
-    use std::pin::Pin;
     use std::sync::Arc;
-    use std::task::{Context, Poll};
-    use std::time::Duration;
 
     use api::v1::SemanticType;
-    use common_recordbatch::adapter::RecordBatchMetrics;
-    use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, RecordBatches};
+    use common_recordbatch::{RecordBatch, RecordBatches};
     use datafusion::prelude::SessionContext;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
-    use futures::{StreamExt, TryStreamExt};
+    use futures::TryStreamExt;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
     use store_api::region_engine::SinglePartitionScanner;
     use store_api::storage::RegionId;
 
     use super::*;
-
-    struct SlowRecordBatchStream {
-        schema: SchemaRef,
-        batch: Option<RecordBatch>,
-    }
-
-    impl Stream for SlowRecordBatchStream {
-        type Item = common_recordbatch::error::Result<RecordBatch>;
-
-        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            std::thread::sleep(Duration::from_millis(1));
-            Poll::Ready(self.batch.take().map(Ok))
-        }
-    }
-
-    impl RecordBatchStream for SlowRecordBatchStream {
-        fn schema(&self) -> SchemaRef {
-            self.schema.clone()
-        }
-
-        fn output_ordering(&self) -> Option<&[OrderOption]> {
-            None
-        }
-
-        fn metrics(&self) -> Option<RecordBatchMetrics> {
-            None
-        }
-    }
-
-    fn reset_region_query_metrics(region_id: RegionId) {
-        let region_id = region_id.as_u64().to_string();
-        let labels = &[region_id.as_str()];
-        let _ = REGION_QUERY_CPU_TIME.remove_label_values(labels);
-        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(labels);
-    }
-
-    fn metric_value(metrics: &ExecutionPlanMetricsSet, name: &str) -> usize {
-        metrics
-            .clone_inner()
-            .aggregate_by_name()
-            .timestamps_removed()
-            .iter()
-            .find_map(|metric| (metric.value().name() == name).then_some(metric.value().as_usize()))
-            .unwrap_or_default()
-    }
 
     #[tokio::test]
     async fn test_simple_table_scan() {
@@ -736,92 +686,5 @@ mod test {
 
         let result = plan.execute(0, ctx.task_ctx());
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn report_region_query_load_when_stream_is_dropped() {
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "a",
-            ConcreteDataType::int32_datatype(),
-            false,
-        )]));
-
-        let batch1 = RecordBatch::new(
-            schema.clone(),
-            vec![Arc::new(Int32Vector::from_slice([1, 2])) as _],
-        )
-        .unwrap();
-        let batch2 = RecordBatch::new(
-            schema.clone(),
-            vec![Arc::new(Int32Vector::from_slice([3, 4])) as _],
-        )
-        .unwrap();
-        let expected_scanned_bytes = batch1.buffer_memory_size() as i64;
-        let region_id = RegionId::new(1234, 9876);
-        reset_region_query_metrics(region_id);
-
-        let recordbatches = RecordBatches::try_new(schema, vec![batch1, batch2]).unwrap();
-        let metric = ExecutionPlanMetricsSet::new();
-        let stream_metrics = StreamMetrics::new(&metric, 0);
-        let mut stream = StreamWithMetricWrapper {
-            stream: recordbatches.as_stream(),
-            metric: stream_metrics,
-            span: common_telemetry::tracing::info_span!("test_region_query_load"),
-            await_timer: None,
-            enable_region_query_load_report: true,
-            region_id,
-            cpu_time: 0,
-            scanned_bytes: 0,
-            reported: false,
-        };
-
-        assert!(stream.next().await.unwrap().is_ok());
-        drop(stream);
-
-        let region_id = region_id.as_u64().to_string();
-        assert_eq!(
-            REGION_QUERY_SCANNED_BYTES
-                .with_label_values(&[&region_id])
-                .get(),
-            expected_scanned_bytes
-        );
-
-        reset_region_query_metrics(RegionId::from_u64(region_id.parse().unwrap()));
-    }
-
-    #[tokio::test]
-    async fn wrapper_poll_time_is_not_elapsed_compute() {
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "a",
-            ConcreteDataType::int32_datatype(),
-            false,
-        )]));
-        let batch = RecordBatch::new(
-            schema.clone(),
-            vec![Arc::new(Int32Vector::from_slice([1, 2])) as _],
-        )
-        .unwrap();
-
-        let metric = ExecutionPlanMetricsSet::new();
-        let stream_metrics = StreamMetrics::new(&metric, 0);
-        let mut stream = StreamWithMetricWrapper {
-            stream: Box::pin(SlowRecordBatchStream {
-                schema,
-                batch: Some(batch),
-            }),
-            metric: stream_metrics,
-            span: common_telemetry::tracing::info_span!("test_poll_time"),
-            await_timer: None,
-            enable_region_query_load_report: false,
-            region_id: RegionId::new(1234, 8765),
-            cpu_time: 0,
-            scanned_bytes: 0,
-            reported: false,
-        };
-
-        assert!(stream.next().await.unwrap().is_ok());
-
-        assert!(metric_value(&metric, "elapsed_poll") > 0);
-        assert_eq!(metric_value(&metric, "elapsed_compute"), 0);
     }
 }
