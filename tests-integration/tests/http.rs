@@ -1451,7 +1451,7 @@ pub async fn test_splunk_health_is_public(store_type: StorageType) {
 
     let user_provider =
         user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
-    let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
+    let (app, _guard) = setup_test_http_app_with_frontend_and_user_provider(
         store_type,
         "test_splunk_health_is_public",
         Some(user_provider),

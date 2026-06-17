@@ -530,14 +530,14 @@ mod tests {
         assert_eq!(m.get("region"), Some(&VrlValue::from(json!("us-east"))));
         assert_eq!(m.get("event"), Some(&VrlValue::from(json!("GET /api 200"))));
         // `time` became the timestamp column, not a `time` column.
-        assert!(m.get("time").is_none());
+        assert!(!m.contains_key("time"));
         assert!(matches!(
             m.get(greptime_timestamp()),
             Some(VrlValue::Timestamp(dt)) if dt.timestamp() == 1426279439
         ));
         // `index` and `fields` are consumed, not columns.
-        assert!(m.get("index").is_none());
-        assert!(m.get("fields").is_none());
+        assert!(!m.contains_key("index"));
+        assert!(!m.contains_key("fields"));
     }
 
     #[test]
@@ -598,7 +598,7 @@ mod tests {
                 m.get(greptime_timestamp()),
                 Some(VrlValue::Timestamp(dt)) if dt.timestamp() == 1447828325
             ));
-            assert!(m.get("host").is_none());
+            assert!(!m.contains_key("host"));
         }
     }
 
