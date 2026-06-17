@@ -27,7 +27,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::DatanodeWalConfig;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions, Region2Peers};
 use mito2::gc::GcConfig;
-use mito2::sst::location::parse_file_id_type_from_path;
+use mito2::sst::location::{parse_file_id_type_from_path, parse_index_file_info};
 use store_api::path_utils::{region_dir, region_name};
 use store_api::storage::{FileId, FileRef, FileRefsManifest, GcReport, RegionId};
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
@@ -47,6 +47,7 @@ pub enum Phase3E2eScenarioKind {
     RepartitionPreGcProtection,
     RepartitionAdminGcDroppedRegion,
     PostMigrationAdminGc,
+    BuildIndexGc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +76,7 @@ impl Phase3E2eScenarioKind {
             Self::RepartitionPreGcProtection => "repartition_pre_gc_protection",
             Self::RepartitionAdminGcDroppedRegion => "admin_gc_dropped_region",
             Self::PostMigrationAdminGc => "post_migration_admin_gc",
+            Self::BuildIndexGc => "build_index_gc",
         }
     }
 
@@ -86,6 +88,7 @@ impl Phase3E2eScenarioKind {
             "repartition_pre_gc_protection" => Ok(Self::RepartitionPreGcProtection),
             "admin_gc_dropped_region" => Ok(Self::RepartitionAdminGcDroppedRegion),
             "post_migration_admin_gc" => Ok(Self::PostMigrationAdminGc),
+            "build_index_gc" => Ok(Self::BuildIndexGc),
             other => Err(format!("unknown phase3 scenario_kind: {other}")),
         }
     }
@@ -267,6 +270,22 @@ pub struct Phase3PostMigrationAdminGcEvidence {
 }
 
 #[derive(Debug)]
+pub struct Phase3BuildIndexGcEvidence {
+    pub region: RegionId,
+    pub manifest_after_build_puffins: BTreeSet<String>,
+    pub storage_after_build_puffins: BTreeSet<String>,
+    pub manifest_before_gc_puffins: BTreeSet<String>,
+    pub storage_before_gc_puffins: BTreeSet<String>,
+    pub manifest_after_gc_puffins: BTreeSet<String>,
+    pub storage_after_gc_puffins: BTreeSet<String>,
+    pub obsolete_puffins_before_gc: BTreeSet<String>,
+    pub active_puffins_before_gc: BTreeSet<String>,
+    pub reported_deleted_index_puffins: BTreeSet<String>,
+    pub fox_count_before_gc: String,
+    pub fox_count_after_gc: String,
+}
+
+#[derive(Debug)]
 pub struct Phase3E2eEvidence {
     pub target_name: &'static str,
     pub seed: u64,
@@ -286,6 +305,7 @@ pub struct Phase3E2eEvidence {
     pub pre_gc_protection_evidence: Option<Phase3PreGcProtectionEvidence>,
     pub admin_gc_dropped_evidence: Option<Phase3AdminGcDroppedRegionEvidence>,
     pub post_migration_admin_gc_evidence: Option<Phase3PostMigrationAdminGcEvidence>,
+    pub build_index_gc_evidence: Option<Phase3BuildIndexGcEvidence>,
     pub follower_required_files: HashSet<FileId>,
     pub count_output: String,
     pub replay_trace: Vec<String>,
@@ -425,6 +445,10 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
         return run_post_migration_admin_gc_scenario(input).await;
     }
 
+    if input.scenario_kind == Phase3E2eScenarioKind::BuildIndexGc {
+        return run_build_index_gc_scenario(input).await;
+    }
+
     common_telemetry::init_default_ut_logging();
 
     let cluster_name = format!("phase3-gc-e2e-{}", input.seed);
@@ -483,7 +507,8 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
         | Phase3E2eScenarioKind::FollowerLike
         | Phase3E2eScenarioKind::RepartitionPreGcProtection
         | Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
-        | Phase3E2eScenarioKind::PostMigrationAdminGc => None,
+        | Phase3E2eScenarioKind::PostMigrationAdminGc
+        | Phase3E2eScenarioKind::BuildIndexGc => None,
         Phase3E2eScenarioKind::RepartitionLike => {
             Some(run_repartition_like_update(&cluster, &regions).await)
         }
@@ -501,7 +526,8 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
         | Phase3E2eScenarioKind::RepartitionLike
         | Phase3E2eScenarioKind::RepartitionPreGcProtection
         | Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
-        | Phase3E2eScenarioKind::PostMigrationAdminGc => HashSet::new(),
+        | Phase3E2eScenarioKind::PostMigrationAdminGc
+        | Phase3E2eScenarioKind::BuildIndexGc => HashSet::new(),
     };
     let count_output = query_count_output(&instance, &table_name).await;
 
@@ -529,6 +555,7 @@ pub async fn run_phase3_e2e_gc_cycle(input: Phase3E2eInput) -> Phase3E2eEvidence
         pre_gc_protection_evidence: None,
         admin_gc_dropped_evidence: None,
         post_migration_admin_gc_evidence: None,
+        build_index_gc_evidence: None,
         follower_required_files,
         count_output,
         replay_trace: vec![
@@ -637,6 +664,7 @@ pub fn validate_phase3_e2e_evidence(evidence: &Phase3E2eEvidence) -> Result<(), 
     if evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionPreGcProtection
         && evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
         && evidence.scenario_kind != Phase3E2eScenarioKind::PostMigrationAdminGc
+        && evidence.scenario_kind != Phase3E2eScenarioKind::BuildIndexGc
         && deleted_file_ids != deleted_path_ids
     {
         return Err(format!(
@@ -651,6 +679,7 @@ pub fn validate_phase3_e2e_evidence(evidence: &Phase3E2eEvidence) -> Result<(), 
     if evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionPreGcProtection
         && evidence.scenario_kind != Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
         && evidence.scenario_kind != Phase3E2eScenarioKind::PostMigrationAdminGc
+        && evidence.scenario_kind != Phase3E2eScenarioKind::BuildIndexGc
         && evidence.manifest_after_gc != evidence.sst_after_gc
     {
         return Err(format!(
@@ -686,6 +715,7 @@ pub fn validate_phase3_e2e_evidence(evidence: &Phase3E2eEvidence) -> Result<(), 
     validate_pre_gc_protection_evidence(evidence)?;
     validate_admin_gc_dropped_evidence(evidence)?;
     validate_post_migration_admin_gc_evidence(evidence)?;
+    validate_build_index_gc_evidence(evidence)?;
 
     Ok(())
 }
@@ -696,7 +726,8 @@ fn validate_repartition_evidence(evidence: &Phase3E2eEvidence) -> Result<(), Str
         | Phase3E2eScenarioKind::FollowerLike
         | Phase3E2eScenarioKind::RepartitionPreGcProtection
         | Phase3E2eScenarioKind::RepartitionAdminGcDroppedRegion
-        | Phase3E2eScenarioKind::PostMigrationAdminGc => {
+        | Phase3E2eScenarioKind::PostMigrationAdminGc
+        | Phase3E2eScenarioKind::BuildIndexGc => {
             if evidence.repartition_evidence.is_some() {
                 return Err(format!(
                     "{} scenario unexpectedly recorded repartition evidence; {} trace={:?}",
@@ -1036,6 +1067,9 @@ fn phase3_scenario_trace_step(scenario_kind: Phase3E2eScenarioKind) -> &'static 
         Phase3E2eScenarioKind::PostMigrationAdminGc => {
             "run admin GC_REGIONS after region migration"
         }
+        Phase3E2eScenarioKind::BuildIndexGc => {
+            "run build_index_gc known-gap scenario with BUILD_INDEX + index GC"
+        }
     }
 }
 
@@ -1373,6 +1407,7 @@ async fn run_repartition_pre_gc_protection_scenario(input: Phase3E2eInput) -> Ph
         pre_gc_protection_evidence: Some(pre_gc_protection_evidence),
         admin_gc_dropped_evidence: None,
         post_migration_admin_gc_evidence: None,
+        build_index_gc_evidence: None,
         follower_required_files: HashSet::new(),
         count_output,
         replay_trace: vec![
@@ -1619,6 +1654,7 @@ async fn run_repartition_admin_gc_dropped_region_scenario(
         pre_gc_protection_evidence: None,
         admin_gc_dropped_evidence: Some(admin_gc_dropped_evidence),
         post_migration_admin_gc_evidence: None,
+        build_index_gc_evidence: None,
         follower_required_files: HashSet::new(),
         count_output,
         replay_trace: vec![
@@ -2083,6 +2119,7 @@ async fn run_post_migration_admin_gc_scenario(input: Phase3E2eInput) -> Phase3E2
         pre_gc_protection_evidence: None,
         admin_gc_dropped_evidence: None,
         post_migration_admin_gc_evidence: Some(post_migration_admin_gc_evidence),
+        build_index_gc_evidence: None,
         follower_required_files: HashSet::new(),
         count_output,
         replay_trace: vec![
@@ -2625,6 +2662,572 @@ async fn wait_procedure_done(
     }
 }
 
+// ---------------------------------------------------------------------------
+//  BuildIndexGc scenario helpers
+// ---------------------------------------------------------------------------
+
+/// Filter a set of file paths to only those ending with `.puffin`.
+fn puffin_paths(paths: &BTreeSet<String>) -> BTreeSet<String> {
+    paths
+        .iter()
+        .filter(|p| p.ends_with(".puffin"))
+        .cloned()
+        .collect()
+}
+
+/// Poll until manifest and storage both contain at least one `.puffin` file
+/// and every manifest puffin is also present in storage (manifest subset storage).
+async fn wait_for_build_index_puffins(
+    cluster: &GreptimeDbCluster,
+    min_manifest_puffins: usize,
+    timeout: Duration,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let start = tokio::time::Instant::now();
+    loop {
+        let manifest = cluster.list_sst_files_from_manifests().await;
+        let storage = cluster.list_sst_files_from_all_datanodes().await;
+        let mp = puffin_paths(&manifest);
+        let sp = puffin_paths(&storage);
+
+        if mp.len() >= min_manifest_puffins && mp.is_subset(&sp) {
+            return (mp, sp);
+        }
+
+        if start.elapsed() > timeout {
+            panic!(
+                "timed out waiting for at least {min_manifest_puffins} build-index puffins; manifest={:?} storage={:?}",
+                mp, sp,
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Execute `SELECT COUNT(*) FROM {table} WHERE msg @@ 'fox'` and return the
+/// pretty-printed output.
+async fn query_fox_count_output(
+    instance: &Arc<frontend::instance::Instance>,
+    table_name: &str,
+) -> String {
+    let sql = format!("SELECT COUNT(*) FROM {table_name} WHERE msg @@ 'fox'");
+    execute_sql(instance, &sql).await.data.pretty_print().await
+}
+
+/// Check whether a GreptimeDB pretty-printed table output contains a specific
+/// expected value as one of its data cells (not just a fragile substring).
+fn pretty_table_contains_cell(output: &str, expected: &str) -> bool {
+    for line in output.lines() {
+        let line = line.trim();
+        if !line.starts_with('|') {
+            continue;
+        }
+        for cell in line.trim_matches('|').split('|') {
+            if cell.trim() == expected {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Poll until the manifest and storage have diverging `.puffin` files:
+/// active (v1) puffins in manifest are non-empty, and obsolete (v0) puffins
+/// exist only in storage. Returns (manifest_puffins, storage_puffins, all_storage_files).
+async fn wait_for_obsolete_index_puffins(
+    cluster: &GreptimeDbCluster,
+    timeout: Duration,
+) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
+    let start = tokio::time::Instant::now();
+    loop {
+        let manifest = cluster.list_sst_files_from_manifests().await;
+        let storage = cluster.list_sst_files_from_all_datanodes().await;
+        let manifest_puffins = puffin_paths(&manifest);
+        let storage_puffins = puffin_paths(&storage);
+        let obsolete_puffins: BTreeSet<String> = storage_puffins
+            .difference(&manifest_puffins)
+            .cloned()
+            .collect();
+
+        if !manifest_puffins.is_empty()
+            && !obsolete_puffins.is_empty()
+            && manifest_puffins.is_subset(&storage_puffins)
+        {
+            return (manifest_puffins, storage_puffins, storage);
+        }
+
+        if start.elapsed() > timeout {
+            panic!(
+                "timed out waiting for obsolete build-index puffins; manifest={:?} storage={:?} obsolete={:?}",
+                manifest_puffins, storage_puffins, obsolete_puffins,
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Extracts the set of `.puffin` paths that were reported as deleted in
+/// `GcReport.deleted_indexes` for `region_id`, with path/version precision.
+fn reported_deleted_index_paths(
+    report: &GcReport,
+    region_id: RegionId,
+    candidate_puffins: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, String> {
+    let deleted = report
+        .deleted_indexes
+        .get(&region_id)
+        .cloned()
+        .unwrap_or_default();
+    let deleted_set: HashSet<(FileId, u64)> = deleted.into_iter().collect();
+
+    let mut result = BTreeSet::new();
+    for path in candidate_puffins {
+        if !path_belongs_to_region(path, region_id) {
+            continue;
+        }
+        match parse_index_file_info(path) {
+            Ok((file_id, version)) => {
+                if deleted_set.contains(&(file_id, version)) {
+                    result.insert(path.clone());
+                }
+            }
+            Err(_) => {
+                // Skip paths that cannot be parsed as index files
+            }
+        }
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+//  run_build_index_gc_scenario
+// ---------------------------------------------------------------------------
+//
+// Flow (oracle-reviewed):
+//   1. CREATE single-region append-mode table with msg STRING (no index preset)
+//   2. INSERT / ADMIN FLUSH_TABLE for flush_rounds
+//   3. ALTER TABLE … SET INVERTED INDEX
+//   4. First ADMIN BUILD_INDEX  →  creates v0 .puffin files
+//   5. wait_for_build_index_puffins
+//   6. ALTER TABLE … SET FULLTEXT INDEX WITH (analyzer='English', case_sensitive='false')
+//   7. Second ADMIN BUILD_INDEX → creates v1 files; v0 files become RemovedFile::Index
+//   8. wait_for_obsolete_index_puffins (storage \ manifest non-empty)
+//   9. Run full-listing batch GC
+//  10. Validate strict invariants (deleted_indexes non-empty, v0 removed, v1 preserved)
+async fn run_build_index_gc_scenario(input: Phase3E2eInput) -> Phase3E2eEvidence {
+    assert!(
+        input.full_file_listing,
+        "build_index_gc requires full_file_listing=true"
+    );
+    assert_eq!(
+        input.table_shape,
+        Phase3E2eTableShape::SingleRegion,
+        "build_index_gc requires a single-region table"
+    );
+
+    common_telemetry::init_default_ut_logging();
+
+    let flush_rounds = input.flush_rounds.max(2);
+
+    let cluster_name = format!("phase3-gc-e2e-{}", input.seed);
+    let (store_config, _store_guard) = get_test_store_config(&StorageType::File);
+    let home_dir = Arc::new(create_temp_dir("phase3_gc_e2e_home"));
+    let cluster = GreptimeDbClusterBuilder::new(&cluster_name)
+        .await
+        .with_datanodes(2)
+        .with_shared_home_dir(home_dir)
+        .with_store_config(store_config)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            lingering_time: Some(Duration::ZERO),
+            unknown_file_lingering_time: Duration::ZERO,
+            ..Default::default()
+        })
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .build(false)
+        .await;
+
+    let instance = cluster.fe_instance().clone();
+    let metasrv = cluster.metasrv.clone();
+    let table_name = format!("phase3_gc_table_{}", input.seed);
+
+    // --- Step 1: Create append-mode table (no index preset) ---
+    let create_sql = format!(
+        r#"
+        CREATE TABLE {table_name} (
+            ts TIMESTAMP TIME INDEX,
+            msg STRING
+        ) WITH (append_mode = 'true')
+        "#,
+    );
+    let _ = execute_sql(&instance, &create_sql).await;
+
+    // --- Step 2: Insert data with `fox` keyword and flush ---
+    for i in 0..flush_rounds {
+        let day = i + 1;
+        let insert_sql = format!(
+            r#"
+            INSERT INTO {table_name} (ts, msg) VALUES
+            ('2023-01-{day:02} 10:00:00', 'the quick brown fox jumps'),
+            ('2023-01-{day:02} 11:00:00', 'lazy dog sleeps'),
+            ('2023-01-{day:02} 12:00:00', 'another fox appears')
+            "#,
+        );
+        let _ = execute_sql(&instance, &insert_sql).await;
+        let flush_sql = format!("ADMIN FLUSH_TABLE('{table_name}')");
+        let _ = execute_sql(&instance, &flush_sql).await;
+    }
+
+    // --- Step 3: Set INVERTED INDEX (not FULLTEXT yet) ---
+    let alter_inverted_sql =
+        format!("ALTER TABLE {table_name} MODIFY COLUMN msg SET INVERTED INDEX");
+    let _ = execute_sql(&instance, &alter_inverted_sql).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // --- Step 4: First BUILD_INDEX → creates v0 .puffin files ---
+    let build_index_sql = format!("ADMIN BUILD_INDEX('{table_name}')");
+    let _ = execute_sql(&instance, &build_index_sql).await;
+
+    // --- Step 5: Wait for v0 .puffin files ---
+    let (manifest_after_build_puffins, storage_after_build_puffins) =
+        wait_for_build_index_puffins(&cluster, 1, Duration::from_secs(120)).await;
+    info!(
+        "BuildIndexGc: after first BUILD_INDEX (INVERTED, v0) — manifest={:?} storage={:?}",
+        manifest_after_build_puffins, storage_after_build_puffins,
+    );
+
+    // --- Step 6: Switch to FULLTEXT INDEX with options (creates space for version bump) ---
+    let sst_before_compaction = cluster.list_sst_files_from_all_datanodes().await;
+    let alter_fulltext_sql = format!(
+        "ALTER TABLE {table_name} MODIFY COLUMN msg SET FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'false')",
+    );
+    let _ = execute_sql(&instance, &alter_fulltext_sql).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // --- Step 7: Second BUILD_INDEX → creates v1 .puffin, v0 becomes RemovedFile::Index ---
+    let _ = execute_sql(&instance, &build_index_sql).await;
+
+    // --- Step 8: Wait until storage has orphan (v0) puffins not referenced by manifest ---
+    let (manifest_before_gc_puffins, storage_before_gc_puffins, sst_after_compaction) =
+        wait_for_obsolete_index_puffins(&cluster, Duration::from_secs(120)).await;
+
+    let obsolete_puffins_before_gc: BTreeSet<String> = storage_before_gc_puffins
+        .difference(&manifest_before_gc_puffins)
+        .cloned()
+        .collect();
+    let active_puffins_before_gc: BTreeSet<String> = manifest_before_gc_puffins.clone();
+
+    info!(
+        "BuildIndexGc: before GC — manifest(v1)={manifest_before_gc_puffins:?} \
+         storage={storage_before_gc_puffins:?} obsolete(v0)={obsolete_puffins_before_gc:?}",
+    );
+
+    // --- Step 9: Pre-GC fox count ---
+    let fox_count_before_gc = query_fox_count_output(&instance, &table_name).await;
+
+    // --- Step 10: Run batch GC ---
+    let regions = get_table_regions(metasrv.table_metadata_manager(), &instance, &table_name).await;
+    assert_expected_region_shape(Phase3E2eTableShape::SingleRegion, &regions);
+    let region = regions[0];
+
+    let gc_report = run_batch_gc(&cluster, regions.clone(), true).await;
+
+    // --- Step 11: Post-GC collection ---
+    let manifest_after_gc_all = cluster.list_sst_files_from_manifests().await;
+    let sst_after_gc_all = cluster.list_sst_files_from_all_datanodes().await;
+
+    let manifest_after_gc_puffins = puffin_paths(&manifest_after_gc_all);
+    let storage_after_gc_puffins = puffin_paths(&sst_after_gc_all);
+    let fox_count_after_gc = query_fox_count_output(&instance, &table_name).await;
+    let total_count_output = query_count_output(&instance, &table_name).await;
+
+    let candidate_puffins_before_gc = {
+        let mut s = storage_before_gc_puffins.clone();
+        s.extend(manifest_before_gc_puffins.iter().cloned());
+        s
+    };
+    let reported_deleted_index_puffins =
+        reported_deleted_index_paths(&gc_report, region, &candidate_puffins_before_gc)
+            .unwrap_or_else(|err| panic!("failed to resolve reported deleted index paths: {err}"));
+
+    info!(
+        "BuildIndexGc: after GC — manifest={manifest_after_gc_puffins:?} \
+         storage={storage_after_gc_puffins:?} reported_deleted={reported_deleted_index_puffins:?}",
+    );
+
+    let build_index_gc_evidence = Phase3BuildIndexGcEvidence {
+        region,
+        manifest_after_build_puffins: manifest_after_build_puffins.clone(),
+        storage_after_build_puffins: storage_after_build_puffins.clone(),
+        manifest_before_gc_puffins: manifest_before_gc_puffins.clone(),
+        storage_before_gc_puffins: storage_before_gc_puffins.clone(),
+        manifest_after_gc_puffins: manifest_after_gc_puffins.clone(),
+        storage_after_gc_puffins: storage_after_gc_puffins.clone(),
+        obsolete_puffins_before_gc: obsolete_puffins_before_gc.clone(),
+        active_puffins_before_gc: active_puffins_before_gc.clone(),
+        reported_deleted_index_puffins: reported_deleted_index_puffins.clone(),
+        fox_count_before_gc: fox_count_before_gc.clone(),
+        fox_count_after_gc: fox_count_after_gc.clone(),
+    };
+
+    let evidence = Phase3E2eEvidence {
+        target_name: "fuzz_gc_e2e_cross_region",
+        seed: input.seed,
+        flush_rounds,
+        full_file_listing: input.full_file_listing,
+        compaction_wait_secs: input.compaction_wait_secs,
+        table_shape: input.table_shape,
+        scenario_kind: input.scenario_kind,
+        table_name: table_name.clone(),
+        regions: regions.clone(),
+        sst_before_compaction,
+        sst_after_compaction,
+        sst_after_gc: sst_after_gc_all,
+        manifest_after_gc: manifest_after_gc_all,
+        gc_report: gc_report.clone(),
+        repartition_evidence: None,
+        pre_gc_protection_evidence: None,
+        admin_gc_dropped_evidence: None,
+        post_migration_admin_gc_evidence: None,
+        build_index_gc_evidence: Some(build_index_gc_evidence),
+        follower_required_files: HashSet::new(),
+        count_output: total_count_output,
+        replay_trace: vec![
+            "create append-mode table with msg STRING".to_string(),
+            format!("insert {flush_rounds} flush rounds (2 fox rows each)"),
+            "ALTER TABLE SET INVERTED INDEX".to_string(),
+            "ADMIN BUILD_INDEX (v0)".to_string(),
+            "ALTER TABLE SET FULLTEXT INDEX WITH(analyzer='English', case_sensitive='false')"
+                .to_string(),
+            "ADMIN BUILD_INDEX (v1, obsolete v0)".to_string(),
+            "wait for obsolete index puffins".to_string(),
+            format!(
+                "run BatchGcProcedure(full_file_listing={})",
+                input.full_file_listing
+            ),
+            "capture post-GC state and fox count".to_string(),
+        ],
+    };
+
+    validate_phase3_e2e_evidence(&evidence)
+        .unwrap_or_else(|err| panic!("Phase 3 BuildIndexGc invariant violation: {err}"));
+
+    evidence
+}
+
+// ---------------------------------------------------------------------------
+//  validate_build_index_gc_evidence
+// ---------------------------------------------------------------------------
+
+fn validate_build_index_gc_evidence(evidence: &Phase3E2eEvidence) -> Result<(), String> {
+    if evidence.scenario_kind != Phase3E2eScenarioKind::BuildIndexGc {
+        if evidence.build_index_gc_evidence.is_some() {
+            return Err(format!(
+                "non-build-index-gc scenario {} unexpectedly recorded build-index-gc evidence; {} trace={:?}",
+                evidence.scenario_kind.as_seed_value(),
+                evidence.concise_summary(),
+                evidence.replay_trace,
+            ));
+        }
+        return Ok(());
+    }
+
+    let Some(ev) = &evidence.build_index_gc_evidence else {
+        return Err(format!(
+            "build_index_gc scenario missing build-index-gc evidence; {} trace={:?}",
+            evidence.concise_summary(),
+            evidence.replay_trace,
+        ));
+    };
+
+    // (1) regions.len() == 1
+    if evidence.regions.len() != 1 {
+        return Err(format!(
+            "build_index_gc must have exactly 1 region; got {:?}",
+            evidence.regions,
+        ));
+    }
+
+    // (2) need_retry_regions is empty and processed_regions contains the region
+    if !evidence.gc_report.need_retry_regions.is_empty() {
+        return Err(format!(
+            "build_index_gc must have empty need_retry_regions; got {:?}",
+            evidence.gc_report.need_retry_regions,
+        ));
+    }
+    if !evidence.gc_report.processed_regions.contains(&ev.region) {
+        return Err(format!(
+            "build_index_gc processed_regions must contain {:?}; got {:?}",
+            ev.region, evidence.gc_report.processed_regions,
+        ));
+    }
+
+    // (3) after build manifest/storage puffins non-empty and manifest subset storage
+    if ev.manifest_after_build_puffins.is_empty() {
+        return Err(format!(
+            "build_index_gc manifest_after_build_puffins is empty; evidence={:?}",
+            ev,
+        ));
+    }
+    if ev.storage_after_build_puffins.is_empty() {
+        return Err(format!(
+            "build_index_gc storage_after_build_puffins is empty; evidence={:?}",
+            ev,
+        ));
+    }
+    if !ev
+        .manifest_after_build_puffins
+        .is_subset(&ev.storage_after_build_puffins)
+    {
+        return Err(format!(
+            "build_index_gc manifest_after_build not subset of storage_after_build; manifest={:?} storage={:?}",
+            ev.manifest_after_build_puffins, ev.storage_after_build_puffins,
+        ));
+    }
+
+    // (4) before GC: active (manifest) v1 puffins and obsolete (storage-only) v0 puffins are non-empty.
+    if ev.active_puffins_before_gc.is_empty() {
+        return Err(format!(
+            "build_index_gc active_puffins_before_gc (manifest, v1) is empty; evidence={:?}",
+            ev,
+        ));
+    }
+    if ev.obsolete_puffins_before_gc.is_empty() {
+        return Err(format!(
+            "build_index_gc obsolete_puffins_before_gc (storage-only, v0) is empty; \
+             the second BUILD_INDEX did not produce version bumps; evidence={:?}",
+            ev,
+        ));
+    }
+
+    // (5) gc_report.deleted_indexes must contain a non-empty entry for this region.
+    let has_deleted_index = evidence
+        .gc_report
+        .deleted_indexes
+        .get(&ev.region)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !has_deleted_index {
+        return Err(format!(
+            "build_index_gc expects non-empty deleted_indexes for region {:?}; \
+             got deleted_indexes={:?}",
+            ev.region, evidence.gc_report.deleted_indexes,
+        ));
+    }
+
+    // (6) reported_deleted_index_puffins must be non-empty and derived exclusively
+    // from GcReport.deleted_indexes via parse_index_file_info (no storage-diff fallback).
+    if ev.reported_deleted_index_puffins.is_empty() {
+        return Err(format!(
+            "build_index_gc reported_deleted_index_puffins is empty; \
+             deleted_indexes is non-empty but path mapping produced no results; \
+             report={:?}",
+            evidence.gc_report,
+        ));
+    }
+
+    // (7) reported_deleted_index_puffins must intersect obsolete (v0) puffins.
+    let intersect_obsolete: BTreeSet<_> = ev
+        .reported_deleted_index_puffins
+        .intersection(&ev.obsolete_puffins_before_gc)
+        .cloned()
+        .collect();
+    if intersect_obsolete.is_empty() {
+        return Err(format!(
+            "build_index_gc reported_deleted does not intersect obsolete (v0); \
+             reported={:?} obsolete={:?}",
+            ev.reported_deleted_index_puffins, ev.obsolete_puffins_before_gc,
+        ));
+    }
+
+    // (8) reported_deleted_index_puffins must NOT intersect active (v1) puffins.
+    let intersect_active: BTreeSet<_> = ev
+        .reported_deleted_index_puffins
+        .intersection(&ev.active_puffins_before_gc)
+        .cloned()
+        .collect();
+    if !intersect_active.is_empty() {
+        return Err(format!(
+            "build_index_gc reported_deleted_index_puffins intersects active_puffins_before_gc (v1); \
+             intersection={:?}; evidence={:?}",
+            intersect_active, ev,
+        ));
+    }
+
+    // (9) At least one obsolete (v0) puffin must have been removed from storage.
+    let removed_obsolete: BTreeSet<_> = ev
+        .obsolete_puffins_before_gc
+        .difference(&ev.storage_after_gc_puffins)
+        .cloned()
+        .collect();
+    if removed_obsolete.is_empty() {
+        return Err(format!(
+            "build_index_gc no obsolete (v0) puffins were removed from storage; \
+             obsolete_before={:?} storage_after={:?}",
+            ev.obsolete_puffins_before_gc, ev.storage_after_gc_puffins,
+        ));
+    }
+
+    // (10) active_puffins_before_gc subset of storage_after_gc_puffins
+    if !ev
+        .active_puffins_before_gc
+        .is_subset(&ev.storage_after_gc_puffins)
+    {
+        let missing: Vec<_> = ev
+            .active_puffins_before_gc
+            .difference(&ev.storage_after_gc_puffins)
+            .collect();
+        return Err(format!(
+            "build_index_gc active puffins missing from storage after GC: {:?}; evidence={:?}",
+            missing, ev,
+        ));
+    }
+
+    // (11) manifest_after_gc_puffins subset storage_after_gc_puffins
+    if !ev
+        .manifest_after_gc_puffins
+        .is_subset(&ev.storage_after_gc_puffins)
+    {
+        let missing: Vec<_> = ev
+            .manifest_after_gc_puffins
+            .difference(&ev.storage_after_gc_puffins)
+            .collect();
+        return Err(format!(
+            "build_index_gc manifest puffins missing from storage after GC: {:?}; evidence={:?}",
+            missing, ev,
+        ));
+    }
+
+    // (12) For single-region full-listing, manifest_after_gc must equal sst_after_gc.
+    if evidence.manifest_after_gc != evidence.sst_after_gc {
+        return Err(format!(
+            "build_index_gc manifest_after_gc / sst_after_gc sets diverged; {} trace={:?}",
+            evidence.concise_summary(),
+            evidence.replay_trace,
+        ));
+    }
+
+    // (13) fox_count_before_gc and fox_count_after_gc contain expected value
+    let expected_fox = (evidence.flush_rounds * 2).to_string();
+    if !pretty_table_contains_cell(&ev.fox_count_before_gc, &expected_fox) {
+        return Err(format!(
+            "build_index_gc fox_count_before_gc does not contain expected '{}'; output=\n{}",
+            expected_fox, ev.fox_count_before_gc,
+        ));
+    }
+    if !pretty_table_contains_cell(&ev.fox_count_after_gc, &expected_fox) {
+        return Err(format!(
+            "build_index_gc fox_count_after_gc does not contain expected '{}'; output=\n{}",
+            expected_fox, ev.fox_count_after_gc,
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3059,6 +3662,7 @@ mod tests {
             pre_gc_protection_evidence: None,
             admin_gc_dropped_evidence: None,
             post_migration_admin_gc_evidence: None,
+            build_index_gc_evidence: None,
             follower_required_files: HashSet::new(),
             count_output: "12".to_string(),
             replay_trace: vec!["replay".to_string()],
@@ -3102,6 +3706,7 @@ mod tests {
             pre_gc_protection_evidence: None,
             admin_gc_dropped_evidence: None,
             post_migration_admin_gc_evidence: None,
+            build_index_gc_evidence: None,
             follower_required_files: HashSet::from([file_id]),
             count_output: "12".to_string(),
             replay_trace: vec!["replay".to_string()],
@@ -3131,6 +3736,94 @@ mod tests {
         assert_eq!(
             classify_phase3_gc_outcome(&no_op_report, 0).unwrap(),
             Phase3GcOutcomeKind::NoOpSuccess,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_phase3_e2e_build_index_gc() {
+        let evidence = run_phase3_e2e_gc_cycle(Phase3E2eInput {
+            seed: 91,
+            flush_rounds: 4,
+            full_file_listing: true,
+            compaction_wait_secs: 2,
+            table_shape: Phase3E2eTableShape::SingleRegion,
+            scenario_kind: Phase3E2eScenarioKind::BuildIndexGc,
+        })
+        .await;
+
+        let ev = evidence
+            .build_index_gc_evidence
+            .as_ref()
+            .expect("build-index-gc evidence must be present");
+
+        // Basic evidence assertions
+        assert_eq!(evidence.regions.len(), 1);
+        assert!(evidence.gc_report.need_retry_regions.is_empty());
+        assert!(evidence.gc_report.processed_regions.contains(&ev.region));
+
+        // Strict index-deletion proof
+        assert!(!ev.obsolete_puffins_before_gc.is_empty());
+        assert!(
+            evidence
+                .gc_report
+                .deleted_indexes
+                .get(&ev.region)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false),
+            "deleted_indexes must be non-empty for this region"
+        );
+        assert!(
+            !ev.reported_deleted_index_puffins.is_empty(),
+            "reported_deleted_index_puffins must be non-empty"
+        );
+        let intersect_obsolete: BTreeSet<_> = ev
+            .reported_deleted_index_puffins
+            .intersection(&ev.obsolete_puffins_before_gc)
+            .cloned()
+            .collect();
+        assert!(
+            !intersect_obsolete.is_empty(),
+            "reported deleted must intersect obsolete (v0) puffins"
+        );
+        let intersect_active: BTreeSet<_> = ev
+            .reported_deleted_index_puffins
+            .intersection(&ev.active_puffins_before_gc)
+            .cloned()
+            .collect();
+        assert!(
+            intersect_active.is_empty(),
+            "reported deleted must not intersect active (v1) puffins"
+        );
+        let removed_obsolete: BTreeSet<_> = ev
+            .obsolete_puffins_before_gc
+            .difference(&ev.storage_after_gc_puffins)
+            .cloned()
+            .collect();
+        assert!(
+            !removed_obsolete.is_empty(),
+            "at least one obsolete (v0) puffin must be removed from storage"
+        );
+        assert!(
+            ev.active_puffins_before_gc
+                .is_subset(&ev.storage_after_gc_puffins),
+            "active (v1) puffins must be preserved in storage"
+        );
+        assert_eq!(
+            evidence.manifest_after_gc, evidence.sst_after_gc,
+            "manifest and storage sets must be identical after GC"
+        );
+
+        // Fox count correct: flush_rounds=4, 2 fox rows each = 8
+        let expected_fox = "8";
+        assert!(
+            pretty_table_contains_cell(&ev.fox_count_before_gc, expected_fox),
+            "fox_count_before_gc should contain '{expected_fox}', got:\n{}",
+            ev.fox_count_before_gc,
+        );
+        assert!(
+            pretty_table_contains_cell(&ev.fox_count_after_gc, expected_fox),
+            "fox_count_after_gc should contain '{expected_fox}', got:\n{}",
+            ev.fox_count_after_gc,
         );
     }
 }
