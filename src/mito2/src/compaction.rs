@@ -40,8 +40,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::{TimeToLive, Timestamp};
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
-use datatypes::extension::json::is_json_extension_type;
-use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::extension::json::is_structured_json_field;
 use datatypes::types::json_type::JsonNativeType;
 use parquet::arrow::parquet_to_arrow_schema;
 use parquet::file::metadata::PageIndexPolicy;
@@ -1040,11 +1039,11 @@ impl CompactionSstReaderBuilder<'_> {
 
     async fn build_scan_input(self) -> Result<ScanInput> {
         let schema = self.metadata.schema.arrow_schema();
-        let json_type_hint = if schema.has_json_extension_field() {
+        let json_type_hint = if schema.fields().iter().any(is_structured_json_field) {
             let mut json_type_hint = schema
                 .fields()
                 .iter()
-                .filter(|&field| is_json_extension_type(field))
+                .filter(|&field| is_structured_json_field(field))
                 .map(|field| (field.name().clone(), JsonNativeType::Null))
                 .collect::<HashMap<_, _>>();
 
