@@ -28,6 +28,7 @@ use crate::data::export_v2::manifest::ChunkStatus;
 use crate::data::import_v2::ImportV2Command;
 use crate::data::import_v2::coordinator::build_import_tasks;
 use crate::data::import_v2::state::{ImportState, ImportTaskStatus, save_import_state};
+use crate::data::path::data_dir_for_schema_chunk;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage};
 use crate::data::sql::escape_sql_identifier;
 use crate::database::DatabaseClient;
@@ -966,6 +967,28 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
         .do_work()
         .await
         .context(OtherSnafu)?;
+
+    let storage_config = ObjectStoreConfig::default();
+    let storage = OpenDalStorage::from_uri(&src_uri, &storage_config)
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+    let manifest = storage
+        .read_manifest()
+        .await
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+    assert_eq!(manifest.chunks.len(), 2);
+    for chunk in &manifest.chunks {
+        assert_eq!(chunk.status, ChunkStatus::Completed);
+        for schema in [schema_a, schema_b] {
+            let prefix = data_dir_for_schema_chunk(schema, chunk.id);
+            assert!(
+                chunk.files.iter().any(|file| file.starts_with(&prefix)),
+                "chunk {} should include exported data for {schema}",
+                chunk.id
+            );
+        }
+    }
 
     let verify_cmd = ExportVerifyCommand::parse_from(["export-v2-verify", "--snapshot", &src_uri]);
     verify_cmd
