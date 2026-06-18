@@ -1,0 +1,40 @@
+src/common/error/src/ext.rs
+  s_abc59d71f18a4d::t_853d423d601862 21,55-69
+src/common/error/Cargo.toml
+  s_abc59d71f18a4d::t_fe95a918684bb8 12
+src/common/meta/src/error.rs
+  s_abc59d71f18a4d::t_14988cb02f0c8d 1475,1478-1484
+  s_abc59d71f18a4d::t_4eb0a195a613d7 1476-1477
+  s_abc59d71f18a4d::t_796ae6115e409f 30,45-53,1137-1138,1297-1298,1353-1360
+src/common/meta/src/instruction.rs
+  s_abc59d71f18a4d::t_4eb0a195a613d7 1284-1285
+  s_abc59d71f18a4d::t_14988cb02f0c8d 1212,1218-1283,1286-1333
+  s_abc59d71f18a4d::t_796ae6115e409f 19-20,36-40,43-48,51-111
+  s_abc59d71f18a4d::t_853d423d601862 41-42,49-50
+Cargo.lock
+  s_abc59d71f18a4d::t_c17dc7a3d1912e 2342
+src/common/error/src/status_code.rs
+  s_abc59d71f18a4d::t_853d423d601862 17,190-202
+  s_abc59d71f18a4d::t_c07083021698fa 203-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "8578b0009a78efa42f98920b6bfb0e79423d350f",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_abc59d71f18a4d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a7bfa0affeEwe6BgYqF7nPHZ",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
