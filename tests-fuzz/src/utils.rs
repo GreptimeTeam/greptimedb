@@ -18,6 +18,7 @@ pub mod crd;
 /// CSV dump writer utilities for fuzz tests.
 pub mod csv_dump_writer;
 pub mod health;
+pub mod kafka_wal_http;
 pub mod migration;
 pub mod network_chaos;
 pub mod partition;

@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::kafka::common::{
     DEFAULT_AUTO_PRUNE_INTERVAL, DEFAULT_AUTO_PRUNE_LOGICAL_DELETE, DEFAULT_AUTO_PRUNE_PARALLELISM,
-    DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE, KafkaConnectionConfig,
-    KafkaTopicConfig,
+    DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE,
+    DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL, DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
+    KafkaConnectionConfig, KafkaTopicConfig,
 };
 
 /// Kafka wal configurations for metasrv.
@@ -46,6 +47,12 @@ pub struct MetasrvKafkaConfig {
     pub flush_trigger_size: ReadableSize,
     // The checkpoint trigger size.
     pub checkpoint_trigger_size: ReadableSize,
+    /// Internal interval of remote WAL region flush trigger.
+    #[serde(with = "humantime_serde")]
+    pub region_flush_trigger_interval: Duration,
+    /// Internal interval to periodically persist remote WAL checkpoints.
+    #[serde(with = "humantime_serde")]
+    pub periodic_checkpoint_persist_interval: Duration,
 }
 
 impl Default for MetasrvKafkaConfig {
@@ -59,6 +66,8 @@ impl Default for MetasrvKafkaConfig {
             auto_prune_parallelism: DEFAULT_AUTO_PRUNE_PARALLELISM,
             flush_trigger_size: DEFAULT_FLUSH_TRIGGER_SIZE,
             checkpoint_trigger_size: DEFAULT_CHECKPOINT_TRIGGER_SIZE,
+            region_flush_trigger_interval: DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
+            periodic_checkpoint_persist_interval: DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL,
         }
     }
 }

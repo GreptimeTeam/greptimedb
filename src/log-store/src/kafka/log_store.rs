@@ -47,8 +47,6 @@ use crate::kafka::util::record::{
 };
 use crate::metrics;
 
-const DEFAULT_OFFSET_FETCH_INTERVAL: Duration = Duration::from_secs(60);
-
 /// Statistics for a topic.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TopicStat {
@@ -152,8 +150,10 @@ impl KafkaLogStore {
         let client_manager = Arc::new(
             ClientManager::try_new(config, global_index_collector, topic_stats.clone()).await?,
         );
-        let fetcher =
-            PeriodicOffsetFetcher::new(DEFAULT_OFFSET_FETCH_INTERVAL, client_manager.clone());
+        let fetcher = PeriodicOffsetFetcher::new(
+            config.topic_latest_offset_fetch_interval,
+            client_manager.clone(),
+        );
         fetcher.run().await;
 
         Ok(Self {

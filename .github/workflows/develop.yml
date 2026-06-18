@@ -329,6 +329,13 @@ jobs:
               minio: true
               kafka: false
               values: "with-minio-repartition-gc.yaml"
+          - target: "fuzz_remote_wal_logical_prune"
+            mode:
+              name: "Remote WAL logical pruning"
+              minio: true
+              kafka: true
+              values: "with-remote-wal-logical-prune.yaml"
+              kafkaWalHelper: true
     steps:
       - name: Remove unused software
         run: |
@@ -378,6 +385,24 @@ jobs:
           rm ./bin.tar.gz
       - name: Build and push GreptimeDB image
         uses: ./.github/actions/build-and-push-ci-image
+      - if: matrix.mode.kafkaWalHelper
+        name: Build Kafka WAL helper binary
+        shell: bash
+        run: |
+          cargo build --bin kafka_wal_helper
+          mkdir -p amd64
+          cp target/debug/kafka_wal_helper amd64/kafka_wal_helper
+      - if: matrix.mode.kafkaWalHelper
+        name: Build and push Kafka WAL helper image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/ci/ubuntu/Dockerfile.kafka-wal-helper
+          push: true
+          tags: localhost:5001/greptime/kafka-wal-helper:latest
+          build-args: |
+            TARGETARCH=amd64
+            TARGET_BIN=kafka_wal_helper
       - name: Wait for etcd
         run: |
           kubectl wait \
@@ -401,6 +426,17 @@ jobs:
             pod -l app.kubernetes.io/instance=kafka \
             --timeout=120s \
             -n kafka-cluster
+      - if: matrix.mode.kafkaWalHelper
+        name: Setup Kafka WAL helper
+        shell: bash
+        run: |
+          kubectl -n kafka-cluster apply \
+            -f .github/actions/setup-greptimedb-cluster/kafka-wal-helper.yaml
+
+          kubectl -n kafka-cluster wait \
+            --for=condition=Ready \
+            pod -l app=kafka-wal-helper \
+            --timeout=120s
       - name: Print etcd info
         shell: bash
         run: kubectl get all --show-labels -n etcd-cluster
@@ -413,14 +449,23 @@ jobs:
       - name: Port forward (mysql)
         run: |
           kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
+      - if: matrix.mode.kafkaWalHelper
+        name: Port forward Kafka WAL helper
+        run: |
+          kubectl port-forward service/kafka-wal-helper 8080:8080 -n kafka-cluster&
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
           CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           GT_MYSQL_ADDR: 127.0.0.1:4002
+          GT_KAFKA_WAL_HELPER_URL: http://127.0.0.1:8080
+          GT_KAFKA_ADDR: kafka.kafka-cluster.svc.cluster.local:9092
+          GT_WAL_TOPIC_PREFIX: greptimedb_wal_topic
+          GT_WAL_NUM_TOPICS: 3
+          GT_FUZZ_OVERRIDE_DELETE_AFTER_SECS: 300
         with:
           target: ${{ matrix.target }}
-          max-total-time: 120
+          max-total-time: ${{ matrix.mode.kafkaWalHelper && 600 || 120 }}
       - name: Describe Nodes
         if: failure()
         shell: bash

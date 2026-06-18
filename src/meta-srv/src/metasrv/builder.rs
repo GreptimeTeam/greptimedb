@@ -467,6 +467,8 @@ impl MetasrvBuilder {
                 options.grpc.server_addr.clone(),
                 remote_wal_options.flush_trigger_size,
                 remote_wal_options.checkpoint_trigger_size,
+                remote_wal_options.region_flush_trigger_interval,
+                remote_wal_options.periodic_checkpoint_persist_interval,
             );
             region_flush_trigger.try_start()?;
 
