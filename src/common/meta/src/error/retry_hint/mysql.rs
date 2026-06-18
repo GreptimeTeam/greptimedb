@@ -74,12 +74,16 @@ const ER_MASTER_NET_WRITE: u16 = 1190;
 
 // MySQL documents ER_LOCK_WAIT_TIMEOUT as SQLSTATE HY000, so classify it by
 // the structured errno instead of SQLSTATE.
+// ER_TOO_MANY_USER_CONNECTIONS, SQLSTATE 42000: Too many user connections.
+const ER_TOO_MANY_USER_CONNECTIONS: u16 = 1203;
 // ER_LOCK_WAIT_TIMEOUT, SQLSTATE HY000: Lock wait timeout exceeded; try restarting transaction.
 const ER_LOCK_WAIT_TIMEOUT: u16 = 1205;
 // ER_LOCK_DEADLOCK, SQLSTATE 40001: Deadlock found when trying to get lock; try restarting transaction.
 const ER_LOCK_DEADLOCK: u16 = 1213;
 // ER_CONNECT_TO_MASTER / ER_CONNECT_TO_SOURCE, SQLSTATE 08S01: Error connecting to source.
 const ER_CONNECT_TO_MASTER: u16 = 1218;
+// ER_USER_LIMIT_REACHED, SQLSTATE 42000: User limit reached.
+const ER_USER_LIMIT_REACHED: u16 = 1226;
 // ER_NOT_SUPPORTED_AUTH_MODE, SQLSTATE 08004: Client does not support authentication protocol.
 const ER_NOT_SUPPORTED_AUTH_MODE: u16 = 1251;
 // ER_NET_OK_PACKET_TOO_LARGE, SQLSTATE 08S01: OK packet too large.
@@ -95,6 +99,8 @@ fn retry_hint_from_mysql_database_error(number: Option<u16>, message: &str) -> R
     match number {
         Some(
             ER_CON_COUNT_ERROR
+            | ER_TOO_MANY_USER_CONNECTIONS
+            | self::ER_USER_LIMIT_REACHED
             | ER_BAD_HOST_ERROR
             | ER_SERVER_SHUTDOWN
             | ER_FORCING_CLOSE
@@ -150,7 +156,15 @@ fn is_mysql_serialization_database_error(message: &str) -> bool {
 
 pub fn is_mysql_serialization_error(error: &sqlx::Error) -> bool {
     match error {
-        sqlx::Error::Database(error) => is_mysql_serialization_database_error(error.message()),
+        sqlx::Error::Database(error) => {
+            let mysql_error = error
+                .as_error()
+                .downcast_ref::<sqlx::mysql::MySqlDatabaseError>();
+            matches!(
+                mysql_error.map(|error| error.number()),
+                Some(ER_LOCK_DEADLOCK)
+            ) || is_mysql_serialization_database_error(error.message())
+        }
         _ => false,
     }
 }
@@ -202,6 +216,8 @@ mod tests {
     fn test_mysql_database_error_retry_hint() {
         let retryable_numbers = [
             ER_CON_COUNT_ERROR,
+            ER_TOO_MANY_USER_CONNECTIONS,
+            ER_USER_LIMIT_REACHED,
             ER_BAD_HOST_ERROR,
             ER_SERVER_SHUTDOWN,
             ER_FORCING_CLOSE,
