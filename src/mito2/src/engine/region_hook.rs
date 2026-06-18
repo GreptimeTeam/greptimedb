@@ -62,39 +62,17 @@
 //! `on_sst_files_written` is invoked at the SST write site (flush task or compaction task),
 //! immediately after SST files are written but **before** the manifest is committed.
 //!
-//! `on_manifest_updated` is funneled through a single method,
-//! [`ManifestContext::update_locked`], which is the **only** place in the crate
-//! that calls the low-level [`RegionManifestManager::update`] and turns each
-//! successful write into a [`PendingManifestHook`]. Callers fire the receipt
-//! **after** releasing the manifest write lock (the hook must never run under
-//! the lock — it may read the manifest or send region requests that acquire it).
+//! `on_manifest_updated` is funneled through [`ManifestContext::update_locked`],
+//! the sole caller of the low-level [`RegionManifestManager::update`], which
+//! packages each successful write into a [`PendingManifestHook`]. The caller
+//! owns the write lock, drops it, and *then* fires the receipt — the hook must
+//! never run under the lock. [`ManifestContext::update_manifest`] is the common
+//! case: it acquires the lock, delegates to `update_locked`, and fires the
+//! receipt in one go. Multi-step sequences (staging-exit, role-state backfill)
+//! call `update_locked` directly under their own held guard.
 //!
-//! There are two usage patterns, both producing/firing a [`PendingManifestHook`]:
-//! - [`ManifestContext::update_manifest`] (and its typed variants such as
-//!   `update_manifest_for_compaction`): acquire the lock, update, release the
-//!   lock, and fire the receipt in one go. Used by flush, compaction, alter,
-//!   truncate, region edit, copy region, index build, and enter-staging.
-//! - [`ManifestContext::update_locked`] / [`MitoRegion::exit_staging_on_success`]:
-//!   for multi-step sequences that must hold the lock across several operations.
-//!   They take a caller-owned `&mut` write guard and return the receipt so the
-//!   caller fires it after dropping the lock (see `set_role_state_gracefully`
-//!   and `handle_apply_staging_manifest_request`).
-//!
-//! Non-logical writes intentionally do **not** fire the hook: GC and staging
-//! bookkeeping call the manager's own methods directly (e.g. `clear_deleted_files`,
-//! `clear_staging_manifest_and_dir`, `unset_staging_manifest`) under a
-//! caller-owned lock guard, rather than going through `update_locked`.
-//!
-//! The funnel is a convention reinforced by two structural aids:
-//! - [`ManifestContext::update_locked`] is the single place that calls the
-//!   low-level [`RegionManifestManager::update`] and packages the result as a
-//!   [`PendingManifestHook`]; all logical write paths route through it.
-//! - [`PendingManifestHook`] is `#[must_use]`, so a receipt that nobody fires
-//!   is a compile warning.
-//!
-//! Lock scope stays caller-owned: each call site acquires the write guard,
-//! performs whatever reads/validations/writes it needs, drops the guard, and
-//! *then* fires the receipt. The hook therefore never runs under the lock.
+//! Non-logical writes (GC, staging bookkeeping) call the manager's own methods
+//! directly and intentionally do not fire the hook.
 //!
 //! ## Future work
 //!
@@ -104,6 +82,8 @@
 //! [`on_sst_files_written`]: RegionHook::on_sst_files_written
 //! [`on_manifest_updated`]: RegionHook::on_manifest_updated
 //! [`RegionManifestManager::update`]: crate::manifest::manager::RegionManifestManager::update
+//! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
+//! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -117,22 +97,11 @@ use crate::manifest::action::RegionMetaActionList;
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::SstInfo;
 
-/// A deferred [`RegionHook::on_manifest_updated`] notification produced after a
-/// manifest write succeeds.
+/// A deferred [`RegionHook::on_manifest_updated`] notification produced by a
+/// logical manifest write via [`ManifestContext::update_locked`](crate::region::ManifestContext::update_locked).
 ///
-/// **Invariant:** [`fire`](Self::fire) **must** be called *after* the manifest
-/// write lock is released. The receipt is `#[must_use]`, so forgetting to fire
-/// it produces a compile warning.
-///
-/// This type exists to make manifest-update + hook-notification a single,
-/// hard-to-miss step: every logical manifest write goes through
-/// [`ManifestContext::update_locked`](crate::region::ManifestContext::update_locked),
-/// which returns a `PendingManifestHook`. The caller is then responsible for
-/// dropping the lock and firing the receipt. Callers that don't need to hold
-/// the lock themselves should use
-/// [`ManifestContext::update_manifest`](crate::region::ManifestContext::update_manifest)
-/// instead, which acquires the lock, updates, releases the lock, and fires the
-/// receipt in one go.
+/// Must be [`fire`](Self::fire)d **after** the manifest write lock is released
+/// (the hook may read the manifest). `#[must_use]` so a forgotten receipt warns.
 #[must_use = "the region hook must be fired after releasing the manifest write lock"]
 pub(crate) struct PendingManifestHook {
     region_id: RegionId,

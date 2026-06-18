@@ -560,8 +560,6 @@ impl MitoRegion {
                     append_mode: None,
                 });
                 let action_list = RegionMetaActionList::with_action(action);
-                // Route through `update_locked` so this write also produces a
-                // `PendingManifestHook` instead of bypassing the funnel.
                 match self
                     .manifest_ctx
                     .update_locked(&mut manager, action_list, false)
@@ -584,9 +582,8 @@ impl MitoRegion {
 
         drop(manager);
 
-        // Merge both payloads into a single hook invocation so consumers see
-        // the complete set of actions and the latest manifest version. Then fire
-        // it now that the manifest write lock has been released.
+        // Merge both payloads so consumers see the complete set of actions in
+        // one notification. The lock is released, so it's safe to fire.
         let merged = match (hook_payload, backfill_hook_payload) {
             (Some(staging), Some(backfill)) => Some(staging.merge(backfill)),
             (Some(payload), None) => Some(payload),
@@ -815,9 +812,8 @@ impl MitoRegion {
     /// Returns `Ok(Some(pending))` when staging manifests were merged, or
     /// `Ok(None)` when there were no staged manifests to merge.
     ///
-    /// **Important:** the returned [`PendingManifestHook`] must be
-    /// [`fire`](PendingManifestHook::fire)d **after** the caller drops the
-    /// manifest write lock, to avoid deadlocking if the hook reads the manifest.
+    /// **Important:** [`fire`](PendingManifestHook::fire) the receipt only after
+    /// dropping the lock — the hook may read the manifest and deadlock otherwise.
     pub(crate) async fn exit_staging_on_success(
         &self,
         manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
@@ -887,9 +883,6 @@ impl MitoRegion {
 
         // Submit merged actions using the manifest manager's update method.
         // Pass `false` so it saves to normal directory, not staging.
-        //
-        // `update_locked` is the single funnel that turns this write into a
-        // `PendingManifestHook`; the caller fires it after dropping the lock.
         let pending = self
             .manifest_ctx
             .update_locked(manager, merged_actions, false)
@@ -979,15 +972,9 @@ impl MitoRegion {
 /// Context to update the region manifest.
 #[derive(Debug)]
 pub(crate) struct ManifestContext {
-    /// Manager to maintain manifest for this region.
-    ///
-    /// Logical manifest writes must go through [`update_locked`](Self::update_locked)
-    /// (or one of the [`update_manifest`](Self::update_manifest) variants), which
-    /// return a [`PendingManifestHook`] so [`RegionHook::on_manifest_updated`] is
-    /// always fired. The caller owns the write-lock guard and fires the receipt
-    /// after dropping it, so the hook never runs under the lock.
-    ///
-    /// [`RegionHook::on_manifest_updated`]: crate::engine::region_hook::RegionHook::on_manifest_updated
+    /// Manager to maintain manifest for this region. Logical writes go through
+    /// [`update_locked`](Self::update_locked) (or an [`update_manifest`](Self::update_manifest)
+    /// variant) so they produce a [`PendingManifestHook`].
     pub(crate) manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
     /// The state of the region. The region checks the state before updating
     /// manifest.
@@ -1170,27 +1157,15 @@ impl ManifestContext {
         .await
     }
 
-    /// Performs a manifest write **while the caller already holds the manifest
-    /// write lock**, and returns a [`PendingManifestHook`] that the caller must
-    /// [`fire`](PendingManifestHook::fire) **after** dropping the lock.
+    /// Performs a manifest write under a caller-held write lock and returns a
+    /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
+    /// dropping the lock. This is the sole caller of
+    /// [`RegionManifestManager::update`], so it is the funnel through which all
+    /// logical manifest writes notify the hook.
     ///
-    /// This is the *only* method inside the crate that calls
-    /// [`RegionManifestManager::update`]. It is the funnel through which all
-    /// logical manifest writes produce a hook notification, so that a manifest
-    /// update can never silently skip `on_manifest_updated`.
-    ///
-    /// Callers that do **not** need to hold the lock for a multi-step sequence
-    /// should call [`ManifestContext::update_manifest`] (or one of its typed
-    /// variants) instead — those acquire the lock, delegate here, and fire the
-    /// receipt in one shot.
-    ///
-    /// # Validation is the caller's responsibility
-    ///
-    /// This method does **not** perform state checks or edit-applicability
-    /// validation: those are path-specific and must be done by the caller while
-    /// still holding the lock (see `update_manifest_with_state_check` for the
-    /// standard pattern, and `MitoRegion::exit_staging_on_success` for the
-    /// staging pattern).
+    /// Does not validate state or edit applicability — the caller must do so
+    /// while still holding the lock (see `update_manifest_with_state_check`
+    /// and `MitoRegion::exit_staging_on_success`).
     pub(crate) async fn update_locked(
         &self,
         manager: &mut RegionManifestManager,
@@ -1198,8 +1173,8 @@ impl ManifestContext {
         is_staging: bool,
     ) -> Result<PendingManifestHook> {
         let region_id = manager.manifest().metadata.region_id;
-        // Clone the action list up-front so the hook still sees what was written
-        // after `action_list` is moved into `manager.update`.
+        // Clone before `action_list` is moved into `update` so the hook still
+        // sees what was written.
         let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
         let version = manager
             .update(action_list, is_staging)
@@ -1279,10 +1254,7 @@ impl ManifestContext {
             }
         }
 
-        // If a region hook is registered, clone the action list before it is consumed
-        // so we can pass a reference to the hook after a successful update.
-        // `update_locked` is the single funnel that turns a manifest write into a
-        // `PendingManifestHook`; we fire it below after releasing the lock.
+        // `update_locked` returns a `PendingManifestHook` we fire after releasing the lock.
         let region_id = manifest.metadata.region_id;
         let pending = self
             .update_locked(&mut manager, action_list, is_staging)
