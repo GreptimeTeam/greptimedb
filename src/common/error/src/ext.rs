@@ -18,6 +18,7 @@ use std::io::ErrorKind;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use serde::{Deserialize, Deserializer, Serializer};
 use snafu::{FromString, Snafu};
 
 use crate::status_code::StatusCode;
@@ -50,6 +51,22 @@ impl RetryHint {
             RetryHint::Retryable => RETRY_HINT_RETRYABLE,
             RetryHint::NonRetryable => RETRY_HINT_NON_RETRYABLE,
         }
+    }
+
+    pub fn serialize_as_str<S>(hint: &Self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(hint.as_str())
+    }
+
+    pub fn deserialize_from_str<'de, D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let hint = String::deserialize(deserializer)?;
+        hint.parse::<RetryHint>()
+            .map_err(|_| serde::de::Error::custom(format!("unknown retry hint: {hint}")))
     }
 }
 

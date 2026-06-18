@@ -27,12 +27,22 @@ use store_api::storage::RegionId;
 use table::metadata::TableId;
 
 use crate::DatanodeId;
+use crate::instruction::InstructionError;
 use crate::peer::Peer;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Instruction error, code: {:?}, message: {}", code, message))]
+    Instruction {
+        code: StatusCode,
+        message: String,
+        retry_hint: RetryHint,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey {
         #[snafu(implicit)]
@@ -1116,6 +1126,8 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            Instruction { code, .. } => *code,
+
             IllegalServerState { .. }
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
@@ -1274,6 +1286,8 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            Instruction { retry_hint, .. } => *retry_hint,
+
             RetryLater { .. }
             | GetLatestCacheRetryExceeded { .. }
             | NoLeader { .. }
@@ -1309,6 +1323,17 @@ impl ErrorExt for Error {
             GetCache { source, .. } => source.retry_hint(),
             _ => RetryHint::NonRetryable,
         }
+    }
+}
+
+impl From<InstructionError> for Error {
+    fn from(error: InstructionError) -> Self {
+        InstructionSnafu {
+            code: error.code,
+            message: error.message,
+            retry_hint: error.retry_hint,
+        }
+        .build()
     }
 }
 
@@ -1407,6 +1432,17 @@ mod retry_hint_tests {
         let source = Arc::new(Error::retry_later(MockError::new(StatusCode::Internal)));
         let err = Error::GetCache { source };
 
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_instruction_error_forwards_status_code_and_retry_hint() {
+        let instruction_error =
+            InstructionError::new(StatusCode::RegionBusy, "region busy", RetryHint::Retryable);
+
+        let err = Error::from(instruction_error);
+
+        assert_eq!(err.status_code(), StatusCode::RegionBusy);
         assert_eq!(err.retry_hint(), RetryHint::Retryable);
     }
 

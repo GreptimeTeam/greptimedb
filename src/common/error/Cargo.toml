@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 http.workspace = true
+serde.workspace = true
 snafu.workspace = true
 strum.workspace = true
 tonic.workspace = true
