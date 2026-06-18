@@ -15,7 +15,7 @@
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::instruction::{
-    InstructionReply, UpgradeRegion, UpgradeRegionReply, UpgradeRegionsReply,
+    InstructionError, InstructionReply, UpgradeRegion, UpgradeRegionReply, UpgradeRegionsReply,
 };
 use common_telemetry::{debug, info, warn};
 use store_api::region_request::{RegionCatchupRequest, ReplayCheckpoint};
@@ -59,14 +59,14 @@ impl UpgradeRegionsHandler {
                                 region_id,
                                 ready: false,
                                 exists: false,
-                                error: Some(format!("{err:?}")),
+                                error: Some(InstructionError::from_error(&err)),
                             }
                         } else {
                             UpgradeRegionReply {
                                 region_id,
                                 ready: false,
                                 exists: true,
-                                error: Some(format!("{err:?}")),
+                                error: Some(InstructionError::from_error(&err)),
                             }
                         }
                     }
@@ -78,7 +78,7 @@ impl UpgradeRegionsHandler {
                     region_id: *region_id,
                     ready: false,
                     exists: true,
-                    error: Some(format!("{err:?}")),
+                    error: Some(InstructionError::from_error(&err)),
                 })
                 .collect::<Vec<_>>(),
         }
@@ -458,6 +458,6 @@ mod tests {
         assert!(!reply.ready);
         assert!(reply.exists);
         assert!(reply.error.is_some());
-        assert!(reply.error.as_ref().unwrap().contains("mock_error"));
+        assert!(reply.error.as_ref().unwrap().message.contains("mock_error"));
     }
 }

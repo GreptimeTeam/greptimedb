@@ -18,8 +18,8 @@ use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::instruction::{
     DowngradeRegionReply, DowngradeRegionsReply, EnterStagingRegionReply, EnterStagingRegionsReply,
-    FlushRegionReply, InstructionReply, SimpleReply, SyncRegionReply, SyncRegionsReply,
-    UpgradeRegionReply, UpgradeRegionsReply,
+    FlushRegionReply, InstructionError, InstructionReply, SimpleReply, SyncRegionReply,
+    SyncRegionsReply, UpgradeRegionReply, UpgradeRegionsReply,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
@@ -41,6 +41,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use crate::error::Result;
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
 use crate::service::mailbox::{Channel, MailboxRef};
+
+fn legacy_instruction_error(error: Option<String>) -> Option<InstructionError> {
+    error.map(InstructionError::legacy_internal_retryable)
+}
 
 pub type MockHeartbeatReceiver = Receiver<std::result::Result<HeartbeatResponse, tonic::Status>>;
 
@@ -100,7 +104,7 @@ pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> Ma
         payload: Some(Payload::Json(
             serde_json::to_string(&InstructionReply::OpenRegions(SimpleReply {
                 result,
-                error,
+                error: legacy_instruction_error(error),
             }))
             .unwrap(),
         )),
@@ -115,7 +119,10 @@ pub fn new_flush_region_reply(id: u64, result: bool, error: Option<String>) -> M
     let flush_reply = if result {
         FlushRegionReply::success_single(region_id)
     } else {
-        FlushRegionReply::error_single(region_id, error.unwrap_or("Test error".to_string()))
+        FlushRegionReply::error_single(
+            region_id,
+            InstructionError::legacy_internal_retryable(error.unwrap_or("Test error".to_string())),
+        )
     };
 
     MailboxMessage {
@@ -141,7 +148,10 @@ pub fn new_flush_region_reply_for_region(
     let flush_reply = if result {
         FlushRegionReply::success_single(region_id)
     } else {
-        FlushRegionReply::error_single(region_id, error.unwrap_or("Test error".to_string()))
+        FlushRegionReply::error_single(
+            region_id,
+            InstructionError::legacy_internal_retryable(error.unwrap_or("Test error".to_string())),
+        )
     };
 
     MailboxMessage {
@@ -196,7 +206,7 @@ pub fn new_downgrade_region_reply(
                     last_entry_id,
                     metadata_last_entry_id: None,
                     exists: exist,
-                    error,
+                    error: legacy_instruction_error(error),
                 }]),
             ))
             .unwrap(),
@@ -224,7 +234,7 @@ pub fn new_upgrade_region_reply(
                     region_id: RegionId::new(0, 0),
                     ready,
                     exists,
-                    error,
+                    error: legacy_instruction_error(error),
                 }),
             ))
             .unwrap(),
@@ -253,7 +263,7 @@ pub fn new_enter_staging_region_reply(
                     region_id,
                     ready,
                     exists,
-                    error,
+                    error: legacy_instruction_error(error),
                 }]),
             ))
             .unwrap(),
@@ -282,7 +292,7 @@ pub fn new_sync_region_reply(
                     region_id,
                     ready,
                     exists,
-                    error,
+                    error: legacy_instruction_error(error),
                 },
             ])))
             .unwrap(),

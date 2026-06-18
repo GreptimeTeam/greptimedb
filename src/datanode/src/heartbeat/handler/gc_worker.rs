@@ -118,9 +118,11 @@ impl InstructionHandler for GcRegionsHandler {
         if register_result.is_busy() {
             warn!("Another gc task is running for the region: {target_region_id}");
             return Some(InstructionReply::GcRegions(GcRegionsReply {
-                result: Err(format!(
-                    "Another gc task is running for the region: {target_region_id}"
-                )),
+                result: Err(
+                    common_meta::instruction::InstructionError::legacy_internal_retryable(format!(
+                        "Another gc task is running for the region: {target_region_id}"
+                    )),
+                ),
             }));
         }
         let mut watcher = register_result.into_watcher();
@@ -130,7 +132,7 @@ impl InstructionHandler for GcRegionsHandler {
                 result: Ok(report),
             })),
             Err(err) => Some(InstructionReply::GcRegions(GcRegionsReply {
-                result: Err(format!("{err:?}")),
+                result: Err(common_meta::instruction::InstructionError::from_error(&err)),
             })),
         }
     }

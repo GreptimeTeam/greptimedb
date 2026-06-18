@@ -34,7 +34,7 @@ use crate::wal_provider::{RegionWalOptions, region_wal_options_serde};
 use crate::{DatanodeId, FlownodeId};
 
 /// A structured error returned by instruction replies.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Debug, Serialize, PartialEq, Eq, Clone)]
 pub struct InstructionError {
     /// Numeric status code aligned with [`StatusCode`].
     #[serde(
@@ -52,6 +52,39 @@ pub struct InstructionError {
     pub retry_hint: RetryHint,
 }
 
+impl<'de> Deserialize<'de> for InstructionError {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Compat {
+            Structured {
+                #[serde(deserialize_with = "StatusCode::deserialize_from_u32")]
+                code: StatusCode,
+                message: String,
+                #[serde(deserialize_with = "RetryHint::deserialize_from_str")]
+                retry_hint: RetryHint,
+            },
+            Legacy(String),
+        }
+
+        match Compat::deserialize(deserializer)? {
+            Compat::Structured {
+                code,
+                message,
+                retry_hint,
+            } => Ok(Self {
+                code,
+                message,
+                retry_hint,
+            }),
+            Compat::Legacy(message) => Ok(Self::legacy_internal_retryable(message)),
+        }
+    }
+}
+
 impl InstructionError {
     pub fn new(code: StatusCode, message: impl Into<String>, retry_hint: RetryHint) -> Self {
         Self {
@@ -61,12 +94,28 @@ impl InstructionError {
         }
     }
 
+    pub fn legacy_internal_retryable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::Internal, message, RetryHint::Retryable)
+    }
+
     pub fn from_error<E: ErrorExt>(error: &E) -> Self {
         Self {
             code: error.status_code(),
             message: error.output_msg(),
             retry_hint: error.retry_hint(),
         }
+    }
+}
+
+impl Display for InstructionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "InstructionError(code={}, retry_hint={}, message={})",
+            self.code as u32,
+            self.retry_hint.as_str(),
+            self.message
+        )
     }
 }
 
@@ -148,7 +197,7 @@ pub struct DowngradeRegionReply {
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Return error if any during the operation.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 impl Display for DowngradeRegionReply {
@@ -164,7 +213,7 @@ impl Display for DowngradeRegionReply {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct SimpleReply {
     pub result: bool,
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 /// Reply for flush region operations with support for batch results.
@@ -173,7 +222,7 @@ pub struct FlushRegionReply {
     /// Results for each region that was attempted to be flushed.
     /// For single region flushes, this will contain one result.
     /// For batch flushes, this contains results for all attempted regions.
-    pub results: Vec<(RegionId, Result<(), String>)>,
+    pub results: Vec<(RegionId, InstructionResult<()>)>,
     /// Overall success: true if all regions were flushed successfully.
     pub overall_success: bool,
 }
@@ -188,7 +237,7 @@ impl FlushRegionReply {
     }
 
     /// Create a failed single region reply.
-    pub fn error_single(region_id: RegionId, error: String) -> Self {
+    pub fn error_single(region_id: RegionId, error: InstructionError) -> Self {
         Self {
             results: vec![(region_id, Err(error))],
             overall_success: false,
@@ -196,7 +245,7 @@ impl FlushRegionReply {
     }
 
     /// Create a batch reply from individual results.
-    pub fn from_results(results: Vec<(RegionId, Result<(), String>)>) -> Self {
+    pub fn from_results(results: Vec<(RegionId, InstructionResult<()>)>) -> Self {
         let overall_success = results.iter().all(|(_, result)| result.is_ok());
         Self {
             results,
@@ -224,7 +273,9 @@ impl FlushRegionReply {
                 .collect();
             SimpleReply {
                 result: false,
-                error: Some(errors.join("; ")),
+                error: Some(InstructionError::legacy_internal_retryable(
+                    errors.join("; "),
+                )),
             }
         }
     }
@@ -597,7 +648,7 @@ pub struct GetFileRefsReply {
     /// Whether the operation was successful.
     pub success: bool,
     /// Error message if any.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 impl Display for GetFileRefsReply {
@@ -615,7 +666,7 @@ impl Display for GetFileRefsReply {
 /// Reply for GC instruction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GcRegionsReply {
-    pub result: Result<GcReport, String>,
+    pub result: InstructionResult<GcReport>,
 }
 
 impl Display for GcRegionsReply {
@@ -911,7 +962,7 @@ pub struct UpgradeRegionReply {
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Returns error if any.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 impl Display for UpgradeRegionReply {
@@ -998,7 +1049,7 @@ pub struct EnterStagingRegionReply {
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Return error if any during the operation.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -1022,7 +1073,7 @@ pub struct SyncRegionReply {
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Return error message if any during the operation.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 /// Reply for a batch of region sync requests.
@@ -1044,7 +1095,7 @@ pub struct RemapManifestReply {
     /// A map from region IDs to their corresponding remapped manifest paths.
     pub manifest_paths: HashMap<RegionId, String>,
     /// Return error if any during the operation.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 impl Display for RemapManifestReply {
@@ -1076,7 +1127,7 @@ pub struct ApplyStagingManifestReply {
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Return error if any during the operation.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -1713,7 +1764,10 @@ mod tests {
         assert!(success_reply.results[0].1.is_ok());
 
         // Failed single region reply
-        let error_reply = FlushRegionReply::error_single(region_id, "test error".to_string());
+        let error_reply = FlushRegionReply::error_single(
+            region_id,
+            InstructionError::legacy_internal_retryable("test error"),
+        );
         assert!(!error_reply.overall_success);
         assert_eq!(error_reply.results.len(), 1);
         assert_eq!(error_reply.results[0].0, region_id);
@@ -1723,7 +1777,10 @@ mod tests {
         let region_id2 = RegionId::new(1024, 2);
         let results = vec![
             (region_id, Ok(())),
-            (region_id2, Err("flush failed".to_string())),
+            (
+                region_id2,
+                Err(InstructionError::legacy_internal_retryable("flush failed")),
+            ),
         ];
         let batch_reply = FlushRegionReply::from_results(results);
         assert!(!batch_reply.overall_success);
@@ -1733,7 +1790,7 @@ mod tests {
         let simple_reply = batch_reply.to_simple_reply();
         assert!(!simple_reply.result);
         assert!(simple_reply.error.is_some());
-        assert!(simple_reply.error.unwrap().contains("flush failed"));
+        assert!(simple_reply.error.unwrap().message.contains("flush failed"));
     }
 
     #[test]

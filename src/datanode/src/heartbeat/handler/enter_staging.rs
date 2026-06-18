@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_meta::instruction::{
-    EnterStagingRegion, EnterStagingRegionReply, EnterStagingRegionsReply, InstructionReply,
-    StagingPartitionDirective as InstructionStagingPartitionDirective,
+    EnterStagingRegion, EnterStagingRegionReply, EnterStagingRegionsReply, InstructionError,
+    InstructionReply, StagingPartitionDirective as InstructionStagingPartitionDirective,
 };
 use common_telemetry::{error, warn};
 use futures::future::join_all;
@@ -70,7 +70,9 @@ impl EnterStagingRegionsHandler {
                 region_id,
                 ready: false,
                 exists: true,
-                error: Some("Region is not writable".into()),
+                error: Some(InstructionError::legacy_internal_retryable(
+                    "Region is not writable",
+                )),
             };
         }
 
@@ -107,7 +109,7 @@ impl EnterStagingRegionsHandler {
                     region_id,
                     ready: false,
                     exists: true,
-                    error: Some(format!("{err:?}")),
+                    error: Some(InstructionError::from_error(&err)),
                 }
             }
         }

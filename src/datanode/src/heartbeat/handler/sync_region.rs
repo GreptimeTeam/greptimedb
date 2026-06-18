@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{InstructionReply, SyncRegion, SyncRegionReply, SyncRegionsReply};
+use common_meta::instruction::{
+    InstructionError, InstructionReply, SyncRegion, SyncRegionReply, SyncRegionsReply,
+};
 use common_telemetry::{debug, error, info, warn};
 use futures::future::join_all;
 
@@ -68,7 +70,9 @@ impl SyncRegionHandler {
                 region_id,
                 ready: false,
                 exists: true,
-                error: Some("Region is not writable".into()),
+                error: Some(InstructionError::legacy_internal_retryable(
+                    "Region is not writable",
+                )),
             };
         }
 
@@ -88,7 +92,7 @@ impl SyncRegionHandler {
                     region_id,
                     ready: false,
                     exists: true,
-                    error: Some(format!("{:?}", e)),
+                    error: Some(InstructionError::from_error(&e)),
                 }
             }
         }

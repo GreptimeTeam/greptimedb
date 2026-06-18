@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use common_meta::instruction::{
-    ApplyStagingManifest, ApplyStagingManifestReply, ApplyStagingManifestsReply, InstructionReply,
+    ApplyStagingManifest, ApplyStagingManifestReply, ApplyStagingManifestsReply, InstructionError,
+    InstructionReply,
 };
 use common_telemetry::{error, warn};
 use futures::future::join_all;
@@ -76,7 +77,9 @@ impl ApplyStagingManifestsHandler {
                 region_id,
                 exists: true,
                 ready: false,
-                error: Some("Region is not leader".into()),
+                error: Some(InstructionError::legacy_internal_retryable(
+                    "Region is not leader",
+                )),
             };
         }
 
@@ -104,7 +107,7 @@ impl ApplyStagingManifestsHandler {
                     region_id,
                     exists: true,
                     ready: false,
-                    error: Some(format!("{err:?}")),
+                    error: Some(InstructionError::from_error(&err)),
                 }
             }
         }
