@@ -95,6 +95,15 @@ pub fn send_mock_reply(
 
 /// Generates a [InstructionReply::OpenRegion] reply.
 pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> MailboxMessage {
+    new_open_region_reply_with_error(id, result, legacy_instruction_error(error))
+}
+
+/// Generates a [InstructionReply::OpenRegion] reply with a structured error.
+pub fn new_open_region_reply_with_error(
+    id: u64,
+    result: bool,
+    error: Option<InstructionError>,
+) -> MailboxMessage {
     MailboxMessage {
         id,
         subject: "mock".to_string(),
@@ -104,7 +113,7 @@ pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> Ma
         payload: Some(Payload::Json(
             serde_json::to_string(&InstructionReply::OpenRegions(SimpleReply {
                 result,
-                error: legacy_instruction_error(error),
+                error,
             }))
             .unwrap(),
         )),

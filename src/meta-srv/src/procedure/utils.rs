@@ -15,7 +15,9 @@
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::instruction::{FlushErrorStrategy, FlushRegions, Instruction, InstructionReply};
+use common_meta::instruction::{
+    FlushErrorStrategy, FlushRegions, Instruction, InstructionError, InstructionReply,
+};
 use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
@@ -33,11 +35,44 @@ pub(crate) enum ErrorStrategy {
     Retry,
 }
 
+#[derive(Debug, Default)]
+struct FlushRegionErrors {
+    retryable: Vec<String>,
+    non_retryable: Vec<String>,
+}
+
+impl FlushRegionErrors {
+    fn is_empty(&self) -> bool {
+        self.retryable.is_empty() && self.non_retryable.is_empty()
+    }
+
+    fn format_all(&self) -> String {
+        self.retryable
+            .iter()
+            .chain(self.non_retryable.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    fn format_non_retryable(&self) -> String {
+        self.non_retryable.join("; ")
+    }
+}
+
+pub(crate) fn instruction_error_result<T>(error: &InstructionError, reason: String) -> Result<T> {
+    if error.retry_hint.is_retryable() {
+        error::RetryLaterSnafu { reason }.fail()
+    } else {
+        error::UnexpectedSnafu { violated: reason }.fail()
+    }
+}
+
 fn handle_flush_region_reply(
     reply: &InstructionReply,
     region_ids: &[RegionId],
     msg: &MailboxMessage,
-) -> Result<(bool, Option<String>)> {
+) -> Result<(bool, Option<FlushRegionErrors>)> {
     let result = match reply {
         InstructionReply::FlushRegions(flush_reply) => {
             if flush_reply.results.len() != region_ids.len() {
@@ -54,20 +89,21 @@ fn handle_flush_region_reply(
 
             match flush_reply.overall_success {
                 true => (true, None),
-                false => (
-                    false,
-                    Some(
-                        flush_reply
-                            .results
-                            .iter()
-                            .filter_map(|(region_id, result)| match result {
-                                Ok(_) => None,
-                                Err(e) => Some(format!("{}: {:?}", region_id, e)),
-                            })
-                            .collect::<Vec<String>>()
-                            .join("; "),
-                    ),
-                ),
+                false => {
+                    let mut errors = FlushRegionErrors::default();
+                    for (region_id, result) in &flush_reply.results {
+                        let Err(error) = result else {
+                            continue;
+                        };
+                        let message = format!("{}: {:?}", region_id, error);
+                        if error.retry_hint.is_retryable() {
+                            errors.retryable.push(message);
+                        } else {
+                            errors.non_retryable.push(message);
+                        }
+                    }
+                    (false, (!errors.is_empty()).then_some(errors))
+                }
             }
         }
         _ => {
@@ -162,16 +198,29 @@ pub(crate) async fn flush_region(
                     ErrorStrategy::Ignore => {
                         warn!(
                             "Failed to flush regions {:?}, the datanode({}) error is ignored: {}",
-                            region_ids, datanode, error
+                            region_ids,
+                            datanode,
+                            error.format_all()
                         );
                     }
                     ErrorStrategy::Retry => {
+                        if !error.non_retryable.is_empty() {
+                            return error::UnexpectedSnafu {
+                                violated: format!(
+                                    "Failed to flush regions {:?}, the datanode({}) reported non-retryable errors: {}",
+                                    region_ids,
+                                    datanode,
+                                    error.format_non_retryable(),
+                                ),
+                            }
+                            .fail();
+                        }
                         return error::RetryLaterSnafu {
                             reason: format!(
                                 "Failed to flush regions {:?}, the datanode({}) error is retried: {}",
                                 region_ids,
                                 datanode,
-                                error,
+                                error.format_all(),
                             ),
                         }
                         .fail()?;

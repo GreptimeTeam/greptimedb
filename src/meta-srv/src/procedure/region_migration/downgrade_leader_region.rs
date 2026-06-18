@@ -35,6 +35,7 @@ use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::upgrade_candidate_region::UpgradeCandidateRegion;
 use crate::procedure::region_migration::{Context, State};
+use crate::procedure::utils::instruction_error_result;
 use crate::service::mailbox::Channel;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,14 +147,17 @@ impl DowngradeLeaderRegion {
             error,
         } = reply;
 
-        if error.is_some() {
-            return error::RetryLaterSnafu {
-                reason: format!(
+        if let Some(error) = error {
+            return instruction_error_result(
+                error,
+                format!(
                     "Failed to downgrade the region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
-                    region_id, leader, error, now.elapsed()
+                    region_id,
+                    leader,
+                    error,
+                    now.elapsed()
                 ),
-            }
-            .fail();
+            );
         }
 
         if !exists {

@@ -39,7 +39,7 @@ use crate::procedure::repartition::group::utils::{
 };
 use crate::procedure::repartition::group::{Context, GroupId, GroupPrepareResult, State};
 use crate::procedure::repartition::plan::TargetRegionDescriptor;
-use crate::procedure::utils::{self, ErrorStrategy};
+use crate::procedure::utils::{self, ErrorStrategy, instruction_error_result};
 use crate::service::mailbox::{Channel, MailboxRef};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -358,14 +358,17 @@ impl EnterStagingRegion {
             }
         );
 
-        if error.is_some() {
-            return error::RetryLaterSnafu {
-                reason: format!(
+        if let Some(error) = error {
+            return instruction_error_result(
+                error,
+                format!(
                     "Failed to enter staging region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
-                    region_id, peer, error, now.elapsed()
+                    region_id,
+                    peer,
+                    error,
+                    now.elapsed()
                 ),
-            }
-            .fail();
+            );
         }
 
         ensure!(

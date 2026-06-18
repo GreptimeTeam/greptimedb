@@ -37,7 +37,7 @@ use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
 use crate::procedure::repartition::group::{Context, State};
-use crate::procedure::utils::ErrorStrategy;
+use crate::procedure::utils::{ErrorStrategy, instruction_error_result};
 use crate::service::mailbox::{Channel, MailboxRef};
 
 const DEFAULT_SYNC_REGION_PARALLELISM: usize = 3;
@@ -318,16 +318,16 @@ impl SyncRegion {
         );
 
         if let Some(error) = error {
-            return error::RetryLaterSnafu {
-                reason: format!(
+            return instruction_error_result(
+                error,
+                format!(
                     "Failed to sync region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
                     region_id,
                     peer,
                     error,
                     now.elapsed()
                 ),
-            }
-            .fail();
+            );
         }
 
         ensure!(

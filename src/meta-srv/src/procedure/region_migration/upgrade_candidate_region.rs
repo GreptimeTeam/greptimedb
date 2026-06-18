@@ -35,6 +35,7 @@ use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::{Context, State};
+use crate::procedure::utils::instruction_error_result;
 use crate::service::mailbox::Channel;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -179,17 +180,17 @@ impl UpgradeCandidateRegion {
         now: &Instant,
     ) -> Result<()> {
         let candidate = &ctx.persistent_ctx.to_peer;
-        if error.is_some() {
-            return error::RetryLaterSnafu {
-                reason: format!(
+        if let Some(error) = error {
+            return instruction_error_result(
+                error,
+                format!(
                     "Failed to upgrade the region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
                     region_id,
                     candidate,
                     error,
                     now.elapsed()
                 ),
-            }
-            .fail();
+            );
         }
 
         ensure!(

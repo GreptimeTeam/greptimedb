@@ -1502,7 +1502,13 @@ mod tests {
                 "Should be throwing a retryable error",
                 Some(mock_datanode_reply(
                     to_peer_id,
-                    Arc::new(|id| Ok(new_open_region_reply(id, false, None))),
+                    Arc::new(|id| {
+                        Ok(new_open_region_reply(
+                            id,
+                            false,
+                            Some("mock retryable open region error".to_string()),
+                        ))
+                    }),
                 )),
                 Assertion::error(|error| assert!(error.is_retryable(), "err: {error:?}")),
             ),
