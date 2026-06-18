@@ -19,6 +19,7 @@ import ast
 import json
 import pathlib
 import re
+import statistics
 
 
 def read_number(result_dir, patterns):
@@ -106,6 +107,34 @@ def parse_query_rows(text):
     return rows
 
 
+def parse_load_data_stats(result_dir):
+    values = []
+    for path in sorted(result_dir.rglob("*.load_data")):
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("{"):
+                continue
+
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+
+            value = data.get("execution_time_ms")
+            if isinstance(value, (int, float)):
+                values.append(value / 1000)
+
+    if not values:
+        return {}
+
+    return {
+        "Max": max(values),
+        "Min": min(values),
+        "Avg": sum(values) / len(values),
+        "Median": statistics.median(values),
+    }
+
+
 def query_rows_to_map(query_rows):
     queries = {}
     for query_index, label, value in query_rows:
@@ -129,6 +158,33 @@ def format_delta(current, last):
 
     formatted = f"{percent:+.1f}"
     return formatted.rstrip("0").rstrip(".")
+
+
+def format_insert_table(stats, previous_stats):
+    rows = [("Indicator", "Value (s)", "Value Last (%)")]
+    for label, key in (
+        ("Max", "Max"),
+        ("Min", "Min"),
+        ("Avg", "Avg"),
+        ("Median", "Median"),
+    ):
+        rows.append(
+            (
+                label,
+                format_duration(stats.get(key)),
+                format_delta(stats.get(key), previous_stats.get(key)),
+            )
+        )
+
+    widths = [max(len(row[column]) for row in rows) for column in range(3)]
+    separator = tuple("-" * width for width in widths)
+    rows.insert(1, separator)
+
+    return "\n".join(
+        f"| {indicator:<{widths[0]}} | {value:>{widths[1]}} | "
+        f"{delta:>{widths[2]}} |"
+        for indicator, value, delta in rows
+    )
 
 
 def format_query_table(query_rows, previous_query_rows):
@@ -175,20 +231,24 @@ def build_payload(result_dir, previous_result_dir, result, run_url):
     count = read_number(result_dir, ["*.count"])
     dataset = read_number(result_dir, ["*.dataset"])
     query_rows = parse_query_rows(read_runtime_text(result_dir))
+    insert_stats = parse_load_data_stats(result_dir)
     previous_query_rows = []
+    previous_insert_stats = {}
     if previous_result_dir and previous_result_dir.exists():
         previous_query_rows = parse_query_rows(read_runtime_text(previous_result_dir))
+        previous_insert_stats = parse_load_data_stats(previous_result_dir)
 
     summary = (
         f"Dataset: {format_dataset(dataset)}\n"
         f"Data size: {format_gb(data_size)}\n"
         f"Count: {count or 'N/A'}"
     )
-    table = format_query_table(query_rows, previous_query_rows)
+    insert_table = format_insert_table(insert_stats, previous_insert_stats)
+    query_table = format_query_table(query_rows, previous_query_rows)
     text = (
         "Nightly JSONBench has completed successfully.\n"
         f"<{run_url}|Workflow run>\n"
-        f"```{summary}\n\n{table}```"
+        f"```{summary}\n\nInsert:\n{insert_table}\n\n{query_table}```"
     )
     return {"text": text}
 
