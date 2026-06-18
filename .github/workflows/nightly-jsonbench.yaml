@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       artifact-name: ${{ steps.find-artifact.outputs.artifact-name }}
+      artifact-arch: ${{ steps.find-artifact.outputs.artifact-arch }}
       run-id: ${{ steps.resolve-run-id.outputs.run-id }}
     steps:
       - name: Resolve nightly build run id
@@ -57,20 +58,31 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_ID: ${{ steps.resolve-run-id.outputs.run-id }}
+          TARGET_RUNNER: ${{ vars.LARGE_IOPS_RUNNER }}
         run: |
           set -euo pipefail
 
+          case "${TARGET_RUNNER}" in
+            *arm64*) artifact_arch="arm64" ;;
+            *amd64*) artifact_arch="amd64" ;;
+            *)
+              echo "Cannot resolve artifact arch from runner name: ${TARGET_RUNNER}."
+              exit 1
+              ;;
+          esac
+
           artifact_name=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" --paginate \
-            --jq '.artifacts[] | select(.name | test("^greptime-linux-arm64-nightly-[0-9]{8}-[0-9a-f]+$")) | .name' \
+            --jq ".artifacts[] | select(.name | test(\"^greptime-linux-${artifact_arch}-nightly-[0-9]{8}-[0-9a-f]+$\")) | .name" \
             | head -n 1)
 
           if [[ -z "${artifact_name}" ]]; then
-            echo "Cannot find linux arm64 nightly artifact in workflow run ${RUN_ID}."
+            echo "Cannot find linux ${artifact_arch} nightly artifact in workflow run ${RUN_ID}."
             exit 1
           fi
 
           echo "Download GreptimeDB artifact: ${artifact_name}"
           echo "artifact-name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+          echo "artifact-arch=${artifact_arch}" >> "${GITHUB_OUTPUT}"
 
   allocate-runner:
     name: Allocate runner
@@ -78,11 +90,11 @@ jobs:
     needs: [ resolve-artifact ]
     runs-on: ubuntu-latest
     outputs:
-      linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
+      linux-runner: ${{ steps.start-linux-runner.outputs.label }}
 
       # The following EC2 resource id will be used for resource releasing.
-      linux-arm64-ec2-runner-label: ${{ steps.start-linux-arm64-runner.outputs.label }}
-      linux-arm64-ec2-runner-instance-id: ${{ steps.start-linux-arm64-runner.outputs.ec2-instance-id }}
+      linux-ec2-runner-label: ${{ steps.start-linux-runner.outputs.label }}
+      linux-ec2-runner-instance-id: ${{ steps.start-linux-runner.outputs.ec2-instance-id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,16 +102,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Allocate Linux ARM64 runner
+      - name: Allocate Linux runner
         uses: ./.github/actions/start-runner
-        id: start-linux-arm64-runner
+        id: start-linux-runner
         with:
-          runner: ${{ vars.DEFAULT_ARM64_RUNNER }}
+          runner: ${{ vars.LARGE_IOPS_RUNNER }}
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          image-id: ${{ vars.EC2_RUNNER_LINUX_ARM64_IMAGE_ID }}
+          image-id: ${{ needs.resolve-artifact.outputs.artifact-arch == 'arm64' && vars.EC2_RUNNER_LINUX_ARM64_IMAGE_ID || vars.EC2_RUNNER_LINUX_AMD64_IMAGE_ID }}
           security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
           subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
 
@@ -107,10 +119,10 @@ jobs:
     name: Run JSONBench
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
     needs: [ resolve-artifact, allocate-runner ]
-    runs-on: ${{ needs.allocate-runner.outputs.linux-arm64-runner }}
+    runs-on: ${{ needs.allocate-runner.outputs.linux-runner }}
     timeout-minutes: 120
     env:
-      JSONBENCH_OUTPUT_PREFIX: _linux-arm64
+      JSONBENCH_OUTPUT_PREFIX: _linux-${{ needs.resolve-artifact.outputs.artifact-arch }}
     steps:
       - name: Download GreptimeDB nightly artifact
         uses: actions/download-artifact@v4
@@ -199,10 +211,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  stop-linux-arm64-runner:
-    name: Stop Linux ARM64 runner
+  stop-linux-runner:
+    name: Stop Linux runner
     # It always runs after JSONBench to make sure that the runner is released.
-    if: ${{ always() && needs.allocate-runner.outputs.linux-arm64-ec2-runner-instance-id != '' }}
+    if: ${{ always() && needs.allocate-runner.outputs.linux-ec2-runner-instance-id != '' }}
     runs-on: ubuntu-latest
     needs: [
       allocate-runner,
@@ -215,11 +227,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Stop Linux ARM64 runner
+      - name: Stop Linux runner
         uses: ./.github/actions/stop-runner
         with:
-          label: ${{ needs.allocate-runner.outputs.linux-arm64-ec2-runner-label }}
-          ec2-instance-id: ${{ needs.allocate-runner.outputs.linux-arm64-ec2-runner-instance-id }}
+          label: ${{ needs.allocate-runner.outputs.linux-ec2-runner-label }}
+          ec2-instance-id: ${{ needs.allocate-runner.outputs.linux-ec2-runner-instance-id }}
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
@@ -228,7 +240,7 @@ jobs:
   notification:
     name: Send JSONBench notification
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }}
-    needs: [ jsonbench, stop-linux-arm64-runner ]
+    needs: [ allocate-runner, jsonbench, stop-linux-runner ]
     runs-on: ubuntu-latest
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_JSON_CHANNEL }}
@@ -288,6 +300,7 @@ jobs:
         shell: bash
         env:
           JSONBENCH_RESULT: ${{ needs.jsonbench.result }}
+          TARGET_RUNNER: ${{ vars.LARGE_IOPS_RUNNER }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -297,6 +310,7 @@ jobs:
               --result-dir jsonbench-results \
               --previous-result-dir previous-jsonbench-results \
               --result "${JSONBENCH_RESULT}" \
+              --runner-name "${TARGET_RUNNER}" \
               --run-url "${RUN_URL}"
           )
           delimiter="jsonbench_payload_${RANDOM}_${RANDOM}"

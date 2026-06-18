@@ -223,9 +223,12 @@ def format_query_table(query_rows, previous_query_rows):
     )
 
 
-def build_payload(result_dir, previous_result_dir, result, run_url):
+def build_payload(result_dir, previous_result_dir, result, run_url, runner_name):
+    title = f"Runner: {runner_name or 'N/A'}\n"
     if result != "success":
-        return {"text": f"Nightly JSONBench failed, please check {run_url}."}
+        return {
+            "text": f"{title}Nightly JSONBench failed, please check {run_url}."
+        }
 
     data_size = read_number(result_dir, ["*.total_size", "*.data_size"])
     count = read_number(result_dir, ["*.count"])
@@ -246,7 +249,7 @@ def build_payload(result_dir, previous_result_dir, result, run_url):
     insert_table = format_insert_table(insert_stats, previous_insert_stats)
     query_table = format_query_table(query_rows, previous_query_rows)
     text = (
-        "Nightly JSONBench has completed successfully.\n"
+        f"{title}Nightly JSONBench has completed successfully.\n"
         f"<{run_url}|Workflow run>\n"
         f"```{summary}\n\nInsert:\n{insert_table}\n\n{query_table}```"
     )
@@ -259,6 +262,7 @@ def main():
     parser.add_argument("--previous-result-dir", type=pathlib.Path)
     parser.add_argument("--result", required=True)
     parser.add_argument("--run-url", required=True)
+    parser.add_argument("--runner-name")
     args = parser.parse_args()
 
     print(
@@ -268,6 +272,7 @@ def main():
                 args.previous_result_dir,
                 args.result,
                 args.run_url,
+                args.runner_name,
             )
         )
     )
