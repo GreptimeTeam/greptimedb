@@ -162,7 +162,7 @@ pub fn is_mysql_serialization_error(error: &sqlx::Error) -> bool {
                 .downcast_ref::<sqlx::mysql::MySqlDatabaseError>();
             matches!(
                 mysql_error.map(|error| error.number()),
-                Some(ER_LOCK_DEADLOCK)
+                Some(ER_LOCK_WAIT_TIMEOUT | ER_LOCK_DEADLOCK)
             ) || is_mysql_serialization_database_error(error.message())
         }
         _ => false,
