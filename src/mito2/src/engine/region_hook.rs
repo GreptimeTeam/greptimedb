@@ -62,10 +62,39 @@
 //! `on_sst_files_written` is invoked at the SST write site (flush task or compaction task),
 //! immediately after SST files are written but **before** the manifest is committed.
 //!
-//! `on_manifest_updated` is centralized in [`ManifestContext::update_manifest_with_state_check`],
-//! so it automatically covers all manifest write paths that go through `ManifestContext`.
-//! The sole exception is [`MitoRegion::exit_staging_on_success`], which returns the hook
-//! payload to the caller so the hook can be invoked after dropping the manifest write lock.
+//! `on_manifest_updated` is funneled through a single method,
+//! [`ManifestContext::update_locked`], which is the **only** place in the crate
+//! that calls the low-level [`RegionManifestManager::update`] and turns each
+//! successful write into a [`PendingManifestHook`]. Callers fire the receipt
+//! **after** releasing the manifest write lock (the hook must never run under
+//! the lock — it may read the manifest or send region requests that acquire it).
+//!
+//! There are two usage patterns, both producing/firing a [`PendingManifestHook`]:
+//! - [`ManifestContext::update_manifest`] (and its typed variants such as
+//!   `update_manifest_for_compaction`): acquire the lock, update, release the
+//!   lock, and fire the receipt in one go. Used by flush, compaction, alter,
+//!   truncate, region edit, copy region, index build, and enter-staging.
+//! - [`ManifestContext::update_locked`] / [`MitoRegion::exit_staging_on_success`]:
+//!   for multi-step sequences that must hold the lock across several operations.
+//!   They take a caller-owned `&mut` write guard and return the receipt so the
+//!   caller fires it after dropping the lock (see `set_role_state_gracefully`
+//!   and `handle_apply_staging_manifest_request`).
+//!
+//! Non-logical writes intentionally do **not** fire the hook: GC and staging
+//! bookkeeping call the manager's own methods directly (e.g. `clear_deleted_files`,
+//! `clear_staging_manifest_and_dir`, `unset_staging_manifest`) under a
+//! caller-owned lock guard, rather than going through `update_locked`.
+//!
+//! The funnel is a convention reinforced by two structural aids:
+//! - [`ManifestContext::update_locked`] is the single place that calls the
+//!   low-level [`RegionManifestManager::update`] and packages the result as a
+//!   [`PendingManifestHook`]; all logical write paths route through it.
+//! - [`PendingManifestHook`] is `#[must_use]`, so a receipt that nobody fires
+//!   is a compile warning.
+//!
+//! Lock scope stays caller-owned: each call site acquires the write guard,
+//! performs whatever reads/validations/writes it needs, drops the guard, and
+//! *then* fires the receipt. The hook therefore never runs under the lock.
 //!
 //! ## Future work
 //!
@@ -74,6 +103,7 @@
 //!
 //! [`on_sst_files_written`]: RegionHook::on_sst_files_written
 //! [`on_manifest_updated`]: RegionHook::on_manifest_updated
+//! [`RegionManifestManager::update`]: crate::manifest::manager::RegionManifestManager::update
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -86,6 +116,82 @@ use store_api::storage::RegionId;
 use crate::manifest::action::RegionMetaActionList;
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::SstInfo;
+
+/// A deferred [`RegionHook::on_manifest_updated`] notification produced after a
+/// manifest write succeeds.
+///
+/// **Invariant:** [`fire`](Self::fire) **must** be called *after* the manifest
+/// write lock is released. The receipt is `#[must_use]`, so forgetting to fire
+/// it produces a compile warning.
+///
+/// This type exists to make manifest-update + hook-notification a single,
+/// hard-to-miss step: every logical manifest write goes through
+/// [`ManifestContext::update_locked`](crate::region::ManifestContext::update_locked),
+/// which returns a `PendingManifestHook`. The caller is then responsible for
+/// dropping the lock and firing the receipt. Callers that don't need to hold
+/// the lock themselves should use
+/// [`ManifestContext::update_manifest`](crate::region::ManifestContext::update_manifest)
+/// instead, which acquires the lock, updates, releases the lock, and fires the
+/// receipt in one go.
+#[must_use = "the region hook must be fired after releasing the manifest write lock"]
+pub(crate) struct PendingManifestHook {
+    region_id: RegionId,
+    /// `None` when no hook is registered (fire becomes a no-op).
+    action_list: Option<RegionMetaActionList>,
+    version: ManifestVersion,
+    hook: Option<RegionHookRef>,
+}
+
+impl PendingManifestHook {
+    pub(crate) fn new(
+        region_id: RegionId,
+        action_list: Option<RegionMetaActionList>,
+        version: ManifestVersion,
+        hook: Option<RegionHookRef>,
+    ) -> Self {
+        Self {
+            region_id,
+            action_list,
+            version,
+            hook,
+        }
+    }
+
+    /// The manifest version produced by the write.
+    pub(crate) fn version(&self) -> ManifestVersion {
+        self.version
+    }
+
+    /// Fires the hook if one is registered. Safe to call unconditionally: it is
+    /// a no-op when no hook is registered.
+    pub(crate) async fn fire(self) {
+        if let (Some(hook), Some(action_list)) = (self.hook, self.action_list) {
+            hook.on_manifest_updated(self.region_id, &action_list, self.version)
+                .await;
+        }
+    }
+
+    /// Merges two pending notifications into one so consumers observe a single
+    /// `on_manifest_updated` call covering all actions. The combined action list
+    /// keeps `self`'s actions followed by `other`'s, and the *later* manifest
+    /// version wins. Used when a sequence of writes (e.g. staging-exit followed
+    /// by metadata backfill) should notify the hook exactly once.
+    pub(crate) fn merge(self, other: PendingManifestHook) -> PendingManifestHook {
+        PendingManifestHook {
+            region_id: self.region_id,
+            action_list: match (self.action_list, other.action_list) {
+                (Some(mut a), Some(b)) => {
+                    a.actions.extend(b.actions);
+                    Some(a)
+                }
+                (a, None) => a,
+                (None, b) => b,
+            },
+            version: self.version.max(other.version),
+            hook: self.hook.or(other.hook),
+        }
+    }
+}
 
 /// Information about a single SST data file written during flush or compaction.
 pub struct SstFileInfo<'a> {
