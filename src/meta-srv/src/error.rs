@@ -1302,11 +1302,81 @@ impl ErrorExt for Error {
             | Error::LeaderLeaseChanged { .. }
             | Error::PeerUnavailable { .. } => RetryHint::Retryable,
 
-            Error::AllocateRegions { source, .. } | Error::DeallocateRegions { source, .. }
-                if source.retry_hint().is_retryable() =>
-            {
-                RetryHint::Retryable
+            Error::ConnectEtcd { error, .. } | Error::EtcdFailed { error, .. } => {
+                common_meta::error::retry_hint_from_etcd_error(error)
             }
+
+            #[cfg(feature = "pg_kvbackend")]
+            Error::PostgresExecution { error, .. } => {
+                common_meta::error::retry_hint_from_postgres_error(error)
+            }
+            #[cfg(feature = "pg_kvbackend")]
+            Error::GetPostgresClient { error, .. } => {
+                common_meta::error::retry_hint_from_postgres_pool_error(error)
+            }
+            #[cfg(feature = "mysql_kvbackend")]
+            Error::MySqlExecution { error, .. }
+            | Error::CreateMySqlPool { error, .. }
+            | Error::AcquireMySqlClient { error, .. } => {
+                common_meta::error::retry_hint_from_sqlx_error(error)
+            }
+            #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+            Error::SqlExecutionTimeout { .. } => RetryHint::Retryable,
+
+            Error::ListActiveFrontends { source, .. }
+            | Error::ListActiveDatanodes { source, .. }
+            | Error::ListActiveFlownodes { source, .. }
+            | Error::InitDdlManager { source, .. }
+            | Error::InitReconciliationManager { source, .. }
+            | Error::InitMetadata { source, .. }
+            | Error::NextSequence { source, .. }
+            | Error::SetNextSequence { source, .. }
+            | Error::PeekSequence { source, .. }
+            | Error::SubmitDdlTask { source, .. }
+            | Error::SubmitReconcileProcedure { source, .. }
+            | Error::InvalidateTableCache { source, .. }
+            | Error::ConvertProtoData { source, .. }
+            | Error::TableMetadataManager { source, .. }
+            | Error::RuntimeSwitchManager { source, .. }
+            | Error::KvBackend { source, .. }
+            | Error::UnexpectedLogicalRouteTable { source, .. }
+            | Error::SaveClusterInfo { source, .. }
+            | Error::InvalidClusterInfoFormat { source, .. }
+            | Error::InvalidDatanodeStatFormat { source, .. }
+            | Error::InvalidNodeInfoFormat { source, .. }
+            | Error::FlowStateHandler { source, .. }
+            | Error::BuildWalProvider { source, .. }
+            | Error::BuildKafkaClient { error: source, .. }
+            | Error::UpdateTopicNameValue { source, .. }
+            | Error::BuildTlsOptions { source, .. }
+            | Error::AllocateRegions { source, .. }
+            | Error::DeallocateRegions { source, .. }
+            | Error::BuildCreateRequest { source, .. }
+            | Error::AllocateRegionRoutes { source, .. }
+            | Error::AllocateWalOptions { source, .. } => source.retry_hint(),
+
+            Error::Other { source, .. }
+            | Error::ListCatalogs { source, .. }
+            | Error::ListSchemas { source, .. }
+            | Error::ListTables { source, .. }
+            | Error::DowngradeLeader { source, .. } => source.retry_hint(),
+
+            Error::SubmitProcedure { source, .. }
+            | Error::WaitProcedure { source, .. }
+            | Error::QueryProcedure { source, .. }
+            | Error::StartProcedureManager { source, .. }
+            | Error::StopProcedureManager { source, .. }
+            | Error::RegisterProcedureLoader { source, .. }
+            | Error::RepartitionSubprocedureStateReceiver { source, .. } => source.retry_hint(),
+
+            Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
+                source.retry_hint()
+            }
+            Error::StartTelemetryTask { source, .. } => source.retry_hint(),
+            Error::CreateChannel { source, .. } => source.retry_hint(),
+            Error::RepartitionCreateSubtasks { source, .. } => source.retry_hint(),
+            Error::SerializePartitionExpr { source, .. }
+            | Error::DeserializePartitionExpr { source, .. } => source.retry_hint(),
 
             Error::DeleteRecords { error, .. }
             | Error::BuildPartitionClient { error, .. }
