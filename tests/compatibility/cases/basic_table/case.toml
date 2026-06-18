@@ -1,0 +1,8 @@
+name = "basic_table"
+reason = "Verify basic table create/insert/alter/select compatibility across versions."
+introduced_by = "PR1 MVP"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table"]
+owner = "team"

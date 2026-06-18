@@ -32,6 +32,7 @@ async fn main() {
 
     match cmd.subcmd {
         SubCommand::Bare(cmd) => cmd.run().await,
+        SubCommand::Compat(cmd) => cmd.run().await,
         SubCommand::Kube(cmd) => cmd.run().await,
     }
 }

@@ -21,6 +21,7 @@ hex = "0.4"
 local-ip-address = "0.6"
 mysql = { version = "26", default-features = false, features = ["minimal", "rustls-tls"] }
 num_cpus = "1.16"
+regex.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -32,3 +33,4 @@ tinytemplate = "1.2"
 tokio.workspace = true
 tokio-postgres = { workspace = true }
 tokio-stream.workspace = true
+toml.workspace = true

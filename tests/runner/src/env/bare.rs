@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use common_error::ext::ErrorExt;
 use sqlness::{Database, EnvController, QueryContext};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -42,6 +43,8 @@ const SERVER_MODE_METASRV_IDX: usize = 0;
 const SERVER_MODE_DATANODE_START_IDX: usize = 1;
 const SERVER_MODE_FRONTEND_IDX: usize = 4;
 const SERVER_MODE_FLOWNODE_IDX: usize = 5;
+// Number of datanodes in distributed mode
+const DISTRIBUTED_DATANODE_COUNT: usize = 3;
 
 #[derive(Clone)]
 pub enum WalConfig {
@@ -174,6 +177,17 @@ impl Env {
     }
 
     async fn start_distributed(&self, id: usize) -> GreptimeDB {
+        self.start_distributed_inner(id, true).await
+    }
+
+    /// Start a distributed GreptimeDB cluster without flownode (PR1-safe topology).
+    /// 1 metasrv + 3 datanodes + 1 frontend, no flownode.
+    async fn start_distributed_core(&self, id: usize) -> GreptimeDB {
+        self.start_distributed_inner(id, false).await
+    }
+
+    /// Internal: start a distributed cluster with optional flownode.
+    async fn start_distributed_inner(&self, id: usize, include_flownode: bool) -> GreptimeDB {
         if self.server_addrs.server_addr.is_some() {
             self.connect_db(&self.server_addrs, id).await
         } else {
@@ -202,33 +216,34 @@ impl Env {
             db_ctx.set_server_mode(meta_server_mode.clone(), SERVER_MODE_METASRV_IDX);
             let meta_server = self.start_server(meta_server_mode, &db_ctx, id, true).await;
 
-            let datanode_1_mode = ServerMode::random_datanode(metasrv_port, 0);
-            db_ctx.set_server_mode(datanode_1_mode.clone(), SERVER_MODE_DATANODE_START_IDX);
-            let datanode_1 = self.start_server(datanode_1_mode, &db_ctx, id, true).await;
-            let datanode_2_mode = ServerMode::random_datanode(metasrv_port, 1);
-            db_ctx.set_server_mode(datanode_2_mode.clone(), SERVER_MODE_DATANODE_START_IDX + 1);
-            let datanode_2 = self.start_server(datanode_2_mode, &db_ctx, id, true).await;
-            let datanode_3_mode = ServerMode::random_datanode(metasrv_port, 2);
-            db_ctx.set_server_mode(datanode_3_mode.clone(), SERVER_MODE_DATANODE_START_IDX + 2);
-            let datanode_3 = self.start_server(datanode_3_mode, &db_ctx, id, true).await;
+            let mut datanodes = Vec::with_capacity(DISTRIBUTED_DATANODE_COUNT);
+            for i in 0..DISTRIBUTED_DATANODE_COUNT {
+                let datanode_mode = ServerMode::random_datanode(metasrv_port, i as u32);
+                db_ctx.set_server_mode(datanode_mode.clone(), SERVER_MODE_DATANODE_START_IDX + i);
+                let datanode = self.start_server(datanode_mode, &db_ctx, id, true).await;
+                datanodes.push(datanode);
+            }
 
             let frontend_mode = ServerMode::random_frontend(metasrv_port);
             let server_addr = frontend_mode.server_addr().unwrap();
             db_ctx.set_server_mode(frontend_mode.clone(), SERVER_MODE_FRONTEND_IDX);
             let frontend = self.start_server(frontend_mode, &db_ctx, id, true).await;
 
-            let flownode_mode = ServerMode::random_flownode(metasrv_port, 0);
-            db_ctx.set_server_mode(flownode_mode.clone(), SERVER_MODE_FLOWNODE_IDX);
-            let flownode = self.start_server(flownode_mode, &db_ctx, id, true).await;
+            let flownode = if include_flownode {
+                let flownode_mode = ServerMode::random_flownode(metasrv_port, 0);
+                db_ctx.set_server_mode(flownode_mode.clone(), SERVER_MODE_FLOWNODE_IDX);
+                let fn_process = self.start_server(flownode_mode, &db_ctx, id, true).await;
+                Some(fn_process)
+            } else {
+                None
+            };
 
             let mut greptimedb = self.connect_db(&server_addr, id).await;
 
             greptimedb.metasrv_process = Some(meta_server).into();
-            greptimedb.server_processes = Some(Arc::new(Mutex::new(vec![
-                datanode_1, datanode_2, datanode_3,
-            ])));
+            greptimedb.server_processes = Some(Arc::new(Mutex::new(datanodes)));
             greptimedb.frontend_process = Some(frontend).into();
-            greptimedb.flownode_process = Some(flownode).into();
+            greptimedb.flownode_process = flownode.into();
             greptimedb.is_standalone = false;
             greptimedb.ctx = db_ctx;
 
@@ -360,7 +375,7 @@ impl Env {
     }
 
     /// stop and restart the server process
-    async fn restart_server(&self, db: &GreptimeDB, is_full_restart: bool) {
+    pub(crate) async fn restart_server(&self, db: &GreptimeDB, is_full_restart: bool) {
         let bins_dir = db.active_bins_dir.lock().unwrap().clone().expect(
             "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
         );
@@ -386,6 +401,7 @@ impl Env {
                 }
             }
 
+            // Stop flownode if present; silently skip if not (distributed_core topology)
             if let Some(mut flownode_process) =
                 db.flownode_process.lock().expect("poisoned lock").take()
             {
@@ -441,7 +457,7 @@ impl Env {
             }
 
             let mut processes = vec![];
-            for i in 0..3 {
+            for i in 0..DISTRIBUTED_DATANODE_COUNT {
                 let datanode_mode = db
                     .ctx
                     .get_server_mode(SERVER_MODE_DATANODE_START_IDX + i)
@@ -480,18 +496,22 @@ impl Env {
                     .replace(frontend);
             }
 
-            let flownode_mode = db
-                .ctx
-                .get_server_mode(SERVER_MODE_FLOWNODE_IDX)
-                .cloned()
-                .unwrap();
-            let flownode = self
-                .start_server_with_bins_dir(flownode_mode, &db.ctx, db.id, false, bins_dir.clone())
-                .await;
-            db.flownode_process
-                .lock()
-                .expect("lock poisoned")
-                .replace(flownode);
+            // Restart flownode only if its mode was configured (not for distributed_core)
+            if let Some(flownode_mode) = db.ctx.get_server_mode(SERVER_MODE_FLOWNODE_IDX).cloned() {
+                let flownode = self
+                    .start_server_with_bins_dir(
+                        flownode_mode,
+                        &db.ctx,
+                        db.id,
+                        false,
+                        bins_dir.clone(),
+                    )
+                    .await;
+                db.flownode_process
+                    .lock()
+                    .expect("lock poisoned")
+                    .replace(flownode);
+            }
 
             processes
         };
@@ -587,6 +607,60 @@ impl Env {
     pub(crate) fn extra_args(&self) -> &Vec<String> {
         &self.extra_args
     }
+
+    /// Set the binary directory for starting GreptimeDB processes.
+    /// Used by compat runner to switch between old and new versions.
+    pub(crate) fn set_bins_dir(&self, path: PathBuf) {
+        *self.bins_dir.lock().unwrap() = Some(path);
+    }
+
+    /// Start a distributed GreptimeDB cluster. Exposed for compat runner.
+    pub(crate) async fn compat_start_distributed(&self, id: usize) -> GreptimeDB {
+        self.start_distributed(id).await
+    }
+
+    /// Start a PR1-safe distributed cluster (no flownode).
+    pub(crate) async fn compat_start_distributed_core(&self, id: usize) -> GreptimeDB {
+        self.start_distributed_core(id).await
+    }
+
+    /// Full restart of all distributed processes preserving the same context and data.
+    /// After restart, waits for the frontend gRPC endpoint to become ready.
+    pub(crate) async fn compat_restart_all(&self, db: &GreptimeDB) {
+        self.restart_server(db, true).await;
+        self.wait_frontend_ready(db).await;
+    }
+
+    /// Full restart for distributed_core topology (no flownode).
+    pub(crate) async fn compat_restart_all_core(&self, db: &GreptimeDB) {
+        self.restart_server(db, true).await;
+        self.wait_frontend_ready(db).await;
+    }
+
+    /// Wait for frontend gRPC readiness after restart.
+    async fn wait_frontend_ready(&self, db: &GreptimeDB) {
+        let frontend_mode = db
+            .ctx
+            .get_server_mode(SERVER_MODE_FRONTEND_IDX)
+            .cloned()
+            .unwrap();
+        if let Some(addr) = frontend_mode.check_addrs().first() {
+            println!("Waiting for frontend gRPC readiness at {addr}...");
+            crate::util::retry_with_backoff(
+                || async {
+                    let mut client = db.client.lock().await;
+                    match client.grpc_query("SELECT 1").await {
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(format!("Frontend not ready: {e}")),
+                    }
+                },
+                10,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("Frontend failed to become ready: {e}"));
+        }
+    }
 }
 
 pub struct GreptimeDB {
@@ -627,6 +701,45 @@ impl GreptimeDB {
         match client.grpc_query(&query).await {
             Ok(rows) => Box::new(OutputFormatter::from(rows)),
             Err(e) => Box::new(ErrorFormatter::from(e)),
+        }
+    }
+
+    /// Execute a gRPC query and return `Result<String, String>` so errors can be
+    /// detected without parsing sqlness formatted output. Used by the compat runner.
+    pub(crate) async fn compat_query(
+        &self,
+        query: &str,
+        ctx: &QueryContext,
+    ) -> Result<String, String> {
+        let mut client = self.client.lock().await;
+
+        // Handle protocol switching
+        if let Some(protocol) = ctx.context.get(PROTOCOL_KEY) {
+            if protocol == MYSQL {
+                return match client.mysql_query(query).await {
+                    Ok(res) => Ok(crate::formatter::MysqlFormatter::from(res).to_string()),
+                    Err(e) => Err(e),
+                };
+            } else {
+                // postgres
+                return match client.postgres_query(query).await {
+                    Ok(rows) => Ok(crate::formatter::PostgresqlFormatter::from(rows).to_string()),
+                    Err(e) => Err(e),
+                };
+            }
+        }
+
+        // Default: gRPC
+        match client.grpc_query(query).await {
+            Ok(output) => Ok(OutputFormatter::from(output).to_string()),
+            Err(e) => {
+                let status_code = e.status_code();
+                let root_cause = e.output_msg();
+                Err(format!(
+                    "Error: {}({status_code}), {root_cause}",
+                    status_code as u32
+                ))
+            }
         }
     }
 }
@@ -720,6 +833,11 @@ impl GreptimeDB {
         {
             util::teardown_wal();
         }
+    }
+
+    /// Stop all processes managed by this GreptimeDB. Exposed for compat runner.
+    pub(crate) fn compat_stop(&mut self) {
+        self.stop();
     }
 }
 
