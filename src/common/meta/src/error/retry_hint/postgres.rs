@@ -81,6 +81,19 @@ pub fn retry_hint_from_postgres_pool_error(
     }
 }
 
+pub fn is_postgres_serialization_error(error: &tokio_postgres::Error) -> bool {
+    is_postgres_serialization_state(error.code())
+}
+
+fn is_postgres_serialization_state(state: Option<&tokio_postgres::error::SqlState>) -> bool {
+    use tokio_postgres::error::SqlState;
+
+    matches!(
+        state,
+        Some(&SqlState::T_R_SERIALIZATION_FAILURE | &SqlState::T_R_DEADLOCK_DETECTED)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use common_error::ext::RetryHint;
@@ -122,5 +135,19 @@ mod tests {
             retry_hint_from_postgres_sql_state(None),
             RetryHint::NonRetryable
         );
+    }
+
+    #[test]
+    fn test_postgres_serialization_state() {
+        assert!(is_postgres_serialization_state(Some(
+            &SqlState::T_R_SERIALIZATION_FAILURE
+        )));
+        assert!(is_postgres_serialization_state(Some(
+            &SqlState::T_R_DEADLOCK_DETECTED
+        )));
+        assert!(!is_postgres_serialization_state(Some(
+            &SqlState::UNDEFINED_TABLE
+        )));
+        assert!(!is_postgres_serialization_state(None));
     }
 }

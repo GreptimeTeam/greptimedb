@@ -133,23 +133,38 @@ fn retry_hint_from_mysql_database_error(number: Option<u16>, message: &str) -> R
         _ => {}
     }
 
-    if matches!(
-        message,
-        "Deadlock found when trying to get lock; try restarting transaction"
-            | "can't serialize access for this transaction"
-    ) {
+    if is_mysql_serialization_database_error(message) {
         RetryHint::Retryable
     } else {
         RetryHint::NonRetryable
     }
 }
 
-#[cfg(feature = "mysql_kvbackend")]
+fn is_mysql_serialization_database_error(message: &str) -> bool {
+    matches!(
+        message,
+        "Deadlock found when trying to get lock; try restarting transaction"
+            | "can't serialize access for this transaction"
+    )
+}
+
+pub fn is_mysql_serialization_error(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(error) => is_mysql_serialization_database_error(error.message()),
+        _ => false,
+    }
+}
+
 /// Converts a sqlx error into a conservative retry hint.
 pub fn retry_hint_from_sqlx_error(error: &sqlx::Error) -> RetryHint {
     match error {
         sqlx::Error::Io(error) => retry_hint_from_io_error(error),
-        sqlx::Error::Tls(_) | sqlx::Error::Protocol(_) => RetryHint::Retryable,
+        // SQLx exposes TLS errors as boxed errors and protocol errors as debug
+        // strings, so we cannot classify them reliably by structured details.
+        // TLS errors are often certificate/configuration failures, while
+        // protocol errors may indicate a driver bug or protocol mismatch.
+        // Keep them non-retryable to avoid retrying deterministic failures.
+        sqlx::Error::Tls(_) | sqlx::Error::Protocol(_) => RetryHint::NonRetryable,
         sqlx::Error::PoolTimedOut | sqlx::Error::WorkerCrashed => RetryHint::Retryable,
         sqlx::Error::Database(error) => {
             let mysql_error = error
@@ -262,5 +277,16 @@ mod tests {
             retry_hint_from_mysql_database_error(Some(9999), "unknown mysql error"),
             RetryHint::NonRetryable
         );
+    }
+
+    #[test]
+    fn test_mysql_serialization_database_error() {
+        assert!(is_mysql_serialization_database_error(
+            "Deadlock found when trying to get lock; try restarting transaction",
+        ));
+        assert!(is_mysql_serialization_database_error(
+            "can't serialize access for this transaction"
+        ));
+        assert!(!is_mysql_serialization_database_error("duplicate entry"));
     }
 }

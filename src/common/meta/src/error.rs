@@ -1342,23 +1342,12 @@ impl Error {
     pub fn is_serialization_error(&self) -> bool {
         match self {
             #[cfg(feature = "pg_kvbackend")]
-            Error::PostgresTransaction { error, .. } => {
-                error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
-            }
-            #[cfg(feature = "pg_kvbackend")]
-            Error::PostgresExecution { error, .. } => {
-                error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+            Error::PostgresExecution { error, .. } | Error::PostgresTransaction { error, .. } => {
+                retry_hint::is_postgres_serialization_error(error)
             }
             #[cfg(feature = "mysql_kvbackend")]
-            Error::MySqlExecution {
-                error: sqlx::Error::Database(database_error),
-                ..
-            } => {
-                matches!(
-                    database_error.message(),
-                    "Deadlock found when trying to get lock; try restarting transaction"
-                        | "can't serialize access for this transaction"
-                )
+            Error::MySqlExecution { error, .. } | Error::MySqlTransaction { error, .. } => {
+                retry_hint::is_mysql_serialization_error(error)
             }
             _ => false,
         }

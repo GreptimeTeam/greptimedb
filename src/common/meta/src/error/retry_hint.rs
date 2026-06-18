@@ -13,13 +13,16 @@
 // limitations under the License.
 
 mod etcd;
+#[cfg(feature = "mysql_kvbackend")]
 mod mysql;
-
 #[cfg(feature = "pg_kvbackend")]
 mod postgres;
 
 pub use etcd::retry_hint_from_etcd_error;
 #[cfg(feature = "mysql_kvbackend")]
-pub use mysql::retry_hint_from_sqlx_error;
+pub use mysql::{is_mysql_serialization_error, retry_hint_from_sqlx_error};
 #[cfg(feature = "pg_kvbackend")]
-pub use postgres::{retry_hint_from_postgres_error, retry_hint_from_postgres_pool_error};
+pub use postgres::{
+    is_postgres_serialization_error, retry_hint_from_postgres_error,
+    retry_hint_from_postgres_pool_error,
+};
