@@ -80,11 +80,11 @@ user which they prefer**):
 
 - **(a) Generate on `main` and filter** — lets `git cliff` produce correctly formatted bullets
   (titles, authors, categories):
-  1. Locate each picked PR's commit on `main` and order them:
+  1. Locate and order the picked PRs' commits on `main` chronologically:
      ```
-     git log --oneline <remote>/main --grep '#NN'   # per PR → its main commit SHA
-     git merge-base --is-ancestor <older> <newer> && echo "older is older"
+     git log --oneline <remote>/main --grep='#NN1' --grep='#NN2' --reverse
      ```
+     The first line is the oldest pick, and the last line is the newest pick.
   2. Run cliff over a `main` range covering all of them (base = parent of the oldest picked
      commit, tip = the newest), then keep only the picked `#NN` bullets:
      ```
