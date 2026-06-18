@@ -22,7 +22,7 @@ use snafu::ResultExt;
 use tempfile::tempdir;
 use url::Url;
 
-use super::command::ExportCreateCommand;
+use super::command::{ExportCreateCommand, ExportVerifyCommand};
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::manifest::ChunkStatus;
 use crate::data::import_v2::ImportV2Command;
@@ -436,6 +436,16 @@ async fn export_import_v2_data_roundtrip_e2e() -> Result<()> {
         &catalog,
         "--schemas",
         schema,
+        "--start-time",
+        "2025-01-01T00:00:00Z",
+        "--end-time",
+        "2025-01-01T02:00:00Z",
+        "--chunk-time-window",
+        "1h",
+        "--chunk-parallelism",
+        "2",
+        "--progress",
+        "never",
     ];
     if let Some(auth) = &auth_basic {
         export_args.push("--auth-basic");
@@ -450,10 +460,22 @@ async fn export_import_v2_data_roundtrip_e2e() -> Result<()> {
         .await
         .context(OtherSnafu)?;
 
+    let verify_cmd = ExportVerifyCommand::parse_from(["export-v2-verify", "--snapshot", &src_uri]);
+    verify_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)?;
+
     database_client
         .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
         .await?;
 
+    let import_state_dir = tempdir().context(FileIoSnafu)?;
+    let import_state_path = import_state_dir.path().join("import-state.json");
+    let import_state_path = import_state_path.to_string_lossy().into_owned();
     let mut import_args = vec![
         "import-v2",
         "--addr",
@@ -464,6 +486,12 @@ async fn export_import_v2_data_roundtrip_e2e() -> Result<()> {
         &catalog,
         "--schemas",
         schema,
+        "--task-parallelism",
+        "2",
+        "--state-path",
+        &import_state_path,
+        "--progress",
+        "never",
     ];
     if let Some(auth) = &auth_basic {
         import_args.push("--auth-basic");
