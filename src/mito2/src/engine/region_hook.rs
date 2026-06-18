@@ -146,6 +146,11 @@ impl PendingManifestHook {
     /// version wins. Used when a sequence of writes (e.g. staging-exit followed
     /// by metadata backfill) should notify the hook exactly once.
     pub(crate) fn merge(self, other: PendingManifestHook) -> PendingManifestHook {
+        debug_assert_eq!(
+            self.region_id, other.region_id,
+            "Cannot merge pending hooks of different regions: {:?} and {:?}",
+            self.region_id, other.region_id
+        );
         PendingManifestHook {
             region_id: self.region_id,
             action_list: match (self.action_list, other.action_list) {
