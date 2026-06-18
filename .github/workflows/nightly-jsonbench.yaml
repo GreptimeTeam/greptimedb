@@ -195,6 +195,7 @@ jobs:
             ./JSONBench/greptimedb/*.count
             ./JSONBench/greptimedb/*.results_runtime
             ./JSONBench/greptimedb/*.query_results
+            ./JSONBench/greptimedb/*.load_data
           if-no-files-found: ignore
           retention-days: 7
 
