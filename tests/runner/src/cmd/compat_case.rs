@@ -86,7 +86,7 @@ fn sanitize_namespace(name: &str) -> String {
     if sanitized
         .chars()
         .next()
-        .map_or(true, |c| !c.is_ascii_alphabetic())
+        .is_none_or(|c| !c.is_ascii_alphabetic())
     {
         format!("c_{sanitized}")
     } else {
@@ -182,11 +182,7 @@ pub fn validate_cases(cases: &[CompatCase]) -> Result<(), String> {
         }
 
         // Check duplicate namespace
-        let is_shared = case
-            .metadata
-            .isolation
-            .as_deref()
-            .map_or(false, |v| v == "shared");
+        let is_shared = case.metadata.isolation.as_deref() == Some("shared");
 
         if !is_shared && !namespaces.insert(&case.namespace) {
             return Err(format!(
@@ -232,13 +228,13 @@ pub fn validate_cases(cases: &[CompatCase]) -> Result<(), String> {
         }
 
         // Validate isolation value
-        if let Some(ref isolation) = case.metadata.isolation {
-            if isolation != "shared" {
-                return Err(format!(
-                    "Case '{}' has invalid isolation '{}': only \"shared\" is supported",
-                    case.metadata.name, isolation
-                ));
-            }
+        if let Some(ref isolation) = case.metadata.isolation
+            && isolation != "shared"
+        {
+            return Err(format!(
+                "Case '{}' has invalid isolation '{}': only \"shared\" is supported",
+                case.metadata.name, isolation
+            ));
         }
     }
 

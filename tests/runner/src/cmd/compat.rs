@@ -131,7 +131,7 @@ impl CompatCommand {
         }
 
         // ---- 3. Resolve case directory ----
-        let case_dir = self.case_dir.unwrap_or_else(|| default_compat_case_dir());
+        let case_dir = self.case_dir.unwrap_or_else(default_compat_case_dir);
 
         if !case_dir.is_dir() {
             panic!("Case directory not found: {}", case_dir.display());
@@ -272,7 +272,7 @@ impl CompatCommand {
             println!("Removing state in {:?}", sqlness_home);
             tokio::fs::remove_dir_all(sqlness_home)
                 .await
-                .unwrap_or_else(|e| eprintln!("Warning: failed to clean up temp dir: {e}"));
+                .unwrap_or_else(|e| println!("Warning: failed to clean up temp dir: {e}"));
         }
 
         // Disarm the etcd guard now that we've done normal cleanup.
@@ -283,7 +283,7 @@ impl CompatCommand {
         if failed.is_empty() {
             println!("\n\x1b[32mAll compat tests passed!\x1b[0m");
         } else {
-            eprintln!("\n\x1b[31mFailed cases: {}\x1b[0m", failed.join(", "));
+            println!("\n\x1b[31mFailed cases: {}\x1b[0m", failed.join(", "));
             // Explicitly drop the guard before exit so it doesn't double-cleanup.
             std::process::exit(1);
         }
