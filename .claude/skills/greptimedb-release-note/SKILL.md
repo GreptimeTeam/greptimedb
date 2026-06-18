@@ -64,13 +64,45 @@ Remove every changelog bullet whose `#NNNN` is in that combined set (a small Pyt
 the reliable way — match `pull/<n>)` on lines starting with `*`).
 
 ### Patch (`X.Y.Z`, Z>0, cherry-picks on the release branch)
-The previous patch tag is an ancestor of the release branch, so a plain range works:
+The previous patch tag is an ancestor of the release branch, so a plain range works **when the
+cherry-picks land as individual commits**:
 ```
 GITHUB_TOKEN=$(gh auth token) git cliff <prev-patch-tag>..<release-branch-tip> --tag vX.Y.Z -o ...
 ```
-No extra subtraction (the branch only contains the new cherry-picks). If the branch history is
-messy, instead identify the newly cherry-picked PRs since the previous patch and keep only
-those.
+No extra subtraction (the branch only contains the new cherry-picks).
+
+**Common case — squashed pick commit.** Patch branches are often a single squashed commit like
+`chore: pick fixes and bump version to vX.Y.Z (#NNNN)`, so the plain range above yields just
+that one bullet. First **find the picked PRs**: read the squash commit message
+(`git log -1 --format=%B <release-branch-tip>`) — each `* fix: ... (#NN)` line is a picked PR.
+Then pick one of two ways to build the changelog (a patch is usually only a few PRs — **ask the
+user which they prefer**):
+
+- **(a) Generate on `main` and filter** — lets `git cliff` produce correctly formatted bullets
+  (titles, authors, categories):
+  1. Locate each picked PR's commit on `main` and order them:
+     ```
+     git log --oneline <remote>/main --grep '#NN'   # per PR → its main commit SHA
+     git merge-base --is-ancestor <older> <newer> && echo "older is older"
+     ```
+  2. Run cliff over a `main` range covering all of them (base = parent of the oldest picked
+     commit, tip = the newest), then keep only the picked `#NN` bullets:
+     ```
+     GITHUB_TOKEN=$(gh auth token) git cliff <oldest-pick>~1..<newest-pick> --tag vX.Y.Z -o /tmp/raw.md
+     ```
+     The raw output includes unrelated PRs in the main range that were **not** picked — drop
+     them, then rebuild contributors (§4).
+- **(b) Hand-write the bullets** — a fine fallback for a small patch (and when the API/network is
+  flaky). For each picked PR fetch its title + author (`gh api repos/GreptimeTeam/greptimedb/pulls/<n>`)
+  and write the `* <title> by [@user] in [#NN](...)` lines plus the contributor list yourself.
+
+If the branch history is otherwise messy, the same "identify the picked PRs and keep only those"
+rule applies.
+
+> Flaky-network note for (a): `git cliff` fetches the repo's full commit history from the GitHub
+> API for author enrichment (paginates back thousands of commits, even for a tiny range). On a
+> flaky connection it can time out mid-pagination; it caches pages, so just **re-run until it
+> completes** — each retry resumes from the cache. If it keeps failing, fall back to (b).
 
 ## 4. Rebuild contributor sections after subtracting
 
@@ -113,14 +145,21 @@ The release note is also published as a blog post in **`GreptimeTeam/docs`**.
 - **Ask the user for their local `GreptimeTeam/docs` checkout path**; if they have none, offer
   to clone (`git clone git@github.com:GreptimeTeam/docs.git <path>`).
 - File: `blog/release-X-Y-Z.md` (version with dashes; see `blog/release-1-0-0.md`).
-- Content = the GitHub release body **minus the `# vX.Y.Z` H1** (start at `Release date:`),
-  **plus docs frontmatter**:
+- Content = docs frontmatter (below) followed by the GitHub release body, **keeping the
+  `# vX.Y.Z` H1 directly under the frontmatter**. The blog frontmatter has no `title:`, so
+  Docusaurus uses that H1 as the page title and sidebar label — omitting it makes the page
+  render as the filename (e.g. `release-1-1-0` instead of `v1.1.0`). Match the shape of
+  `blog/release-1-0-0.md`:
   ```
   ---
   keywords: [release, GreptimeDB, changelog, vX.Y.Z]
   description: GreptimeDB vX.Y.Z Changelog
   date: YYYY-MM-DD
   ---
+
+  # vX.Y.Z
+
+  Release date: ...
   ```
 - The docs working tree may have unrelated WIP — **don't disturb it**: use a `git worktree` off
   `origin/main`:
