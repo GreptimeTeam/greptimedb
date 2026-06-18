@@ -166,7 +166,7 @@ def format_insert_table(stats, previous_stats):
         ("Max", "Max"),
         ("Min", "Min"),
         ("Avg", "Avg"),
-        ("Medium", "Median"),
+        ("Median", "Median"),
     ):
         rows.append(
             (
