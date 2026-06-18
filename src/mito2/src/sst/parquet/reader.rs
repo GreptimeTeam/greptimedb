@@ -33,8 +33,8 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::DataType;
-use datatypes::schema::ext::ArrowSchemaExt;
 use futures::StreamExt;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
@@ -525,7 +525,12 @@ impl ParquetReaderBuilder {
 
         // Create ArrowReaderMetadata for async stream building.
         let mut arrow_reader_options = ArrowReaderOptions::new();
-        if !read_format.arrow_schema().has_json_extension_field() {
+        if !read_format
+            .arrow_schema()
+            .fields()
+            .iter()
+            .any(is_structured_json_field)
+        {
             // Read `__primary_key` as Binary when it's too large for dictionary
             // encoding; convert_batch wraps it back to a DictionaryArray.
             let schema_for_reader = if should_read_pk_as_binary(&parquet_meta) {

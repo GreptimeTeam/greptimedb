@@ -31,7 +31,7 @@ use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
-use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::extension::json::is_structured_json_field;
 use datatypes::types::json_type::JsonNativeType;
 use futures::StreamExt;
 use itertools::Itertools;
@@ -425,11 +425,24 @@ impl ScanRegion {
                 ReadColumns::from_deduped_column_ids(read_col_ids)
             }
         };
-        narrow_read_columns_by_json_type_hint(
-            &mut read_cols,
-            &self.request.json_type_hint,
-            &self.version.metadata,
-        );
+        // Only narrow read columns and pass JSON type hints for structured JSON (JSON2)
+        // columns. Legacy JSONB columns have JSON extension metadata but their physical
+        // Arrow type is Binary, not Struct, so they must not enter structured JSON paths.
+        let has_structured_json = self
+            .version
+            .metadata
+            .schema
+            .arrow_schema()
+            .fields()
+            .iter()
+            .any(is_structured_json_field);
+        if has_structured_json {
+            narrow_read_columns_by_json_type_hint(
+                &mut read_cols,
+                &self.request.json_type_hint,
+                &self.version.metadata,
+            );
+        }
         let read_col_ids = read_cols.column_ids();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
@@ -438,12 +451,7 @@ impl ScanRegion {
             .projection_indices()
             .map(|x| x.to_vec())
             .unwrap_or_else(|| (0..self.version.metadata.column_metadatas.len()).collect());
-        let json_type_hint = self
-            .version
-            .metadata
-            .schema
-            .arrow_schema()
-            .has_json_extension_field()
+        let json_type_hint = has_structured_json
             .then_some(&self.request.json_type_hint)
             .inspect(|json_type_hint| {
                 debug!(
