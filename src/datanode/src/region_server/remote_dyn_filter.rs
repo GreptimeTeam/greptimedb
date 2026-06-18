@@ -730,6 +730,7 @@ mod tests {
                         payload: vec![1],
                         generation: 1,
                         is_complete: false,
+                        typed_payload: None,
                     },
                 )),
             })
@@ -755,6 +756,7 @@ mod tests {
                         payload: Vec::new(),
                         generation: 1,
                         is_complete: false,
+                        typed_payload: None,
                     },
                 )),
             })

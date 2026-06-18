@@ -435,6 +435,7 @@ async fn fanout_update_for_query(
             payload: payload.clone(),
             generation,
             is_complete,
+            typed_payload: None,
         };
 
         match await_control_rpc_or_lifecycle_close(
