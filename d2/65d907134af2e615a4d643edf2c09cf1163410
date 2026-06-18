@@ -1,0 +1,26 @@
+src/common/meta/src/error/retry_hint/mysql.rs
+  s_ebc8bb056b0403::t_b37ea1b0aeb5b6 103
+  h_623774b620da8e 77-78,85-86
+  s_ebc8bb056b0403::t_92fa7b0f6f37d0 102,159-167,219-220
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "d265d907134af2e615a4d643edf2c09cf1163410",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_ebc8bb056b0403": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_126554944ffepRZnOGAXFznuvx",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
