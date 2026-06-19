@@ -1,0 +1,4 @@
+interface:
+  display_name: "GreptimeDB Release Notes"
+  short_description: "Generate GreptimeDB release notes"
+  default_prompt: "Use $greptimedb-release-note to generate the GreptimeDB changelog, curate highlights, and prepare the docs release-note PR."
