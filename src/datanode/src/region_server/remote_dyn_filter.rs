@@ -20,6 +20,7 @@ use api::region::RegionResponse;
 use api::v1::region::RemoteDynFilterRequest;
 use api::v1::region::remote_dyn_filter_request::Action;
 use common_base::Plugins;
+use common_query::request::DynFilterPayload;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::{debug, warn};
@@ -179,16 +180,36 @@ impl RegionServer {
             return error::MissingRequiredFieldSnafu { name: "filter_id" }.fail();
         }
 
-        if request.payload.is_empty() {
+        if request.payload.is_empty() && request.typed_payload.is_none() {
             return error::MissingRequiredFieldSnafu { name: "payload" }.fail();
         }
 
         let filter_id = RemoteDynFilterId::new(request.filter_id.clone());
+
+        // Prefer typed payload if available; fall back to legacy payload.
+        let dyn_filter_payload = if let Some(ref typed_proto) = request.typed_payload {
+            match DynFilterPayload::from_region_proto_payload(typed_proto.clone()) {
+                Ok(typed) => typed,
+                Err(error) if !request.payload.is_empty() => {
+                    warn!(error; "Failed to decode typed remote dyn filter payload, falling back to legacy Datafusion payload");
+                    DynFilterPayload::Datafusion(request.payload.clone())
+                }
+                Err(_error) => {
+                    warn!(_error; "Failed to decode typed remote dyn filter payload with no legacy fallback");
+                    let outcome = RemoteDynFilterUpdateOutcome::DecodeFailed;
+                    self.log_remote_dyn_filter_update_outcome(query_id, &filter_id, outcome);
+                    return Ok(RegionResponse::new(0));
+                }
+            }
+        } else {
+            DynFilterPayload::Datafusion(request.payload.clone())
+        };
+
         let outcome = apply_remote_dyn_filter_update(
             &self.inner.initial_remote_dyn_filter_registrations,
             query_id,
             &filter_id,
-            &request.payload,
+            &dyn_filter_payload,
             request.generation,
             request.is_complete,
         );
@@ -354,9 +375,15 @@ mod tests {
         InitialDynFilterReg, InitialDynFilterRegs, InitialDynFilterSnapshot,
     };
     use common_recordbatch::RecordBatches;
-    use datafusion::arrow::datatypes::Schema as ArrowSchema;
+    use datafusion::arrow::datatypes::{
+        DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
+    };
     use datafusion::physical_plan::PhysicalExpr;
-    use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
+    use datafusion::physical_plan::expressions::{
+        Column, DynamicFilterPhysicalExpr, lit as physical_lit,
+    };
+    use datafusion::physical_plan::joins::join_hash_map::{JoinHashMapType, JoinHashMapU32};
+    use datafusion::physical_plan::joins::{HashTableLookupExpr, Map, SeededRandomState};
     use datafusion_common::DFSchema;
     use datafusion_expr::EmptyRelation;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
@@ -730,6 +757,7 @@ mod tests {
                         payload: vec![1],
                         generation: 1,
                         is_complete: false,
+                        typed_payload: None,
                     },
                 )),
             })
@@ -755,6 +783,7 @@ mod tests {
                         payload: Vec::new(),
                         generation: 1,
                         is_complete: false,
+                        typed_payload: None,
                     },
                 )),
             })
@@ -773,8 +802,14 @@ mod tests {
         let query_id = test_remote_query_id();
         let filter_id = RemoteDynFilterId::new("filter-1");
 
-        let outcome =
-            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[1], 1, false);
+        let outcome = apply_remote_dyn_filter_update(
+            &regs_by_query,
+            &query_id,
+            &filter_id,
+            &test_datafusion_payload(vec![1]),
+            1,
+            false,
+        );
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::MissingRegistration);
 
         let outcome = unregister_remote_dyn_filter(&regs_by_query, &query_id, &filter_id);
@@ -799,34 +834,65 @@ mod tests {
         );
 
         // First update with generation 1: should be Buffered (no runtime installed yet)
-        let outcome =
-            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[1], 1, false);
+        let outcome = apply_remote_dyn_filter_update(
+            &regs_by_query,
+            &query_id,
+            &filter_id,
+            &test_datafusion_payload(vec![1]),
+            1,
+            false,
+        );
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Buffered);
 
         // Update with generation 0: should be Stale (older than pending generation 1)
-        let outcome =
-            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[2], 0, false);
+        let outcome = apply_remote_dyn_filter_update(
+            &regs_by_query,
+            &query_id,
+            &filter_id,
+            &test_datafusion_payload(vec![2]),
+            0,
+            false,
+        );
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Stale);
 
         // Update with generation 1 again: should be Idempotent (same generation)
-        let outcome =
-            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[3], 1, false);
+        let outcome = apply_remote_dyn_filter_update(
+            &regs_by_query,
+            &query_id,
+            &filter_id,
+            &test_datafusion_payload(vec![3]),
+            1,
+            false,
+        );
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Idempotent);
     }
 
-    fn datafusion_payload_bytes(expr: Arc<dyn PhysicalExpr>) -> Vec<u8> {
-        match DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
-            .unwrap()
-        {
-            DynFilterPayload::Datafusion(bytes) => bytes,
-            _ => unreachable!(
-                "DynFilterPayload::from_datafusion_expr only returns datafusion payloads"
-            ),
-        }
+    fn datafusion_payload_bytes(expr: Arc<dyn PhysicalExpr>) -> DynFilterPayload {
+        DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES).unwrap()
+    }
+
+    fn test_datafusion_payload(bytes: Vec<u8>) -> DynFilterPayload {
+        DynFilterPayload::Datafusion(bytes)
+    }
+
+    fn test_lookup_expr(child: Arc<dyn PhysicalExpr>, hashes: Vec<u64>) -> Arc<dyn PhysicalExpr> {
+        let mut hash_map = JoinHashMapU32::with_capacity(hashes.len().max(1));
+        hash_map.update_from_iter(Box::new(hashes.iter().enumerate()), 0);
+        let map = Arc::new(Map::HashMap(Box::new(hash_map)));
+        Arc::new(HashTableLookupExpr::new(
+            vec![child],
+            SeededRandomState::with_seeds(1, 2, 3, 4),
+            map,
+            "lookup".to_string(),
+        ))
     }
 
     fn empty_arrow_schema() -> ArrowSchema {
         ArrowSchema::empty()
+    }
+
+    fn one_column_arrow_schema() -> ArrowSchema {
+        ArrowSchema::new(vec![ArrowField::new("id", ArrowDataType::Int32, false)])
     }
 
     fn register_empty_remote_dyn_filter(
@@ -857,7 +923,7 @@ mod tests {
     fn initial_remote_dyn_filter_snapshot_initializes_runtime_filter() {
         let regs_by_query = RemoteDynFilterRegistry::new();
         let query_id = test_remote_query_id();
-        let payload = DynFilterPayload::Datafusion(datafusion_payload_bytes(physical_lit(false)));
+        let payload = datafusion_payload_bytes(physical_lit(false));
         let regs = InitialDynFilterRegs::new(vec![
             InitialDynFilterReg::new("filter-1", vec![])
                 .with_initial_snapshot(InitialDynFilterSnapshot::new(payload, 7, false)),
@@ -878,6 +944,45 @@ mod tests {
 
         assert_eq!(exprs.len(), 1);
         assert_eq!(format!("{}", exprs[0]), "DynamicFilter [ false ]");
+    }
+
+    #[test]
+    fn bloom_initial_remote_dyn_filter_snapshot_initializes_runtime_filter() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = test_remote_query_id();
+        let schema = one_column_arrow_schema();
+        let id_col = Arc::new(Column::new("id", 0)) as Arc<dyn PhysicalExpr>;
+        let children = vec![Arc::clone(&id_col)];
+        let lookup = test_lookup_expr(Arc::clone(&id_col), vec![10, 20, 30]);
+        let payload = DynFilterPayload::from_datafusion_expr_with_registered_children(
+            &lookup,
+            &children,
+            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            &schema,
+        )
+        .unwrap();
+        assert!(matches!(payload, DynFilterPayload::JoinHashBloom(_)));
+
+        let reg = InitialDynFilterReg::from_filter_id_and_children("filter-1", &children)
+            .unwrap()
+            .with_initial_snapshot(InitialDynFilterSnapshot::new(payload, 7, false));
+        let regs = InitialDynFilterRegs::new(vec![reg]);
+
+        register_initial_dyn_filter_regs(
+            &regs_by_query,
+            &query_id,
+            test_remote_dyn_filter_region_id(),
+            &regs,
+        );
+        let exprs =
+            remote_dyn_filter_exprs_for_initial_regs(&regs_by_query, &query_id, &regs, &schema);
+
+        assert_eq!(exprs.len(), 1);
+        assert!(
+            format!("{}", exprs[0]).contains("bloom_probe"),
+            "expected Bloom initial snapshot to initialize runtime filter, got {}",
+            exprs[0]
+        );
     }
 
     fn only_remote_dyn_filter(
@@ -905,7 +1010,8 @@ mod tests {
         let filter_id = RemoteDynFilterId::new("filter-1");
         register_empty_remote_dyn_filter(&regs_by_query, &query_id);
 
-        let oversized = vec![0; REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES + 1];
+        let oversized =
+            DynFilterPayload::Datafusion(vec![0; REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES + 1]);
         let outcome = apply_remote_dyn_filter_update(
             &regs_by_query,
             &query_id,
@@ -917,8 +1023,14 @@ mod tests {
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::PayloadTooLarge);
 
         // The rejected generation must not become the pending generation.
-        let outcome =
-            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[1], 0, false);
+        let outcome = apply_remote_dyn_filter_update(
+            &regs_by_query,
+            &query_id,
+            &filter_id,
+            &test_datafusion_payload(vec![1]),
+            0,
+            false,
+        );
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Buffered);
     }
 

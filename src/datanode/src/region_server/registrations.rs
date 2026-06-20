@@ -114,7 +114,7 @@ pub(super) enum RemoteDynFilterUpdateOutcome {
 
 #[derive(Debug, Clone)]
 struct PendingDynFilterUpdate {
-    payload: Vec<u8>,
+    payload: DynFilterPayload,
     generation: u64,
     is_complete: bool,
 }
@@ -122,14 +122,12 @@ struct PendingDynFilterUpdate {
 impl PendingDynFilterUpdate {
     fn from_initial_reg(reg: &InitialDynFilterReg) -> Option<Self> {
         let snapshot = reg.initial_snapshot.as_ref()?;
-        match &snapshot.payload {
-            DynFilterPayload::Datafusion(payload) => Some(Self {
-                payload: payload.clone(),
-                generation: snapshot.generation,
-                is_complete: snapshot.is_complete,
-            }),
-            _ => None,
-        }
+        // Accept any payload variant for pending; FE may send non-Datafusion in the future.
+        Some(Self {
+            payload: snapshot.payload.clone(),
+            generation: snapshot.generation,
+            is_complete: snapshot.is_complete,
+        })
     }
 }
 
@@ -143,14 +141,20 @@ struct RemoteDynFilterEpochState {
 struct RemoteDynFilterState {
     filter: Arc<DynamicFilterPhysicalExpr>,
     input_schema: SchemaRef,
+    registered_children: Vec<Arc<dyn PhysicalExpr>>,
     epoch: Mutex<RemoteDynFilterEpochState>,
 }
 
 impl RemoteDynFilterState {
-    fn new(filter: Arc<DynamicFilterPhysicalExpr>, input_schema: SchemaRef) -> Self {
+    fn new(
+        filter: Arc<DynamicFilterPhysicalExpr>,
+        input_schema: SchemaRef,
+        registered_children: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> Self {
         Self {
             filter,
             input_schema,
+            registered_children,
             epoch: Mutex::new(RemoteDynFilterEpochState {
                 generation: None,
                 is_complete: false,
@@ -164,7 +168,7 @@ impl RemoteDynFilterState {
 
     fn apply_update(
         &self,
-        payload: &[u8],
+        payload: &DynFilterPayload,
         generation: u64,
         is_complete: bool,
     ) -> RemoteDynFilterUpdateOutcome {
@@ -192,7 +196,12 @@ impl RemoteDynFilterState {
             return RemoteDynFilterUpdateOutcome::AlreadyComplete;
         }
 
-        let expr = match decode_update_payload(payload, self.input_schema.as_ref()) {
+        let expr = match payload.decode_expr_with_registered_children(
+            remote_dyn_filter_task_context(),
+            self.input_schema.as_ref(),
+            &self.registered_children,
+            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        ) {
             Ok(expr) => expr,
             Err(error) => {
                 warn!(error; "Failed to decode remote dynamic filter update payload");
@@ -277,7 +286,7 @@ impl RegisteredDynFilter {
 
     fn buffer_update(
         &mut self,
-        payload: &[u8],
+        payload: &DynFilterPayload,
         generation: u64,
         is_complete: bool,
     ) -> RemoteDynFilterUpdateOutcome {
@@ -301,7 +310,7 @@ impl RegisteredDynFilter {
         }
 
         self.pending_update = Some(PendingDynFilterUpdate {
-            payload: payload.to_vec(),
+            payload: payload.clone(),
             generation,
             is_complete,
         });
@@ -310,7 +319,7 @@ impl RegisteredDynFilter {
 
     fn apply_or_buffer_update(
         &mut self,
-        payload: &[u8],
+        payload: &DynFilterPayload,
         generation: u64,
         is_complete: bool,
     ) -> RemoteDynFilterUpdateOutcome {
@@ -352,6 +361,7 @@ impl RegisteredDynFilter {
                 let runtime = Arc::new(RemoteDynFilterState::new(
                     filter,
                     Arc::new(input_schema.clone()),
+                    children.clone(),
                 ));
                 if let Some(pending) = self.pending_update.take() {
                     let outcome = runtime.apply_update(
@@ -489,7 +499,7 @@ pub(super) fn apply_remote_dyn_filter_update(
     regs_by_query: &RemoteDynFilterRegistry,
     query_id: &QueryId,
     filter_id: &RemoteDynFilterId,
-    payload: &[u8],
+    payload: &DynFilterPayload,
     generation: u64,
     is_complete: bool,
 ) -> RemoteDynFilterUpdateOutcome {
@@ -498,7 +508,7 @@ pub(super) fn apply_remote_dyn_filter_update(
             "Ignored oversized remote dynamic filter update, query_id: {}, filter_id: {}, payload_size: {}, max_payload_size: {}",
             query_id,
             filter_id,
-            payload.len(),
+            payload.encoded_payload_bytes(),
             REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES
         );
         return RemoteDynFilterUpdateOutcome::PayloadTooLarge;
@@ -597,15 +607,8 @@ pub(super) fn remove_initial_dyn_filter_regs(
     }
 }
 
-fn decode_update_payload(
-    payload: &[u8],
-    input_schema: &Schema,
-) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
-    DynFilterPayload::Datafusion(payload.to_vec()).decode_datafusion_expr(
-        remote_dyn_filter_task_context(),
-        input_schema,
-        REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-    )
+fn validate_update_payload_size(payload: &DynFilterPayload) -> bool {
+    payload.encoded_payload_bytes() <= REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES
 }
 
 fn remote_dyn_filter_task_context() -> &'static TaskContext {
@@ -619,10 +622,6 @@ fn remote_dyn_filter_task_context() -> &'static TaskContext {
         let session_state = SessionStateBuilder::new().with_default_features().build();
         TaskContext::from(&session_state)
     })
-}
-
-fn validate_update_payload_size(payload: &[u8]) -> bool {
-    payload.len() <= REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES
 }
 
 #[cfg(test)]

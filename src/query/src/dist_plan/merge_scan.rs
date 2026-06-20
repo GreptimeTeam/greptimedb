@@ -832,8 +832,11 @@ impl ExecutionPlan for MergeScanExec {
                 updated_node: Some(new_self),
             });
         };
-        let remote_dyn_filter_pushdown =
-            capture_remote_dyn_filters_for_pushdown(remote_dyn_filter_producer_id, parent_filters);
+        let remote_dyn_filter_pushdown = capture_remote_dyn_filters_for_pushdown(
+            remote_dyn_filter_producer_id,
+            parent_filters,
+            self.arrow_schema.as_ref(),
+        );
         *self.captured_remote_dyn_filters.lock().unwrap() =
             remote_dyn_filter_pushdown.captured_dyn_filters;
         let new_self = Arc::new(self.clone());
@@ -1022,6 +1025,11 @@ mod tests {
         let captured = capture_remote_dyn_filters_for_pushdown(
             RemoteDynFilterProducerId::new(42),
             vec![dyn_filter],
+            &ArrowSchema::new(vec![arrow_schema::Field::new(
+                "host",
+                arrow_schema::DataType::Utf8,
+                true,
+            )]),
         );
         assert_eq!(captured.captured_dyn_filters.len(), 1);
 

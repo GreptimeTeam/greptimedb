@@ -18,11 +18,12 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
+use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_query::request::DynFilterPayload;
 use common_runtime::spawn_global;
 use common_telemetry::{debug, warn};
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
+use datafusion_physical_expr::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
 use session::query_id::QueryId;
 use store_api::storage::RegionId;
 use tokio::sync::{Notify, watch};
@@ -75,6 +76,7 @@ pub struct DynFilterEntry {
     subscribers: RwLock<HashSet<Subscriber>>,
     state: Mutex<DynFilterEntryState>,
     subscriber_changed: Notify,
+    input_schema: ArrowSchemaRef,
 }
 
 #[derive(Debug, Default)]
@@ -90,13 +92,18 @@ struct QueryDynFilterRegistryInner {
 }
 
 impl DynFilterEntry {
-    pub fn new(filter_id: FilterId, producer_filter: Arc<DynamicFilterPhysicalExpr>) -> Self {
+    pub fn new(
+        filter_id: FilterId,
+        producer_filter: Arc<DynamicFilterPhysicalExpr>,
+        input_schema: ArrowSchemaRef,
+    ) -> Self {
         Self {
             filter_id,
             producer_filter: Arc::downgrade(&producer_filter),
             subscribers: RwLock::new(HashSet::new()),
             state: Mutex::new(DynFilterEntryState::default()),
             subscriber_changed: Notify::new(),
+            input_schema,
         }
     }
 
@@ -125,6 +132,14 @@ impl DynFilterEntry {
 
         state.last_sent_generation = generation;
         true
+    }
+
+    fn should_send_generation(&self, generation: u64, is_complete: bool) -> bool {
+        if is_complete {
+            return true;
+        }
+
+        generation > self.state.lock().unwrap().last_sent_generation
     }
 
     fn try_mark_unregistered(&self) -> bool {
@@ -210,13 +225,18 @@ impl QueryDynFilterRegistry {
         &self,
         filter_id: FilterId,
         producer_filter: Arc<DynamicFilterPhysicalExpr>,
+        input_schema: ArrowSchemaRef,
     ) -> EntryRegistration {
         let mut inner = self.inner.write().unwrap();
         if let Some(existing) = inner.entries.get(&filter_id) {
             return EntryRegistration::Existing(existing.clone());
         }
 
-        let entry = Arc::new(DynFilterEntry::new(filter_id.clone(), producer_filter));
+        let entry = Arc::new(DynFilterEntry::new(
+            filter_id.clone(),
+            producer_filter,
+            input_schema,
+        ));
         inner.entries.insert(filter_id, entry.clone());
         EntryRegistration::Inserted(entry)
     }
@@ -363,6 +383,87 @@ async fn run_entry_fanout(
     unregister_entry_once_for_query(&region_query_handler, query_id, &entry).await;
 }
 
+/// Encoded payload pair for a fanout update.
+#[derive(Debug, Clone)]
+struct EncodedRemoteDynFilterUpdate {
+    typed_payload: DynFilterPayload,
+    legacy_payload: Vec<u8>,
+}
+
+fn encode_remote_dyn_filter_update(
+    current: &Arc<dyn PhysicalExpr>,
+    filter: &DynamicFilterPhysicalExpr,
+    entry: &DynFilterEntry,
+) -> Option<EncodedRemoteDynFilterUpdate> {
+    let children = filter.children().into_iter().cloned().collect::<Vec<_>>();
+
+    let typed = match DynFilterPayload::from_datafusion_expr_with_registered_children(
+        current,
+        &children,
+        REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES,
+        entry.input_schema.as_ref(),
+    ) {
+        Ok(typed) => typed,
+        Err(error) => {
+            warn!(error; "Failed to encode typed remote dynamic filter update");
+            return None;
+        }
+    };
+
+    let legacy_payload = match &typed {
+        DynFilterPayload::Datafusion(bytes) => bytes.clone(),
+        DynFilterPayload::JoinHashBloom(_) => {
+            // Build a safe legacy fallback for old DNs that cannot parse JoinHashBloom.
+            // Try Datafusion encoding first; if that fails, use lit(true).
+            match DynFilterPayload::from_datafusion_expr(
+                current,
+                REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES,
+            ) {
+                Ok(DynFilterPayload::Datafusion(bytes)) => bytes,
+                Ok(_) => {
+                    // Unsupported variant from from_datafusion_expr — fallback to lit(true).
+                    match DynFilterPayload::from_datafusion_expr(
+                        &(physical_lit(true) as Arc<dyn PhysicalExpr>),
+                        REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES,
+                    ) {
+                        Ok(DynFilterPayload::Datafusion(bytes)) => bytes,
+                        _ => {
+                            warn!("Failed to encode legacy fallback payload for old DNs");
+                            return None;
+                        }
+                    }
+                }
+                Err(_) => {
+                    match DynFilterPayload::from_datafusion_expr(
+                        &(physical_lit(true) as Arc<dyn PhysicalExpr>),
+                        REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES,
+                    ) {
+                        Ok(DynFilterPayload::Datafusion(bytes)) => bytes,
+                        _ => {
+                            warn!("Failed to encode legacy fallback payload for old DNs");
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            warn!("Unsupported DynFilterPayload variant for fanout");
+            return None;
+        }
+    };
+
+    if legacy_payload.is_empty() {
+        warn!("Failed to encode non-empty legacy remote dynamic filter payload for old DNs");
+        return None;
+    }
+
+    Some(EncodedRemoteDynFilterUpdate {
+        typed_payload: typed,
+        legacy_payload,
+    })
+}
+
 async fn fanout_snapshot_for_query(
     query_id: QueryId,
     region_query_handler: &RegionQueryHandlerRef,
@@ -376,9 +477,17 @@ async fn fanout_snapshot_for_query(
         return true;
     };
 
-    // The entry-global watermark advances before best-effort fanout. A timed-out
-    // subscriber may miss this generation; later/complete snapshots supersede it,
-    // and RDF only prunes.
+    if !entry.should_send_generation(generation, is_complete) {
+        return true;
+    }
+
+    let Some(encoded) = encode_remote_dyn_filter_update(&current, filter, entry) else {
+        // Failed to encode; do not advance watermark.
+        return true;
+    };
+
+    // Advance watermark after encoding succeeds, so a failed encode doesn't
+    // skip a generation.
     if !is_complete && !entry.mark_generation_sent(generation) {
         return true;
     }
@@ -387,28 +496,13 @@ async fn fanout_snapshot_for_query(
         let _ = entry.mark_generation_sent(generation);
     }
 
-    let payload = match DynFilterPayload::from_datafusion_expr(
-        &current,
-        REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES,
-    ) {
-        Ok(DynFilterPayload::Datafusion(payload)) => payload,
-        Ok(_) => {
-            warn!("Ignored unsupported remote dynamic filter producer payload");
-            return true;
-        }
-        Err(error) => {
-            warn!(error; "Failed to encode remote dynamic filter producer snapshot");
-            return true;
-        }
-    };
-
     fanout_update_for_query(
         query_id,
         region_query_handler,
         entry,
         generation,
         is_complete,
-        payload,
+        encoded,
         lifecycle_rx,
         control_rpc_timeout,
     )
@@ -422,7 +516,7 @@ async fn fanout_update_for_query(
     entry: &DynFilterEntry,
     generation: u64,
     is_complete: bool,
-    payload: Vec<u8>,
+    encoded: EncodedRemoteDynFilterUpdate,
     lifecycle_rx: &mut watch::Receiver<()>,
     control_rpc_timeout: Duration,
 ) -> bool {
@@ -432,9 +526,10 @@ async fn fanout_update_for_query(
     for subscriber in entry.subscribers() {
         let update = RemoteDynFilterUpdate {
             filter_id: filter_id.clone(),
-            payload: payload.clone(),
+            payload: encoded.legacy_payload.clone(),
             generation,
             is_complete,
+            typed_payload: Some(encoded.typed_payload.to_region_proto_payload()),
         };
 
         match await_control_rpc_or_lifecycle_close(
@@ -773,9 +868,13 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
+    use api::v1::region::{
+        RemoteDynFilterPayload, RemoteDynFilterUnregister, RemoteDynFilterUpdate,
+    };
     use async_trait::async_trait;
     use common_query::request::QueryRequest;
+    use datafusion::physical_plan::joins::join_hash_map::{JoinHashMapType, JoinHashMapU32};
+    use datafusion::physical_plan::joins::{HashTableLookupExpr, Map, SeededRandomState};
     use datafusion_physical_expr::expressions::{Column, lit};
     use session::ReadPreference;
     use uuid::Uuid;
@@ -793,6 +892,7 @@ mod tests {
         generation: u64,
         is_complete: bool,
         payload: Vec<u8>,
+        typed_payload: Option<RemoteDynFilterPayload>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -887,6 +987,7 @@ mod tests {
                 generation: update.generation,
                 is_complete: update.is_complete,
                 payload: update.payload,
+                typed_payload: update.typed_payload,
             });
             if should_block {
                 self.update_blocked.notify_one();
@@ -930,6 +1031,31 @@ mod tests {
             .collect();
 
         Arc::new(DynamicFilterPhysicalExpr::new(children, lit(true) as _))
+    }
+
+    fn test_lookup_expr(child: Arc<dyn PhysicalExpr>, hashes: Vec<u64>) -> Arc<dyn PhysicalExpr> {
+        let mut hash_map = JoinHashMapU32::with_capacity(hashes.len().max(1));
+        hash_map.update_from_iter(Box::new(hashes.iter().enumerate()), 0);
+        let map = Arc::new(Map::HashMap(Box::new(hash_map)));
+        Arc::new(HashTableLookupExpr::new(
+            vec![child],
+            SeededRandomState::with_seeds(1, 2, 3, 4),
+            map,
+            "lookup".to_string(),
+        ))
+    }
+
+    fn test_arrow_schema(names: &[&str]) -> ArrowSchemaRef {
+        Arc::new(arrow_schema::Schema::new(
+            names
+                .iter()
+                .map(|name| arrow_schema::Field::new(*name, arrow_schema::DataType::Utf8, true))
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    fn test_entry_schema() -> ArrowSchemaRef {
+        test_arrow_schema(&["host"])
     }
 
     #[test]
@@ -1131,7 +1257,11 @@ mod tests {
         let registry = QueryDynFilterRegistry::new(test_query_id(1));
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
+        let entry = match registry.register_remote_dyn_filter(
+            filter_id.clone(),
+            filter.clone(),
+            test_entry_schema(),
+        ) {
             EntryRegistration::Inserted(entry) => entry,
             other => panic!("unexpected registration result: {other:?}"),
         };
@@ -1157,7 +1287,11 @@ mod tests {
         let registry = Arc::new(QueryDynFilterRegistry::new(query_id));
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
+        let entry = match registry.register_remote_dyn_filter(
+            filter_id.clone(),
+            filter.clone(),
+            test_entry_schema(),
+        ) {
             EntryRegistration::Inserted(entry) => entry,
             other => panic!("unexpected registration result: {other:?}"),
         };
@@ -1181,6 +1315,7 @@ mod tests {
         assert_eq!(updates[0].generation, filter.snapshot_generation());
         assert!(!updates[0].is_complete);
         assert!(!updates[0].payload.is_empty());
+        assert!(updates[0].typed_payload.is_some());
 
         registry
             .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
@@ -1219,6 +1354,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fanout_sends_join_hash_bloom_typed_payload_with_legacy_fallback() {
+        let query_id = test_query_id(10);
+        let registry = Arc::new(QueryDynFilterRegistry::new(query_id));
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let entry = match registry.register_remote_dyn_filter(
+            filter_id.clone(),
+            filter.clone(),
+            test_entry_schema(),
+        ) {
+            EntryRegistration::Inserted(entry) => entry,
+            other => panic!("unexpected registration result: {other:?}"),
+        };
+        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        assert_eq!(
+            registry.register_subscriber(&filter_id, subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+
+        let host = Arc::new(Column::new("host", 0)) as Arc<dyn PhysicalExpr>;
+        filter
+            .update(test_lookup_expr(Arc::clone(&host), vec![10, 20, 30]))
+            .unwrap();
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        let handler_ref = handler.clone() as RegionQueryHandlerRef;
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].region_id, subscriber.region_id());
+        assert!(
+            !updates[0].payload.is_empty(),
+            "legacy fallback payload must stay non-empty for old DNs"
+        );
+
+        let typed = updates[0]
+            .typed_payload
+            .clone()
+            .expect("typed payload must be populated");
+        let typed = DynFilterPayload::from_region_proto_payload(typed).unwrap();
+        match typed {
+            DynFilterPayload::JoinHashBloom(bloom) => {
+                assert_eq!(bloom.join_key_child_indices, vec![0]);
+                assert_eq!(bloom.distinct_hash_count, 3);
+                assert_ne!(bloom.hash_compat_fingerprint, 0);
+            }
+            other => panic!("expected JoinHashBloom typed payload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn fanout_task_waits_for_dynamic_filter_notifications() {
         let query_id = test_query_id(3);
         let manager = Arc::new(DynFilterRegistryManager::default());
@@ -1226,9 +1415,11 @@ mod tests {
         let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let _ = lease
-            .registry()
-            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let _ = lease.registry().register_remote_dyn_filter(
+            filter_id.clone(),
+            filter.clone(),
+            test_entry_schema(),
+        );
         let subscriber = Subscriber::new(RegionId::new(1024, 7));
         assert_eq!(
             lease
@@ -1272,10 +1463,11 @@ mod tests {
         let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let entry = match lease
-            .registry()
-            .register_remote_dyn_filter(filter_id.clone(), filter.clone())
-        {
+        let entry = match lease.registry().register_remote_dyn_filter(
+            filter_id.clone(),
+            filter.clone(),
+            test_entry_schema(),
+        ) {
             EntryRegistration::Inserted(entry) => entry,
             other => panic!("unexpected registration result: {other:?}"),
         };
@@ -1314,9 +1506,11 @@ mod tests {
         let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let _ = lease
-            .registry()
-            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let _ = lease.registry().register_remote_dyn_filter(
+            filter_id.clone(),
+            filter.clone(),
+            test_entry_schema(),
+        );
         let first_subscriber = Subscriber::new(RegionId::new(1024, 7));
         assert_eq!(
             lease
@@ -1368,9 +1562,11 @@ mod tests {
         let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let _ = lease
-            .registry()
-            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let _ = lease.registry().register_remote_dyn_filter(
+            filter_id.clone(),
+            filter.clone(),
+            test_entry_schema(),
+        );
         let subscriber = Subscriber::new(RegionId::new(1024, 7));
         assert_eq!(
             lease
@@ -1401,9 +1597,11 @@ mod tests {
         let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let _ = lease
-            .registry()
-            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let _ = lease.registry().register_remote_dyn_filter(
+            filter_id.clone(),
+            filter.clone(),
+            test_entry_schema(),
+        );
         let subscriber = Subscriber::new(RegionId::new(1024, 7));
         assert_eq!(
             lease
@@ -1442,9 +1640,11 @@ mod tests {
         let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let _ = lease
-            .registry()
-            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let _ = lease.registry().register_remote_dyn_filter(
+            filter_id.clone(),
+            filter.clone(),
+            test_entry_schema(),
+        );
         let subscriber = Subscriber::new(RegionId::new(1024, 7));
         assert_eq!(
             lease
@@ -1473,7 +1673,11 @@ mod tests {
         let registry = QueryDynFilterRegistry::new(query_id);
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
+        let entry = match registry.register_remote_dyn_filter(
+            filter_id.clone(),
+            filter.clone(),
+            test_entry_schema(),
+        ) {
             EntryRegistration::Inserted(entry) => entry,
             other => panic!("unexpected registration result: {other:?}"),
         };
@@ -1563,7 +1767,7 @@ mod tests {
         let registry = QueryDynFilterRegistry::new(query_id);
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
-        let _ = registry.register_remote_dyn_filter(filter_id.clone(), filter);
+        let _ = registry.register_remote_dyn_filter(filter_id.clone(), filter, test_entry_schema());
         let subscriber = Subscriber::new(RegionId::new(1024, 7));
         assert_eq!(
             registry.register_subscriber(&filter_id, subscriber.clone()),
