@@ -268,4 +268,26 @@ mod tests {
         };
         assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
     }
+
+    #[test]
+    fn test_kafka_wal_config_debug_redacts_password() {
+        let config = MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                sasl: Some(KafkaClientSasl {
+                    config: KafkaClientSaslConfig::Plain {
+                        username: "greptime".to_string(),
+                        password: "kafka-secret".to_string(),
+                    },
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let debug = format!("{config:#?}");
+
+        assert!(debug.contains("greptime"));
+        assert!(debug.contains("<REDACTED>"));
+        assert!(!debug.contains("kafka-secret"));
+    }
 }
