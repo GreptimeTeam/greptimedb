@@ -1,0 +1,40 @@
+SELECT ts, host, json_to_string(j) AS j
+FROM legacy_jsonb
+ORDER BY ts, host;
+
++---------------------+------+----------------------------+
+| ts                  | host | j                          |
++---------------------+------+----------------------------+
+| 2024-01-01T00:00:01 | r1   | {"a":10,"msg":"old-jsonb"} |
+| 2024-01-01T00:00:02 | r2   | {"a":20,"msg":"old-jsonb"} |
+| 2024-01-01T00:00:03 | r3   | {"msg":"no-a"}             |
++---------------------+------+----------------------------+
+
+SELECT host, json_to_string(j) AS j
+FROM legacy_jsonb
+WHERE json_get(j, 'a') = 10
+ORDER BY host;
+
++------+----------------------------+
+| host | j                          |
++------+----------------------------+
+| r1   | {"a":10,"msg":"old-jsonb"} |
++------+----------------------------+
+
+SHOW CREATE TABLE legacy_jsonb;
+
++--------------+---------------------------------------------+
+| Table        | Create Table                                |
++--------------+---------------------------------------------+
+| legacy_jsonb | CREATE TABLE IF NOT EXISTS "legacy_jsonb" ( |
+|              |   "ts" TIMESTAMP(3) NOT NULL,               |
+|              |   "host" STRING NULL,                       |
+|              |   "j" JSON NULL,                            |
+|              |   TIME INDEX ("ts"),                        |
+|              |   PRIMARY KEY ("host")                      |
+|              | )                                           |
+|              |                                             |
+|              | ENGINE=mito                                 |
+|              |                                             |
++--------------+---------------------------------------------+
+

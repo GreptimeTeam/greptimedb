@@ -1,0 +1,8 @@
+name = "legacy_jsonb"
+reason = "Verify legacy JSONB data written by old binaries can be read by newer binaries without entering JSON2 structured alignment paths."
+introduced_by = "PR #8323"
+topologies = ["distributed"]
+from_range = ["<=v1.1.0"]
+to_range = [">=v1.1.1"]
+features = ["json", "table"]
+owner = "query"
