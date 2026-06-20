@@ -435,7 +435,6 @@ mod test {
                 payload: vec![1, 2, 3],
                 generation: 7,
                 is_complete: false,
-                typed_payload: None,
             },
         );
 
