@@ -82,7 +82,8 @@ EXPLAIN SELECT * FROM parent p LEFT JOIN child c ON p.k = c.k WHERE p.ts >= '202
 |               | ]]                                                                                              |
 |               |   MergeScan [is_placeholder=false, remote_input=[                                               |
 |               | SubqueryAlias: c                                                                                |
-|               |   TableScan: child                                                                              |
+|               |   Filter: child.k IS NOT NULL                                                                   |
+|               |     TableScan: child, partial_filters=[child.k IS NOT NULL]                                     |
 |               | ]]                                                                                              |
 | physical_plan | HashJoinExec: mode=Partitioned, join_type=Left, on=[(k@1, k@1)]                                 |
 |               |   RepartitionExec: partitioning=Hash([k@1], 20), input_partitions=20                            |
@@ -110,7 +111,8 @@ EXPLAIN SELECT * FROM (SELECT * FROM parent WHERE ts >= '2024-01-30 00:00:00') p
 |               | ]]                                                                                                |
 |               |   MergeScan [is_placeholder=false, remote_input=[                                                 |
 |               | SubqueryAlias: c                                                                                  |
-|               |   TableScan: child                                                                                |
+|               |   Filter: child.k IS NOT NULL                                                                     |
+|               |     TableScan: child, partial_filters=[child.k IS NOT NULL]                                       |
 |               | ]]                                                                                                |
 | physical_plan | HashJoinExec: mode=Partitioned, join_type=Left, on=[(k@1, k@1)]                                   |
 |               |   RepartitionExec: partitioning=Hash([k@1], 20), input_partitions=20                              |

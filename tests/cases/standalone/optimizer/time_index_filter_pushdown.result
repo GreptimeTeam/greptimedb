@@ -67,7 +67,7 @@ WHERE
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                   |
 |               | Projection: cpu.rack                                                                                                                              |
 |               |   Filter: cpu.usage_small = Int16(10) OR cpu.usage_small = Int16(20)                                                                              |
-|               |     TableScan: cpu                                                                                                                                |
+|               |     TableScan: cpu, partial_filters=[cpu.usage_small = Int16(10) OR cpu.usage_small = Int16(20)]                                                  |
 |               | ]]                                                                                                                                                |
 | physical_plan | CooperativeExec                                                                                                                                   |
 |               |   MergeScanExec: REDACTED
@@ -88,7 +88,7 @@ WHERE
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                   |
 |               | Projection: cpu.rack                                                                                                                              |
 |               |   Filter: cpu.usage_small >= Int16(10) AND cpu.usage_small <= Int16(20)                                                                           |
-|               |     TableScan: cpu                                                                                                                                |
+|               |     TableScan: cpu, partial_filters=[cpu.usage_small >= Int16(10), cpu.usage_small <= Int16(20)]                                                  |
 |               | ]]                                                                                                                                                |
 | physical_plan | CooperativeExec                                                                                                                                   |
 |               |   MergeScanExec: REDACTED

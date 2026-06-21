@@ -26,8 +26,31 @@ use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use datafusion_optimizer::common_subexpr_eliminate::CommonSubexprEliminate;
+use datafusion_optimizer::decorrelate_lateral_join::DecorrelateLateralJoin;
+use datafusion_optimizer::decorrelate_predicate_subquery::DecorrelatePredicateSubquery;
+use datafusion_optimizer::eliminate_cross_join::EliminateCrossJoin;
+use datafusion_optimizer::eliminate_duplicated_expr::EliminateDuplicatedExpr;
+use datafusion_optimizer::eliminate_filter::EliminateFilter;
+use datafusion_optimizer::eliminate_group_by_constant::EliminateGroupByConstant;
+use datafusion_optimizer::eliminate_join::EliminateJoin;
+use datafusion_optimizer::eliminate_limit::EliminateLimit;
+use datafusion_optimizer::eliminate_outer_join::EliminateOuterJoin;
+use datafusion_optimizer::extract_equijoin_predicate::ExtractEquijoinPredicate;
+use datafusion_optimizer::extract_leaf_expressions::{
+    ExtractLeafExpressions, PushDownLeafProjections,
+};
+use datafusion_optimizer::filter_null_join_keys::FilterNullJoinKeys;
+use datafusion_optimizer::optimize_unions::OptimizeUnions;
 use datafusion_optimizer::optimizer::Optimizer;
+use datafusion_optimizer::propagate_empty_relation::PropagateEmptyRelation;
 use datafusion_optimizer::push_down_filter::PushDownFilter;
+use datafusion_optimizer::push_down_limit::PushDownLimit;
+use datafusion_optimizer::replace_distinct_aggregate::ReplaceDistinctWithAggregate;
+use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
+use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
+use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
+use datafusion_optimizer::single_distinct_to_groupby::SingleDistinctToGroupBy;
 use promql::extension_plan::SeriesDivide;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
@@ -122,16 +145,15 @@ impl AnalyzerRule for DistPlannerAnalyzer {
             .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier::new(optimizer_context))?
             .data;
 
-        // Run a focused, intentionally global PushDownFilter pass so filters
-        // reach TableScan filters *before* MergeScan wraps and hides table
-        // scans from later optimizers. This ensures time-index / bloom /
-        // skipping pruning can see side-local JOIN predicates.
+        // Run DataFusion's logical optimizer before MergeScan wraps remote
+        // inputs. MergeScan intentionally hides its remote_input from later
+        // optimizer passes, so running only a prefix of the rules here can
+        // freeze half-optimized plans inside MergeScan.
         let optimizer_context = PatchOptimizerContext {
             inner: datafusion_optimizer::OptimizerContext::new(),
             config: config.clone(),
         };
-        let push_down_optimizer = Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())]);
-        let plan = push_down_optimizer.optimize(plan, &optimizer_context, |_, _| {})?;
+        let plan = pre_merge_scan_optimizer().optimize(plan, &optimizer_context, |_, _| {})?;
 
         let opt = config.extensions.get::<DistPlannerOptions>();
         let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
@@ -152,6 +174,34 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 
         Ok(result)
     }
+}
+
+fn pre_merge_scan_optimizer() -> Optimizer {
+    Optimizer::with_rules(vec![
+        Arc::new(RewriteSetComparison::new()),
+        Arc::new(OptimizeUnions::new()),
+        Arc::new(SimplifyExpressions::new()),
+        Arc::new(ReplaceDistinctWithAggregate::new()),
+        Arc::new(EliminateJoin::new()),
+        Arc::new(DecorrelatePredicateSubquery::new()),
+        Arc::new(ScalarSubqueryToJoin::new()),
+        Arc::new(DecorrelateLateralJoin::new()),
+        Arc::new(ExtractEquijoinPredicate::new()),
+        Arc::new(EliminateDuplicatedExpr::new()),
+        Arc::new(EliminateFilter::new()),
+        Arc::new(EliminateCrossJoin::new()),
+        Arc::new(EliminateLimit::new()),
+        Arc::new(PropagateEmptyRelation::new()),
+        Arc::new(FilterNullJoinKeys::default()),
+        Arc::new(EliminateOuterJoin::new()),
+        Arc::new(PushDownLimit::new()),
+        Arc::new(PushDownFilter::new()),
+        Arc::new(SingleDistinctToGroupBy::new()),
+        Arc::new(EliminateGroupByConstant::new()),
+        Arc::new(CommonSubexprEliminate::new()),
+        Arc::new(ExtractLeafExpressions::new()),
+        Arc::new(PushDownLeafProjections::new()),
+    ])
 }
 
 impl DistPlannerAnalyzer {

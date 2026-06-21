@@ -534,12 +534,10 @@ fn expand_sort_limit() {
 
     let expected = [
         "Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
-        "  Limit: skip=0, fetch=10",
-        "    MergeSort: t.pk1 ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Sort: t.pk1 ASC NULLS LAST",
-        "    TableScan: t",
+        "  MergeSort: t.pk1 ASC NULLS LAST, fetch=10",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Sort: t.pk1 ASC NULLS LAST, fetch=10",
+        "  TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -572,13 +570,11 @@ fn expand_sort_alias_limit() {
 
     let expected = [
         "Projection: something",
-        "  Limit: skip=0, fetch=10",
-        "    MergeSort: something ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Projection: t.pk1 AS something",
-        "    Sort: t.pk1 ASC NULLS LAST",
-        "      TableScan: t",
+        "  MergeSort: something ASC NULLS LAST, fetch=10",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.pk1 AS something",
+        "  Sort: t.pk1 ASC NULLS LAST, fetch=10",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -618,10 +614,9 @@ fn expand_sort_alias_conflict_limit() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
     let expected = [
-        "Limit: skip=0, fetch=10",
-        "  Projection: t.pk2 AS pk1",
-        "    Sort: t.pk1 ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.pk2 AS pk1",
+        "  Sort: t.pk1 ASC NULLS LAST, fetch=10",
+        "    MergeScan [is_placeholder=false, remote_input=[",
         "TableScan: t",
         "]]",
     ]
@@ -653,13 +648,11 @@ fn expand_sort_alias_conflict_but_not_really_limit() {
 
     let expected = [
         "Projection: t.pk1",
-        "  Limit: skip=0, fetch=10",
-        "    MergeSort: t.pk1 ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Projection: t.pk2 AS t.pk1, t.pk1",
-        "    Sort: t.pk1 ASC NULLS LAST",
-        "      TableScan: t",
+        "  MergeSort: t.pk1 ASC NULLS LAST, fetch=10",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.pk2 AS t.pk1, t.pk1",
+        "  Sort: t.pk1 ASC NULLS LAST, fetch=10",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -691,11 +684,10 @@ fn expand_limit_sort() {
 
     let expected = [
         "Sort: t.pk1 ASC NULLS LAST",
-        "  Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
-        "    Limit: skip=0, fetch=10",
+        "  Limit: skip=0, fetch=10",
+        "    Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
         "      MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  TableScan: t",
+        "TableScan: t, fetch=10",
         "]]",
     ]
     .join("\n");
@@ -727,12 +719,10 @@ fn expand_sort_limit_sort() {
     let expected = [
         "Sort: t.pk1 ASC NULLS LAST",
         "  Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
-        "    Limit: skip=0, fetch=10",
-        "      MergeSort: t.pk1 ASC NULLS LAST",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Sort: t.pk1 ASC NULLS LAST",
-        "    TableScan: t",
+        "    MergeSort: t.pk1 ASC NULLS LAST, fetch=10",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Sort: t.pk1 ASC NULLS LAST, fetch=10",
+        "  TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1151,13 +1141,11 @@ fn expand_proj_sort_limit_step_aggr() {
     let expected = [
         "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
         "  Projection: t.number",
-        "    Limit: skip=0, fetch=10",
-        "      MergeSort: t.pk1 ASC NULLS LAST",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Projection: t.number, t.pk1",
-        "    Sort: t.pk1 ASC NULLS LAST",
-        "      TableScan: t",
+        "    MergeSort: t.pk1 ASC NULLS LAST, fetch=10",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.number, t.pk1",
+        "  Sort: t.pk1 ASC NULLS LAST, fetch=10",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1195,10 +1183,9 @@ fn expand_proj_limit_step_aggr_sort() {
         "  Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
         "    Projection: t.number",
         "      Limit: skip=0, fetch=10",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Projection: t.number",
-        "    TableScan: t",
+        "        Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
+        "          MergeScan [is_placeholder=false, remote_input=[",
+        "TableScan: t, fetch=10",
         "]]",
     ]
     .join("\n");
@@ -1277,13 +1264,11 @@ fn expand_proj_sort_limit_part_col_aggr() {
     let expected = [
         "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
         "  Projection: t.number, t.pk1, t.pk2",
-        "    Limit: skip=0, fetch=10",
-        "      MergeSort: t.pk3 ASC NULLS LAST",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Projection: t.number, t.pk1, t.pk2, t.pk3",
-        "    Sort: t.pk3 ASC NULLS LAST",
-        "      TableScan: t",
+        "    MergeSort: t.pk3 ASC NULLS LAST, fetch=10",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.number, t.pk1, t.pk2, t.pk3",
+        "  Sort: t.pk3 ASC NULLS LAST, fetch=10",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1318,13 +1303,12 @@ fn expand_proj_part_col_aggr_limit_sort() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
         "Sort: t.pk2 ASC NULLS LAST",
-        "  Projection: t.pk1, t.pk2, min(t.number)",
-        "    Limit: skip=0, fetch=10",
+        "  Limit: skip=0, fetch=10",
+        "    Projection: t.pk1, t.pk2, min(t.number)",
         "      MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
-        "    Projection: t.number, t.pk1, t.pk2",
-        "      TableScan: t",
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "  Projection: t.number, t.pk1, t.pk2",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1360,14 +1344,12 @@ fn expand_proj_part_col_aggr_sort_limit() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
         "Projection: t.pk1, t.pk2, min(t.number)",
-        "  Limit: skip=0, fetch=10",
-        "    MergeSort: t.pk2 ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Sort: t.pk2 ASC NULLS LAST",
-        "    Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
-        "      Projection: t.number, t.pk1, t.pk2",
-        "        TableScan: t",
+        "  MergeSort: t.pk2 ASC NULLS LAST, fetch=10",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Sort: t.pk2 ASC NULLS LAST, fetch=10",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "    Projection: t.number, t.pk1, t.pk2",
+        "      TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1556,10 +1538,9 @@ fn expand_proj_limit_part_col_aggr_sort() {
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
         "    Projection: t.number, t.pk1, t.pk2",
         "      Limit: skip=0, fetch=10",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Projection: t.number, t.pk1, t.pk2",
-        "    TableScan: t",
+        "        Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
+        "          MergeScan [is_placeholder=false, remote_input=[",
+        "TableScan: t, fetch=10",
         "]]",
     ]
     .join("\n");
@@ -1598,10 +1579,9 @@ fn expand_proj_limit_sort_part_col_aggr() {
         "  Sort: t.pk2 ASC NULLS LAST",
         "    Projection: t.number, t.pk1, t.pk2",
         "      Limit: skip=0, fetch=10",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Limit: skip=0, fetch=10",
-        "  Projection: t.number, t.pk1, t.pk2",
-        "    TableScan: t",
+        "        Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
+        "          MergeScan [is_placeholder=false, remote_input=[",
+        "TableScan: t, fetch=10",
         "]]",
     ]
     .join("\n");
@@ -1695,12 +1675,11 @@ fn expand_part_col_aggr_limit() {
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
-        "Projection: t.pk1, t.pk2, min(t.number)",
-        "  Limit: skip=0, fetch=10",
-        "    MergeScan [is_placeholder=false, remote_input=[",
         "Limit: skip=0, fetch=10",
-        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
-        "    TableScan: t",
+        "  Projection: t.pk1, t.pk2, min(t.number)",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "  TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1786,7 +1765,7 @@ fn transform_distinct_order() {
         "Projection: t.number",
         "  MergeScan [is_placeholder=false, remote_input=[
 Sort: t.number ASC NULLS LAST
-  Distinct:
+  Aggregate: groupBy=[[t.number]], aggr=[[]]
     TableScan: t
 ]]",
     ]
@@ -1813,7 +1792,7 @@ fn transform_single_limit() {
     let expected = "Projection: t.number\
         \n  MergeScan [is_placeholder=false, remote_input=[
 Limit: skip=0, fetch=1
-  TableScan: t
+  TableScan: t, fetch=1
 ]]";
     assert_eq!(expected, result.to_string());
 }
@@ -1853,7 +1832,7 @@ fn transform_unalighed_join_with_alias() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
         "Limit: skip=0, fetch=1",
-        "  LeftSemi Join:  Filter: t.number = right.number",
+        "  LeftSemi Join: t.number = right.number",
         "    Projection: t.number",
         "      MergeScan [is_placeholder=false, remote_input=[",
         "TableScan: t",
@@ -2189,22 +2168,26 @@ fn test_join_side_local_filter_pushdown_into_merge_scan() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
     let plan_str = result.to_string();
-    // After PushDownFilter runs, the predicate should be inside the left
-    // MergeScan's remote_input and also in TableScan partial_filters. Inexact
-    // pushdown keeps a residual Filter while still populating scan filters.
+    // After PushDownFilter runs, the predicate `t1.pk1 = Utf8("v")` should appear
+    // inside the left MergeScan's remote_input. The pre-MergeScan optimizer may
+    // combine it with join-derived IS NOT NULL pushdowns, so it may not appear as
+    // a standalone Filter: line. It must still be in TableScan partial_filters
+    // and below the Inner Join.
     assert!(
-        plan_str.contains("Filter: t1.pk1 = Utf8(\"v\")"),
-        "Expected filter t1.pk1 = Utf8(\"v\") in plan, got:\n{plan_str}"
+        plan_str.contains("t1.pk1 = Utf8(\"v\")"),
+        "Expected predicate t1.pk1 = Utf8(\"v\") in plan, got:\n{plan_str}"
     );
     assert!(
-        plan_str.contains("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\")]"),
+        plan_str.contains(
+            "TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]"
+        ),
         "Expected t1 TableScan partial_filters to contain pushed predicate, got:\n{plan_str}"
     );
 
     // Find the position of the filter and verify it appears after a MergeScan
     // opening (i.e., inside remote_input) rather than before the Join.
     let filter_pos = plan_str
-        .find("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\")]")
+        .find("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]")
         .unwrap();
     let join_pos = plan_str.find("Inner Join").unwrap();
     // The filter should be after the Join (meaning it was pushed down below the Join,
