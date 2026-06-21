@@ -26,6 +26,8 @@ use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use datafusion_optimizer::optimizer::Optimizer;
+use datafusion_optimizer::push_down_filter::PushDownFilter;
 use promql::extension_plan::SeriesDivide;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
@@ -119,6 +121,17 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let plan = plan
             .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier::new(optimizer_context))?
             .data;
+
+        // Run a focused, intentionally global PushDownFilter pass so filters
+        // reach TableScan filters *before* MergeScan wraps and hides table
+        // scans from later optimizers. This ensures time-index / bloom /
+        // skipping pruning can see side-local JOIN predicates.
+        let optimizer_context = PatchOptimizerContext {
+            inner: datafusion_optimizer::OptimizerContext::new(),
+            config: config.clone(),
+        };
+        let push_down_optimizer = Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())]);
+        let plan = push_down_optimizer.optimize(plan, &optimizer_context, |_, _| {})?;
 
         let opt = config.extensions.get::<DistPlannerOptions>();
         let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);

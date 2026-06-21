@@ -1,0 +1,130 @@
+-- Regression test for issue #8338: static side-local predicates on a JOIN input
+-- should reach the remote region TableScan/SeqScan filters before MergeScan wrapping.
+CREATE TABLE parent (
+    ts TIMESTAMP(3) TIME INDEX,
+    k STRING,
+    v DOUBLE,
+    PRIMARY KEY (k)
+) ENGINE = mito;
+
+Affected Rows: 0
+
+CREATE TABLE child (
+    ts TIMESTAMP(3) TIME INDEX,
+    k STRING,
+    PRIMARY KEY (k)
+) ENGINE = mito;
+
+Affected Rows: 0
+
+INSERT INTO parent VALUES
+    ('2024-01-30 00:00:00', 'a', 1.0),
+    ('2024-01-30 01:00:00', 'b', 2.0);
+
+Affected Rows: 2
+
+INSERT INTO child VALUES
+    ('2024-01-30 00:00:00', 'a'),
+    ('2024-01-31 00:00:00', 'c');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('parent');
+
++-----------------------------+
+| ADMIN FLUSH_TABLE('parent') |
++-----------------------------+
+| 0                           |
++-----------------------------+
+
+ADMIN FLUSH_TABLE('child');
+
++----------------------------+
+| ADMIN FLUSH_TABLE('child') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+-- Query A: single table with time index filter (baseline).
+-- The scan should have partial_filters with the time condition.
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE peers=\[\d+\(\d+,\s+\d+\),\s\] peers=[REDACTED]
+EXPLAIN SELECT * FROM parent WHERE ts >= '2024-01-30 00:00:00';
+
++---------------+-------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                            |
++---------------+-------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                 |
+|               | Projection: parent.ts, parent.k, parent.v                                                       |
+|               |   Filter: parent.ts >= TimestampMillisecond(1706572800000, None)                                |
+|               |     TableScan: parent, partial_filters=[parent.ts >= TimestampMillisecond(1706572800000, None)] |
+|               | ]]                                                                                              |
+| physical_plan | CooperativeExec                                                                                 |
+|               |   MergeScanExec: peers=[REDACTED]                                               |
+|               |                                                                                                 |
++---------------+-------------------------------------------------------------------------------------------------+
+
+-- Query B: flat LEFT JOIN with WHERE on parent's ts.
+-- The filter should be pushed into the left MergeScan remote_input,
+-- appearing as partial_filters=[...] in the parent TableScan.
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE peers=\[\d+\(\d+,\s+\d+\),\s\] peers=[REDACTED]
+EXPLAIN SELECT * FROM parent p LEFT JOIN child c ON p.k = c.k WHERE p.ts >= '2024-01-30 00:00:00';
+
++---------------+-------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                            |
++---------------+-------------------------------------------------------------------------------------------------+
+| logical_plan  | Left Join: p.k = c.k                                                                            |
+|               |   MergeScan [is_placeholder=false, remote_input=[                                               |
+|               | SubqueryAlias: p                                                                                |
+|               |   Filter: parent.ts >= TimestampMillisecond(1706572800000, None)                                |
+|               |     TableScan: parent, partial_filters=[parent.ts >= TimestampMillisecond(1706572800000, None)] |
+|               | ]]                                                                                              |
+|               |   MergeScan [is_placeholder=false, remote_input=[                                               |
+|               | SubqueryAlias: c                                                                                |
+|               |   TableScan: child                                                                              |
+|               | ]]                                                                                              |
+| physical_plan | HashJoinExec: mode=Partitioned, join_type=Left, on=[(k@1, k@1)]                                 |
+|               |   RepartitionExec: partitioning=Hash([k@1], 20), input_partitions=20                            |
+|               |     MergeScanExec: peers=[REDACTED]                                             |
+|               |   RepartitionExec: partitioning=Hash([k@1], 20), input_partitions=20                            |
+|               |     MergeScanExec: peers=[REDACTED]                                             |
+|               |                                                                                                 |
++---------------+-------------------------------------------------------------------------------------------------+
+
+-- Query C: subquery pre-filter (workaround from #8338).
+-- Should produce the same logical scan filter shape as query B.
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE peers=\[\d+\(\d+,\s+\d+\),\s\] peers=[REDACTED]
+EXPLAIN SELECT * FROM (SELECT * FROM parent WHERE ts >= '2024-01-30 00:00:00') p LEFT JOIN child c ON p.k = c.k;
+
++---------------+---------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                              |
++---------------+---------------------------------------------------------------------------------------------------+
+| logical_plan  | Left Join: p.k = c.k                                                                              |
+|               |   MergeScan [is_placeholder=false, remote_input=[                                                 |
+|               | SubqueryAlias: p                                                                                  |
+|               |   Projection: parent.ts, parent.k, parent.v                                                       |
+|               |     Filter: parent.ts >= TimestampMillisecond(1706572800000, None)                                |
+|               |       TableScan: parent, partial_filters=[parent.ts >= TimestampMillisecond(1706572800000, None)] |
+|               | ]]                                                                                                |
+|               |   MergeScan [is_placeholder=false, remote_input=[                                                 |
+|               | SubqueryAlias: c                                                                                  |
+|               |   TableScan: child                                                                                |
+|               | ]]                                                                                                |
+| physical_plan | HashJoinExec: mode=Partitioned, join_type=Left, on=[(k@1, k@1)]                                   |
+|               |   RepartitionExec: partitioning=Hash([k@1], 20), input_partitions=20                              |
+|               |     MergeScanExec: peers=[REDACTED]                                               |
+|               |   RepartitionExec: partitioning=Hash([k@1], 20), input_partitions=20                              |
+|               |     MergeScanExec: peers=[REDACTED]                                               |
+|               |                                                                                                   |
++---------------+---------------------------------------------------------------------------------------------------+
+
+DROP TABLE parent;
+
+Affected Rows: 0
+
+DROP TABLE child;
+
+Affected Rows: 0
+

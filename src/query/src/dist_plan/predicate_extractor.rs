@@ -88,10 +88,23 @@ impl PredicateExtractor {
         Ok(partition_exprs)
     }
 
-    /// Collect all filter expressions from a logical plan
+    /// Collect all filter expressions from a logical plan.
+    ///
+    /// Besides explicit [`LogicalPlan::Filter`] nodes, this must also collect
+    /// predicates already stored in [`LogicalPlan::TableScan`] filters. The
+    /// distributed planner runs a focused DataFusion `PushDownFilter` pass
+    /// before `MergeScan` wrapping, so partition predicates may no longer exist
+    /// as standalone `Filter` nodes by the time region pruning calls this
+    /// extractor. If we ignored `TableScan.filters`, region pruning would miss
+    /// predicates that were successfully pushed down for scan-level pruning.
     fn collect_filter_expressions(plan: &LogicalPlan, expressions: &mut Vec<Expr>) -> DfResult<()> {
         if let LogicalPlan::Filter(filter) = plan {
             expressions.push(filter.predicate.clone());
+        }
+
+        // Collect filters that DataFusion's PushDownFilter stored in TableScan
+        if let LogicalPlan::TableScan(table_scan) = plan {
+            expressions.extend(table_scan.filters.iter().cloned());
         }
 
         // Recursively visit children
@@ -577,6 +590,32 @@ mod tests {
                 case.name, expected, partition_exprs
             );
         }
+    }
+
+    #[test]
+    fn test_extracts_table_scan_filters() {
+        let table_scan = create_test_table_scan();
+        let filter = col("user_id").gt_eq(lit(100i64));
+        let LogicalPlan::TableScan(scan) = table_scan else {
+            panic!("expected test table scan");
+        };
+        let plan = LogicalPlan::TableScan(datafusion_expr::logical_plan::TableScan {
+            filters: vec![filter],
+            ..scan
+        });
+
+        let partition_exprs =
+            PredicateExtractor::extract_partition_expressions(&plan, &["user_id".to_string()])
+                .unwrap();
+
+        assert_eq!(
+            partition_exprs,
+            vec![PartitionExpr::new(
+                Operand::Column("user_id".to_string()),
+                RestrictedOp::GtEq,
+                Operand::Value(Value::Int64(100)),
+            )]
+        );
     }
 
     #[test]
