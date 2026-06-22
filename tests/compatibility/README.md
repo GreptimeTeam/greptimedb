@@ -1,6 +1,6 @@
 # GreptimeDB Compatibility Test Framework
 
-Compatibility tests verify that a newer version of GreptimeDB can read data written by an older version (backward compatibility) and vice versa.
+Compatibility tests verify that a newer version of GreptimeDB can read data written by an older version.
 
 Tests are run via `cargo sqlness compat` and reuse the sqlness-runner infrastructure.
 
@@ -67,7 +67,6 @@ SQL statements executed on the **old** version cluster. These must succeed (any 
 Rules:
 - Statements are semicolon-terminated
 - `--` prefix for ordinary comments (allowed but **not preserved** in verify.result in PR1)
-- **No `-- SQLNESS` interceptors** — PR1 rejects all SQLNESS directives. Only default gRPC protocol is supported.
 
 ### `verify.sql` — Verify Phase (New Version)
 
@@ -91,10 +90,9 @@ If output differs from expected, the run fails and `verify.result` is updated wi
 
 ## PR1 Limitations
 
-- **No SQLNESS interceptors**: PR1 uses default gRPC protocol only. `-- SQLNESS PROTOCOL mysql/postgres` and any other SQLNESS directives are **rejected with an error**. Ordinary `--` comments are allowed.
 - **Comments not preserved in verify.result**: Ordinary `--` comment lines from verify.sql are not written to the verify.result output. Only statement text and query results appear.
 - **Full distributed topology**: The compat runner starts 1 metasrv + 3 datanodes + 1 frontend + 1 flownode.
-- **Not full sqlness parity**: The compat executor is intentionally minimal. Only SQL execution and output comparison are supported; advanced sqlness features (interceptors, structured snapshots, etc.) are future work.
+- **No comment-based compat config**: The compat runner does not interpret SQL comments as compatibility configuration. Ordinary `--` comment lines are ignored by the compat snapshot writer.
 
 ## Namespace Isolation
 

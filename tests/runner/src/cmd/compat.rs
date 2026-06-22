@@ -13,16 +13,14 @@
 // limitations under the License.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
 use sqlness::QueryContext;
-use sqlness::interceptor::Registry;
 
 use crate::cmd::bare::ServerAddr;
 use crate::cmd::compat_case::{self, CompatCase};
 use crate::env::bare::{Env, StoreConfig, WalConfig};
-use crate::{protocol_interceptor, util};
+use crate::util;
 
 const COMPAT_TOPOLOGY: &str = "distributed";
 
@@ -33,8 +31,6 @@ const COMPAT_TOPOLOGY: &str = "distributed";
 /// and runs verify SQLs comparing results against `verify.result` files.
 ///
 /// PR1 notes:
-/// - Only default gRPC protocol is supported; SQLNESS interceptors are rejected.
-/// - `-- SQLNESS PROTOCOL mysql/postgres` is not supported.
 /// - Ordinary `--` comments are allowed but not preserved in verify.result.
 /// - The runner starts the full distributed topology, including flownode.
 #[derive(Debug, Parser)]
@@ -144,9 +140,6 @@ impl CompatCommand {
         )
         .await;
 
-        // ---- 6. Build interceptor registry ----
-        let interceptor_registry = create_interceptor_registry();
-
         // ---- 6b. Create Env for bare distributed mode ----
         let store_config = StoreConfig {
             store_addrs: if self.setup_etcd {
@@ -185,7 +178,7 @@ impl CompatCommand {
 
         println!("Running setup phase...");
         for case in &cases {
-            run_compat_phase(&db, case, &interceptor_registry, CompatPhase::Setup)
+            run_compat_phase(&db, case, CompatPhase::Setup)
                 .await
                 .unwrap_or_else(|e| panic!("Setup failed for case '{}': {e}", case.metadata.name));
             println!("  Setup: {} - OK", case.metadata.name);
@@ -202,7 +195,7 @@ impl CompatCommand {
         println!("Running verify phase...");
         let mut failed = Vec::new();
         for case in &cases {
-            match run_compat_phase(&db, case, &interceptor_registry, CompatPhase::Verify).await {
+            match run_compat_phase(&db, case, CompatPhase::Verify).await {
                 Ok(()) => println!("  Verify: {} - PASSED", case.metadata.name),
                 Err(e) => {
                     println!("  Verify: {} - FAILED: {e}", case.metadata.name);
@@ -284,16 +277,6 @@ enum CompatPhase {
     Verify,
 }
 
-/// Create an interceptor registry with the protocol interceptor registered.
-fn create_interceptor_registry() -> Registry {
-    let mut interceptor_registry: Registry = Default::default();
-    interceptor_registry.register(
-        protocol_interceptor::PREFIX,
-        Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
-    );
-    interceptor_registry
-}
-
 /// Resolve binary directory: explicit path takes priority, then version (pulls if needed),
 /// otherwise default to current debug build.
 ///
@@ -358,7 +341,6 @@ fn default_compat_case_dir() -> PathBuf {
 async fn run_compat_phase(
     db: &crate::env::bare::GreptimeDB,
     case: &CompatCase,
-    registry: &Registry,
     phase: CompatPhase,
 ) -> Result<(), String> {
     let sql_file = match phase {
@@ -369,17 +351,17 @@ async fn run_compat_phase(
     let sql_content = std::fs::read_to_string(&sql_file)
         .map_err(|e| format!("Failed to read {}: {e}", sql_file.display()))?;
 
-    // Parse SQL into statements with interceptor contexts
-    let statements = parse_sql_file(&sql_content, registry)?;
+    let statements = parse_sql_file(&sql_content)?;
 
     // Run namespace prelude (only for setup and verify; not written into verify result)
     run_namespace_prelude(db, &case.namespace).await?;
 
     // Execute statements
     let mut verify_output = String::new();
+    let query_ctx = QueryContext::default();
 
-    for parsed in &statements {
-        let result = db.compat_query(&parsed.sql, &parsed.query_ctx).await?;
+    for sql in &statements {
+        let result = db.compat_query(sql, &query_ctx).await?;
 
         match phase {
             CompatPhase::Setup => {
@@ -388,7 +370,7 @@ async fn run_compat_phase(
             CompatPhase::Verify => {
                 // Verify: accumulate output in sqlness-style format
                 // Format: display query, blank line, result, blank line
-                verify_output.push_str(&parsed.sql);
+                verify_output.push_str(sql);
                 verify_output.push('\n');
                 verify_output.push('\n');
                 verify_output.push_str(&result);
@@ -449,47 +431,15 @@ async fn run_namespace_prelude(
     Ok(())
 }
 
-/// A parsed SQL statement with its interceptor-derived query context.
-struct ParsedStatement {
-    sql: String,
-    query_ctx: QueryContext,
-}
-
-/// Parse a SQL file into a list of (statement, QueryContext) pairs.
-///
-/// PR1 behavior:
-/// - Lines starting with `--` are ordinary comments (not preserved in verify.result)
-/// - `-- SQLNESS <INTERCEPTOR>` lines are REJECTED — PR1 does not support interceptors
-/// - Statements are terminated by `;`
-/// - Multi-line statements are supported
-fn parse_sql_file(content: &str, registry: &Registry) -> Result<Vec<ParsedStatement>, String> {
+/// Parse a SQL file into statements.
+/// Lines starting with `--` are ordinary comments and are not preserved in verify.result.
+fn parse_sql_file(content: &str) -> Result<Vec<String>, String> {
     let mut statements = Vec::new();
-    let mut current_ctx = QueryContext::default();
     let mut current_stmt = String::new();
     let mut in_stmt = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
-
-        // Check for interceptor directive
-        if trimmed.starts_with("-- SQLNESS ") {
-            if in_stmt {
-                // Flush current statement before applying new interceptor
-                let stmt = current_stmt.trim().to_string();
-                if !stmt.is_empty() {
-                    statements.push(ParsedStatement {
-                        sql: stmt,
-                        query_ctx: current_ctx.clone(),
-                    });
-                }
-                current_stmt.clear();
-                in_stmt = false;
-            }
-            // Parse interceptor: strip "-- SQLNESS " prefix
-            let directive = trimmed.strip_prefix("-- SQLNESS ").unwrap();
-            apply_interceptor_directive(directive, registry, &mut current_ctx)?;
-            continue;
-        }
 
         // Skip pure comment lines
         if trimmed.starts_with("--") || trimmed.is_empty() {
@@ -510,10 +460,7 @@ fn parse_sql_file(content: &str, registry: &Registry) -> Result<Vec<ParsedStatem
         if trimmed.ends_with(';') {
             let stmt = current_stmt.trim().to_string();
             if !stmt.is_empty() {
-                statements.push(ParsedStatement {
-                    sql: stmt,
-                    query_ctx: current_ctx.clone(),
-                });
+                statements.push(stmt);
             }
             current_stmt.clear();
             in_stmt = false;
@@ -524,10 +471,7 @@ fn parse_sql_file(content: &str, registry: &Registry) -> Result<Vec<ParsedStatem
     if in_stmt {
         let stmt = current_stmt.trim().to_string();
         if !stmt.is_empty() {
-            statements.push(ParsedStatement {
-                sql: stmt,
-                query_ctx: current_ctx,
-            });
+            statements.push(stmt);
         }
     }
 
@@ -536,32 +480,6 @@ fn parse_sql_file(content: &str, registry: &Registry) -> Result<Vec<ParsedStatem
     }
 
     Ok(statements)
-}
-
-/// Apply an interceptor directive (e.g., "PROTOCOL mysql") to a QueryContext.
-///
-/// PR1 rejects ALL SQLNESS interceptors. Only default gRPC protocol is supported.
-fn apply_interceptor_directive(
-    directive: &str,
-    _registry: &Registry,
-    _ctx: &mut QueryContext,
-) -> Result<(), String> {
-    // Reject PROTOCOL interceptor: PR1 only supports default gRPC
-    if let Some(protocol) = directive.strip_prefix("PROTOCOL ") {
-        let protocol = protocol.trim().to_lowercase();
-        return Err(format!(
-            "PR1 does not support '-- SQLNESS PROTOCOL {protocol}'. \
-             Compat tests use default gRPC protocol only. \
-             SQLNESS interceptors are not supported in PR1."
-        ));
-    }
-
-    // Any other SQLNESS directive is an error in PR1
-    Err(format!(
-        "Unknown SQLNESS directive: '-- SQLNESS {directive}'. \
-         PR1 does not support SQLNESS interceptors. \
-         Ordinary '--' comments are allowed."
-    ))
 }
 
 /// Generate a simple line-based diff between expected and actual.
