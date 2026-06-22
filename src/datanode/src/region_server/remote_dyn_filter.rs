@@ -171,6 +171,7 @@ impl RegionServer {
         }
     }
 
+    #[allow(deprecated)]
     async fn handle_remote_dyn_filter_update(
         &self,
         query_id: &QueryId,
@@ -363,6 +364,7 @@ impl Stream for RemoteDynFilterGuardedStream {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use std::assert_matches;
     use std::collections::{HashMap, HashSet};
