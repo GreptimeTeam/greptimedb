@@ -1,0 +1,158 @@
+-- Set-comparison subqueries (`ANY`/`ALL`) must be rewritten before
+-- PushDownFilter. Otherwise the set-comparison subquery can be pushed into
+-- TableScan.partial_filters, which is not a valid remote scan filter.
+CREATE TABLE sc_t (
+    ts TIMESTAMP(3) TIME INDEX,
+    v INT,
+    PRIMARY KEY (v)
+) ENGINE = mito;
+
+Affected Rows: 0
+
+CREATE TABLE sc_s (
+    ts TIMESTAMP(3) TIME INDEX,
+    v INT
+) ENGINE = mito;
+
+Affected Rows: 0
+
+INSERT INTO sc_t VALUES
+    ('2024-01-30 00:00:00', 1),
+    ('2024-01-30 01:00:00', 6),
+    ('2024-01-30 02:00:00', 10);
+
+Affected Rows: 3
+
+INSERT INTO sc_s VALUES
+    ('2024-01-30 00:00:00', 5),
+    ('2024-01-30 01:00:00', NULL);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('sc_t');
+
++---------------------------+
+| ADMIN FLUSH_TABLE('sc_t') |
++---------------------------+
+| 0                         |
++---------------------------+
+
+ADMIN FLUSH_TABLE('sc_s');
+
++---------------------------+
+| ADMIN FLUSH_TABLE('sc_s') |
++---------------------------+
+| 0                         |
++---------------------------+
+
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
+
++---------------+---------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                          |
++---------------+---------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: sc_t.v ASC NULLS LAST                                                                                   |
+|               |   Projection: sc_t.v                                                                                          |
+|               |     Filter: __correlated_sq_1.mark OR __correlated_sq_2.mark AND NOT __correlated_sq_1.mark AND Boolean(NULL) |
+|               |       LeftMark Join:  Filter: sc_t.v > __correlated_sq_2.v IS NULL                                            |
+|               |         Filter: __correlated_sq_1.mark OR NOT __correlated_sq_1.mark AND Boolean(NULL)                        |
+|               |           LeftMark Join:  Filter: sc_t.v > __correlated_sq_1.v IS TRUE                                        |
+|               |             Projection: sc_t.v                                                                                |
+|               |               MergeScan [is_placeholder=false, remote_input=[                                                 |
+|               | TableScan: sc_t                                                                                               |
+|               | ]]                                                                                                            |
+|               |             MergeScan [is_placeholder=false, remote_input=[                                                   |
+|               | Projection: __correlated_sq_1.v                                                                               |
+|               |   SubqueryAlias: __correlated_sq_1                                                                            |
+|               |     Projection: sc_s.v                                                                                        |
+|               |       TableScan: sc_s                                                                                         |
+|               | ]]                                                                                                            |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                       |
+|               | Projection: __correlated_sq_2.v                                                                               |
+|               |   SubqueryAlias: __correlated_sq_2                                                                            |
+|               |     Projection: sc_s.v                                                                                        |
+|               |       TableScan: sc_s                                                                                         |
+|               | ]]                                                                                                            |
+| physical_plan | SortPreservingMergeExec: [v@0 ASC NULLS LAST]                                                                 |
+|               |   SortExec: expr=[v@0 ASC NULLS LAST], preserve_partitioning=[true]                                           |
+|               |     FilterExec: mark@1 OR mark@2 AND NOT mark@1 AND NULL, projection=[v@0]                                    |
+|               |       NestedLoopJoinExec: join_type=LeftMark, filter=v@0 > v@1 IS NULL                                        |
+|               |         CoalescePartitionsExec                                                                                |
+|               |           FilterExec: mark@1 OR NOT mark@1 AND NULL                                                           |
+|               |             NestedLoopJoinExec: join_type=LeftMark, filter=(v@0 > v@1) IS NOT DISTINCT FROM true              |
+|               |               CoalescePartitionsExec                                                                          |
+|               |                 ProjectionExec: expr=[v@1 as v]                                                               |
+|               |                   MergeScanExec: REDACTED
+|               |               MergeScanExec: REDACTED
+|               |         MergeScanExec: REDACTED
+|               |                                                                                                               |
++---------------+---------------------------------------------------------------------------------------------------------------+
+
+SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
+
++----+
+| v  |
++----+
+| 6  |
+| 10 |
++----+
+
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
+
++---------------+----------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                               |
++---------------+----------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: sc_t.v ASC NULLS LAST                                                                        |
+|               |   Projection: sc_t.v                                                                               |
+|               |     Filter: __correlated_sq_2.mark AND Boolean(NULL) OR NOT __correlated_sq_2.mark                 |
+|               |       LeftMark Join:  Filter: sc_t.v != __correlated_sq_2.v IS NULL                                |
+|               |         Projection: sc_t.v                                                                         |
+|               |           Filter: NOT __correlated_sq_1.mark                                                       |
+|               |             LeftMark Join:  Filter: sc_t.v != __correlated_sq_1.v IS FALSE                         |
+|               |               Projection: sc_t.v                                                                   |
+|               |                 MergeScan [is_placeholder=false, remote_input=[                                    |
+|               | TableScan: sc_t                                                                                    |
+|               | ]]                                                                                                 |
+|               |               MergeScan [is_placeholder=false, remote_input=[                                      |
+|               | Projection: __correlated_sq_1.v                                                                    |
+|               |   SubqueryAlias: __correlated_sq_1                                                                 |
+|               |     Projection: sc_s.v                                                                             |
+|               |       TableScan: sc_s                                                                              |
+|               | ]]                                                                                                 |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                            |
+|               | Projection: __correlated_sq_2.v                                                                    |
+|               |   SubqueryAlias: __correlated_sq_2                                                                 |
+|               |     Projection: sc_s.v                                                                             |
+|               |       TableScan: sc_s                                                                              |
+|               | ]]                                                                                                 |
+| physical_plan | SortPreservingMergeExec: [v@0 ASC NULLS LAST]                                                      |
+|               |   SortExec: expr=[v@0 ASC NULLS LAST], preserve_partitioning=[true]                                |
+|               |     FilterExec: mark@1 AND NULL OR NOT mark@1, projection=[v@0]                                    |
+|               |       NestedLoopJoinExec: join_type=LeftMark, filter=v@0 != v@1 IS NULL                            |
+|               |         CoalescePartitionsExec                                                                     |
+|               |           FilterExec: NOT mark@1, projection=[v@0]                                                 |
+|               |             NestedLoopJoinExec: join_type=LeftMark, filter=(v@0 != v@1) IS NOT DISTINCT FROM false |
+|               |               CoalescePartitionsExec                                                               |
+|               |                 ProjectionExec: expr=[v@1 as v]                                                    |
+|               |                   MergeScanExec: REDACTED
+|               |               MergeScanExec: REDACTED
+|               |         MergeScanExec: REDACTED
+|               |                                                                                                    |
++---------------+----------------------------------------------------------------------------------------------------+
+
+SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
+
+++
+++
+
+DROP TABLE sc_t;
+
+Affected Rows: 0
+
+DROP TABLE sc_s;
+
+Affected Rows: 0
+
