@@ -695,8 +695,7 @@ impl datafusion::physical_plan::PhysicalExpr for JoinHashBloomProbeExpr {
             "join_hash_bloom_probe_hash".to_string(),
         );
         let hashes = datafusion::physical_plan::PhysicalExpr::evaluate(&hash_expr, batch)?
-            .into_array(num_rows)
-            .map_err(DataFusionError::from)?;
+            .into_array(num_rows)?;
         let hashes = hashes
             .as_any()
             .downcast_ref::<datafusion::arrow::array::UInt64Array>()
@@ -737,7 +736,7 @@ impl datafusion::physical_plan::PhysicalExpr for JoinHashBloomProbeExpr {
 /// `ceil(n / 8)` without floating point.
 #[inline]
 fn num_bits_ceil_bytes(num_bits: usize) -> usize {
-    (num_bits / 8) + usize::from(num_bits % 8 != 0)
+    (num_bits / 8) + usize::from(!num_bits.is_multiple_of(8))
 }
 
 // ---------------------------------------------------------------------------
@@ -1742,7 +1741,6 @@ mod tests {
 
     #[test]
     fn evaluate_with_invalid_bitset_length_errors_not_panics() {
-        let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
         let col: Arc<dyn PhysicalExpr> =
             Arc::new(datafusion::physical_expr::expressions::Column::new("id", 0));
 

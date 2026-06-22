@@ -455,12 +455,12 @@ fn flatten_and_conjuncts(expr: &Arc<dyn PhysicalExpr>) -> Vec<Arc<dyn PhysicalEx
     let mut conjuncts = Vec::new();
     let mut stack = vec![Arc::clone(expr)];
     while let Some(node) = stack.pop() {
-        if let Some(and) = node.as_any().downcast_ref::<BinaryExpr>() {
-            if *and.op() == Operator::And {
-                stack.push(Arc::clone(and.right()));
-                stack.push(Arc::clone(and.left()));
-                continue;
-            }
+        if let Some(and) = node.as_any().downcast_ref::<BinaryExpr>()
+            && *and.op() == Operator::And
+        {
+            stack.push(Arc::clone(and.right()));
+            stack.push(Arc::clone(and.left()));
+            continue;
         }
         conjuncts.push(node);
     }
@@ -1562,9 +1562,9 @@ mod tests {
             .into_array(batch.num_rows())
             .unwrap();
         let bools = result.as_any().downcast_ref::<BooleanArray>().unwrap();
-        assert_eq!(bools.value(0), false);
-        assert_eq!(bools.value(1), true);
-        assert_eq!(bools.value(2), true);
+        assert!(!bools.value(0));
+        assert!(bools.value(1));
+        assert!(bools.value(2));
     }
 
     #[test]
