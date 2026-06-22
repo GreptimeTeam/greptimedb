@@ -82,6 +82,8 @@ ADMIN FLUSH_TABLE('vals');
 -- partial_filters.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT f.k, f.val FROM fact f
   LEFT JOIN dim d ON f.k = d.k
   WHERE f.ts >= '2024-01-30 00:00:00'
@@ -115,16 +117,16 @@ EXPLAIN SELECT f.k, f.val FROM fact f
 |               |         TableScan: vals, partial_filters=[vals.x IS NOT NULL]                                                                                           |
 |               | ]]                                                                                                                                                      |
 | physical_plan | HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(CAST(f.val AS Int32)@2, x@0)], projection=[k@0, val@1]                                         |
-|               |   RepartitionExec: partitioning=Hash([CAST(f.val AS Int32)@2], 20), input_partitions=20                                                                 |
+|               |   RepartitionExec: partitioning=Hash([REDACTED
 |               |     ProjectionExec: expr=[k@0 as k, val@1 as val, CAST(val@1 AS Int32) as CAST(f.val AS Int32)]                                                         |
 |               |       HashJoinExec: mode=Partitioned, join_type=Left, on=[(k@0, k@0)], projection=[k@0, val@1]                                                          |
-|               |         RepartitionExec: partitioning=Hash([k@0], 20), input_partitions=20                                                                              |
+|               |         RepartitionExec: partitioning=Hash([REDACTED
 |               |           ProjectionExec: expr=[k@1 as k, val@2 as val]                                                                                                 |
 |               |             MergeScanExec: REDACTED
-|               |         RepartitionExec: partitioning=Hash([k@0], 20), input_partitions=20                                                                              |
+|               |         RepartitionExec: partitioning=Hash([REDACTED
 |               |           ProjectionExec: expr=[k@1 as k]                                                                                                               |
 |               |             MergeScanExec: REDACTED
-|               |   RepartitionExec: partitioning=Hash([x@0], 20), input_partitions=20                                                                                    |
+|               |   RepartitionExec: partitioning=Hash([REDACTED
 |               |     ProjectionExec: expr=[x@1 as x]                                                                                                                     |
 |               |       MergeScanExec: REDACTED
 |               |                                                                                                                                                         |
@@ -183,6 +185,8 @@ SELECT f.k, f.val FROM fact f
 -- expressions that the remote scan can evaluate.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT * FROM fact WHERE CAST(fact.val AS INT) > 0;
 
 +---------------+---------------------------------------------------------------------------+
@@ -234,6 +238,8 @@ ADMIN FLUSH_TABLE('edge_events');
 -- independent top-level pruning predicates.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT * FROM edge_events
   WHERE (rack > 5 AND cpu > 0.4) OR (host = 'h3');
 

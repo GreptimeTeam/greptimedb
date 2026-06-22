@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -29,7 +29,8 @@ use datafusion::execution::SessionState;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion::prelude::SessionContext;
-use datafusion_common::{JoinType, ScalarValue};
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{ExprSchema, JoinType, ScalarValue};
 use datafusion_expr::expr::{Exists, ScalarFunction};
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, Subquery, binary_expr,
@@ -97,6 +98,76 @@ fn collect_merge_scan_remote_dyn_filter_producer_id_list(
         .clone()
         .rewrite_with_subqueries(&mut MergeScanRemoteDynFilterProducerIdCollector { producer_ids })
         .unwrap();
+}
+
+fn assert_remote_table_scan_filters_are_safe(plan: &LogicalPlan) {
+    let mut checked_filters = 0;
+    assert_remote_table_scan_filters_are_safe_inner(plan, false, &mut checked_filters);
+    assert!(
+        checked_filters > 0,
+        "expected at least one remote TableScan filter in plan:\n{plan}"
+    );
+}
+
+fn assert_remote_table_scan_filters_are_safe_inner(
+    plan: &LogicalPlan,
+    in_merge_scan_remote_input: bool,
+    checked_filters: &mut usize,
+) {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+    {
+        assert_remote_table_scan_filters_are_safe_inner(merge_scan.input(), true, checked_filters);
+    }
+
+    if in_merge_scan_remote_input && let LogicalPlan::TableScan(table_scan) = plan {
+        for filter in &table_scan.filters {
+            assert_table_scan_filter_is_remote_safe(table_scan, filter);
+            *checked_filters += 1;
+        }
+    }
+
+    for child in plan.inputs() {
+        assert_remote_table_scan_filters_are_safe_inner(
+            child,
+            in_merge_scan_remote_input,
+            checked_filters,
+        );
+    }
+}
+
+fn assert_table_scan_filter_is_remote_safe(
+    table_scan: &datafusion_expr::logical_plan::TableScan,
+    filter: &Expr,
+) {
+    filter
+        .apply(|expr| match expr {
+            Expr::Exists(_)
+            | Expr::InSubquery(_)
+            | Expr::ScalarSubquery(_)
+            | Expr::SetComparison(_)
+            | Expr::OuterReferenceColumn(_, _) => {
+                panic!("remote TableScan filter contains non-scan-local expression: {filter}")
+            }
+            _ => Ok(TreeNodeRecursion::Continue),
+        })
+        .unwrap();
+
+    let mut columns = HashSet::new();
+    expr_to_columns(filter, &mut columns).unwrap();
+    for column in columns {
+        assert!(
+            table_scan
+                .projected_schema
+                .field_from_column(&column)
+                .is_ok(),
+            "remote TableScan filter references non-scan column {column}: {filter}\nscan schema: {:?}",
+            table_scan.projected_schema
+        );
+    }
 }
 
 pub(crate) struct TestTable;
@@ -2208,6 +2279,7 @@ fn test_join_side_local_filter_pushdown_into_merge_scan() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    assert_remote_table_scan_filters_are_safe(&result);
 
     let plan_str = result.to_string();
     // After PushDownFilter runs, the predicate `t1.pk1 = Utf8("v")` should appear
@@ -2276,6 +2348,7 @@ fn test_left_join_left_side_filter_pushdown_into_merge_scan() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    assert_remote_table_scan_filters_are_safe(&result);
 
     let plan_str = result.to_string();
     assert!(
@@ -2331,6 +2404,7 @@ fn test_join_cross_table_predicate_not_pushed_to_single_side() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    assert_remote_table_scan_filters_are_safe(&result);
 
     let plan_str = result.to_string();
     // The cross-table predicate should NOT appear as a filter on a single table's

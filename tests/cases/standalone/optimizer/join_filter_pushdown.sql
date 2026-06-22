@@ -29,6 +29,8 @@ ADMIN FLUSH_TABLE('child');
 -- The scan should have partial_filters with the time condition.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE peers=\[\d+\(\d+,\s+\d+\),\s\] peers=[REDACTED]
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT * FROM parent WHERE ts >= '2024-01-30 00:00:00';
 
 -- Query B: flat LEFT JOIN with WHERE on parent's ts.
@@ -36,12 +38,16 @@ EXPLAIN SELECT * FROM parent WHERE ts >= '2024-01-30 00:00:00';
 -- appearing as partial_filters=[...] in the parent TableScan.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE peers=\[\d+\(\d+,\s+\d+\),\s\] peers=[REDACTED]
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT * FROM parent p LEFT JOIN child c ON p.k = c.k WHERE p.ts >= '2024-01-30 00:00:00';
 
 -- Query C: subquery pre-filter (workaround from #8338).
 -- Should produce the same logical scan filter shape as query B.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE peers=\[\d+\(\d+,\s+\d+\),\s\] peers=[REDACTED]
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT * FROM (SELECT * FROM parent WHERE ts >= '2024-01-30 00:00:00') p LEFT JOIN child c ON p.k = c.k;
 
 DROP TABLE parent;

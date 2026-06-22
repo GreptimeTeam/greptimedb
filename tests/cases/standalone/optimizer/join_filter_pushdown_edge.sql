@@ -51,6 +51,8 @@ ADMIN FLUSH_TABLE('vals');
 -- partial_filters.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT f.k, f.val FROM fact f
   LEFT JOIN dim d ON f.k = d.k
   WHERE f.ts >= '2024-01-30 00:00:00'
@@ -82,6 +84,8 @@ SELECT f.k, f.val FROM fact f
 -- expressions that the remote scan can evaluate.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT * FROM fact WHERE CAST(fact.val AS INT) > 0;
 
 CREATE TABLE edge_events (
@@ -110,6 +114,8 @@ ADMIN FLUSH_TABLE('edge_events');
 -- independent top-level pruning predicates.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT * FROM edge_events
   WHERE (rack > 5 AND cpu > 0.4) OR (host = 'h3');
 

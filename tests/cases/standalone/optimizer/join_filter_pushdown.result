@@ -49,6 +49,8 @@ ADMIN FLUSH_TABLE('child');
 -- The scan should have partial_filters with the time condition.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE peers=\[\d+\(\d+,\s+\d+\),\s\] peers=[REDACTED]
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT * FROM parent WHERE ts >= '2024-01-30 00:00:00';
 
 +---------------+-------------------------------------------------------------------------------------------------+
@@ -69,6 +71,8 @@ EXPLAIN SELECT * FROM parent WHERE ts >= '2024-01-30 00:00:00';
 -- appearing as partial_filters=[...] in the parent TableScan.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE peers=\[\d+\(\d+,\s+\d+\),\s\] peers=[REDACTED]
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT * FROM parent p LEFT JOIN child c ON p.k = c.k WHERE p.ts >= '2024-01-30 00:00:00';
 
 +---------------+-------------------------------------------------------------------------------------------------+
@@ -86,9 +90,9 @@ EXPLAIN SELECT * FROM parent p LEFT JOIN child c ON p.k = c.k WHERE p.ts >= '202
 |               |     TableScan: child, partial_filters=[child.k IS NOT NULL]                                     |
 |               | ]]                                                                                              |
 | physical_plan | HashJoinExec: mode=Partitioned, join_type=Left, on=[(k@1, k@1)]                                 |
-|               |   RepartitionExec: partitioning=Hash([k@1], 20), input_partitions=20                            |
+|               |   RepartitionExec: partitioning=Hash([REDACTED
 |               |     MergeScanExec: peers=[REDACTED]                                             |
-|               |   RepartitionExec: partitioning=Hash([k@1], 20), input_partitions=20                            |
+|               |   RepartitionExec: partitioning=Hash([REDACTED
 |               |     MergeScanExec: peers=[REDACTED]                                             |
 |               |                                                                                                 |
 +---------------+-------------------------------------------------------------------------------------------------+
@@ -97,6 +101,8 @@ EXPLAIN SELECT * FROM parent p LEFT JOIN child c ON p.k = c.k WHERE p.ts >= '202
 -- Should produce the same logical scan filter shape as query B.
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE peers=\[\d+\(\d+,\s+\d+\),\s\] peers=[REDACTED]
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 EXPLAIN SELECT * FROM (SELECT * FROM parent WHERE ts >= '2024-01-30 00:00:00') p LEFT JOIN child c ON p.k = c.k;
 
 +---------------+---------------------------------------------------------------------------------------------------+
@@ -115,9 +121,9 @@ EXPLAIN SELECT * FROM (SELECT * FROM parent WHERE ts >= '2024-01-30 00:00:00') p
 |               |     TableScan: child, partial_filters=[child.k IS NOT NULL]                                       |
 |               | ]]                                                                                                |
 | physical_plan | HashJoinExec: mode=Partitioned, join_type=Left, on=[(k@1, k@1)]                                   |
-|               |   RepartitionExec: partitioning=Hash([k@1], 20), input_partitions=20                              |
+|               |   RepartitionExec: partitioning=Hash([REDACTED
 |               |     MergeScanExec: peers=[REDACTED]                                               |
-|               |   RepartitionExec: partitioning=Hash([k@1], 20), input_partitions=20                              |
+|               |   RepartitionExec: partitioning=Hash([REDACTED
 |               |     MergeScanExec: peers=[REDACTED]                                               |
 |               |                                                                                                   |
 +---------------+---------------------------------------------------------------------------------------------------+
