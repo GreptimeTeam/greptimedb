@@ -708,7 +708,7 @@ impl LocalGcWorker {
 
     /// Flat-list puffin files from `region_dir/index/`.
     /// If the index directory does not exist, returns an empty vec without error.
-    /// Only files (not subdirectories) are included.
+    /// Only `.puffin` files (not subdirectories) are included.
     async fn list_region_index_files(&self, region_id: RegionId) -> Result<Vec<Entry>> {
         let region_dir = self.access_layer.build_region_dir(region_id);
         let index_dir = object_store::util::join_dir(&region_dir, "index");
@@ -736,7 +736,7 @@ impl LocalGcWorker {
         let entries = lister
             .filter(|e| {
                 if let Ok(e) = &e {
-                    e.metadata().is_file()
+                    e.metadata().is_file() && e.name().ends_with(".puffin")
                 } else {
                     true
                 }
