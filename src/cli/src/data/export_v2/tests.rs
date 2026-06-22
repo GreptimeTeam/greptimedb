@@ -28,6 +28,7 @@ use crate::data::export_v2::manifest::ChunkStatus;
 use crate::data::import_v2::ImportV2Command;
 use crate::data::import_v2::coordinator::build_import_tasks;
 use crate::data::import_v2::state::{ImportState, ImportTaskStatus, save_import_state};
+use crate::data::path::data_dir_for_schema_chunk;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage};
 use crate::data::sql::escape_sql_identifier;
 use crate::database::DatabaseClient;
@@ -114,6 +115,16 @@ async fn query_hosts(database_client: &DatabaseClient, schema: &str) -> Result<V
             .fail(),
         })
         .collect()
+}
+
+async fn schema_exists(database_client: &DatabaseClient, schema: &str) -> Result<bool> {
+    let rows = database_client
+        .sql_in_public("SHOW DATABASES")
+        .await?
+        .unwrap_or_default();
+    Ok(rows
+        .iter()
+        .any(|row| matches!(row.first(), Some(Value::String(value)) if value == schema)))
 }
 
 #[tokio::test]
@@ -908,18 +919,25 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
     }
     database_client
         .sql(
-            "INSERT INTO metrics (ts, host, cpu) VALUES ('2025-01-01T00:00:00Z', 'a1', 1.0)",
+            "INSERT INTO metrics (ts, host, cpu) VALUES \
+             ('2025-01-01T00:00:00Z', 'a1', 1.0), \
+             ('2025-01-01T01:00:00Z', 'a2', 1.5)",
             schema_a,
         )
         .await?;
     database_client
         .sql(
-            "INSERT INTO metrics (ts, host, cpu) VALUES ('2025-01-01T00:00:00Z', 'b1', 2.0)",
+            "INSERT INTO metrics (ts, host, cpu) VALUES \
+             ('2025-01-01T00:00:00Z', 'b1', 2.0), \
+             ('2025-01-01T01:00:00Z', 'b2', 2.5)",
             schema_b,
         )
         .await?;
 
     let expected_rows_a = query_count(&database_client, schema_a, "metrics").await?;
+    assert_eq!(expected_rows_a, 2);
+    let expected_rows_b = query_count(&database_client, schema_b, "metrics").await?;
+    assert_eq!(expected_rows_b, 2);
 
     let src_dir = tempdir().context(FileIoSnafu)?;
     let src_uri = path_to_uri(src_dir.path())?;
@@ -936,6 +954,16 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
         schema_a,
         "--schemas",
         schema_b,
+        "--start-time",
+        "2025-01-01T00:00:00Z",
+        "--end-time",
+        "2025-01-01T02:00:00Z",
+        "--chunk-time-window",
+        "1h",
+        "--chunk-parallelism",
+        "2",
+        "--progress",
+        "never",
     ];
     if let Some(auth) = &auth_basic {
         export_args.push("--auth-basic");
@@ -950,12 +978,46 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
         .await
         .context(OtherSnafu)?;
 
+    let storage_config = ObjectStoreConfig::default();
+    let storage = OpenDalStorage::from_uri(&src_uri, &storage_config)
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+    let manifest = storage
+        .read_manifest()
+        .await
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+    assert_eq!(manifest.chunks.len(), 2);
+    for chunk in &manifest.chunks {
+        assert_eq!(chunk.status, ChunkStatus::Completed);
+        for schema in [schema_a, schema_b] {
+            let prefix = data_dir_for_schema_chunk(schema, chunk.id);
+            assert!(
+                chunk.files.iter().any(|file| file.starts_with(&prefix)),
+                "chunk {} should include exported data for {schema}",
+                chunk.id
+            );
+        }
+    }
+
+    let verify_cmd = ExportVerifyCommand::parse_from(["export-v2-verify", "--snapshot", &src_uri]);
+    verify_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)?;
+
     for schema in [schema_a, schema_b] {
         database_client
             .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
             .await?;
     }
 
+    let import_state_dir = tempdir().context(FileIoSnafu)?;
+    let import_state_path = import_state_dir.path().join("import-state.json");
+    let import_state_path = import_state_path.to_string_lossy().into_owned();
     let mut import_args = vec![
         "import-v2",
         "--addr",
@@ -966,6 +1028,12 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
         &catalog,
         "--schemas",
         schema_a,
+        "--task-parallelism",
+        "2",
+        "--state-path",
+        &import_state_path,
+        "--progress",
+        "never",
     ];
     if let Some(auth) = &auth_basic {
         import_args.push("--auth-basic");
@@ -982,11 +1050,13 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
 
     let actual_rows_a = query_count(&database_client, schema_a, "metrics").await?;
     assert_eq!(actual_rows_a, expected_rows_a);
+    let hosts_a = query_hosts(&database_client, schema_a).await?;
+    assert_eq!(hosts_a, vec!["a1".to_string(), "a2".to_string()]);
 
-    let schema_b_query = database_client
-        .sql("SELECT COUNT(*) FROM metrics", schema_b)
-        .await;
-    assert!(schema_b_query.is_err(), "schema_b should not be imported");
+    assert!(
+        !schema_exists(&database_client, schema_b).await?,
+        "schema_b should not be imported"
+    );
 
     for schema in [schema_a, schema_b] {
         database_client
