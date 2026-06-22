@@ -1696,14 +1696,17 @@ mod tests {
             (1, 2, 3, 4),
         )
         .unwrap();
-        let fp_ba = join_hash_bloom::compute_hash_compat_fingerprint(
+        let fp_reversed = join_hash_bloom::compute_hash_compat_fingerprint(
             &[Arc::clone(&col_b), Arc::clone(&col_a)],
             &schema,
             (1, 2, 3, 4),
         )
         .unwrap();
 
-        assert_ne!(fp_ab, fp_ba, "fingerprint should differ for child order");
+        assert_ne!(
+            fp_ab, fp_reversed,
+            "fingerprint should differ for child order"
+        );
     }
 
     #[test]
