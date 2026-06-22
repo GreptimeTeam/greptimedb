@@ -163,15 +163,12 @@ impl DynFilterPayload {
         Ok(expr)
     }
 
-    /// Decodes this payload into a DataFusion physical expression using
+    /// Decodes this payload into a single DataFusion physical expression using
     /// the registered dynamic-filter children for context.
     ///
-    /// - `Datafusion` variant delegates to [`Self::decode_datafusion_expr`].
-    /// - `JoinHashBloom` variant validates payload budget, checks join key child index
-    ///   range, recomputes the hash-compat fingerprint, and returns
-    ///   `residual_expr AND JoinHashBloomProbeExpr` only when fingerprints match.
-    ///   If the fingerprint is zero (not computed), cannot be recomputed, or mismatches, returns
-    ///   residual-only fail-open.
+    /// This is a convenience wrapper around [`Self::decode_placement_aware`] that
+    /// combines pushdown and exact expressions with AND for callers that do not
+    /// need placement-aware splitting (e.g. legacy tests or single-filter usage).
     pub fn decode_expr_with_registered_children(
         &self,
         task_ctx: &TaskContext,
@@ -179,19 +176,48 @@ impl DynFilterPayload {
         registered_children: &[Arc<dyn PhysicalExpr>],
         max_payload_bytes: usize,
     ) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
+        let decoded = self.decode_placement_aware(
+            task_ctx,
+            input_schema,
+            registered_children,
+            max_payload_bytes,
+        )?;
+        match decoded.exact_expr {
+            Some(exact) => Ok(Arc::new(BinaryExpr::new(
+                decoded.pushdown_expr,
+                Operator::And,
+                exact,
+            ))),
+            None => Ok(decoded.pushdown_expr),
+        }
+    }
+
+    /// Decodes this payload into placement-aware parts.
+    ///
+    /// See [`DecodedDynFilterExprs`] for semantics.
+    pub fn decode_placement_aware(
+        &self,
+        task_ctx: &TaskContext,
+        input_schema: &datafusion::arrow::datatypes::Schema,
+        registered_children: &[Arc<dyn PhysicalExpr>],
+        max_payload_bytes: usize,
+    ) -> DataFusionResult<DecodedDynFilterExprs> {
         match self {
             Self::Datafusion(_) => {
-                self.decode_datafusion_expr(task_ctx, input_schema, max_payload_bytes)
+                let pushdown_expr =
+                    self.decode_datafusion_expr(task_ctx, input_schema, max_payload_bytes)?;
+                Ok(DecodedDynFilterExprs {
+                    pushdown_expr,
+                    exact_expr: None,
+                })
             }
             Self::JoinHashBloom(bloom) => {
                 bloom.validate()?;
 
-                // Validate the encoded proto budget
                 let encoded_bytes = self.encoded_payload_bytes();
                 validate_payload_size(encoded_bytes, max_payload_bytes)
                     .map_err(DataFusionError::from)?;
 
-                // Validate join key child indices are in range
                 let num_registered = registered_children.len();
                 for &child_index in &bloom.join_key_child_indices {
                     if child_index as usize >= num_registered {
@@ -226,42 +252,34 @@ impl DynFilterPayload {
                     .map(|&child_index| Arc::clone(&registered_children[child_index as usize]))
                     .collect();
 
-                // Recompute hash compat fingerprint for cross-platform drift detection.
-                // A missing/zero fingerprint, mismatch, or recompute error must fail open
-                // to residual-only rather than risk Bloom false negatives.
-                if bloom.hash_compat_fingerprint == 0 {
-                    return Ok(residual_expr);
-                }
-                match crate::request::join_hash_bloom::compute_hash_compat_fingerprint(
-                    &probe_children,
-                    input_schema,
-                    (
-                        bloom.df_seed0,
-                        bloom.df_seed1,
-                        bloom.df_seed2,
-                        bloom.df_seed3,
-                    ),
-                ) {
-                    Ok(local_fp) if local_fp == bloom.hash_compat_fingerprint => {
-                        // Fingerprint matches — construct probe expression below.
+                // Recompute fingerprint; zero/mismatch/recompute-error yields lit(true) exact.
+                let exact_expr: Arc<dyn PhysicalExpr> = if bloom.hash_compat_fingerprint == 0 {
+                    lit(true)
+                } else {
+                    match crate::request::join_hash_bloom::compute_hash_compat_fingerprint(
+                        &probe_children,
+                        input_schema,
+                        (
+                            bloom.df_seed0,
+                            bloom.df_seed1,
+                            bloom.df_seed2,
+                            bloom.df_seed3,
+                        ),
+                    ) {
+                        Ok(local_fp) if local_fp == bloom.hash_compat_fingerprint => {
+                            Arc::new(JoinHashBloomProbeExpr::try_new(
+                                probe_children,
+                                Arc::new(bloom.clone()),
+                            )?) as Arc<dyn PhysicalExpr>
+                        }
+                        _ => lit(true),
                     }
-                    _ => {
-                        // Fingerprint mismatch or recompute error — fail open.
-                        return Ok(residual_expr);
-                    }
-                }
+                };
 
-                let probe_expr = Arc::new(JoinHashBloomProbeExpr::try_new(
-                    probe_children,
-                    Arc::new(bloom.clone()),
-                )?) as Arc<dyn PhysicalExpr>;
-
-                // Return residual AND probe
-                Ok(Arc::new(BinaryExpr::new(
-                    residual_expr,
-                    Operator::And,
-                    probe_expr,
-                )))
+                Ok(DecodedDynFilterExprs {
+                    pushdown_expr: residual_expr,
+                    exact_expr: Some(exact_expr),
+                })
             }
         }
     }
@@ -720,6 +738,27 @@ fn validate_decoded_payload_expr(
     })?;
 
     Ok(())
+}
+
+/// Placement-aware decoded dynamic filter expressions.
+///
+/// Splits a decoded payload so DataNode can install the `pushdown_expr` into a
+/// normal [`DynamicFilterPhysicalExpr`] that Mito scan can push down, while the
+/// optional `exact_expr` is wrapped in a non-pushdown marker that stays in
+/// [`FilterExec`] for row-level evaluation only.
+///
+/// - `Datafusion` payload: `pushdown_expr = decode_datafusion_expr(...)`,
+///   `exact_expr = None`.
+/// - `JoinHashBloom` payload: `pushdown_expr = residual_expr`,
+///   `exact_expr = Some(bloom_probe_expr)` when fingerprint matches;
+///   `exact_expr = Some(lit(true))` on zero/mismatch/recompute error
+///   (valid-payload degradation that disables exact Bloom safely).
+///
+/// [`DynamicFilterPhysicalExpr`]: datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr
+#[derive(Debug, Clone)]
+pub struct DecodedDynFilterExprs {
+    pub pushdown_expr: Arc<dyn PhysicalExpr>,
+    pub exact_expr: Option<Arc<dyn PhysicalExpr>>,
 }
 
 /// A remote dynamic filter update sent from a query coordinator to region servers.

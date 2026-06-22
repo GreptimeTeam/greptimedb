@@ -196,8 +196,11 @@ impl RegionServer {
                 }
                 Err(_error) => {
                     warn!(_error; "Failed to decode typed remote dyn filter payload with no legacy fallback");
-                    let outcome = RemoteDynFilterUpdateOutcome::DecodeFailed;
-                    self.log_remote_dyn_filter_update_outcome(query_id, &filter_id, outcome);
+                    self.log_remote_dyn_filter_update_outcome(
+                        query_id,
+                        &filter_id,
+                        RemoteDynFilterUpdateOutcome::DecodeFailed,
+                    );
                     return Ok(RegionResponse::new(0));
                 }
             }
@@ -942,8 +945,11 @@ mod tests {
             &empty_arrow_schema(),
         );
 
-        assert_eq!(exprs.len(), 1);
+        // Two exprs: pushdown DynamicFilterPhysicalExpr + non-pushdown exact wrapper
+        assert_eq!(exprs.len(), 2);
         assert_eq!(format!("{}", exprs[0]), "DynamicFilter [ false ]");
+        // Exact wrapper display
+        assert!(format!("{}", exprs[1]).contains("non_pushdown"));
     }
 
     #[test]
@@ -977,11 +983,41 @@ mod tests {
         let exprs =
             remote_dyn_filter_exprs_for_initial_regs(&regs_by_query, &query_id, &regs, &schema);
 
-        assert_eq!(exprs.len(), 1);
+        // Two exprs: pushdown DynamicFilterPhysicalExpr (residual, lit(true)) +
+        // non-pushdown exact wrapper (bloom_probe)
+        assert_eq!(exprs.len(), 2);
+        let pushdown_display = format!("{}", exprs[0]);
+        let exact_display = format!("{}", exprs[1]);
         assert!(
-            format!("{}", exprs[0]).contains("bloom_probe"),
-            "expected Bloom initial snapshot to initialize runtime filter, got {}",
-            exprs[0]
+            exact_display.contains("bloom_probe"),
+            "expected exact non-pushdown expr to contain bloom_probe, got: {exact_display}"
+        );
+        assert!(
+            exact_display.starts_with("non_pushdown("),
+            "expected exact non-pushdown wrapper display, got: {exact_display}"
+        );
+        // Pushdown wrapper should be the residual (lit(true) for lookup-only)
+        assert!(
+            pushdown_display.contains("DynamicFilter"),
+            "expected pushdown expr to be a DynamicFilter, got: {pushdown_display}"
+        );
+
+        // The exact wrapper must NOT be downcastable as DynamicFilterPhysicalExpr
+        let exact_any = exprs[1].clone() as Arc<dyn std::any::Any + Send + Sync>;
+        assert!(
+            exact_any
+                .downcast_ref::<DynamicFilterPhysicalExpr>()
+                .is_none(),
+            "exact non-pushdown wrapper must not downcast as DynamicFilterPhysicalExpr"
+        );
+
+        // The pushdown wrapper must be downcastable as DynamicFilterPhysicalExpr
+        let pushdown_any = exprs[0].clone() as Arc<dyn std::any::Any + Send + Sync>;
+        assert!(
+            pushdown_any
+                .downcast_ref::<DynamicFilterPhysicalExpr>()
+                .is_some(),
+            "pushdown wrapper must downcast as DynamicFilterPhysicalExpr"
         );
     }
 
@@ -997,14 +1033,15 @@ mod tests {
             &initial_regs,
             &empty_arrow_schema(),
         );
-        assert_eq!(1, exprs.len());
+        // Now returns two exprs: pushdown (DynamicFilterPhysicalExpr) + exact (non-pushdown)
+        assert_eq!(2, exprs.len());
         let expr = exprs.into_iter().next().unwrap();
         let expr = expr as Arc<dyn std::any::Any + Send + Sync>;
         expr.downcast::<DynamicFilterPhysicalExpr>().unwrap()
     }
 
     #[test]
-    fn test_remote_dyn_filter_rejects_oversized_payload_before_buffering() {
+    fn test_remote_dyn_filter_oversized_payload_rejected_without_mutation() {
         let regs_by_query = RemoteDynFilterRegistry::new();
         let query_id = test_remote_query_id();
         let filter_id = RemoteDynFilterId::new("filter-1");
@@ -1022,7 +1059,8 @@ mod tests {
         );
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::PayloadTooLarge);
 
-        // The rejected generation must not become the pending generation.
+        // The oversized generation must NOT install any watermark — a lower
+        // generation can still buffer because no previous generation was recorded.
         let outcome = apply_remote_dyn_filter_update(
             &regs_by_query,
             &query_id,

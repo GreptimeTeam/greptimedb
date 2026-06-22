@@ -385,6 +385,95 @@ async fn prepare_remote_dyn_filter_large_tables(frontend: &Arc<Instance>) {
     .await;
 }
 
+async fn prepare_remote_dyn_filter_bloom_tables(frontend: &Arc<Instance>) {
+    // Probe table: 8192 sparse keys spread across 4 partitions. Build table:
+    // 302 keys distributed across the full probe key range. Keeping the build
+    // side small makes the Bloom update arrive quickly, while the larger
+    // flushed probe-side SST scan gives the non-pushdown FilterExec enough
+    // rows to show the Bloom filtering effect in EXPLAIN ANALYZE metrics.
+    execute_sql(
+        frontend,
+        r#"
+        CREATE TABLE rdf_bloom_probe(
+            k INT,
+            ts TIMESTAMP,
+            v DOUBLE,
+            TIME INDEX (ts),
+            PRIMARY KEY(k)
+        )
+        PARTITION ON COLUMNS (k) (
+            k < 2097152,
+            k >= 2097152 AND k < 4194304,
+            k >= 4194304 AND k < 6291456,
+            k >= 6291456
+        )
+        engine=mito
+        "#,
+    )
+    .await;
+
+    execute_sql(
+        frontend,
+        r#"
+        CREATE TABLE rdf_bloom_build(
+            k INT,
+            ts TIMESTAMP,
+            TIME INDEX (ts),
+            PRIMARY KEY(k)
+        ) engine=mito
+        "#,
+    )
+    .await;
+
+    const PROBE_COUNT: usize = 8192;
+    const BUILD_COUNT: usize = 302;
+
+    let probe_values = (0..PROBE_COUNT)
+        .map(|i| {
+            let k = i * 1024;
+            format!("({k}, {k}, {}.0)", k * 10)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let insert_probe_sql = format!("INSERT INTO rdf_bloom_probe(k, ts, v) VALUES {probe_values}");
+    execute_sql(frontend, &insert_probe_sql).await;
+
+    // Flush so the scan reads from SST files, giving the async Bloom
+    // gRPC update more time to arrive before the scan finishes.
+    execute_sql(frontend, "ADMIN FLUSH_TABLE('rdf_bloom_probe')").await;
+
+    // Write a few extra probe-only rows into memtable after flush.
+    // These are probe keys that do NOT appear in the build side,
+    // so the Bloom filter must reject them. This increases the gap
+    // between scan volume and join output, making the filtering effect
+    // easier to observe in metrics.
+    let extra_start = PROBE_COUNT;
+    let extra_end = extra_start + 8;
+    let extra_probe_values = (extra_start..extra_end)
+        .map(|i| {
+            let k = i * 1024;
+            format!("({k}, {k}, {}.0)", k * 10)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    if !extra_probe_values.is_empty() {
+        let extra_sql =
+            format!("INSERT INTO rdf_bloom_probe(k, ts, v) VALUES {extra_probe_values}");
+        execute_sql(frontend, &extra_sql).await;
+    }
+
+    let build_values = (0..BUILD_COUNT)
+        .map(|i| {
+            let probe_index = i * (PROBE_COUNT - 1) / (BUILD_COUNT - 1);
+            let k = probe_index * 1024;
+            format!("({k}, {k})")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let insert_build_sql = format!("INSERT INTO rdf_bloom_build(k, ts) VALUES {build_values}");
+    execute_sql(frontend, &insert_build_sql).await;
+}
+
 async fn insert_remote_dyn_filter_large_probe_range(
     frontend: &Arc<Instance>,
     start: usize,
@@ -432,6 +521,14 @@ fn remote_dyn_filter_large_join_sql() -> &'static str {
     FROM rdf_large_build b
     JOIN rdf_large_probe p ON p.k = b.k
     ORDER BY p.k
+    "#
+}
+
+fn remote_dyn_filter_bloom_join_sql() -> &'static str {
+    r#"
+    SELECT COUNT(*) AS cnt
+    FROM rdf_bloom_build b
+    JOIN rdf_bloom_probe p ON p.k = b.k
     "#
 }
 
@@ -505,5 +602,125 @@ fn assert_seq_scan_has_dyn_filter(explain: &str) {
     assert!(
         has_dyn_filter,
         "expected at least one region SeqScan line with dyn_filters in:\n{explain}"
+    );
+}
+
+fn assert_seq_scan_dyn_filter_not_contains(explain: &str, needle: &str) {
+    let seq_scan_dyn_filter_lines = explain
+        .lines()
+        .filter(|line| line.contains("SeqScan: region=") && line.contains("\"dyn_filters\""))
+        .collect::<Vec<_>>();
+
+    assert!(
+        seq_scan_dyn_filter_lines
+            .iter()
+            .all(|line| !line.contains(needle)),
+        "expected no region SeqScan dyn_filters line to contain {needle:?}; actual SeqScan dyn_filters lines:\n{}\n\nfull explain:\n{explain}",
+        seq_scan_dyn_filter_lines.join("\n")
+    );
+}
+
+/// Extracts the value of a named metric from an explain metrics line.
+///
+/// The line is expected to contain `metrics=[..., metric_name: value, ...]`.
+/// Returns `None` if the metric name is not found or the value cannot be
+/// parsed as `usize`.
+fn parse_metric_value(line: &str, metric_name: &str) -> Option<usize> {
+    let metrics_segment = line.split("metrics=[").nth(1)?;
+    // The metrics block ends with `]` (potentially followed by extra output).
+    let metrics_body = metrics_segment.split(']').next()?;
+    let prefix = format!("{}: ", metric_name);
+    for part in metrics_body.split(", ") {
+        if let Some(val_str) = part.strip_prefix(&prefix) {
+            return val_str.trim().parse::<usize>().ok();
+        }
+    }
+    None
+}
+
+/// Pairs each `FilterExec` line carrying `bloom_probe` with the next region
+/// `SeqScan` line under it, returning `(filter_output_rows, scan_output_rows)`.
+fn bloom_filter_exec_scan_row_pairs(explain: &str) -> Vec<(usize, usize)> {
+    let mut pending_bloom_filter_rows = None;
+    let mut pairs = Vec::new();
+
+    for line in explain.lines() {
+        if line.contains("FilterExec")
+            && line.contains("non_pushdown(")
+            && line.contains("bloom_probe")
+        {
+            pending_bloom_filter_rows = parse_metric_value(line, "output_rows");
+            continue;
+        }
+
+        if line.contains("SeqScan: region=")
+            && let Some(filter_rows) = pending_bloom_filter_rows.take()
+            && let Some(scan_rows) = parse_metric_value(line, "output_rows")
+        {
+            pairs.push((filter_rows, scan_rows));
+        }
+    }
+
+    pairs
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_remote_dyn_filter_bloom_typed_payload_e2e() {
+    common_telemetry::init_default_ut_logging();
+
+    let distributed =
+        tests::create_distributed_instance("test_remote_dyn_filter_bloom_typed_payload_e2e").await;
+    let frontend = distributed.frontend();
+
+    prepare_remote_dyn_filter_bloom_tables(&frontend).await;
+
+    let join_sql = remote_dyn_filter_bloom_join_sql();
+    let result = output_to_pretty_string(
+        execute_sql_with_query_parallelism_one(&frontend, join_sql, true).await,
+    )
+    .await;
+    // 302 build keys distributed across the 8192 probe keys → 302 join rows.
+    assert_eq!(
+        result,
+        r#"+-----+
+| cnt |
++-----+
+| 302 |
++-----+"#
+    );
+
+    let explain_sql = format!("EXPLAIN ANALYZE VERBOSE {join_sql}");
+    let explain = output_to_pretty_string(
+        execute_sql_with_query_parallelism_one(&frontend, &explain_sql, true).await,
+    )
+    .await;
+
+    // ── Plan-shape invariants ──────────────────────────────────────
+    assert_contains(&explain, "HashJoinExec: mode=CollectLeft");
+    assert_contains(&explain, "MergeScanExec");
+    assert_contains(&explain, "FilterExec");
+    assert_contains(&explain, "non_pushdown(");
+    // The exact Bloom probe must never leak into SeqScan dyn_filters
+    // (it stays in the non-pushdown FilterExec wrapper).
+    assert_seq_scan_dyn_filter_not_contains(&explain, "bloom_probe");
+
+    // ── Bloom filtering-effect assertions ──────────────────────────
+    //
+    // The Bloom gRPC update is asynchronous per region.  The explain may show
+    // some region FilterExec nodes already carrying `bloom_probe`, while other
+    // regions still carry the initial `true` exact wrapper.  For regions where
+    // Bloom arrived, the FilterExec output must be smaller than the underlying
+    // SeqScan output, proving row-level filtering outside scan.
+    let bloom_pairs = bloom_filter_exec_scan_row_pairs(&explain);
+    assert!(
+        !bloom_pairs.is_empty(),
+        "expected at least one non-pushdown FilterExec with bloom_probe in:\n{explain}"
+    );
+    assert!(
+        bloom_pairs
+            .iter()
+            .any(|(filter_rows, scan_rows)| filter_rows < scan_rows),
+        "expected at least one Bloom FilterExec to reduce rows; pairs={bloom_pairs:?};\
+         explain:\n{explain}"
     );
 }
