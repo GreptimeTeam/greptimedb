@@ -470,6 +470,7 @@ impl Env {
                     .get_server_mode(SERVER_MODE_FRONTEND_IDX)
                     .cloned()
                     .unwrap();
+                let server_addr = frontend_mode.server_addr().unwrap();
                 let frontend = self
                     .start_server_with_bins_dir(
                         frontend_mode,
@@ -483,6 +484,17 @@ impl Env {
                     .lock()
                     .expect("lock poisoned")
                     .replace(frontend);
+
+                // Reconnect protocol clients to the new frontend process
+                // so that MySQL/Postgres queries use the restarted frontend,
+                // not stale connections to the old (killed) process.
+                let mut client = db.client.lock().await;
+                client
+                    .reconnect_mysql_client(server_addr.mysql_server_addr.as_ref().unwrap())
+                    .await;
+                client
+                    .reconnect_pg_client(server_addr.pg_server_addr.as_ref().unwrap())
+                    .await;
             }
 
             // Restart flownode.

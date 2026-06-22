@@ -95,7 +95,8 @@ fn sanitize_namespace(name: &str) -> String {
 }
 
 /// Discover all compat cases under `case_root`.
-/// Each case is a directory containing `case.toml`, `setup.sql`, `verify.sql`, and `verify.result`.
+/// Each case is a directory containing `case.toml`, `setup.sql`, and `verify.sql`.
+/// `verify.result` is optional — it is auto-generated on first run.
 pub fn discover_cases(case_root: &Path) -> Result<Vec<CompatCase>, String> {
     let mut cases = Vec::new();
 
@@ -124,9 +125,8 @@ pub fn discover_cases(case_root: &Path) -> Result<Vec<CompatCase>, String> {
 
         let setup_sql = path.join("setup.sql");
         let verify_sql = path.join("verify.sql");
-        let verify_result = path.join("verify.result");
 
-        for required in [&setup_sql, &verify_sql, &verify_result] {
+        for required in [&setup_sql, &verify_sql] {
             if !required.is_file() {
                 return Err(format!(
                     "Missing required file {} in case directory {}",
@@ -288,5 +288,76 @@ mod tests {
         };
 
         assert!(validate_cases(&[case]).is_err());
+    }
+
+    /// Write minimal required files for a compat case into `dir`.
+    fn write_minimal_case(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let case_toml = dir.join("case.toml");
+        let setup_sql = dir.join("setup.sql");
+        let verify_sql = dir.join("verify.sql");
+
+        std::fs::write(
+            &case_toml,
+            r#"
+name = "test_case"
+reason = "test"
+introduced_by = "test"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table"]
+owner = "test"
+"#,
+        )
+        .unwrap();
+        std::fs::write(&setup_sql, "CREATE TABLE t (a INT);").unwrap();
+        std::fs::write(&verify_sql, "SELECT * FROM t;").unwrap();
+    }
+
+    #[test]
+    fn test_discover_cases_allows_missing_verify_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let case_dir = tmp.path().join("my_case");
+        write_minimal_case(&case_dir);
+        // verify.result is intentionally absent
+        assert!(!case_dir.join("verify.result").is_file());
+
+        let cases =
+            discover_cases(tmp.path()).expect("discover should succeed without verify.result");
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].metadata.name, "test_case");
+    }
+
+    #[test]
+    fn test_discover_cases_rejects_missing_setup_sql() {
+        let tmp = tempfile::tempdir().unwrap();
+        let case_dir = tmp.path().join("my_case");
+        write_minimal_case(&case_dir);
+        std::fs::remove_file(case_dir.join("setup.sql")).unwrap();
+
+        assert!(discover_cases(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_discover_cases_rejects_missing_verify_sql() {
+        let tmp = tempfile::tempdir().unwrap();
+        let case_dir = tmp.path().join("my_case");
+        write_minimal_case(&case_dir);
+        std::fs::remove_file(case_dir.join("verify.sql")).unwrap();
+
+        assert!(discover_cases(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_discover_cases_rejects_missing_case_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let case_dir = tmp.path().join("my_case");
+        write_minimal_case(&case_dir);
+        std::fs::remove_file(case_dir.join("case.toml")).unwrap();
+
+        // No case.toml → skipped (not an error)
+        let result = discover_cases(tmp.path());
+        assert!(result.is_err()); // no cases found at all
     }
 }

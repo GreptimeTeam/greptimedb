@@ -102,7 +102,7 @@ Each case runs in its own database namespace to prevent cross-case interference:
 - Default namespace is derived from the case directory name (sanitized to `[a-z][a-z0-9_]*`)
 - Override with `namespace` in `case.toml`
 - Duplicate namespaces are **rejected** unless `isolation = "shared"` is set
-- The runner executes `CREATE DATABASE IF NOT EXISTS <ns>; USE <ns>;` before each phase (not written to verify.result)
+- The runner executes `CREATE DATABASE IF NOT EXISTS <ns>; USE <ns>;` before each statement (not written to verify.result)
 
 ## Batch Behavior
 
