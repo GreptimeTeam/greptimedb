@@ -737,9 +737,13 @@ async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
     ];
     append_common_storage_args(&mut delete_args);
     let delete_cmd = ExportDeleteCommand::parse_from(delete_args);
-    if let Ok(delete) = delete_cmd.build().await {
-        let _ = delete.do_work().await;
-    }
+    delete_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)?;
 
     database_client
         .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
