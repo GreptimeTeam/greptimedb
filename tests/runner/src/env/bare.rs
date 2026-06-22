@@ -597,20 +597,16 @@ impl Env {
         &self.extra_args
     }
 
-    /// Set the binary directory for starting GreptimeDB processes.
-    /// Used by compat runner to switch between old and new versions.
-    pub(crate) fn set_bins_dir(&self, path: PathBuf) {
-        *self.bins_dir.lock().unwrap() = Some(path);
-    }
-
     /// Start a distributed GreptimeDB cluster. Exposed for compat runner.
     pub(crate) async fn compat_start_distributed(&self, id: usize) -> GreptimeDB {
         self.start_distributed(id).await
     }
 
-    /// Full restart of all distributed processes preserving the same context and data.
+    /// Full restart of all distributed processes with a new binary directory,
+    /// preserving the same context and data.
     /// After restart, waits for the frontend gRPC endpoint to become ready.
-    pub(crate) async fn compat_restart_all(&self, db: &GreptimeDB) {
+    pub(crate) async fn compat_restart_all(&self, db: &GreptimeDB, bins_dir: PathBuf) {
+        *db.active_bins_dir.lock().unwrap() = Some(bins_dir);
         self.restart_server(db, true).await;
         self.wait_frontend_ready(db).await;
     }

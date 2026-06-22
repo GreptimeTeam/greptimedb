@@ -195,10 +195,8 @@ impl CompatCommand {
         let to_bins_dir =
             resolve_bins(self.to_bins_dir.as_ref(), None, self.pull_version_on_need).await;
 
-        env.set_bins_dir(to_bins_dir);
-
         println!("Restarting cluster with new-version binary on preserved state...");
-        env.compat_restart_all(&db).await;
+        env.compat_restart_all(&db, to_bins_dir).await;
 
         // ---- 9. Run verify phase on new cluster ----
         println!("Running verify phase...");
