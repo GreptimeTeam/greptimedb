@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,7 +64,7 @@ pub struct KafkaClientSasl {
     pub config: KafkaClientSaslConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "SCREAMING-KEBAB-CASE")]
 pub enum KafkaClientSaslConfig {
     Plain {
@@ -80,6 +81,28 @@ pub enum KafkaClientSaslConfig {
         username: String,
         password: String,
     },
+}
+
+impl fmt::Debug for KafkaClientSaslConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KafkaClientSaslConfig::Plain { username, .. } => f
+                .debug_struct("Plain")
+                .field("username", username)
+                .field("password", &"<REDACTED>")
+                .finish(),
+            KafkaClientSaslConfig::ScramSha256 { username, .. } => f
+                .debug_struct("ScramSha256")
+                .field("username", username)
+                .field("password", &"<REDACTED>")
+                .finish(),
+            KafkaClientSaslConfig::ScramSha512 { username, .. } => f
+                .debug_struct("ScramSha512")
+                .field("username", username)
+                .field("password", &"<REDACTED>")
+                .finish(),
+        }
+    }
 }
 
 impl KafkaClientSaslConfig {
