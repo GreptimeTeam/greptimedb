@@ -427,6 +427,7 @@ mod test {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_build_remote_dyn_filter_request_sets_header_and_body() {
         let request = build_remote_dyn_filter_update_request(
             "query-1",
