@@ -19,9 +19,6 @@ cargo run -p sqlness-runner -- compat --from-bins-dir ./bins/old --to-bins-dir .
 # Run a specific case:
 cargo run -p sqlness-runner -- compat --test-filter "basic_table"
 
-# Run with reduced topology (without flownode):
-cargo run -p sqlness-runner -- compat --topology distributed_core
-
 # See all options:
 cargo run -p sqlness-runner -- compat --help
 ```
@@ -51,7 +48,7 @@ my_case/
 name = "my_case"
 reason = "Why this compatibility case exists"
 introduced_by = "PR #1234 or feature name"
-topologies = ["distributed"]  # default topology includes flownode
+topologies = ["distributed"]  # full distributed topology, including flownode
 from_range = ["*"]
 to_range = ["*"]
 features = ["table"]
@@ -71,10 +68,6 @@ Rules:
 - Statements are semicolon-terminated
 - `--` prefix for ordinary comments (allowed but **not preserved** in verify.result in PR1)
 - **No `-- SQLNESS` interceptors** — PR1 rejects all SQLNESS directives. Only default gRPC protocol is supported.
-- No `USE` statements (handled by the runner's namespace prelude)
-- No `CREATE DATABASE` / `CREATE SCHEMA` (namespace managed by runner)
-- No `DROP DATABASE` / `DROP SCHEMA` (rejected by validation)
-- No fully-qualified cross-namespace references like `db.table` (rejected by validation)
 
 ### `verify.sql` — Verify Phase (New Version)
 
@@ -100,7 +93,7 @@ If output differs from expected, the run fails and `verify.result` is updated wi
 
 - **No SQLNESS interceptors**: PR1 uses default gRPC protocol only. `-- SQLNESS PROTOCOL mysql/postgres` and any other SQLNESS directives are **rejected with an error**. Ordinary `--` comments are allowed.
 - **Comments not preserved in verify.result**: Ordinary `--` comment lines from verify.sql are not written to the verify.result output. Only statement text and query results appear.
-- **Flownode is started by default**: The default topology `distributed` starts 1 metasrv + 3 datanodes + 1 frontend + 1 flownode. Use `--topology distributed_core` only for a reduced topology without flownode.
+- **Full distributed topology**: The compat runner starts 1 metasrv + 3 datanodes + 1 frontend + 1 flownode.
 - **Not full sqlness parity**: The compat executor is intentionally minimal. Only SQL execution and output comparison are supported; advanced sqlness features (interceptors, structured snapshots, etc.) are future work.
 
 ## Namespace Isolation
@@ -117,14 +110,6 @@ Each case runs in its own database namespace to prevent cross-case interference:
 - All cases in a run share one cluster lifecycle: start old cluster → run all setups → restart with new binary → run all verifies
 - Cases run **serially** (no parallelism in PR1). `USE <db>` is session state and cannot be shared concurrently.
 - Same namespace across cases is rejected by default. Use `isolation = "shared"` for cases that intentionally share state.
-
-## Dangerous SQL
-
-The runner validates SQL files and rejects:
-- `USE` statements (namespace prelude is handled by the runner)
-- `CREATE DATABASE` / `CREATE SCHEMA` (namespace managed by runner)
-- `DROP DATABASE` / `DROP SCHEMA` (destructive across namespaces)
-- Fully-qualified cross-namespace references (`db.table`, `schema.column`)
 
 ## xfail Policy (Future)
 

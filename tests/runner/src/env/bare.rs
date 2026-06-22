@@ -177,17 +177,11 @@ impl Env {
     }
 
     async fn start_distributed(&self, id: usize) -> GreptimeDB {
-        self.start_distributed_inner(id, true).await
+        self.start_distributed_inner(id).await
     }
 
-    /// Start a distributed GreptimeDB cluster without flownode (PR1-safe topology).
-    /// 1 metasrv + 3 datanodes + 1 frontend, no flownode.
-    async fn start_distributed_core(&self, id: usize) -> GreptimeDB {
-        self.start_distributed_inner(id, false).await
-    }
-
-    /// Internal: start a distributed cluster with optional flownode.
-    async fn start_distributed_inner(&self, id: usize, include_flownode: bool) -> GreptimeDB {
+    /// Internal: start a distributed cluster with flownode.
+    async fn start_distributed_inner(&self, id: usize) -> GreptimeDB {
         if self.server_addrs.server_addr.is_some() {
             self.connect_db(&self.server_addrs, id).await
         } else {
@@ -229,21 +223,16 @@ impl Env {
             db_ctx.set_server_mode(frontend_mode.clone(), SERVER_MODE_FRONTEND_IDX);
             let frontend = self.start_server(frontend_mode, &db_ctx, id, true).await;
 
-            let flownode = if include_flownode {
-                let flownode_mode = ServerMode::random_flownode(metasrv_port, 0);
-                db_ctx.set_server_mode(flownode_mode.clone(), SERVER_MODE_FLOWNODE_IDX);
-                let fn_process = self.start_server(flownode_mode, &db_ctx, id, true).await;
-                Some(fn_process)
-            } else {
-                None
-            };
+            let flownode_mode = ServerMode::random_flownode(metasrv_port, 0);
+            db_ctx.set_server_mode(flownode_mode.clone(), SERVER_MODE_FLOWNODE_IDX);
+            let flownode = self.start_server(flownode_mode, &db_ctx, id, true).await;
 
             let mut greptimedb = self.connect_db(&server_addr, id).await;
 
             greptimedb.metasrv_process = Some(meta_server).into();
             greptimedb.server_processes = Some(Arc::new(Mutex::new(datanodes)));
             greptimedb.frontend_process = Some(frontend).into();
-            greptimedb.flownode_process = flownode.into();
+            greptimedb.flownode_process = Some(flownode).into();
             greptimedb.is_standalone = false;
             greptimedb.ctx = db_ctx;
 
@@ -401,7 +390,7 @@ impl Env {
                 }
             }
 
-            // Stop flownode if present; silently skip if not (distributed_core topology)
+            // Stop flownode if present.
             if let Some(mut flownode_process) =
                 db.flownode_process.lock().expect("poisoned lock").take()
             {
@@ -496,7 +485,7 @@ impl Env {
                     .replace(frontend);
             }
 
-            // Restart flownode only if its mode was configured (not for distributed_core)
+            // Restart flownode.
             if let Some(flownode_mode) = db.ctx.get_server_mode(SERVER_MODE_FLOWNODE_IDX).cloned() {
                 let flownode = self
                     .start_server_with_bins_dir(
@@ -619,20 +608,9 @@ impl Env {
         self.start_distributed(id).await
     }
 
-    /// Start a PR1-safe distributed cluster (no flownode).
-    pub(crate) async fn compat_start_distributed_core(&self, id: usize) -> GreptimeDB {
-        self.start_distributed_core(id).await
-    }
-
     /// Full restart of all distributed processes preserving the same context and data.
     /// After restart, waits for the frontend gRPC endpoint to become ready.
     pub(crate) async fn compat_restart_all(&self, db: &GreptimeDB) {
-        self.restart_server(db, true).await;
-        self.wait_frontend_ready(db).await;
-    }
-
-    /// Full restart for distributed_core topology (no flownode).
-    pub(crate) async fn compat_restart_all_core(&self, db: &GreptimeDB) {
         self.restart_server(db, true).await;
         self.wait_frontend_ready(db).await;
     }

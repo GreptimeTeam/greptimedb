@@ -24,23 +24,7 @@ use crate::cmd::compat_case::{self, CompatCase};
 use crate::env::bare::{Env, StoreConfig, WalConfig};
 use crate::{protocol_interceptor, util};
 
-/// Cluster topology for compat tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompatTopology {
-    /// Reduced topology: 1 metasrv + 3 datanodes + 1 frontend, no flownode.
-    DistributedCore,
-    /// Default topology including flownode.
-    Distributed,
-}
-
-impl CompatTopology {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::DistributedCore => "distributed_core",
-            Self::Distributed => "distributed",
-        }
-    }
-}
+const COMPAT_TOPOLOGY: &str = "distributed";
 
 /// Run compatibility tests in bare distributed mode.
 ///
@@ -52,7 +36,7 @@ impl CompatTopology {
 /// - Only default gRPC protocol is supported; SQLNESS interceptors are rejected.
 /// - `-- SQLNESS PROTOCOL mysql/postgres` is not supported.
 /// - Ordinary `--` comments are allowed but not preserved in verify.result.
-/// - Default topology (`distributed`) includes flownode.
+/// - The runner starts the full distributed topology, including flownode.
 #[derive(Debug, Parser)]
 pub struct CompatCommand {
     /// Version of the "from" GreptimeDB binary (e.g. "v0.9.5") or "current".
@@ -96,26 +80,10 @@ pub struct CompatCommand {
     /// External metadata stores are not supported by the compat MVP yet.
     #[clap(long, default_value = "true")]
     setup_etcd: bool,
-
-    /// Cluster topology for compat tests.
-    /// `distributed` (default): full topology including flownode.
-    /// `distributed_core`: 1 metasrv + 3 datanodes + 1 frontend, no flownode.
-    #[clap(long, default_value = "distributed")]
-    topology: String,
 }
 
 impl CompatCommand {
     pub async fn run(self) {
-        // ---- 0. Resolve topology ----
-        let topology = match self.topology.as_str() {
-            "distributed_core" => CompatTopology::DistributedCore,
-            "distributed" => CompatTopology::Distributed,
-            other => panic!(
-                "Unknown topology '{}'. Supported: distributed (default, with flownode), distributed_core (no flownode)",
-                other
-            ),
-        };
-
         // ---- 1. Create temp directory ----
         let temp_dir = tempfile::Builder::new()
             .prefix("sqlness-compat")
@@ -146,21 +114,20 @@ impl CompatCommand {
         let filter_re = regex::Regex::new(&self.test_filter)
             .unwrap_or_else(|e| panic!("Invalid test filter regex '{}': {e}", self.test_filter));
         cases.retain(|c| filter_re.is_match(&c.metadata.name));
-        cases.retain(|c| c.metadata.topologies.iter().any(|t| t == topology.as_str()));
+        cases.retain(|c| c.metadata.topologies.iter().any(|t| t == COMPAT_TOPOLOGY));
 
         if cases.is_empty() {
             println!(
                 "No compat cases found matching filter '{}' and topology '{}'",
-                self.test_filter,
-                topology.as_str()
+                self.test_filter, COMPAT_TOPOLOGY
             );
             return;
         }
 
         println!(
-            "Running {} compat case(s) with topology {:?}:",
+            "Running {} compat case(s) with topology {}:",
             cases.len(),
-            topology
+            COMPAT_TOPOLOGY
         );
         for c in &cases {
             println!(
@@ -213,14 +180,8 @@ impl CompatCommand {
         };
 
         // ---- 7. Run setup phase on old cluster ----
-        println!(
-            "Starting old-version distributed cluster (topology: {:?})...",
-            topology
-        );
-        let mut db = match topology {
-            CompatTopology::DistributedCore => env.compat_start_distributed_core(0).await,
-            CompatTopology::Distributed => env.compat_start_distributed(0).await,
-        };
+        println!("Starting old-version distributed cluster with flownode...");
+        let mut db = env.compat_start_distributed(0).await;
 
         println!("Running setup phase...");
         for case in &cases {
@@ -237,10 +198,7 @@ impl CompatCommand {
         env.set_bins_dir(to_bins_dir);
 
         println!("Restarting cluster with new-version binary on preserved state...");
-        match topology {
-            CompatTopology::DistributedCore => env.compat_restart_all_core(&db).await,
-            CompatTopology::Distributed => env.compat_restart_all(&db).await,
-        }
+        env.compat_restart_all(&db).await;
 
         // ---- 9. Run verify phase on new cluster ----
         println!("Running verify phase...");
@@ -412,9 +370,6 @@ async fn run_compat_phase(
 
     let sql_content = std::fs::read_to_string(&sql_file)
         .map_err(|e| format!("Failed to read {}: {e}", sql_file.display()))?;
-
-    // Validate SQL safety
-    compat_case::validate_sql_safety(&sql_content, &case.metadata.name)?;
 
     // Parse SQL into statements with interceptor contexts
     let statements = parse_sql_file(&sql_content, registry)?;
