@@ -117,6 +117,16 @@ async fn query_hosts(database_client: &DatabaseClient, schema: &str) -> Result<V
         .collect()
 }
 
+async fn schema_exists(database_client: &DatabaseClient, schema: &str) -> Result<bool> {
+    let rows = database_client
+        .sql_in_public("SHOW DATABASES")
+        .await?
+        .unwrap_or_default();
+    Ok(rows
+        .iter()
+        .any(|row| matches!(row.first(), Some(Value::String(value)) if value == schema)))
+}
+
 #[tokio::test]
 #[ignore]
 async fn export_import_v2_schema_parity_e2e() -> Result<()> {
@@ -1040,11 +1050,13 @@ async fn import_v2_schema_filter_data_e2e() -> Result<()> {
 
     let actual_rows_a = query_count(&database_client, schema_a, "metrics").await?;
     assert_eq!(actual_rows_a, expected_rows_a);
+    let hosts_a = query_hosts(&database_client, schema_a).await?;
+    assert_eq!(hosts_a, vec!["a1".to_string(), "a2".to_string()]);
 
-    let schema_b_query = database_client
-        .sql("SELECT COUNT(*) FROM metrics", schema_b)
-        .await;
-    assert!(schema_b_query.is_err(), "schema_b should not be imported");
+    assert!(
+        !schema_exists(&database_client, schema_b).await?,
+        "schema_b should not be imported"
+    );
 
     for schema in [schema_a, schema_b] {
         database_client
