@@ -107,10 +107,10 @@ impl PredicateExtractor {
         // a list but the table scan must satisfy all of them. Preserve that AND
         // semantics for partition pruning instead of returning the filters as
         // independent top-level expressions.
-        if let LogicalPlan::TableScan(table_scan) = plan {
-            if let Some(expr) = Self::conjunction(table_scan.filters.iter().cloned()) {
-                expressions.push(expr);
-            }
+        if let LogicalPlan::TableScan(table_scan) = plan
+            && let Some(expr) = Self::conjunction(table_scan.filters.iter().cloned())
+        {
+            expressions.push(expr);
         }
 
         // Recursively visit children
