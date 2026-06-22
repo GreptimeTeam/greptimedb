@@ -161,15 +161,11 @@ impl TableProvider for DfTableProviderAdapter {
 }
 
 /// Returns true if the expression can be safely evaluated by a remote scan.
-/// Rejects subquery/outer-ref constructs and column references unknown to the schema.
+/// Rejects outer references and column references unknown to the schema.
 fn is_scan_local(expr: &Expr, schema: &DfSchemaRef) -> bool {
     let mut problems = false;
     let _ = expr.apply(|node| match node {
-        Expr::OuterReferenceColumn(_, _)
-        | Expr::Exists(_)
-        | Expr::InSubquery(_)
-        | Expr::ScalarSubquery(_)
-        | Expr::SetComparison(_) => {
+        Expr::OuterReferenceColumn(_, _) => {
             problems = true;
             Ok(TreeNodeRecursion::Stop)
         }
