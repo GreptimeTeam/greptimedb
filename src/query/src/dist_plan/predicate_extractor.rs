@@ -102,9 +102,15 @@ impl PredicateExtractor {
             expressions.push(filter.predicate.clone());
         }
 
-        // Collect filters that DataFusion's PushDownFilter stored in TableScan
+        // Collect filters that DataFusion's PushDownFilter stored in TableScan.
+        // `TableScan.filters` is conjunctive: DataFusion passes scan filters as
+        // a list but the table scan must satisfy all of them. Preserve that AND
+        // semantics for partition pruning instead of returning the filters as
+        // independent top-level expressions.
         if let LogicalPlan::TableScan(table_scan) = plan {
-            expressions.extend(table_scan.filters.iter().cloned());
+            if let Some(expr) = Self::conjunction(table_scan.filters.iter().cloned()) {
+                expressions.push(expr);
+            }
         }
 
         // Recursively visit children
@@ -118,6 +124,11 @@ impl PredicateExtractor {
         }
 
         Ok(())
+    }
+
+    fn conjunction(mut expressions: impl Iterator<Item = Expr>) -> Option<Expr> {
+        let first = expressions.next()?;
+        Some(expressions.fold(first, |acc, expr| acc.and(expr)))
     }
 }
 
@@ -614,6 +625,43 @@ mod tests {
                 Operand::Column("user_id".to_string()),
                 RestrictedOp::GtEq,
                 Operand::Value(Value::Int64(100)),
+            )]
+        );
+    }
+
+    #[test]
+    fn test_combines_table_scan_filters_as_conjunction() {
+        let table_scan = create_test_table_scan();
+        let filter_a = col("user_id").eq(lit(10i64));
+        let filter_b = col("value").eq(lit(20i64));
+        let LogicalPlan::TableScan(scan) = table_scan else {
+            panic!("expected test table scan");
+        };
+        let plan = LogicalPlan::TableScan(datafusion_expr::logical_plan::TableScan {
+            filters: vec![filter_a, filter_b],
+            ..scan
+        });
+
+        let partition_exprs = PredicateExtractor::extract_partition_expressions(
+            &plan,
+            &["user_id".to_string(), "value".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            partition_exprs,
+            vec![PartitionExpr::new(
+                Operand::Expr(PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(10)),
+                )),
+                RestrictedOp::And,
+                Operand::Expr(PartitionExpr::new(
+                    Operand::Column("value".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(20)),
+                )),
             )]
         );
     }

@@ -28,8 +28,11 @@ use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as co
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::decorrelate_lateral_join::DecorrelateLateralJoin;
 use datafusion_optimizer::decorrelate_predicate_subquery::DecorrelatePredicateSubquery;
+use datafusion_optimizer::eliminate_filter::EliminateFilter;
 use datafusion_optimizer::extract_equijoin_predicate::ExtractEquijoinPredicate;
+use datafusion_optimizer::filter_null_join_keys::FilterNullJoinKeys;
 use datafusion_optimizer::optimizer::Optimizer;
+use datafusion_optimizer::propagate_empty_relation::PropagateEmptyRelation;
 use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
@@ -178,6 +181,9 @@ fn pre_merge_scan_optimizer() -> Optimizer {
         Arc::new(ScalarSubqueryToJoin::new()),
         Arc::new(DecorrelateLateralJoin::new()),
         Arc::new(ExtractEquijoinPredicate::new()),
+        Arc::new(EliminateFilter::new()),
+        Arc::new(PropagateEmptyRelation::new()),
+        Arc::new(FilterNullJoinKeys::default()),
         Arc::new(PushDownFilter::new()),
     ])
 }

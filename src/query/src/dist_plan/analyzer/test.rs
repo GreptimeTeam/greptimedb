@@ -1451,6 +1451,48 @@ fn sibling_merge_scans_have_unique_remote_dyn_filter_producer_ids() {
 }
 
 #[test]
+fn pre_merge_scan_optimizer_eliminates_projected_false_filter() {
+    init_default_ut_logging();
+    let left_table =
+        TestTable::table_with_filter_pushdown(0, "i1".to_string(), FilterPushDownType::Inexact);
+    let right_table =
+        TestTable::table_with_filter_pushdown(1, "i2".to_string(), FilterPushDownType::Inexact);
+
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let left = LogicalPlanBuilder::scan_with_filters("i1", left_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    let right = LogicalPlanBuilder::scan_with_filters("i2", right_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let plan = LogicalPlanBuilder::from(left)
+        .cross_join(right)
+        .unwrap()
+        .project(vec![lit(false).alias("cond")])
+        .unwrap()
+        .filter(col("cond"))
+        .unwrap()
+        .sort(vec![col("cond").sort(true, true)])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    assert_eq!("EmptyRelation: rows=0", result.to_string());
+}
+
+#[test]
 fn test_simplify_now_expression() {
     init_default_ut_logging();
     let test_table = TestTable::table_with_name(0, "t".to_string());

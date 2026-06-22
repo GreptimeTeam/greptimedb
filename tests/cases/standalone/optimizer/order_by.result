@@ -59,9 +59,10 @@ explain select * from numbers order by number desc limit 10;
 | plan_type     | plan                                                                                                                                                                      |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                           |
-|               | Sort: numbers.number DESC NULLS FIRST, fetch=10                                                                                                                           |
-|               |   Projection: numbers.number                                                                                                                                              |
-|               |     TableScan: numbers                                                                                                                                                    |
+|               | Limit: skip=0, fetch=10                                                                                                                                                   |
+|               |   Sort: numbers.number DESC NULLS FIRST                                                                                                                                   |
+|               |     Projection: numbers.number                                                                                                                                            |
+|               |       TableScan: numbers                                                                                                                                                  |
 |               | ]]                                                                                                                                                                        |
 | physical_plan | SortPreservingMergeExec: [number@0 DESC], fetch=10                                                                                                                        |
 |               |   CooperativeExec                                                                                                                                                         |
@@ -78,9 +79,10 @@ explain select * from numbers order by number asc limit 10;
 | plan_type     | plan                                                                                                                                                                      |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                           |
-|               | Sort: numbers.number ASC NULLS LAST, fetch=10                                                                                                                             |
-|               |   Projection: numbers.number                                                                                                                                              |
-|               |     TableScan: numbers                                                                                                                                                    |
+|               | Limit: skip=0, fetch=10                                                                                                                                                   |
+|               |   Sort: numbers.number ASC NULLS LAST                                                                                                                                     |
+|               |     Projection: numbers.number                                                                                                                                            |
+|               |       TableScan: numbers                                                                                                                                                  |
 |               | ]]                                                                                                                                                                        |
 | physical_plan | SortPreservingMergeExec: [number@0 ASC NULLS LAST], fetch=10                                                                                                              |
 |               |   CooperativeExec                                                                                                                                                         |
