@@ -62,10 +62,17 @@
 //! `on_sst_files_written` is invoked at the SST write site (flush task or compaction task),
 //! immediately after SST files are written but **before** the manifest is committed.
 //!
-//! `on_manifest_updated` is centralized in [`ManifestContext::update_manifest_with_state_check`],
-//! so it automatically covers all manifest write paths that go through `ManifestContext`.
-//! The sole exception is [`MitoRegion::exit_staging_on_success`], which returns the hook
-//! payload to the caller so the hook can be invoked after dropping the manifest write lock.
+//! `on_manifest_updated` is funneled through [`ManifestContext::update_locked`],
+//! the sole caller of the low-level [`RegionManifestManager::update`], which
+//! packages each successful write into a [`PendingManifestHook`]. The caller
+//! owns the write lock, drops it, and *then* fires the receipt — the hook must
+//! never run under the lock. [`ManifestContext::update_manifest`] is the common
+//! case: it acquires the lock, delegates to `update_locked`, and fires the
+//! receipt in one go. Multi-step sequences (staging-exit, role-state backfill)
+//! call `update_locked` directly under their own held guard.
+//!
+//! Non-logical writes (GC, staging bookkeeping) call the manager's own methods
+//! directly and intentionally do not fire the hook.
 //!
 //! ## Future work
 //!
@@ -74,6 +81,9 @@
 //!
 //! [`on_sst_files_written`]: RegionHook::on_sst_files_written
 //! [`on_manifest_updated`]: RegionHook::on_manifest_updated
+//! [`RegionManifestManager::update`]: crate::manifest::manager::RegionManifestManager::update
+//! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
+//! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -86,6 +96,76 @@ use store_api::storage::RegionId;
 use crate::manifest::action::RegionMetaActionList;
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::SstInfo;
+
+/// A deferred [`RegionHook::on_manifest_updated`] notification produced by a
+/// logical manifest write via [`ManifestContext::update_locked`](crate::region::ManifestContext::update_locked).
+///
+/// Must be [`fire`](Self::fire)d **after** the manifest write lock is released
+/// (the hook may read the manifest). `#[must_use]` so a forgotten receipt warns.
+#[must_use = "the region hook must be fired after releasing the manifest write lock"]
+pub(crate) struct PendingManifestHook {
+    region_id: RegionId,
+    /// `None` when no hook is registered (fire becomes a no-op).
+    action_list: Option<RegionMetaActionList>,
+    version: ManifestVersion,
+    hook: Option<RegionHookRef>,
+}
+
+impl PendingManifestHook {
+    pub(crate) fn new(
+        region_id: RegionId,
+        action_list: Option<RegionMetaActionList>,
+        version: ManifestVersion,
+        hook: Option<RegionHookRef>,
+    ) -> Self {
+        Self {
+            region_id,
+            action_list,
+            version,
+            hook,
+        }
+    }
+
+    /// The manifest version produced by the write.
+    pub(crate) fn version(&self) -> ManifestVersion {
+        self.version
+    }
+
+    /// Fires the hook if one is registered. Safe to call unconditionally: it is
+    /// a no-op when no hook is registered.
+    pub(crate) async fn fire(self) {
+        if let (Some(hook), Some(action_list)) = (self.hook, self.action_list) {
+            hook.on_manifest_updated(self.region_id, &action_list, self.version)
+                .await;
+        }
+    }
+
+    /// Merges two pending notifications into one so consumers observe a single
+    /// `on_manifest_updated` call covering all actions. The combined action list
+    /// keeps `self`'s actions followed by `other`'s, and the *later* manifest
+    /// version wins. Used when a sequence of writes (e.g. staging-exit followed
+    /// by metadata backfill) should notify the hook exactly once.
+    pub(crate) fn merge(self, other: PendingManifestHook) -> PendingManifestHook {
+        debug_assert_eq!(
+            self.region_id, other.region_id,
+            "Cannot merge pending hooks of different regions: {:?} and {:?}",
+            self.region_id, other.region_id
+        );
+        PendingManifestHook {
+            region_id: self.region_id,
+            action_list: match (self.action_list, other.action_list) {
+                (Some(mut a), Some(b)) => {
+                    a.actions.extend(b.actions);
+                    Some(a)
+                }
+                (a, None) => a,
+                (None, b) => b,
+            },
+            version: self.version.max(other.version),
+            hook: self.hook.or(other.hook),
+        }
+    }
+}
 
 /// Information about a single SST data file written during flush or compaction.
 pub struct SstFileInfo<'a> {

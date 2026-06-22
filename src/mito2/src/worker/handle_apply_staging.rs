@@ -159,13 +159,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         return;
                     }
                 };
-                // Drop the write lock before invoking the hook to avoid deadlock.
                 drop(manager);
-                if let Some((action_list, version)) = hook_payload
-                    && let Some(hook) = region.manifest_ctx.hook()
-                {
-                    hook.on_manifest_updated(region.region_id, &action_list, version)
-                        .await;
+                if let Some(pending) = hook_payload {
+                    pending.fire().await;
                 }
                 sender.send(Ok(0));
             } else {
