@@ -66,7 +66,8 @@ SQL statements executed on the **old** version cluster. These must succeed (any 
 
 Rules:
 - Statements are semicolon-terminated
-- `--` prefix for ordinary comments (allowed but **not preserved** in verify.result in PR1)
+- `--` prefix for ordinary comments
+- `-- SQLNESS ...` interceptor comments follow ordinary sqlness semantics
 
 ### `verify.sql` — Verify Phase (New Version)
 
@@ -90,9 +91,9 @@ If output differs from expected, the run fails and `verify.result` is updated wi
 
 ## PR1 Limitations
 
-- **Comments not preserved in verify.result**: Ordinary `--` comment lines from verify.sql are not written to the verify.result output. Only statement text and query results appear.
+- **Sqlness interceptors**: `-- SQLNESS ...` comments are applied per statement using the same interceptor registry as the ordinary sqlness runner, including the GreptimeDB `PROTOCOL` interceptor.
 - **Full distributed topology**: The compat runner starts 1 metasrv + 3 datanodes + 1 frontend + 1 flownode.
-- **No comment-based compat config**: The compat runner does not interpret SQL comments as compatibility configuration. Ordinary `--` comment lines are ignored by the compat snapshot writer.
+- **No comment-based compat config**: The compat runner does not define extra compatibility configuration in SQL comments; sqlness comments keep their normal sqlness meaning.
 
 ## Namespace Isolation
 

@@ -680,6 +680,36 @@ impl GreptimeDB {
 
     /// Execute a gRPC query and return `Result<String, String>` so errors can be
     /// detected without parsing sqlness formatted output. Used by the compat runner.
+    pub(crate) async fn compat_prepare_query_context(&self, ctx: &QueryContext) {
+        if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
+            self.env.restart_server(self, false).await;
+        } else if let Some(version) = ctx.context.get("version") {
+            let version_bin_dir = self
+                .env
+                .versioned_bins_dirs
+                .lock()
+                .expect("lock poison")
+                .get(version.as_str())
+                .cloned();
+
+            match version_bin_dir {
+                Some(path) if path.join(PROGRAM).is_file() => {
+                    *self.active_bins_dir.lock().unwrap() = Some(path);
+                }
+                _ => {
+                    maybe_pull_binary(version, self.env.pull_version_on_need).await;
+                    let root = get_workspace_root();
+                    let new_path = PathBuf::from_iter([&root, version]);
+                    *self.active_bins_dir.lock().unwrap() = Some(new_path);
+                }
+            }
+
+            self.env.restart_server(self, true).await;
+            // sleep for a while to wait for the server to fully boot up
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
     pub(crate) async fn compat_query(
         &self,
         query: &str,

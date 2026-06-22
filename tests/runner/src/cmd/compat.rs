@@ -13,16 +13,22 @@
 // limitations under the License.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use sqlness::QueryContext;
+use sqlness::interceptor::template::DELIMITER as TEMPLATE_DELIMITER;
+use sqlness::interceptor::{InterceptorRef, Registry};
 
 use crate::cmd::bare::ServerAddr;
 use crate::cmd::compat_case::{self, CompatCase};
 use crate::env::bare::{Env, StoreConfig, WalConfig};
-use crate::util;
+use crate::{protocol_interceptor, util};
 
 const COMPAT_TOPOLOGY: &str = "distributed";
+const COMMENT_PREFIX: &str = "--";
+const INTERCEPTOR_PREFIX: &str = "-- SQLNESS";
+const QUERY_DELIMITER: char = ';';
 
 /// Run compatibility tests in bare distributed mode.
 ///
@@ -31,7 +37,7 @@ const COMPAT_TOPOLOGY: &str = "distributed";
 /// and runs verify SQLs comparing results against `verify.result` files.
 ///
 /// PR1 notes:
-/// - Ordinary `--` comments are allowed but not preserved in verify.result.
+/// - Sqlness interceptor comments are supported for each statement.
 /// - The runner starts the full distributed topology, including flownode.
 #[derive(Debug, Parser)]
 pub struct CompatCommand {
@@ -140,6 +146,9 @@ impl CompatCommand {
         )
         .await;
 
+        // ---- 6. Build interceptor registry ----
+        let interceptor_registry = create_interceptor_registry();
+
         // ---- 6b. Create Env for bare distributed mode ----
         let store_config = StoreConfig {
             store_addrs: if self.setup_etcd {
@@ -178,7 +187,7 @@ impl CompatCommand {
 
         println!("Running setup phase...");
         for case in &cases {
-            run_compat_phase(&db, case, CompatPhase::Setup)
+            run_compat_phase(&db, case, &interceptor_registry, CompatPhase::Setup)
                 .await
                 .unwrap_or_else(|e| panic!("Setup failed for case '{}': {e}", case.metadata.name));
             println!("  Setup: {} - OK", case.metadata.name);
@@ -195,7 +204,7 @@ impl CompatCommand {
         println!("Running verify phase...");
         let mut failed = Vec::new();
         for case in &cases {
-            match run_compat_phase(&db, case, CompatPhase::Verify).await {
+            match run_compat_phase(&db, case, &interceptor_registry, CompatPhase::Verify).await {
                 Ok(()) => println!("  Verify: {} - PASSED", case.metadata.name),
                 Err(e) => {
                     println!("  Verify: {} - FAILED: {e}", case.metadata.name);
@@ -277,6 +286,16 @@ enum CompatPhase {
     Verify,
 }
 
+/// Create an interceptor registry matching the ordinary sqlness runner.
+fn create_interceptor_registry() -> Registry {
+    let mut interceptor_registry: Registry = Default::default();
+    interceptor_registry.register(
+        protocol_interceptor::PREFIX,
+        Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
+    );
+    interceptor_registry
+}
+
 /// Resolve binary directory: explicit path takes priority, then version (pulls if needed),
 /// otherwise default to current debug build.
 ///
@@ -341,6 +360,7 @@ fn default_compat_case_dir() -> PathBuf {
 async fn run_compat_phase(
     db: &crate::env::bare::GreptimeDB,
     case: &CompatCase,
+    registry: &Registry,
     phase: CompatPhase,
 ) -> Result<(), String> {
     let sql_file = match phase {
@@ -351,31 +371,25 @@ async fn run_compat_phase(
     let sql_content = std::fs::read_to_string(&sql_file)
         .map_err(|e| format!("Failed to read {}: {e}", sql_file.display()))?;
 
-    let statements = parse_sql_file(&sql_content)?;
-
-    // Run namespace prelude (only for setup and verify; not written into verify result)
-    run_namespace_prelude(db, &case.namespace).await?;
+    let mut statements = parse_sql_file(&sql_content, registry)?;
 
     // Execute statements
     let mut verify_output = String::new();
-    let query_ctx = QueryContext::default();
 
-    for sql in &statements {
-        let result = db.compat_query(sql, &query_ctx).await?;
+    for statement in &mut statements {
+        let (display, results) = statement.execute(db, &case.namespace).await?;
 
         match phase {
             CompatPhase::Setup => {
                 // Setup: just check for success (already returned Ok)
             }
             CompatPhase::Verify => {
-                // Verify: accumulate output in sqlness-style format
-                // Format: display query, blank line, result, blank line
-                verify_output.push_str(sql);
-                verify_output.push('\n');
-                verify_output.push('\n');
-                verify_output.push_str(&result);
-                verify_output.push('\n');
-                verify_output.push('\n');
+                verify_output.push_str(&display);
+                for result in results {
+                    verify_output.push_str(&result);
+                    verify_output.push('\n');
+                    verify_output.push('\n');
+                }
             }
         }
     }
@@ -418,61 +432,170 @@ async fn run_compat_phase(
 async fn run_namespace_prelude(
     db: &crate::env::bare::GreptimeDB,
     namespace: &str,
+    query_ctx: &QueryContext,
 ) -> Result<(), String> {
     let create_db = format!("CREATE DATABASE IF NOT EXISTS {namespace}");
     let use_db = format!("USE {namespace}");
 
-    // Use default context (gRPC protocol) for namespace management
-    let default_ctx = QueryContext::default();
-
-    db.compat_query(&create_db, &default_ctx).await?;
-    db.compat_query(&use_db, &default_ctx).await?;
+    db.compat_query(&create_db, query_ctx).await?;
+    db.compat_query(&use_db, query_ctx).await?;
 
     Ok(())
 }
 
-/// Parse a SQL file into statements.
-/// Lines starting with `--` are ordinary comments and are not preserved in verify.result.
-fn parse_sql_file(content: &str) -> Result<Vec<String>, String> {
+/// A parsed SQL statement with sqlness comments and interceptors.
+struct ParsedStatement {
+    comment_lines: Vec<String>,
+    display_query: Vec<String>,
+    execute_query: Vec<String>,
+    interceptors: Vec<InterceptorRef>,
+}
+
+impl ParsedStatement {
+    fn new() -> Self {
+        Self {
+            comment_lines: Vec::new(),
+            display_query: Vec::new(),
+            execute_query: Vec::new(),
+            interceptors: Vec::new(),
+        }
+    }
+
+    fn push_comment(&mut self, line: String) {
+        self.comment_lines.push(line);
+    }
+
+    fn push_interceptor(&mut self, line: &str, registry: &Registry) -> Result<(), String> {
+        let Some((_, remaining)) = line.split_once(INTERCEPTOR_PREFIX) else {
+            return Err(format!(
+                "Missing sqlness interceptor prefix in line: {line}"
+            ));
+        };
+        let interceptor = registry.create(remaining).map_err(|e| e.to_string())?;
+        self.interceptors.push(interceptor);
+        Ok(())
+    }
+
+    fn append_query_line(&mut self, line: &str) {
+        self.display_query.push(line.to_string());
+        self.execute_query.push(line.to_string());
+    }
+
+    fn is_empty(&self) -> bool {
+        self.comment_lines.is_empty()
+            && self.display_query.is_empty()
+            && self.execute_query.is_empty()
+            && self.interceptors.is_empty()
+    }
+
+    fn has_query(&self) -> bool {
+        !self.execute_query.is_empty()
+    }
+
+    fn display_text(&self) -> String {
+        let mut output = String::new();
+        for comment in &self.comment_lines {
+            output.push_str(comment);
+            output.push('\n');
+        }
+        for line in &self.display_query {
+            output.push_str(line);
+        }
+        output.push('\n');
+        output.push('\n');
+        output
+    }
+
+    fn concat_query_lines(&self) -> String {
+        self.execute_query
+            .iter()
+            .fold(String::new(), |query, line| query + line)
+            .trim_start()
+            .to_string()
+    }
+
+    async fn before_execute_intercept(&mut self) -> QueryContext {
+        let mut context = QueryContext::default();
+        for interceptor in &self.interceptors {
+            interceptor
+                .before_execute_async(&mut self.execute_query, &mut context)
+                .await;
+        }
+        context
+    }
+
+    async fn after_execute_intercept(&self, result: &mut String) {
+        for interceptor in &self.interceptors {
+            interceptor.after_execute_async(result).await;
+        }
+    }
+
+    async fn execute(
+        &mut self,
+        db: &crate::env::bare::GreptimeDB,
+        namespace: &str,
+    ) -> Result<(String, Vec<String>), String> {
+        let display = self.display_text();
+        let context = self.before_execute_intercept().await;
+        db.compat_prepare_query_context(&context).await;
+        run_namespace_prelude(db, namespace, &context).await?;
+        let sql = self.concat_query_lines();
+        let mut results = Vec::new();
+
+        for sql in sql.split(TEMPLATE_DELIMITER) {
+            if sql.trim().is_empty() {
+                continue;
+            }
+            let sql = if sql.ends_with(QUERY_DELIMITER) {
+                sql.to_string()
+            } else {
+                format!("{sql};")
+            };
+            let mut result = db.compat_query(&sql, &context).await?;
+            self.after_execute_intercept(&mut result).await;
+            results.push(result);
+        }
+
+        Ok((display, results))
+    }
+}
+
+/// Parse a SQL file into statements using the same sqlness comment/interceptor
+/// conventions as the ordinary runner.
+fn parse_sql_file(content: &str, registry: &Registry) -> Result<Vec<ParsedStatement>, String> {
     let mut statements = Vec::new();
-    let mut current_stmt = String::new();
-    let mut in_stmt = false;
+    let mut current_stmt = ParsedStatement::new();
 
     for line in content.lines() {
-        let trimmed = line.trim();
+        if line.starts_with(COMMENT_PREFIX) {
+            current_stmt.push_comment(line.to_string());
 
-        // Skip pure comment lines
-        if trimmed.starts_with("--") || trimmed.is_empty() {
-            if in_stmt {
-                // Blank line or comment inside a statement is fine, just skip
+            if line.starts_with(INTERCEPTOR_PREFIX) {
+                current_stmt.push_interceptor(line, registry)?;
             }
             continue;
         }
 
-        // Accumulate statement content
-        if in_stmt {
-            current_stmt.push('\n');
+        if line.is_empty() {
+            continue;
         }
-        current_stmt.push_str(line); // preserve original formatting
-        in_stmt = true;
+
+        current_stmt.append_query_line(line);
 
         // Check for statement terminator
-        if trimmed.ends_with(';') {
-            let stmt = current_stmt.trim().to_string();
-            if !stmt.is_empty() {
-                statements.push(stmt);
+        if line.ends_with(QUERY_DELIMITER) {
+            if current_stmt.has_query() {
+                statements.push(current_stmt);
             }
-            current_stmt.clear();
-            in_stmt = false;
+            current_stmt = ParsedStatement::new();
+        } else {
+            current_stmt.append_query_line("\n");
         }
     }
 
     // Flush any remaining statement
-    if in_stmt {
-        let stmt = current_stmt.trim().to_string();
-        if !stmt.is_empty() {
-            statements.push(stmt);
-        }
+    if !current_stmt.is_empty() && current_stmt.has_query() {
+        statements.push(current_stmt);
     }
 
     if statements.is_empty() {
