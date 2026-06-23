@@ -30,9 +30,7 @@ pub struct PredicateExtractor;
 
 impl PredicateExtractor {
     /// Extract partition expressions for partition columns from logical plan  
-    /// This method returns PartitionExpr objects suitable for ConstraintPruner.
-    /// The returned Vec will contain at most one element: either a single safe
-    /// PartitionExpr or zero expressions.
+    /// This method returns PartitionExpr objects suitable for ConstraintPruner
     pub fn extract_partition_expressions(
         plan: &LogicalPlan,
         partition_columns: &[String],
@@ -45,53 +43,49 @@ impl PredicateExtractor {
             return Ok(Vec::new());
         }
 
+        // Convert each DataFusion filter expression to PartitionExpr
+        let mut partition_exprs = Vec::with_capacity(filter_exprs.len());
         let partition_set: HashSet<String> = partition_columns.iter().cloned().collect();
 
-        let mut and_exprs = Vec::new();
-        let mut fallback_or = None;
-
         for filter_expr in filter_exprs {
-            for conjunct in split_conjuncts(&filter_expr) {
-                match DataFusionExprConverter::convert(&conjunct) {
-                    Ok(partition_expr) => match ExpressionChecker::check_expression_for_pruning(
+            match DataFusionExprConverter::convert(&filter_expr) {
+                Ok(partition_expr) => {
+                    // Check expression for safe partition pruning
+                    match ExpressionChecker::check_expression_for_pruning(
                         &partition_expr,
                         &partition_set,
                     ) {
                         ExpressionCheckResult::UseAsIs(expr) => {
-                            push_partition_expr(expr, &mut and_exprs, &mut fallback_or);
+                            partition_exprs.push(expr);
                         }
                         ExpressionCheckResult::UsePartial(exprs) => {
-                            for expr in exprs {
-                                push_partition_expr(expr, &mut and_exprs, &mut fallback_or);
-                            }
+                            partition_exprs.extend(exprs);
                         }
                         ExpressionCheckResult::Drop => {
-                            debug!("Dropping mixed expression for correctness: {partition_expr}");
+                            debug!(
+                                "Dropping mixed expression for correctness: {}",
+                                partition_expr
+                            );
                         }
-                    },
-                    Err(err) => {
-                        debug!(
-                            "Failed to convert filter expression to PartitionExpr: {}, skipping",
-                            err
-                        );
-                        continue;
                     }
+                }
+                Err(err) => {
+                    debug!(
+                        "Failed to convert filter expression to PartitionExpr: {}, skipping",
+                        err
+                    );
+                    continue;
                 }
             }
         }
 
-        let result = conjunction_partition_exprs(and_exprs)
-            .or(fallback_or)
-            .into_iter()
-            .collect::<Vec<_>>();
-
         debug!(
             "Extracted {} partition expressions from logical plan for partition columns: {:?}",
-            result.len(),
+            partition_exprs.len(),
             partition_columns
         );
 
-        Ok(result)
+        Ok(partition_exprs)
     }
 
     /// Collect all filter expressions from a logical plan.
@@ -110,13 +104,13 @@ impl PredicateExtractor {
 
         // Collect filters that DataFusion's PushDownFilter stored in TableScan.
         // `TableScan.filters` is conjunctive: DataFusion passes scan filters as
-        // a list but the table scan must satisfy all of them. We push each filter
-        // individually so that independent conjuncts are converted/checked
-        // separately; the surviving partition expressions are AND-combined later.
-        if let LogicalPlan::TableScan(table_scan) = plan {
-            for filter in &table_scan.filters {
-                expressions.push(filter.clone());
-            }
+        // a list but the table scan must satisfy all of them. Preserve that AND
+        // semantics for partition pruning instead of returning the filters as
+        // independent top-level expressions.
+        if let LogicalPlan::TableScan(table_scan) = plan
+            && let Some(expr) = Self::conjunction(table_scan.filters.iter().cloned())
+        {
+            expressions.push(expr);
         }
 
         // Recursively visit children
@@ -131,47 +125,11 @@ impl PredicateExtractor {
 
         Ok(())
     }
-}
 
-/// Split a DataFusion expression by top-level `Operator::And` into individual conjuncts.
-fn split_conjuncts(expr: &Expr) -> Vec<Expr> {
-    fn collect(expr: &Expr, out: &mut Vec<Expr>) {
-        if let Expr::BinaryExpr(binary) = expr
-            && binary.op == Operator::And
-        {
-            collect(&binary.left, out);
-            collect(&binary.right, out);
-        } else {
-            out.push(expr.clone());
-        }
+    fn conjunction(mut expressions: impl Iterator<Item = Expr>) -> Option<Expr> {
+        let first = expressions.next()?;
+        Some(expressions.fold(first, |acc, expr| acc.and(expr)))
     }
-    let mut result = Vec::new();
-    collect(expr, &mut result);
-    result
-}
-
-fn push_partition_expr(
-    expr: PartitionExpr,
-    and_exprs: &mut Vec<PartitionExpr>,
-    fallback_or: &mut Option<PartitionExpr>,
-) {
-    // A lone OR is safe for the collider, but AND-over-OR is not. Keep one OR
-    // only as a fallback when there are no ordinary conjuncts to use.
-    if matches!(expr.op(), RestrictedOp::Or) {
-        fallback_or.get_or_insert(expr);
-    } else {
-        and_exprs.push(expr);
-    }
-}
-
-/// Combine a list of [`PartitionExpr`] into a single AND expression.
-/// Returns `None` if the list is empty.
-fn conjunction_partition_exprs(exprs: Vec<PartitionExpr>) -> Option<PartitionExpr> {
-    let mut iter = exprs.into_iter();
-    let first = iter.next()?;
-    Some(iter.fold(first, |acc, expr| {
-        PartitionExpr::new(Operand::Expr(acc), RestrictedOp::And, Operand::Expr(expr))
-    }))
 }
 
 /// Result of analyzing an expression for partition pruning safety
@@ -1206,26 +1164,25 @@ mod tests {
                 vec![], // Empty result - expression should be dropped
                 vec!["user_id"],
             ),
-            // Complex mixed AND expression with multiple parts — now AND-combined
+            // Complex mixed AND expression with multiple parts
             FilterTestCase::new(
                 "complex_mixed_and",
                 col("user_id")
                     .gt_eq(lit(100i64))
                     .and(col("value").eq(lit(200i64)))
                     .and(col("timestamp").lt(lit(1000i64))),
-                vec![PartitionExpr::new(
-                    Operand::Expr(PartitionExpr::new(
+                vec![
+                    PartitionExpr::new(
                         Operand::Column("user_id".to_string()),
                         RestrictedOp::GtEq,
                         Operand::Value(Value::Int64(100)),
-                    )),
-                    RestrictedOp::And,
-                    Operand::Expr(PartitionExpr::new(
+                    ),
+                    PartitionExpr::new(
                         Operand::Column("timestamp".to_string()),
                         RestrictedOp::Lt,
                         Operand::Value(Value::Int64(1000)),
-                    )),
-                )],
+                    ),
+                ],
                 vec!["user_id", "timestamp"], // Both partition columns
             ),
             // Pure partition expression - should be kept as-is
@@ -1302,43 +1259,5 @@ mod tests {
             ),
         ];
         check_partition_expressions(cases);
-    }
-
-    #[test]
-    fn test_table_scan_filters_partition_predicate_survives_unsupported_conjunct() {
-        let table_scan = create_test_table_scan();
-        let partition_filter = col("user_id").eq(lit(10i64));
-        // An unsupported expression: binary arithmetic inside a comparison.
-        // The converter doesn't support `Plus`, so conversion should fail.
-        let unsupported_filter = Expr::BinaryExpr(datafusion_expr::BinaryExpr {
-            left: Box::new(Expr::BinaryExpr(datafusion_expr::BinaryExpr {
-                left: Box::new(col("value")),
-                op: Operator::Plus,
-                right: Box::new(lit(1i64)),
-            })),
-            op: Operator::Gt,
-            right: Box::new(lit(20i64)),
-        });
-        let LogicalPlan::TableScan(scan) = table_scan else {
-            panic!("expected test table scan");
-        };
-        let plan = LogicalPlan::TableScan(datafusion_expr::logical_plan::TableScan {
-            filters: vec![partition_filter, unsupported_filter],
-            ..scan
-        });
-
-        let partition_exprs =
-            PredicateExtractor::extract_partition_expressions(&plan, &["user_id".to_string()])
-                .unwrap();
-
-        // Only the partition predicate should survive.
-        assert_eq!(
-            partition_exprs,
-            vec![PartitionExpr::new(
-                Operand::Column("user_id".to_string()),
-                RestrictedOp::Eq,
-                Operand::Value(Value::Int64(10)),
-            )]
-        );
     }
 }
