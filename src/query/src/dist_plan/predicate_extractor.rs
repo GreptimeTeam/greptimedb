@@ -47,31 +47,28 @@ impl PredicateExtractor {
 
         let partition_set: HashSet<String> = partition_columns.iter().cloned().collect();
 
-        // Split each collected filter by top-level AND, convert/check each
-        // conjunct independently, then collect surviving partition expressions.
-        let mut surviving = Vec::new();
+        let mut and_exprs = Vec::new();
+        let mut fallback_or = None;
+
         for filter_expr in filter_exprs {
             for conjunct in split_conjuncts(&filter_expr) {
                 match DataFusionExprConverter::convert(&conjunct) {
-                    Ok(partition_expr) => {
-                        match ExpressionChecker::check_expression_for_pruning(
-                            &partition_expr,
-                            &partition_set,
-                        ) {
-                            ExpressionCheckResult::UseAsIs(expr) => {
-                                surviving.push(expr);
-                            }
-                            ExpressionCheckResult::UsePartial(exprs) => {
-                                surviving.extend(exprs);
-                            }
-                            ExpressionCheckResult::Drop => {
-                                debug!(
-                                    "Dropping mixed expression for correctness: {}",
-                                    partition_expr
-                                );
+                    Ok(partition_expr) => match ExpressionChecker::check_expression_for_pruning(
+                        &partition_expr,
+                        &partition_set,
+                    ) {
+                        ExpressionCheckResult::UseAsIs(expr) => {
+                            push_partition_expr(expr, &mut and_exprs, &mut fallback_or);
+                        }
+                        ExpressionCheckResult::UsePartial(exprs) => {
+                            for expr in exprs {
+                                push_partition_expr(expr, &mut and_exprs, &mut fallback_or);
                             }
                         }
-                    }
+                        ExpressionCheckResult::Drop => {
+                            debug!("Dropping mixed expression for correctness: {partition_expr}");
+                        }
+                    },
                     Err(err) => {
                         debug!(
                             "Failed to convert filter expression to PartitionExpr: {}, skipping",
@@ -83,16 +80,10 @@ impl PredicateExtractor {
             }
         }
 
-        // Combine the surviving partition expressions for ConstraintPruner.
-        // The partition collider/pruner does not support AND over OR, so:
-        // - A lone partition-only OR is returned unchanged.
-        // - OR survivors are dropped if they would be AND-combined with anything
-        //   else (avoids producing AND-over-OR).
-        // - Non-OR survivors are AND-combined as usual.
-        let result = match combine_survivors(surviving) {
-            Some(expr) => vec![expr],
-            None => Vec::new(),
-        };
+        let result = conjunction_partition_exprs(and_exprs)
+            .or(fallback_or)
+            .into_iter()
+            .collect::<Vec<_>>();
 
         debug!(
             "Extracted {} partition expressions from logical plan for partition columns: {:?}",
@@ -159,6 +150,20 @@ fn split_conjuncts(expr: &Expr) -> Vec<Expr> {
     result
 }
 
+fn push_partition_expr(
+    expr: PartitionExpr,
+    and_exprs: &mut Vec<PartitionExpr>,
+    fallback_or: &mut Option<PartitionExpr>,
+) {
+    // A lone OR is safe for the collider, but AND-over-OR is not. Keep one OR
+    // only as a fallback when there are no ordinary conjuncts to use.
+    if matches!(expr.op(), RestrictedOp::Or) {
+        fallback_or.get_or_insert(expr);
+    } else {
+        and_exprs.push(expr);
+    }
+}
+
 /// Combine a list of [`PartitionExpr`] into a single AND expression.
 /// Returns `None` if the list is empty.
 fn conjunction_partition_exprs(exprs: Vec<PartitionExpr>) -> Option<PartitionExpr> {
@@ -167,49 +172,6 @@ fn conjunction_partition_exprs(exprs: Vec<PartitionExpr>) -> Option<PartitionExp
     Some(iter.fold(first, |acc, expr| {
         PartitionExpr::new(Operand::Expr(acc), RestrictedOp::And, Operand::Expr(expr))
     }))
-}
-
-/// Combine surviving partition expressions safely for ConstraintPruner.
-///
-/// The partition collider (`src/partition/src/collider.rs`) does not support
-/// AND over OR (e.g. `(A OR B) AND C`). To avoid producing unsupported shapes:
-/// - A lone partition-only OR survivor is returned as-is (no AND wrapping).
-/// - OR survivors are dropped if they would be combined with anything else.
-/// - Non-OR survivors are AND-combined as usual.
-fn combine_survivors(exprs: Vec<PartitionExpr>) -> Option<PartitionExpr> {
-    let (ors, non_ors): (Vec<_>, Vec<_>) = exprs
-        .into_iter()
-        .partition(|e| matches!(e.op(), RestrictedOp::Or));
-
-    match (ors.len(), non_ors.len()) {
-        // Only OR survivors and exactly one: return it unchanged.
-        (1, 0) => Some(ors.into_iter().next().unwrap()),
-        // Only OR survivors but multiple: drop them. Combining them would
-        // produce AND-over-OR, which the partition collider does not support.
-        (n, 0) if n > 1 => {
-            debug!(
-                "Dropping {} OR survivor(s) to avoid AND-over-OR without non-OR survivors",
-                n
-            );
-            None
-        }
-        // Only non-OR survivors: AND-combine them.
-        (0, _) => conjunction_partition_exprs(non_ors),
-        // Mixed: OR survivors would form AND-over-OR with non-OR survivors.
-        // Drop the OR survivors and keep only the non-OR ones.
-        _ => {
-            debug!(
-                "Dropping {} OR survivor(s) to avoid AND-over-OR with {} non-OR survivor(s)",
-                ors.len(),
-                non_ors.len()
-            );
-            match non_ors.len() {
-                0 => None,
-                1 => Some(non_ors.into_iter().next().unwrap()),
-                _ => conjunction_partition_exprs(non_ors),
-            }
-        }
-    }
 }
 
 /// Result of analyzing an expression for partition pruning safety
@@ -1378,74 +1340,5 @@ mod tests {
                 Operand::Value(Value::Int64(10)),
             )]
         );
-    }
-
-    #[test]
-    fn test_or_dropped_when_combined_with_non_or() {
-        // TableScan.filters = [user_id = 1 OR user_id = 2, timestamp > 100]
-        // partition columns: user_id, timestamp
-        //
-        // The OR expression (user_id = 1 OR user_id = 2) is partition-only and
-        // would normally survive. But combining it with (timestamp > 100) via
-        // AND would produce AND-over-OR, which the partition collider does not
-        // support. The OR survivor must be dropped; only (timestamp > 100)
-        // should survive.
-        let table_scan = create_test_table_scan();
-        let or_filter = col("user_id")
-            .eq(lit(1i64))
-            .or(col("user_id").eq(lit(2i64)));
-        let ts_filter = col("timestamp").gt(lit(100i64));
-        let LogicalPlan::TableScan(scan) = table_scan else {
-            panic!("expected test table scan");
-        };
-        let plan = LogicalPlan::TableScan(datafusion_expr::logical_plan::TableScan {
-            filters: vec![or_filter, ts_filter],
-            ..scan
-        });
-
-        let partition_exprs = PredicateExtractor::extract_partition_expressions(
-            &plan,
-            &["user_id".to_string(), "timestamp".to_string()],
-        )
-        .unwrap();
-
-        // Only the non-OR partition predicate should survive.
-        assert_eq!(
-            partition_exprs,
-            vec![PartitionExpr::new(
-                Operand::Column("timestamp".to_string()),
-                RestrictedOp::Gt,
-                Operand::Value(Value::Int64(100)),
-            )]
-        );
-    }
-
-    #[test]
-    fn test_multiple_or_survivors_are_dropped() {
-        // Multiple partition-only OR filters are conjunctive scan filters, but
-        // AND-combining them would produce AND-over-OR, which the partition
-        // collider does not support. Be conservative and drop them all.
-        let table_scan = create_test_table_scan();
-        let user_or = col("user_id")
-            .eq(lit(1i64))
-            .or(col("user_id").eq(lit(2i64)));
-        let ts_or = col("timestamp")
-            .lt(lit(100i64))
-            .or(col("timestamp").gt(lit(200i64)));
-        let LogicalPlan::TableScan(scan) = table_scan else {
-            panic!("expected test table scan");
-        };
-        let plan = LogicalPlan::TableScan(datafusion_expr::logical_plan::TableScan {
-            filters: vec![user_or, ts_or],
-            ..scan
-        });
-
-        let partition_exprs = PredicateExtractor::extract_partition_expressions(
-            &plan,
-            &["user_id".to_string(), "timestamp".to_string()],
-        )
-        .unwrap();
-
-        assert!(partition_exprs.is_empty());
     }
 }

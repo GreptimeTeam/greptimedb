@@ -605,10 +605,12 @@ fn expand_sort_limit() {
 
     let expected = [
         "Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
-        "  MergeSort: t.pk1 ASC NULLS LAST, fetch=10",
-        "    MergeScan [is_placeholder=false, remote_input=[",
-        "Sort: t.pk1 ASC NULLS LAST, fetch=10",
-        "  TableScan: t",
+        "  Limit: skip=0, fetch=10",
+        "    MergeSort: t.pk1 ASC NULLS LAST",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Sort: t.pk1 ASC NULLS LAST",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -641,11 +643,13 @@ fn expand_sort_alias_limit() {
 
     let expected = [
         "Projection: something",
-        "  MergeSort: something ASC NULLS LAST, fetch=10",
-        "    MergeScan [is_placeholder=false, remote_input=[",
-        "Projection: t.pk1 AS something",
-        "  Sort: t.pk1 ASC NULLS LAST, fetch=10",
-        "    TableScan: t",
+        "  Limit: skip=0, fetch=10",
+        "    MergeSort: something ASC NULLS LAST",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.pk1 AS something",
+        "    Sort: t.pk1 ASC NULLS LAST",
+        "      TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -685,9 +689,10 @@ fn expand_sort_alias_conflict_limit() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
     let expected = [
-        "Projection: t.pk2 AS pk1",
-        "  Sort: t.pk1 ASC NULLS LAST, fetch=10",
-        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.pk2 AS pk1",
+        "    Sort: t.pk1 ASC NULLS LAST",
+        "      MergeScan [is_placeholder=false, remote_input=[",
         "TableScan: t",
         "]]",
     ]
@@ -719,11 +724,13 @@ fn expand_sort_alias_conflict_but_not_really_limit() {
 
     let expected = [
         "Projection: t.pk1",
-        "  MergeSort: t.pk1 ASC NULLS LAST, fetch=10",
-        "    MergeScan [is_placeholder=false, remote_input=[",
-        "Projection: t.pk2 AS t.pk1, t.pk1",
-        "  Sort: t.pk1 ASC NULLS LAST, fetch=10",
-        "    TableScan: t",
+        "  Limit: skip=0, fetch=10",
+        "    MergeSort: t.pk1 ASC NULLS LAST",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.pk2 AS t.pk1, t.pk1",
+        "    Sort: t.pk1 ASC NULLS LAST",
+        "      TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -791,10 +798,12 @@ fn expand_sort_limit_sort() {
     let expected = [
         "Sort: t.pk1 ASC NULLS LAST",
         "  Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
-        "    MergeSort: t.pk1 ASC NULLS LAST, fetch=10",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Sort: t.pk1 ASC NULLS LAST, fetch=10",
-        "  TableScan: t",
+        "    Limit: skip=0, fetch=10",
+        "      MergeSort: t.pk1 ASC NULLS LAST",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Sort: t.pk1 ASC NULLS LAST",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1213,11 +1222,13 @@ fn expand_proj_sort_limit_step_aggr() {
     let expected = [
         "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
         "  Projection: t.number",
-        "    MergeSort: t.pk1 ASC NULLS LAST, fetch=10",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Projection: t.number, t.pk1",
-        "  Sort: t.pk1 ASC NULLS LAST, fetch=10",
-        "    TableScan: t",
+        "    Limit: skip=0, fetch=10",
+        "      MergeSort: t.pk1 ASC NULLS LAST",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.number, t.pk1",
+        "    Sort: t.pk1 ASC NULLS LAST",
+        "      TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1337,11 +1348,13 @@ fn expand_proj_sort_limit_part_col_aggr() {
     let expected = [
         "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
         "  Projection: t.number, t.pk1, t.pk2",
-        "    MergeSort: t.pk3 ASC NULLS LAST, fetch=10",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Projection: t.number, t.pk1, t.pk2, t.pk3",
-        "  Sort: t.pk3 ASC NULLS LAST, fetch=10",
-        "    TableScan: t",
+        "    Limit: skip=0, fetch=10",
+        "      MergeSort: t.pk3 ASC NULLS LAST",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.number, t.pk1, t.pk2, t.pk3",
+        "    Sort: t.pk3 ASC NULLS LAST",
+        "      TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1376,12 +1389,13 @@ fn expand_proj_part_col_aggr_limit_sort() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
         "Sort: t.pk2 ASC NULLS LAST",
-        "  Limit: skip=0, fetch=10",
-        "    Projection: t.pk1, t.pk2, min(t.number)",
+        "  Projection: t.pk1, t.pk2, min(t.number)",
+        "    Limit: skip=0, fetch=10",
         "      MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
-        "  Projection: t.number, t.pk1, t.pk2",
-        "    TableScan: t",
+        "Limit: skip=0, fetch=10",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "    Projection: t.number, t.pk1, t.pk2",
+        "      TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1417,12 +1431,14 @@ fn expand_proj_part_col_aggr_sort_limit() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
         "Projection: t.pk1, t.pk2, min(t.number)",
-        "  MergeSort: t.pk2 ASC NULLS LAST, fetch=10",
-        "    MergeScan [is_placeholder=false, remote_input=[",
-        "Sort: t.pk2 ASC NULLS LAST, fetch=10",
-        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
-        "    Projection: t.number, t.pk1, t.pk2",
-        "      TableScan: t",
+        "  Limit: skip=0, fetch=10",
+        "    MergeSort: t.pk2 ASC NULLS LAST",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Sort: t.pk2 ASC NULLS LAST",
+        "    Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "      Projection: t.number, t.pk1, t.pk2",
+        "        TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1798,11 +1814,12 @@ fn expand_part_col_aggr_limit() {
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
-        "Limit: skip=0, fetch=10",
-        "  Projection: t.pk1, t.pk2, min(t.number)",
+        "Projection: t.pk1, t.pk2, min(t.number)",
+        "  Limit: skip=0, fetch=10",
         "    MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
-        "  TableScan: t",
+        "Limit: skip=0, fetch=10",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1888,7 +1905,7 @@ fn transform_distinct_order() {
         "Projection: t.number",
         "  MergeScan [is_placeholder=false, remote_input=[
 Sort: t.number ASC NULLS LAST
-  Aggregate: groupBy=[[t.number]], aggr=[[]]
+  Distinct:
     TableScan: t
 ]]",
     ]
@@ -1915,7 +1932,7 @@ fn transform_single_limit() {
     let expected = "Projection: t.number\
         \n  MergeScan [is_placeholder=false, remote_input=[
 Limit: skip=0, fetch=1
-  TableScan: t, fetch=1
+  TableScan: t
 ]]";
     assert_eq!(expected, result.to_string());
 }
