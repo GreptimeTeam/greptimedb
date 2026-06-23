@@ -20,6 +20,7 @@
 pub mod decode;
 pub(crate) mod row_builder;
 pub(crate) mod types;
+pub(crate) mod v2;
 pub mod validation;
 
 use bytes::Bytes;

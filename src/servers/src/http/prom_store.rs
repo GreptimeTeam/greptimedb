@@ -44,6 +44,7 @@ use crate::http::header::{
 use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
+use crate::prom_remote_write::v2::decode_remote_write_v2_request;
 use crate::prom_remote_write::validation::PromValidationMode;
 use crate::prom_store::{extract_schema_from_read_request, snappy_decompress};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
@@ -98,29 +99,15 @@ pub async fn remote_write(
     content_encoding: TypedHeader<headers::ContentEncoding>,
     body: Bytes,
 ) -> Result<axum::response::Response> {
+    let is_zstd = content_encoding.contains(VM_ENCODING);
+
     if let Some(ct) = content_type
         && is_remote_write_v2(ct.0)
     {
-        return remote_write_v2(
-            state,
-            params,
-            query_ctx,
-            pipeline_info,
-            content_encoding,
-            body,
-        )
-        .await;
+        return remote_write_v2(state, params, query_ctx, pipeline_info, is_zstd, body).await;
     }
 
-    remote_write_v1(
-        state,
-        params,
-        query_ctx,
-        pipeline_info,
-        content_encoding,
-        body,
-    )
-    .await
+    remote_write_v1(state, params, query_ctx, pipeline_info, is_zstd, body).await
 }
 
 async fn remote_write_v1(
@@ -128,7 +115,7 @@ async fn remote_write_v1(
     params: RemoteWriteQuery,
     mut query_ctx: QueryContext,
     pipeline_info: PipelineInfo,
-    content_encoding: TypedHeader<headers::ContentEncoding>,
+    is_zstd: bool,
     body: Bytes,
 ) -> Result<axum::response::Response> {
     let PromStoreState {
@@ -161,8 +148,6 @@ async fn remote_write_v1(
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-
-    let is_zstd = content_encoding.contains(VM_ENCODING);
 
     let mut processor = PromSeriesProcessor::default_processor();
 
@@ -226,9 +211,11 @@ async fn remote_write_v2(
     _params: RemoteWriteQuery,
     _query_ctx: QueryContext,
     _pipeline_info: PipelineInfo,
-    _content_encoding: TypedHeader<headers::ContentEncoding>,
-    _body: Bytes,
+    is_zstd: bool,
+    body: Bytes,
 ) -> Result<axum::response::Response> {
+    let _request = decode_remote_write_v2_request(is_zstd, body)?;
+
     todo!("prometheus remote write v2 handler")
 }
 
