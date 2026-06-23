@@ -755,10 +755,11 @@ fn expand_limit_sort() {
 
     let expected = [
         "Sort: t.pk1 ASC NULLS LAST",
-        "  Limit: skip=0, fetch=10",
-        "    Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
+        "  Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
+        "    Limit: skip=0, fetch=10",
         "      MergeScan [is_placeholder=false, remote_input=[",
-        "TableScan: t, fetch=10",
+        "Limit: skip=0, fetch=10",
+        "  TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1254,9 +1255,10 @@ fn expand_proj_limit_step_aggr_sort() {
         "  Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
         "    Projection: t.number",
         "      Limit: skip=0, fetch=10",
-        "        Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
-        "          MergeScan [is_placeholder=false, remote_input=[",
-        "TableScan: t, fetch=10",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.number",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1646,14 +1648,18 @@ fn expand_proj_limit_part_col_aggr_sort() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    // Pre-MergeScan optimizer intentionally excludes PushDownLimit, so the
+    // remote plan shows an explicit Limit node instead of `fetch=10` on
+    // TableScan.
     let expected = [
         "Sort: t.pk2 ASC NULLS LAST",
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
         "    Projection: t.number, t.pk1, t.pk2",
         "      Limit: skip=0, fetch=10",
-        "        Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
-        "          MergeScan [is_placeholder=false, remote_input=[",
-        "TableScan: t, fetch=10",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.number, t.pk1, t.pk2",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -1687,14 +1693,18 @@ fn expand_proj_limit_sort_part_col_aggr() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    // Pre-MergeScan optimizer intentionally excludes PushDownLimit, so the
+    // remote plan shows an explicit Limit node instead of `fetch=10` on
+    // TableScan.
     let expected = [
         "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
         "  Sort: t.pk2 ASC NULLS LAST",
         "    Projection: t.number, t.pk1, t.pk2",
         "      Limit: skip=0, fetch=10",
-        "        Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
-        "          MergeScan [is_placeholder=false, remote_input=[",
-        "TableScan: t, fetch=10",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.number, t.pk1, t.pk2",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
