@@ -39,8 +39,6 @@ use datatypes::arrow::datatypes::{
 use datatypes::data_type::DataType;
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::{MutableVector, Vector};
-use datatypes::types::JsonType;
-use datatypes::schema::ext::ArrowSchemaExt;
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
 use mito_codec::key_values::{KeyValue, KeyValues};
