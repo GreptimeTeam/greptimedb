@@ -566,21 +566,21 @@ async fn export_import_v2_data_roundtrip_e2e() -> Result<()> {
 #[ignore]
 async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
     let required_env = [
-        "GT_MINIO_BUCKET",
-        "GT_MINIO_ACCESS_KEY_ID",
-        "GT_MINIO_ACCESS_KEY",
-        "GT_MINIO_ENDPOINT_URL",
+        "GT_S3_BUCKET",
+        "GT_S3_ACCESS_KEY_ID",
+        "GT_S3_ACCESS_KEY",
+        "GT_S3_ENDPOINT_URL",
     ];
     if required_env.iter().any(|key| env::var(key).is_err()) {
         return Ok(());
     }
 
     let conn = TestConnection::from_env();
-    let bucket = env::var("GT_MINIO_BUCKET").expect("checked above");
-    let access_key_id = env::var("GT_MINIO_ACCESS_KEY_ID").expect("checked above");
-    let secret_access_key = env::var("GT_MINIO_ACCESS_KEY").expect("checked above");
-    let endpoint = env::var("GT_MINIO_ENDPOINT_URL").expect("checked above");
-    let region = env::var("GT_MINIO_REGION").unwrap_or_else(|_| "us-west-2".to_string());
+    let bucket = env::var("GT_S3_BUCKET").expect("checked above");
+    let access_key_id = env::var("GT_S3_ACCESS_KEY_ID").expect("checked above");
+    let secret_access_key = env::var("GT_S3_ACCESS_KEY").expect("checked above");
+    let endpoint = env::var("GT_S3_ENDPOINT_URL").expect("checked above");
+    let region = env::var("GT_S3_REGION").unwrap_or_else(|_| "us-west-2".to_string());
     let schema = "test_db_minio_roundtrip";
     let snapshot_uri = format!(
         "s3://{}/export-import-v2-e2e/{}",

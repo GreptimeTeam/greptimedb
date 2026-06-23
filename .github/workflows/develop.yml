@@ -884,6 +884,38 @@ jobs:
         working-directory: tests-integration/fixtures
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
 
+      - name: Build GreptimeDB standalone
+        run: cargo build --bin greptime --features "dashboard,pg_kvbackend,mysql_kvbackend,vector_index"
+
+      - name: Start GreptimeDB standalone
+        run: |
+          ./target/debug/greptime standalone start > greptimedb.log 2>&1 &
+          greptime_pid=$!
+          echo "Waiting for GreptimeDB..."
+          for i in {1..60}; do
+            if curl -sf http://localhost:4000/health > /dev/null; then
+              echo "GreptimeDB is ready"
+              exit 0
+            fi
+            if ! kill -0 "${greptime_pid}" 2>/dev/null; then
+              cat greptimedb.log
+              exit 1
+            fi
+            sleep 1
+          done
+          cat greptimedb.log
+          exit 1
+
+      - name: Run export/import v2 E2E tests
+        run: cargo test -p cli data::export_v2::tests --lib -- --ignored --test-threads=1
+        env:
+          GREPTIME_ADDR: 127.0.0.1:4000
+          GT_S3_BUCKET: greptime
+          GT_S3_ACCESS_KEY_ID: superpower_ci_user
+          GT_S3_ACCESS_KEY: superpower_password
+          GT_S3_REGION: us-west-2
+          GT_S3_ENDPOINT_URL: http://127.0.0.1:9000
+
       - name: Run nextest cases
         run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index
         env:
