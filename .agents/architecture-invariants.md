@@ -85,15 +85,23 @@ unfinished work merge without freezing it into the stable config surface.
 
 When you stabilize such a feature, drop the prefix and document the migration.
 
-## 6. DataFusion is a pinned fork — patch in two places
+## 6. DataFusion is a pinned fork — two sections, two forms
 
-GreptimeDB depends on a fork at `GreptimeTeam/datafusion`, pinned to a single git
-rev. In the root `Cargo.toml`:
+GreptimeDB uses a fork at `GreptimeTeam/datafusion`, wired up in the root
+`Cargo.toml` through **two sections that hold different things**:
 
-- Every DataFusion sub-crate must appear in **both** `[workspace.dependencies]`
-  **and** `[patch.crates-io]`, at the **same** rev.
-- Adding a new DataFusion sub-crate dependency means adding it to both sections.
-- Upgrading DataFusion means bumping the rev for **all** of them together.
+- `[workspace.dependencies]` pins each DataFusion sub-crate to an **exact
+  crates.io version** (e.g. `datafusion = "=53.1.0"`).
+- `[patch.crates-io]` redirects those same crates to the **fork at a git rev**
+  (e.g. `datafusion = { git = ".../GreptimeTeam/datafusion.git", rev = "..." }`).
+
+So:
+
+- Adding a new DataFusion sub-crate dependency means adding it to **both**
+  sections — the `=<version>` entry under `[workspace.dependencies]` and the
+  matching git-rev patch under `[patch.crates-io]`.
+- Upgrading DataFusion means bumping the version in `[workspace.dependencies]`
+  **and** the rev in `[patch.crates-io]` together, for all of them.
 
 ## Maintenance contract
 
