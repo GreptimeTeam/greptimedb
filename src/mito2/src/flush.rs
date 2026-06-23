@@ -23,6 +23,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::extension::json::is_structured_json_field;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
@@ -774,19 +775,15 @@ fn memtable_flat_sources(
         if let Some(encoded) = only_range.encoded() {
             flat_sources.encoded.push((encoded, max_sequence));
         } else {
-            let schema = only_range
-                .record_batch_schema_hint()
-                .unwrap_or_else(|| schema.clone());
-            let input = RecordBatchInput {
-                schema,
-                iter: only_range.build_record_batch_iter(None, None)?,
-            };
-            let (schema, iter) = align_and_dedup_one(
+            let iter = only_range.build_record_batch_iter(None, None)?;
+            // Dedup according to append mode and merge mode.
+            // Even single range may have duplicate rows.
+            let iter = maybe_dedup_one(
                 options.append_mode,
                 options.merge_mode(),
                 field_column_start,
-                input,
-            )?;
+                iter,
+            );
             flat_sources
                 .sources
                 .push((FlatSource::new_iter(schema, iter), max_sequence));
@@ -808,8 +805,15 @@ fn memtable_flat_sources(
         let mut rows_remaining = total_rows;
         let mut last_iter_rows = 0;
         let num_ranges = ranges.len();
-        let mut inputs = Vec::with_capacity(num_ranges);
+        let mut input_iters = Vec::with_capacity(num_ranges);
         let mut current_ranges = Vec::new();
+
+        let mut json_align_schemas = if schema.fields().iter().any(is_structured_json_field) {
+            Some(Vec::with_capacity(num_ranges))
+        } else {
+            None
+        };
+
         for (_range_id, range) in ranges {
             if let Some(encoded) = range.encoded() {
                 let max_sequence = range.stats().max_sequence();
@@ -817,12 +821,16 @@ fn memtable_flat_sources(
                 continue;
             }
 
-            inputs.push(RecordBatchInput {
-                schema: range
+            // Collect schemas if has json2 field.
+            if let Some(schemas) = json_align_schemas.as_mut() {
+                let schema = range
                     .record_batch_schema_hint()
-                    .unwrap_or_else(|| schema.clone()),
-                iter: range.build_record_batch_iter(None, None)?,
-            });
+                    .unwrap_or_else(|| schema.clone());
+                schemas.push(schema);
+            }
+
+            let iter = range.build_record_batch_iter(None, None)?;
+            input_iters.push(iter);
             let range_rows = range.num_rows();
             last_iter_rows += range_rows;
             rows_remaining -= range_rows;
@@ -837,7 +845,7 @@ fn memtable_flat_sources(
                     "Flush batch ready, rows: {}, min_rows: {}, num_iters: {}, remaining: {}",
                     last_iter_rows,
                     min_flush_rows,
-                    inputs.len(),
+                    input_iters.len(),
                     rows_remaining
                 );
 
@@ -848,75 +856,119 @@ fn memtable_flat_sources(
                     .max()
                     .unwrap_or(0);
 
-                let (schema, iter) = merge_and_dedup(
+                let maybe_dedup = merge_and_dedup(
+                    &schema,
                     options.append_mode,
                     options.merge_mode(),
                     field_column_start,
-                    std::mem::replace(&mut inputs, Vec::with_capacity(num_ranges)),
+                    std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
                 )?;
 
-                flat_sources
-                    .sources
-                    .push((FlatSource::new_iter(schema, iter), max_sequence));
+                flat_sources.sources.push((
+                    FlatSource::new_iter(schema.clone(), maybe_dedup),
+                    max_sequence,
+                ));
                 last_iter_rows = 0;
                 current_ranges.clear();
             }
         }
 
         // Handle remaining iters.
-        if !inputs.is_empty() {
+        if !input_iters.is_empty() {
             debug!(
                 "Flush remaining batch, rows: {}, min_rows: {}, num_iters: {}, remaining: {}",
                 last_iter_rows,
                 min_flush_rows,
-                inputs.len(),
+                input_iters.len(),
                 rows_remaining
             );
+
+            let (schema, input_iters) = if let Some(schemas) = json_align_schemas {
+                let aligner = Json2Aligner::try_new(schemas)?;
+                let input_iters = input_iters
+                    .into_iter()
+                    .map(|input_iter| aligner.wrap_iter(input_iter))
+                    .collect();
+                (aligner.schema().clone(), input_iters)
+            } else {
+                (schema, input_iters)
+            };
+
             let max_sequence = current_ranges
                 .iter()
                 .map(|r| r.stats().max_sequence())
                 .max()
                 .unwrap_or(0);
 
-            let (schema, iter) = merge_and_dedup(
+            let maybe_dedup = merge_and_dedup(
+                &schema,
                 options.append_mode,
                 options.merge_mode(),
                 field_column_start,
-                inputs,
+                input_iters,
             )?;
 
             flat_sources
                 .sources
-                .push((FlatSource::new_iter(schema, iter), max_sequence));
+                .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
         }
     }
 
     Ok(flat_sources)
 }
 
-pub struct RecordBatchInput {
-    schema: SchemaRef,
-    iter: BoxedRecordBatchIterator,
-}
-
-/// Aligns JSON2 schemas, merges sorted record batch iterators, and applies deduplication.
+/// Merges multiple record batch iterators and applies deduplication based on the specified mode.
+///
+/// This function is used during the flush process to combine data from multiple memtable ranges
+/// into a single stream while handling duplicate records according to the configured merge strategy.
+///
+/// # Arguments
+///
+/// * `schema` - The Arrow schema reference that defines the structure of the record batches
+/// * `append_mode` - When true, no deduplication is performed and all records are preserved.
+///                  This is used for append-only workloads where duplicate handling is not required.
+/// * `merge_mode` - The strategy used for deduplication when not in append mode:
+///   - `MergeMode::LastRow`: Keeps the last record for each primary key
+///   - `MergeMode::LastNonNull`: Keeps the last non-null values for each field
+/// * `field_column_start` - The starting column index for fields in the record batch.
+///                          Used when `MergeMode::LastNonNull` to identify which columns
+///                          contain field values versus primary key columns.
+/// * `input_iters` - A vector of record batch iterators to be merged and deduplicated
+///
+/// # Returns
+///
+/// Returns a boxed record batch iterator that yields the merged and potentially deduplicated
+/// record batches.
+///
+/// # Behavior
+///
+/// 1. Creates a `FlatMergeIterator` to merge all input iterators in sorted order based on
+///    primary key and timestamp
+/// 2. If `append_mode` is true, returns the merge iterator directly without deduplication
+/// 3. If `append_mode` is false, wraps the merge iterator with a `FlatDedupIterator` that
+///    applies the specified merge mode:
+///    - `LastRow`: Removes duplicate rows, keeping only the last one
+///    - `LastNonNull`: Removes duplicates but preserves the last non-null value for each field
+///
+/// # Examples
+///
+/// ```ignore
+/// let merged_iter = merge_and_dedup(
+///     &schema,
+///     false,  // not append mode, apply dedup
+///     MergeMode::LastRow,
+///     2,  // fields start at column 2 after primary key columns
+///     vec![iter1, iter2, iter3],
+/// )?;
+/// ```
 pub fn merge_and_dedup(
+    schema: &SchemaRef,
     append_mode: bool,
     merge_mode: MergeMode,
     field_column_start: usize,
-    inputs: Vec<RecordBatchInput>,
-) -> Result<(SchemaRef, BoxedRecordBatchIterator)> {
-    let input_schemas = inputs.iter().map(|input| input.schema.clone());
-    let aligner = Json2Aligner::try_new(input_schemas)?;
-    let input_iters = inputs
-        .into_iter()
-        .map(|input| aligner.wrap_iter(input.iter))
-        .collect();
-    let merge_iter = FlatMergeIterator::new(
-        aligner.schema().clone(),
-        input_iters,
-        DEFAULT_READ_BATCH_SIZE,
-    )?;
+    input_iters: Vec<BoxedRecordBatchIterator>,
+) -> Result<BoxedRecordBatchIterator> {
+    let merge_iter = FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
     let maybe_dedup = if append_mode {
         // No dedup in append mode
         Box::new(merge_iter) as _
@@ -932,32 +984,30 @@ pub fn merge_and_dedup(
             )) as _,
         }
     };
-    Ok((aligner.schema().clone(), maybe_dedup))
+    Ok(maybe_dedup)
 }
 
-/// Aligns a single record batch iterator and applies deduplication if needed.
-pub fn align_and_dedup_one(
+pub fn maybe_dedup_one(
     append_mode: bool,
     merge_mode: MergeMode,
     field_column_start: usize,
-    input: RecordBatchInput,
-) -> Result<(SchemaRef, BoxedRecordBatchIterator)> {
-    let aligner = Json2Aligner::try_new([input.schema])?;
-    let iter = aligner.wrap_iter(input.iter);
-    let iter = if append_mode {
-        iter
+    input_iter: BoxedRecordBatchIterator,
+) -> BoxedRecordBatchIterator {
+    if append_mode {
+        // No dedup in append mode
+        input_iter
     } else {
+        // Dedup according to merge mode.
         match merge_mode {
-            MergeMode::LastRow => Box::new(FlatDedupIterator::new(iter, FlatLastRow::new(false)))
-                as BoxedRecordBatchIterator,
+            MergeMode::LastRow => {
+                Box::new(FlatDedupIterator::new(input_iter, FlatLastRow::new(false)))
+            }
             MergeMode::LastNonNull => Box::new(FlatDedupIterator::new(
-                iter,
+                input_iter,
                 FlatLastNonNull::new(field_column_start, false),
-            )) as BoxedRecordBatchIterator,
+            )),
         }
-    };
-
-    Ok((aligner.schema().clone(), iter))
+    }
 }
 
 /// Manages background flushes of a worker.
