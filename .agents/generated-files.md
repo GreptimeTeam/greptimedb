@@ -31,7 +31,7 @@ make config-docs
 ```
 
 Edit the example TOMLs and/or the template, then regenerate. Do not edit
-`config.md` directly.
+`config/config.md` directly.
 
 ## Grafana dashboards
 

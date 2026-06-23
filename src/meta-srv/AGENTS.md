@@ -25,7 +25,11 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
 | `service` | `src/meta-srv/src/service/` | gRPC services (`heartbeat`, `procedure`, `cluster`, `store`) and HTTP admin |
 | `procedure` | `src/meta-srv/src/procedure/` | Distributed procedures: `region_migration/`, `repartition.rs`, `wal_prune/` |
 | `region` | `src/meta-srv/src/region/` | Region supervisor, lease keeper, failover triggers |
+| `discovery` | `src/meta-srv/src/discovery/` | Node discovery and lease-backed node info |
+| `pubsub` | `src/meta-srv/src/pubsub/` | Heartbeat topic publish/subscribe support |
+| `gc` | `src/meta-srv/src/gc/` | Metadata-driven garbage-collection procedures and scheduling |
 | `selector` | `src/meta-srv/src/selector/` | Region placement strategies (round-robin / load-based / lease-based) |
+| `peer` | `src/meta-srv/src/peer.rs` | Peer allocation through selectors |
 | `cluster` | `src/meta-srv/src/cluster.rs` | `MetaPeerClient`: internal RPC with leader fallback |
 | `cache_invalidator` | `src/meta-srv/src/cache_invalidator.rs` | Pushes cache-invalidation to frontends/datanodes |
 | `key` | `src/meta-srv/src/key/` | Metasrv-side KV key encoding |

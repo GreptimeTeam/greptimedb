@@ -50,7 +50,9 @@ Flow metadata lives in `common-meta`, not here:
 ## Public surface
 
 - gRPC `Flow` service in `src/flow/src/server.rs`
-  (`handle_create_remove`, `handle_insert`, `handle_delete`, `handle_mark_window_dirty`).
+  (`handle_create_remove`, `handle_mirror_request`, `handle_mark_dirty_time_window`).
+- Sink writes for the streaming engine go through `FrontendInvoker`
+  (`row_inserts`, `row_deletes`).
 - `FlowEngine` trait in `src/flow/src/engine.rs`.
 - Started from the `cmd` crate via `FlownodeBuilder` / `FlownodeInstance`.
 

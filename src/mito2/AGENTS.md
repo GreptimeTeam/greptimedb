@@ -9,7 +9,7 @@ Repo-wide rules that apply here: [`.agents/architecture-invariants.md`](../../.a
 
 Mito2 is GreptimeDB's primary time-series region storage engine. It owns the
 write path (memtable + WAL), flushing memtables to Parquet SST files,
-TWCS/level compaction, and the read path (multi-level merge + dedup with
+TWCS/windowed compaction, and the read path (multi-level merge + dedup with
 snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 
 ## Module map
@@ -23,12 +23,15 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `wal` | `src/mito2/src/wal.rs` | Write-ahead log wrapper over `log-store` |
 | `memtable` | `src/mito2/src/memtable/` | In-memory write buffers (time-series / bulk / partition) |
 | `flush` | `src/mito2/src/flush.rs` | `FlushScheduler`, `WriteBufferManager`, memtable → SST |
-| `compaction` | `src/mito2/src/compaction/` | TWCS (`twcs.rs`) and level pickers; `compactor.rs` |
+| `compaction` | `src/mito2/src/compaction/` | TWCS picker, strict-window manual picker, compactor, memory control |
 | `access_layer` | `src/mito2/src/access_layer.rs` | SST read/write over the object store |
 | `sst` | `src/mito2/src/sst/` | Parquet format, file metadata, index layout |
 | `read` | `src/mito2/src/read/` | `ScanRegion`, merge, dedup, projection, streaming |
 | `manifest` | `src/mito2/src/manifest/` | `RegionManifestManager`, manifest actions/edits |
 | `cache` | `src/mito2/src/cache.rs` | Write/file/page caches |
+| `gc` | `src/mito2/src/gc.rs`, `src/mito2/src/gc/` | Dropped-file cleanup worker |
+| `schedule` | `src/mito2/src/schedule/` | Local/remote background job scheduling |
+| `remap_manifest` | `src/mito2/src/remap_manifest.rs` | Manifest path remapping for region copy/migration |
 | `config` | `src/mito2/src/config.rs` | `MitoConfig` tuning knobs |
 | `test_util` | `src/mito2/src/test_util.rs` | `TestEnv` and builders (under the `test` feature) |
 
