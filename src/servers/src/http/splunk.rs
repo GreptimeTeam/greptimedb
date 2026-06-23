@@ -37,7 +37,7 @@ use pipeline::{
     PipelineDefinition,
 };
 use serde_json::{Deserializer, json};
-use session::context::{QueryContext, QueryContextRef};
+use session::context::{Channel, QueryContext, QueryContextRef};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{Result, status_code_to_http_status};
@@ -101,7 +101,6 @@ fn parse_hec_time(value: &VrlValue) -> Option<DateTime<Utc>> {
 /// `None` if the event isn't a JSON object.
 fn hec_event_to_map(
     event: VrlValue,
-    default_table: &str,
     query_table: Option<&str>,
 ) -> Option<(String, VrlValue, Vec<String>)> {
     let VrlValue::Object(mut obj) = event else {
@@ -124,7 +123,7 @@ fn hec_event_to_map(
         .as_deref()
         .and_then(sanitize_index)
         .or_else(|| query_table.map(str::to_string))
-        .unwrap_or_else(|| default_table.to_string());
+        .unwrap_or_else(|| DEFAULT_SPLUNK_TABLE.to_string());
 
     let mut map: BTreeMap<KeyString, VrlValue> = BTreeMap::new();
     map.insert(
@@ -216,7 +215,8 @@ fn sanitize_index(raw: &str) -> Option<String> {
 }
 
 pub(crate) fn is_splunk_request<B>(req: &axum::extract::Request<B>) -> bool {
-    req.uri().path().contains(SPLUNK_API_PATH_NAME)
+    let path = req.uri().path();
+    path.starts_with(SPLUNK_API_PATH_NAME)
 }
 /// Like `ingest_logs_inner`, but retags metadata columns (identity default) before insert.
 async fn ingest_events(
@@ -267,10 +267,11 @@ pub async fn handle_health() -> impl IntoResponse {
 pub async fn handle_event(
     State(log_state): State<LogState>,
     Query(params): Query<LogIngesterQueryParams>,
-    Extension(query_ctx): Extension<QueryContext>,
+    Extension(mut query_ctx): Extension<QueryContext>,
     headers: HeaderMap,
     payload: Bytes,
 ) -> impl IntoResponse {
+    query_ctx.set_channel(Channel::Splunk);
     let events = match parse_hec_events(&payload) {
         Ok(events) => events,
         // HEC code 6 == "invalid data format".
@@ -286,7 +287,7 @@ pub async fn handle_event(
     let mut by_table: HashMap<String, Vec<VrlValue>> = HashMap::new();
     let mut tag_columns: HashMap<String, HashSet<String>> = HashMap::new();
     for event in events {
-        if let Some((table, map, tags)) = hec_event_to_map(event, DEFAULT_SPLUNK_TABLE, query_table)
+        if let Some((table, map, tags)) = hec_event_to_map(event, query_table)
         {
             tag_columns.entry(table.clone()).or_default().extend(tags);
             by_table.entry(table).or_default().push(map);
@@ -296,6 +297,11 @@ pub async fn handle_event(
         .into_iter()
         .map(|(table, values)| PipelineIngestRequest { table, values })
         .collect();
+
+    // Events parsed but none were JSON objects, so nothing is ingestable. HEC code 6 == "invalid data format".
+    if requests.is_empty() {
+        return hec_response(StatusCode::BAD_REQUEST, 6, "invalid data format");
+    }
 
     // Bad table name (e.g. invalid `?table=`) -> HEC code 7 ("incorrect index").
     if let Some(bad) = requests
@@ -521,7 +527,7 @@ mod tests {
         })
         .into();
 
-        let (table, map, tags) = hec_event_to_map(event, "splunk_logs", None).unwrap();
+        let (table, map, tags) = hec_event_to_map(event, None).unwrap();
 
         // `index` -> table name.
         assert_eq!(table, "web_logs");
@@ -554,25 +560,25 @@ mod tests {
     #[test]
     fn map_falls_back_to_query_table_then_default() {
         let ev1: VrlValue = json!({ "event": "x" }).into();
-        let (t1, _, _) = hec_event_to_map(ev1, "splunk_logs", Some("from_query")).unwrap();
+        let (t1, _, _) = hec_event_to_map(ev1, Some("from_query")).unwrap();
         assert_eq!(t1, "from_query");
 
         let ev2: VrlValue = json!({ "event": "x" }).into();
-        let (t2, _, _) = hec_event_to_map(ev2, "splunk_logs", None).unwrap();
+        let (t2, _, _) = hec_event_to_map(ev2, None).unwrap();
         assert_eq!(t2, "splunk_logs");
     }
 
     #[test]
     fn map_sanitizes_index_for_table() {
         let ev: VrlValue = json!({ "index": "web/prod", "event": "x" }).into();
-        let (table, _, _) = hec_event_to_map(ev, "splunk_logs", None).unwrap();
+        let (table, _, _) = hec_event_to_map(ev, None).unwrap();
         assert_eq!(table, "web_prod");
     }
 
     #[test]
     fn map_rejects_non_object_event() {
         let ev: VrlValue = json!("just a string").into();
-        assert!(hec_event_to_map(ev, "splunk_logs", None).is_none());
+        assert!(hec_event_to_map(ev, None).is_none());
     }
 
     #[test]
@@ -598,7 +604,7 @@ mod tests {
             assert_eq!(events.len(), 2);
 
             let (table, map, tags) =
-                hec_event_to_map(events.into_iter().next().unwrap(), "splunk_logs", None).unwrap();
+                hec_event_to_map(events.into_iter().next().unwrap(), None).unwrap();
             assert_eq!(table, "splunk_logs"); // no `index` -> default table
             assert!(tags.is_empty()); // no host/source/sourcetype/fields
             let VrlValue::Object(m) = map else {
@@ -616,7 +622,7 @@ mod tests {
     #[test]
     fn map_keeps_event_object_for_pipeline_flattening() {
         let ev: VrlValue = json!({ "event": { "a": 1 } }).into();
-        let (_, map, _) = hec_event_to_map(ev, "splunk_logs", None).unwrap();
+        let (_, map, _) = hec_event_to_map(ev, None).unwrap();
         let VrlValue::Object(m) = map else {
             panic!("expected object");
         };
@@ -626,7 +632,7 @@ mod tests {
     #[test]
     fn map_uses_ingest_time_when_time_absent() {
         let ev: VrlValue = json!({ "event": "x" }).into();
-        let (_, map, _) = hec_event_to_map(ev, "splunk_logs", None).unwrap();
+        let (_, map, _) = hec_event_to_map(ev, None).unwrap();
         let VrlValue::Object(m) = map else {
             panic!("expected object");
         };
@@ -654,7 +660,7 @@ mod tests {
         let events = parse_hec_events(vector.as_bytes()).unwrap();
         assert_eq!(events.len(), 2); // concatenated, no separator
         let (table, map, tags) =
-            hec_event_to_map(events.into_iter().next().unwrap(), "splunk_logs", None).unwrap();
+            hec_event_to_map(events.into_iter().next().unwrap(), None).unwrap();
         assert_eq!(table, "main");
         let tagset: HashSet<&str> = tags.iter().map(String::as_str).collect();
         assert_eq!(
@@ -682,7 +688,7 @@ mod tests {
         let events = parse_hec_events(otel.as_bytes()).unwrap();
         assert_eq!(events.len(), 2); // newline-separated
         let (table, map, tags) =
-            hec_event_to_map(events.into_iter().next().unwrap(), "splunk_logs", None).unwrap();
+            hec_event_to_map(events.into_iter().next().unwrap(), None).unwrap();
         assert_eq!(table, "main");
         let tagset: HashSet<&str> = tags.iter().map(String::as_str).collect();
         // a dotted `fields` key still becomes a tag column.
