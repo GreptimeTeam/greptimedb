@@ -1123,12 +1123,6 @@ impl ScanInput {
                 self.mapper.metadata().schema.arrow_schema(),
             );
             if pruning_results.first() == Some(&false) {
-                debug!(
-                    "File {} pruned at file-level: time_range [{:?}, {:?}] cannot satisfy predicate",
-                    file.file_id(),
-                    file.time_range().0,
-                    file.time_range().1,
-                );
                 return Ok(FileRangeBuilder::default());
             }
         }
