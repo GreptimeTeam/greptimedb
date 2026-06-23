@@ -18,13 +18,13 @@ use api::prom_store::remote::ReadRequest;
 use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use axum_extra::TypedHeader;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
-use hyper::HeaderMap;
+use mime_guess::mime;
 use pipeline::PipelineDefinition;
 use pipeline::util::to_pipeline_version;
 use prost::Message;
@@ -38,7 +38,9 @@ use table::requests::{
 
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
-use crate::http::header::{GREPTIME_DB_HEADER_METRICS, write_cost_header_map};
+use crate::http::header::{
+    CONTENT_TYPE_PROTOBUF_STR, GREPTIME_DB_HEADER_METRICS, write_cost_header_map,
+};
 use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
@@ -50,6 +52,8 @@ pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
+const REMOTE_WRITE_V2_PROTO: &str = "io.prometheus.write.v2.Request";
+const CONTENT_TYPE_PROTO_PARAM: &str = "proto";
 
 #[derive(Clone)]
 pub struct PromStoreState {
@@ -88,11 +92,45 @@ impl Default for RemoteWriteQuery {
 pub async fn remote_write(
     State(state): State<PromStoreState>,
     Query(params): Query<RemoteWriteQuery>,
-    Extension(mut query_ctx): Extension<QueryContext>,
+    Extension(query_ctx): Extension<QueryContext>,
+    content_type: Option<TypedHeader<headers::ContentType>>,
     pipeline_info: PipelineInfo,
     content_encoding: TypedHeader<headers::ContentEncoding>,
     body: Bytes,
-) -> Result<impl IntoResponse> {
+) -> Result<axum::response::Response> {
+    if let Some(ct) = content_type
+        && is_remote_write_v2(ct.0)
+    {
+        return remote_write_v2(
+            state,
+            params,
+            query_ctx,
+            pipeline_info,
+            content_encoding,
+            body,
+        )
+        .await;
+    }
+
+    remote_write_v1(
+        state,
+        params,
+        query_ctx,
+        pipeline_info,
+        content_encoding,
+        body,
+    )
+    .await
+}
+
+async fn remote_write_v1(
+    state: PromStoreState,
+    params: RemoteWriteQuery,
+    mut query_ctx: QueryContext,
+    pipeline_info: PipelineInfo,
+    content_encoding: TypedHeader<headers::ContentEncoding>,
+    body: Bytes,
+) -> Result<axum::response::Response> {
     let PromStoreState {
         prom_store_handler,
         pipeline_handler,
@@ -183,6 +221,33 @@ pub async fn remote_write(
     Ok((StatusCode::NO_CONTENT, write_cost_header_map(cost)).into_response())
 }
 
+async fn remote_write_v2(
+    _state: PromStoreState,
+    _params: RemoteWriteQuery,
+    _query_ctx: QueryContext,
+    _pipeline_info: PipelineInfo,
+    _content_encoding: TypedHeader<headers::ContentEncoding>,
+    _body: Bytes,
+) -> Result<axum::response::Response> {
+    todo!("prometheus remote write v2 handler")
+}
+
+// ref: https://github.com/prometheus/client_golang/blob/74560058a7af7a695db8196c8e84a0754032c6af/exp/api/remote/remote_api.go#L544
+fn is_remote_write_v2(content_type: headers::ContentType) -> bool {
+    let mime_type: mime::Mime = content_type.into();
+    if !mime_type
+        .essence_str()
+        .eq_ignore_ascii_case(CONTENT_TYPE_PROTOBUF_STR)
+    {
+        return false;
+    }
+
+    mime_type.params().any(|(name, value)| {
+        name.as_str().eq_ignore_ascii_case(CONTENT_TYPE_PROTO_PARAM)
+            && value.as_str() == REMOTE_WRITE_V2_PROTO
+    })
+}
+
 impl IntoResponse for PromStoreResponse {
     fn into_response(self) -> axum::response::Response {
         let mut header_map = HeaderMap::new();
@@ -235,4 +300,31 @@ async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
     let buf = snappy_decompress(&body[..])?;
 
     ReadRequest::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_remote_write_v2() {
+        assert!(is_remote_write_v2(content_type(
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request"
+        )));
+        assert!(is_remote_write_v2(content_type(
+            "application/x-protobuf; proto=\"io.prometheus.write.v2.Request\""
+        )));
+
+        assert!(!is_remote_write_v2(content_type("application/x-protobuf")));
+        assert!(!is_remote_write_v2(content_type(
+            "application/x-protobuf;proto=prometheus.WriteRequest"
+        )));
+        assert!(!is_remote_write_v2(content_type(
+            "application/json;proto=io.prometheus.write.v2.Request"
+        )));
+    }
+
+    fn content_type(value: &str) -> headers::ContentType {
+        std::str::FromStr::from_str(value).unwrap()
+    }
 }
