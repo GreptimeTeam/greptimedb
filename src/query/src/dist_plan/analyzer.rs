@@ -174,6 +174,29 @@ impl AnalyzerRule for DistPlannerAnalyzer {
     }
 }
 
+/// Builds the small optimizer pre-pass that runs before `MergeScan` wrapping.
+///
+/// This is intentionally not DataFusion's full optimizer. After
+/// `PlanRewriter` wraps remote table scans in `MergeScan`,
+/// `MergeScanLogicalPlan::inputs()` hides `remote_input`, so ordinary optimizer
+/// rules can no longer see into the remote side. The main rule we need here is
+/// `PushDownFilter`: it moves side-local join/filter predicates into
+/// `TableScan.filters`, where region pruning and scan-level pruning can use
+/// them.
+///
+/// The rules before `PushDownFilter` are only the minimum cleanup/rewrite steps
+/// needed to make that filter pushdown safe around subqueries and set
+/// comparisons. For example, `RewriteSetComparison` handles ANY/ALL before they
+/// can become scan filters, and the decorrelation/subquery rules expose
+/// supported predicates as joins/filters instead of leaving raw subquery
+/// expressions under a scan.
+///
+/// Keep this list narrow. Do not add broad plan-shaping rules such as
+/// `PushDownLimit`, projection optimization, DISTINCT rewrites, or join-type
+/// rewrites here: those can change the local/remote distributed boundary or
+/// degrade unrelated planning diagnostics. Such rules belong either before this
+/// analyzer or after distributed planning, not in this pre-MergeScan,
+/// filter-focused pass.
 fn pre_merge_scan_optimizer() -> Optimizer {
     Optimizer::with_rules(vec![
         Arc::new(RewriteSetComparison::new()),
