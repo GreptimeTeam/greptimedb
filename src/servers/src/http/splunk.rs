@@ -287,8 +287,7 @@ pub async fn handle_event(
     let mut by_table: HashMap<String, Vec<VrlValue>> = HashMap::new();
     let mut tag_columns: HashMap<String, HashSet<String>> = HashMap::new();
     for event in events {
-        if let Some((table, map, tags)) = hec_event_to_map(event, query_table)
-        {
+        if let Some((table, map, tags)) = hec_event_to_map(event, query_table) {
             tag_columns.entry(table.clone()).or_default().extend(tags);
             by_table.entry(table).or_default().push(map);
         }
