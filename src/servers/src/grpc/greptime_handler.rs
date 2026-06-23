@@ -166,8 +166,7 @@ impl GreptimeRequestHandler {
                     }
                 }
 
-                if let Err(e) =
-                    result_sender.try_send(result.map_err(|e| Status::from_error(Box::new(e))))
+                if let Err(e) = result_sender.try_send(result.map_err(Status::from))
                     && let TrySendError::Closed(_) = e
                 {
                     warn!(r#""DoPut" client maybe unreachable, abort handling its message"#);
@@ -298,12 +297,17 @@ impl Drop for RequestTimer {
 #[cfg(test)]
 mod tests {
     use chrono::FixedOffset;
+    use common_error::ext::BoxedError;
+    use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT};
     use common_time::Timezone;
     use session::hints::{
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
     };
+    use snafu::ResultExt;
+    use tonic::Code;
 
     use super::*;
+    use crate::error::{ExecuteGrpcRequestSnafu, InvalidParameterSnafu};
 
     #[test]
     fn test_create_query_context() {
@@ -377,6 +381,41 @@ mod tests {
         assert_eq!(
             query_context.extension(REMOTE_QUERY_ID_EXTENSION_KEY),
             query_context.remote_query_id()
+        );
+    }
+
+    #[test]
+    fn test_record_batch_error_to_status_preserves_error_details() {
+        let inner = InvalidParameterSnafu {
+            reason: "Column not found, column: new_col",
+        }
+        .build();
+        let err = Err::<(), _>(BoxedError::new(inner))
+            .context(ExecuteGrpcRequestSnafu)
+            .unwrap_err();
+
+        let status = Status::from(err);
+
+        assert_eq!(status.code(), Code::InvalidArgument);
+        assert!(
+            status
+                .message()
+                .contains("Column not found, column: new_col")
+        );
+        assert!(
+            status
+                .message()
+                .contains("Invalid request parameter: Column not found")
+        );
+        assert!(
+            status
+                .metadata()
+                .contains_key(GREPTIME_DB_HEADER_ERROR_CODE)
+        );
+        assert!(
+            status
+                .metadata()
+                .contains_key(GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
         );
     }
 }
