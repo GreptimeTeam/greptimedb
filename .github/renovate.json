@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    ":dependencyDashboard"
+  ],
+  "minimumReleaseAge": "14 days",
+  "internalChecksFilter": "strict",
+  "vulnerabilityAlerts": {
+    "minimumReleaseAge": null
+  },
+  "packageRules": [
+    {
+      "description": "Allow our own forks/internal crates to update immediately",
+      "matchSourceUrls": [
+        "https://github.com/GreptimeTeam/**"
+      ],
+      "minimumReleaseAge": null
+    }
+  ]
+}
