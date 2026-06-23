@@ -1,0 +1,80 @@
+name: Cargo.lock Diff Check
+
+# Non-blocking check that warns when Cargo.lock has a large diff, to help
+# catch accidental dependency updates. This job always succeeds; it only
+# posts/updates a PR comment when the threshold is exceeded.
+on:
+    pull_request:
+        paths:
+            - "Cargo.lock"
+
+jobs:
+    check-cargo-lock:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        permissions:
+            pull-requests: write
+            contents: read
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
+            - name: Compute Cargo.lock diff size
+              id: diff
+              env:
+                  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+                  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+              run: |
+                  set -euo pipefail
+
+                  # Make sure the base commit is available locally (it may be absent
+                  # from a shallow/fetched history).
+                  git fetch origin "${BASE_SHA}" --depth=1 2>/dev/null || true
+
+                  # `base...head` diffs from the merge-base of the PR, i.e. exactly
+                  # what this PR changes in Cargo.lock. --numstat prints
+                  # "<added> <deleted> <path>".
+                  NUMSTAT="$(git diff "${BASE_SHA}...${HEAD_SHA}" -- Cargo.lock --numstat || true)"
+                  echo "::group::Cargo.lock numstat"
+                  echo "${NUMSTAT}"
+                  echo "::endgroup::"
+
+                  ADDED="$(awk '{print $1}' <<<"${NUMSTAT}")"
+                  DELETED="$(awk '{print $2}' <<<"${NUMSTAT}")"
+                  ADDED="${ADDED:-0}"
+                  DELETED="${DELETED:-0}"
+
+                  TOTAL=$((ADDED + DELETED))
+
+                  {
+                    echo "added=${ADDED}"
+                    echo "deleted=${DELETED}"
+                    echo "total=${TOTAL}"
+                  } >> "${GITHUB_OUTPUT}"
+                  echo "Computed Cargo.lock diff: +${ADDED} -${DELETED} (${TOTAL} lines)"
+
+            - name: Warn when Cargo.lock diff exceeds 500 lines
+              if: ${{ fromJSON(steps.diff.outputs.total) > 500 }}
+              uses: marocchino/sticky-pull-request-comment@v2
+              with:
+                  header: cargo-lock-diff-warning
+                  recreate: true
+                  message: |
+                      ⚠️ **Large `Cargo.lock` diff detected** (${{ steps.diff.outputs.total }} lines changed: +${{ steps.diff.outputs.added }} -${{ steps.diff.outputs.deleted }})
+
+                      This is a **non-blocking** check — it will not fail CI. It exists to help catch
+                      accidental `Cargo.lock` updates, which can pull in unintended dependency changes.
+
+                      Please double-check that this change is intentional:
+                      - If unintended, restore `Cargo.lock` to the base version.
+                      - If intended (e.g. a deliberate dependency bump), you can ignore this warning.
+
+            - name: Hide resolved warning
+              if: ${{ fromJSON(steps.diff.outputs.total) <= 500 }}
+              uses: marocchino/sticky-pull-request-comment@v2
+              with:
+                  header: cargo-lock-diff-warning
+                  hide: true
+                  hide_classify: RESOLVED
