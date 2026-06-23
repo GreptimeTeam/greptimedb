@@ -28,11 +28,14 @@ use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
-use datafusion_common::Column;
+use datafusion_common::pruning::PruningStatistics;
+use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
+use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::types::json_type::JsonNativeType;
+use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
 use itertools::Itertools;
 use partition::expr::PartitionExpr;
@@ -1071,6 +1074,32 @@ impl ScanInput {
         }
     }
 
+    /// Tries to build file-level pruning statistics using only the [FileHandle]'s manifest-level
+    /// time range, without reading any parquet metadata.
+    ///
+    /// Returns `None` if timestamp unit conversion overflows (conservative: keep the file).
+    fn try_file_level_pruning_stats(&self, file: &FileHandle) -> Option<FileLevelPruningStats> {
+        let (ts_min, ts_max) = file.time_range();
+        let time_index = self.mapper.metadata().time_index_column();
+        let time_index_unit = time_index
+            .column_schema
+            .data_type
+            .as_timestamp()
+            .expect("Time index must have timestamp-compatible type")
+            .unit();
+
+        // Convert file timestamps to the time index column's unit. Use `convert_to_ceil` for
+        // the upper bound to avoid accidentally shrinking the manifest range.
+        let min_ts = ts_min.convert_to(time_index_unit)?;
+        let max_ts = ts_max.convert_to_ceil(time_index_unit)?;
+
+        Some(FileLevelPruningStats {
+            min_scalar: timestamp_to_scalar_value(time_index_unit, Some(min_ts.value())),
+            max_scalar: timestamp_to_scalar_value(time_index_unit, Some(max_ts.value())),
+            time_index_col_name: time_index.column_schema.name.clone(),
+        })
+    }
+
     /// Prunes a file to scan and returns the builder to build readers.
     #[tracing::instrument(
         skip_all,
@@ -1086,6 +1115,27 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
+
+        // Early file-level pruning using manifest time range before any parquet metadata access.
+        // This avoids I/O for files that definitely can't match the current predicate snapshot,
+        // especially after TopK dynamic filters have established a timestamp threshold.
+        if let Some(ref pred) = predicate
+            && !pred.is_empty()
+            && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
+        {
+            let arrow_schema = self.mapper.metadata().schema.arrow_schema().clone();
+            let pruning_results = pred.prune_with_stats(&file_level_stats, &arrow_schema);
+            if pruning_results.len() == 1 && !pruning_results[0] {
+                debug!(
+                    "File {} pruned at file-level: time_range [{:?}, {:?}] cannot satisfy predicate",
+                    file.file_id(),
+                    file.time_range().0,
+                    file.time_range().1,
+                );
+                return Ok(FileRangeBuilder::default());
+            }
+        }
+
         let may_build_selective_row_selection = predicate.is_some();
         let decode_pk_values = !self.compaction
             && self
@@ -1302,6 +1352,57 @@ impl ScanInput {
     #[cfg(feature = "enterprise")]
     pub(crate) fn extension_range(&self, i: usize) -> &BoxedExtensionRange {
         &self.extension_ranges[i - self.num_memtables() - self.num_files()]
+    }
+}
+
+/// Lightweight [PruningStatistics] that only uses the file-level time range from manifest
+/// metadata, avoiding any parquet metadata reads. Used for early file-level pruning before
+/// accessing row-group-level statistics.
+pub(crate) struct FileLevelPruningStats {
+    /// Scalar value for the file's minimum timestamp in the time index column's unit.
+    pub(crate) min_scalar: ScalarValue,
+    /// Scalar value for the file's maximum timestamp in the time index column's unit.
+    pub(crate) max_scalar: ScalarValue,
+    /// Name of the time index column.
+    pub(crate) time_index_col_name: String,
+}
+
+impl PruningStatistics for FileLevelPruningStats {
+    fn min_values(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            ScalarValue::iter_to_array(std::iter::once(self.min_scalar.clone())).ok()
+        } else {
+            None
+        }
+    }
+
+    fn max_values(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            ScalarValue::iter_to_array(std::iter::once(self.max_scalar.clone())).ok()
+        } else {
+            None
+        }
+    }
+
+    fn num_containers(&self) -> usize {
+        1
+    }
+
+    fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            // The time index column is NOT NULL.
+            Some(Arc::new(UInt64Array::from(vec![0u64])))
+        } else {
+            None
+        }
+    }
+
+    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+        None
+    }
+
+    fn contained(&self, _column: &Column, _values: &HashSet<ScalarValue>) -> Option<BooleanArray> {
+        None
     }
 }
 
@@ -1864,6 +1965,9 @@ mod tests {
     use datafusion::physical_plan::expressions::lit as physical_lit;
     use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
+    use datatypes::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
+    };
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::JsonObjectType;
@@ -2127,6 +2231,56 @@ mod tests {
         let predicate_without_region = predicate_group.predicate_without_region().unwrap();
         assert!(predicate_without_region.exprs().is_empty());
         assert_eq!(1, predicate_without_region.dyn_filters().len());
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_prunes_old_file() {
+        let ts_col_name = "ts";
+        let predicate = Predicate::new(vec![col(ts_col_name).gt(ts_lit(1000))]);
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            ts_col_name,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )]));
+
+        // File with time range [0ms, 500ms] is completely before `ts > 1000ms`.
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+        assert_eq!(
+            vec![false],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+
+        // File with time range [0ms, 2000ms] overlaps `ts > 1000ms`, so keep it.
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(2000), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_no_predicate_keeps_all() {
+        let predicate = Predicate::new(vec![]);
+        assert!(predicate.is_empty());
+
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
+            time_index_col_name: "ts".to_string(),
+        };
+        let arrow_schema = Arc::new(ArrowSchema::new(Vec::<Field>::new()));
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
     }
 
     #[tokio::test]
