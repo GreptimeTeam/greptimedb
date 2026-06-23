@@ -83,37 +83,45 @@ limit 1;
 |_|_Inner Join: t_3.ts = t_4.ts, t_3.vin = t_4.vin_|
 |_|_Inner Join: t_2.ts = t_3.ts, t_2.vin = t_3.vin_|
 |_|_Inner Join: t_1.ts = t_2.ts, t_1.vin = t_2.vin_|
-|_|_Filter: t_1.vin IS NOT NULL_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: t_1_|
-|_| ]]_|
-|_|_Filter: t_2.vin IS NOT NULL_|
-|_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: t_2_|
+|_| Filter: t_1.vin IS NOT NULL_|
+|_|_TableScan: t_1, partial_filters=[t_1.vin IS NOT NULL]_|
 |_| ]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: t_3_|
+|_| Filter: t_2.vin IS NOT NULL_|
+|_|_TableScan: t_2, partial_filters=[t_2.vin IS NOT NULL]_|
 |_| ]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: t_4_|
+|_| Filter: t_3.vin IS NOT NULL_|
+|_|_TableScan: t_3, partial_filters=[t_3.vin IS NOT NULL]_|
 |_| ]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: t_5_|
+|_| Filter: t_4.vin IS NOT NULL_|
+|_|_TableScan: t_4, partial_filters=[t_4.vin IS NOT NULL]_|
 |_| ]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: t_6_|
+|_| Filter: t_5.vin IS NOT NULL_|
+|_|_TableScan: t_5, partial_filters=[t_5.vin IS NOT NULL]_|
 |_| ]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: t_7_|
+|_| Filter: t_6.vin IS NOT NULL_|
+|_|_TableScan: t_6, partial_filters=[t_6.vin IS NOT NULL]_|
 |_| ]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: t_8_|
+|_| Filter: t_7.vin IS NOT NULL_|
+|_|_TableScan: t_7, partial_filters=[t_7.vin IS NOT NULL]_|
 |_| ]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: t_9_|
+|_| Filter: t_8.vin IS NOT NULL_|
+|_|_TableScan: t_8, partial_filters=[t_8.vin IS NOT NULL]_|
 |_| ]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: t_10_|
+|_| Filter: t_9.vin IS NOT NULL_|
+|_|_TableScan: t_9, partial_filters=[t_9.vin IS NOT NULL]_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Filter: t_10.vin IS NOT NULL_|
+|_|_TableScan: t_10, partial_filters=[t_10.vin IS NOT NULL]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [ts@0 DESC], fetch=1_|
 |_|_SortExec: TopK(fetch=1), expr=[ts@0 DESC], preserve_partitioning=[true]_|
@@ -127,10 +135,8 @@ limit 1;
 |_|_REDACTED
 |_|_REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_FilterExec: vin@1 IS NOT NULL_|
 |_|_MergeScanExec: REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_FilterExec: vin@1 IS NOT NULL_|
 |_|_MergeScanExec: REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED

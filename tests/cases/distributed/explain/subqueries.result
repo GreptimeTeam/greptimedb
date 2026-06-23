@@ -15,12 +15,14 @@ EXPLAIN SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) ORDER BY i;
 | logical_plan_| Sort: integers.i ASC NULLS LAST_|
 |_|_LeftSemi Join: integers.i = __correlated_sq_1.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: integers_|
+|_| Filter: integers.i IS NOT NULL_|
+|_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL]_|
 |_| ]]_|
-|_|_SubqueryAlias: __correlated_sq_1_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Projection: integers.i_|
-|_|_TableScan: integers_|
+|_| SubqueryAlias: __correlated_sq_1_|
+|_|_Projection: integers.i_|
+|_|_Filter: integers.i IS NOT NULL_|
+|_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
@@ -46,12 +48,14 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 |_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| SubqueryAlias: i1_|
-|_|_TableScan: integers_|
+|_|_Filter: integers.i IS NOT NULL_|
+|_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL]_|
 |_| ]]_|
-|_|_SubqueryAlias: __correlated_sq_1_|
-|_|_Projection: integers.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: integers_|
+|_| SubqueryAlias: __correlated_sq_1_|
+|_|_Projection: integers.i_|
+|_|_Filter: integers.i IS NOT NULL_|
+|_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
@@ -59,7 +63,6 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[i@0 as i]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -86,10 +89,10 @@ order by t.i desc;
 | logical_plan_| Sort: t.i DESC NULLS FIRST_|
 |_|_SubqueryAlias: t_|
 |_|_Cross Join:_|
-|_|_Filter: integers.i IS NOT NULL_|
 |_|_Projection: integers.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: integers_|
+|_| Filter: integers.i IS NOT NULL AND Boolean(true)_|
+|_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL, Boolean(true)] |
 |_| ]]_|
 |_|_Projection:_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
@@ -99,7 +102,6 @@ order by t.i desc;
 |_|_SortExec: expr=[i@0 DESC], preserve_partitioning=[true]_|
 |_|_CrossJoinExec_|
 |_|_CoalescePartitionsExec_|
-|_|_FilterExec: i@0 IS NOT NULL_|
 |_|_ProjectionExec: expr=[i@0 as i]_|
 |_|_MergeScanExec: REDACTED
 |_|_ProjectionExec: expr=[]_|
@@ -125,11 +127,11 @@ EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM 
 |                     |         MergeScan [is_placeholder=false, remote_input=[                     |
 |                     | TableScan: integers                                                         |
 |                     | ]]                                                                          |
-|                     |       SubqueryAlias: __scalar_sq_1                                          |
-|                     |         MergeScan [is_placeholder=false, remote_input=[                     |
-|                     | Projection: max(integers.i)                                                 |
-|                     |   Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]                         |
-|                     |     TableScan: integers                                                     |
+|                     |       MergeScan [is_placeholder=false, remote_input=[                       |
+|                     | SubqueryAlias: __scalar_sq_1                                                |
+|                     |   Projection: max(integers.i)                                               |
+|                     |     Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]                       |
+|                     |       TableScan: integers, partial_filters=[Boolean(true)]                  |
 |                     | ]]                                                                          |
 | physical_plan_error | This feature is not implemented: Insert into not implemented for this table |
 +---------------------+-----------------------------------------------------------------------------+
@@ -165,18 +167,19 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 |_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| SubqueryAlias: i1_|
-|_|_TableScan: integers_|
+|_|_Filter: integers.i IS NOT NULL_|
+|_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL]_|
 |_| ]]_|
-|_|_SubqueryAlias: __correlated_sq_1_|
-|_|_Projection: integers.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: integers_|
+|_| SubqueryAlias: __correlated_sq_1_|
+|_|_Projection: integers.i_|
+|_|_Filter: integers.i IS NOT NULL_|
+|_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_REDACTED
 |_|_MergeScanExec: REDACTED
-|_|_ProjectionExec: expr=[i@0 as i]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -195,20 +198,22 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT count(i) FROM integers WHE
 |_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| SubqueryAlias: i1_|
-|_|_TableScan: integers_|
+|_|_Filter: integers.i IS NOT NULL_|
+|_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL]_|
 |_| ]]_|
-|_|_SubqueryAlias: __correlated_sq_1_|
-|_|_Aggregate: groupBy=[[integers.i]], aggr=[[]]_|
-|_|_Projection: integers.i_|
+|_|_Projection: __correlated_sq_1.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: integers_|
+|_| SubqueryAlias: __correlated_sq_1_|
+|_|_Projection: count(integers.i), integers.i_|
+|_|_Aggregate: groupBy=[[integers.i]], aggr=[[count(integers.i)]]_|
+|_|_Filter: integers.i IS NOT NULL_|
+|_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_REDACTED
 |_|_MergeScanExec: REDACTED
-|_|_AggregateExec: mode=SinglePartitioned, gby=[i@0 as i], aggr=[]_|
-|_|_ProjectionExec: expr=[i@0 as i]_|
+|_|_ProjectionExec: expr=[i@1 as i]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -543,12 +548,14 @@ ORDER BY u1.a;
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| SubqueryAlias: u1_|
 |_|_Projection: t1.a_|
-|_|_TableScan: t1_|
+|_|_Filter: t1.a IS NOT NULL_|
+|_|_TableScan: t1, partial_filters=[t1.a IS NOT NULL]_|
 |_| ]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| SubqueryAlias: u2_|
 |_|_Projection: t2.a_|
-|_|_TableScan: t2_|
+|_|_Filter: t2.a IS NOT NULL_|
+|_|_TableScan: t2, partial_filters=[t2.a IS NOT NULL]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]_|

@@ -26,6 +26,16 @@ use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use datafusion_optimizer::decorrelate_lateral_join::DecorrelateLateralJoin;
+use datafusion_optimizer::decorrelate_predicate_subquery::DecorrelatePredicateSubquery;
+use datafusion_optimizer::eliminate_filter::EliminateFilter;
+use datafusion_optimizer::extract_equijoin_predicate::ExtractEquijoinPredicate;
+use datafusion_optimizer::filter_null_join_keys::FilterNullJoinKeys;
+use datafusion_optimizer::optimizer::Optimizer;
+use datafusion_optimizer::propagate_empty_relation::PropagateEmptyRelation;
+use datafusion_optimizer::push_down_filter::PushDownFilter;
+use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
+use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use promql::extension_plan::SeriesDivide;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
@@ -110,6 +120,8 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         // Aligned with the behavior in `datafusion_optimizer::OptimizerContext::new()`.
         config.optimizer.filter_null_join_keys = true;
         let config = Arc::new(config);
+        let opt = config.extensions.get::<DistPlannerOptions>();
+        let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
 
         let optimizer_context = PatchOptimizerContext {
             inner: datafusion_optimizer::OptimizerContext::new(),
@@ -119,9 +131,30 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let plan = plan
             .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier::new(optimizer_context))?
             .data;
+        let fallback_plan = plan.clone();
 
-        let opt = config.extensions.get::<DistPlannerOptions>();
-        let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
+        // Run a filter-focused optimizer subset before MergeScan wraps remote
+        // inputs. MergeScan intentionally hides its remote_input from later
+        // optimizer passes; this pass only normalizes/decorrelates enough for
+        // DataFusion's PushDownFilter to put side-local predicates into scans.
+        // Keep this narrow: rules like PushDownLimit, OptimizeProjections, and
+        // DISTINCT rewrites can change global distributed-planning boundaries.
+        let optimizer_context = PatchOptimizerContext {
+            inner: datafusion_optimizer::OptimizerContext::new(),
+            config: config.clone(),
+        };
+        let plan = match pre_merge_scan_optimizer().optimize(plan, &optimizer_context, |_, _| {}) {
+            Ok(plan) => plan,
+            Err(err) => {
+                if allow_fallback {
+                    common_telemetry::warn!(err; "Failed to pre-optimize plan, using fallback plan rewriter for plan: {fallback_plan}");
+                    PUSH_DOWN_FALLBACK_ERRORS_TOTAL.inc();
+                    return self.use_fallback(fallback_plan);
+                } else {
+                    return Err(err);
+                }
+            }
+        };
 
         let result = match self.try_push_down(plan.clone()) {
             Ok(plan) => plan,
@@ -130,7 +163,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
                     common_telemetry::warn!(err; "Failed to push down plan, using fallback plan rewriter for plan: {plan}");
                     // if push down failed, use fallback plan rewriter
                     PUSH_DOWN_FALLBACK_ERRORS_TOTAL.inc();
-                    self.use_fallback(plan)?
+                    self.use_fallback(fallback_plan)?
                 } else {
                     return Err(err);
                 }
@@ -139,6 +172,43 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 
         Ok(result)
     }
+}
+
+/// Builds the small optimizer pre-pass that runs before `MergeScan` wrapping.
+///
+/// This is intentionally not DataFusion's full optimizer. After
+/// `PlanRewriter` wraps remote table scans in `MergeScan`,
+/// `MergeScanLogicalPlan::inputs()` hides `remote_input`, so ordinary optimizer
+/// rules can no longer see into the remote side. The main rule we need here is
+/// `PushDownFilter`: it moves side-local join/filter predicates into
+/// `TableScan.filters`, where region pruning and scan-level pruning can use
+/// them.
+///
+/// The rules before `PushDownFilter` are only the minimum cleanup/rewrite steps
+/// needed to make that filter pushdown safe around subqueries and set
+/// comparisons. For example, `RewriteSetComparison` handles ANY/ALL before they
+/// can become scan filters, and the decorrelation/subquery rules expose
+/// supported predicates as joins/filters instead of leaving raw subquery
+/// expressions under a scan.
+///
+/// Keep this list narrow. Do not add broad plan-shaping rules such as
+/// `PushDownLimit`, projection optimization, DISTINCT rewrites, or join-type
+/// rewrites here: those can change the local/remote distributed boundary or
+/// degrade unrelated planning diagnostics. Such rules belong either before this
+/// analyzer or after distributed planning, not in this pre-MergeScan,
+/// filter-focused pass.
+fn pre_merge_scan_optimizer() -> Optimizer {
+    Optimizer::with_rules(vec![
+        Arc::new(RewriteSetComparison::new()),
+        Arc::new(DecorrelatePredicateSubquery::new()),
+        Arc::new(ScalarSubqueryToJoin::new()),
+        Arc::new(DecorrelateLateralJoin::new()),
+        Arc::new(ExtractEquijoinPredicate::new()),
+        Arc::new(EliminateFilter::new()),
+        Arc::new(PropagateEmptyRelation::new()),
+        Arc::new(FilterNullJoinKeys::default()),
+        Arc::new(PushDownFilter::new()),
+    ])
 }
 
 impl DistPlannerAnalyzer {

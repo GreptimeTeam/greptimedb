@@ -22,6 +22,7 @@ use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
 use datafusion_expr::expr::Expr;
 use datafusion_physical_expr::PhysicalSortExpr;
@@ -139,10 +140,76 @@ impl TableProvider for DfTableProviderAdapter {
         &self,
         filters: &[&Expr],
     ) -> DfResult<Vec<DfTableProviderFilterPushDown>> {
+        let schema = self.schema();
         let filters = filters.iter().map(|&x| x.clone()).collect::<Vec<_>>();
         Ok(self
             .table
             .supports_filters_pushdown(&filters.iter().collect::<Vec<_>>())
-            .map(|v| v.into_iter().map(Into::into).collect::<Vec<_>>())?)
+            .map(|v| {
+                v.into_iter()
+                    .zip(filters.iter())
+                    .map(|(ty, expr)| {
+                        if !is_scan_local(expr, &schema) {
+                            DfTableProviderFilterPushDown::Unsupported
+                        } else {
+                            ty.into()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })?)
+    }
+}
+
+/// Returns true if the expression can be safely evaluated by a remote scan.
+/// Rejects outer references and column references unknown to the schema.
+fn is_scan_local(expr: &Expr, schema: &DfSchemaRef) -> bool {
+    let mut problems = false;
+    let _ = expr.apply(|node| match node {
+        Expr::OuterReferenceColumn(_, _) => {
+            problems = true;
+            Ok(TreeNodeRecursion::Stop)
+        }
+        Expr::Column(col) => {
+            if schema.column_with_name(&col.name).is_none() {
+                problems = true;
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        }
+        _ => Ok(TreeNodeRecursion::Continue),
+    });
+    !problems
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion_common::Column as DfColumn;
+
+    use super::*;
+
+    #[test]
+    fn test_is_scan_local_normal_column() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+        let expr = Expr::Column(DfColumn::new(Some("t"), "x"));
+        assert!(is_scan_local(&expr, &schema));
+    }
+
+    #[test]
+    fn test_is_scan_local_unknown_column() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+        let expr = Expr::Column(DfColumn::new(Some("t"), "z"));
+        assert!(!is_scan_local(&expr, &schema));
+    }
+
+    #[test]
+    fn test_is_scan_local_outer_ref() {
+        use datafusion::arrow::datatypes::Schema;
+        use datatypes::arrow::datatypes::{DataType, Field};
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+        let field = Arc::new(Field::new("x", DataType::Int64, true));
+        let expr = Expr::OuterReferenceColumn(field, DfColumn::new(Some("t"), "x"));
+        assert!(!is_scan_local(&expr, &schema));
     }
 }

@@ -1,0 +1,114 @@
+-- Scalar subquery predicates must be converted before PushDownFilter. Otherwise
+-- a scalar subquery can be pushed into TableScan.partial_filters, which is not a
+-- valid remote scan filter.
+CREATE TABLE scalar_fact (
+    ts TIMESTAMP(3) TIME INDEX,
+    k STRING,
+    val DOUBLE,
+    PRIMARY KEY (k)
+) ENGINE = mito;
+
+Affected Rows: 0
+
+CREATE TABLE scalar_dim (
+    ts TIMESTAMP(3) TIME INDEX,
+    k STRING,
+    threshold DOUBLE,
+    PRIMARY KEY (k)
+) ENGINE = mito;
+
+Affected Rows: 0
+
+INSERT INTO scalar_fact VALUES
+    ('2024-01-30 00:00:00', 'a', 10.0),
+    ('2024-01-30 01:00:00', 'b', 20.0),
+    ('2024-01-30 02:00:00', 'c', 30.0),
+    ('2024-01-30 03:00:00', 'd', 40.0);
+
+Affected Rows: 4
+
+INSERT INTO scalar_dim VALUES
+    ('2024-01-30 00:00:00', 'a', 5.0),
+    ('2024-01-30 01:00:00', 'b', 25.0),
+    ('2024-01-30 02:00:00', 'c', NULL);
+
+Affected Rows: 3
+
+ADMIN FLUSH_TABLE('scalar_fact');
+
++----------------------------------+
+| ADMIN FLUSH_TABLE('scalar_fact') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+ADMIN FLUSH_TABLE('scalar_dim');
+
++---------------------------------+
+| ADMIN FLUSH_TABLE('scalar_dim') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[[^\]]+\],.* Hash([REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+EXPLAIN SELECT f.k, f.val FROM scalar_fact f
+WHERE f.val > (
+    SELECT max(d.threshold) FROM scalar_dim d WHERE d.k = f.k
+)
+ORDER BY f.k;
+
++---------------+----------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                             |
++---------------+----------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: f.k ASC NULLS LAST                                                                                                         |
+|               |   Projection: f.k, f.val                                                                                                         |
+|               |     Inner Join: f.k = __scalar_sq_1.k Filter: f.val > __scalar_sq_1.max(d.threshold)                                             |
+|               |       Projection: f.k, f.val                                                                                                     |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                          |
+|               | SubqueryAlias: f                                                                                                                 |
+|               |   TableScan: scalar_fact                                                                                                         |
+|               | ]]                                                                                                                               |
+|               |       Projection: __scalar_sq_1.max(d.threshold), __scalar_sq_1.k                                                                |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                          |
+|               | SubqueryAlias: __scalar_sq_1                                                                                                     |
+|               |   Projection: max(d.threshold), d.k, __always_true                                                                               |
+|               |     Aggregate: groupBy=[[d.k, Boolean(true) AS __always_true]], aggr=[[max(d.threshold)]]                                        |
+|               |       SubqueryAlias: d                                                                                                           |
+|               |         Filter: scalar_dim.k IS NOT NULL                                                                                         |
+|               |           TableScan: scalar_dim, partial_filters=[scalar_dim.k IS NOT NULL]                                                      |
+|               | ]]                                                                                                                               |
+| physical_plan | SortPreservingMergeExec: [k@0 ASC NULLS LAST]                                                                                    |
+|               |   SortExec: expr=[k@0 ASC NULLS LAST], preserve_partitioning=[true]                                                              |
+|               |     HashJoinExec: mode=Partitioned, join_type=Inner, on=[(k@0, k@1)], filter=val@0 > max(d.threshold)@1, projection=[k@0, val@1] |
+|               |       RepartitionExec: partitioning=Hash([REDACTED
+|               |         ProjectionExec: expr=[k@1 as k, val@2 as val]                                                                            |
+|               |           MergeScanExec: REDACTED
+|               |       RepartitionExec: partitioning=Hash([REDACTED
+|               |         ProjectionExec: expr=[max(d.threshold)@0 as max(d.threshold), k@1 as k]                                                  |
+|               |           MergeScanExec: REDACTED
+|               |                                                                                                                                  |
++---------------+----------------------------------------------------------------------------------------------------------------------------------+
+
+SELECT f.k, f.val FROM scalar_fact f
+WHERE f.val > (
+    SELECT max(d.threshold) FROM scalar_dim d WHERE d.k = f.k
+)
+ORDER BY f.k;
+
++---+------+
+| k | val  |
++---+------+
+| a | 10.0 |
++---+------+
+
+DROP TABLE scalar_fact;
+
+Affected Rows: 0
+
+DROP TABLE scalar_dim;
+
+Affected Rows: 0
+

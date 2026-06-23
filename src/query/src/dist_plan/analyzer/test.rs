@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -29,7 +29,8 @@ use datafusion::execution::SessionState;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion::prelude::SessionContext;
-use datafusion_common::{JoinType, ScalarValue};
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{ExprSchema, JoinType, ScalarValue};
 use datafusion_expr::expr::{Exists, ScalarFunction};
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, Subquery, binary_expr,
@@ -99,14 +100,92 @@ fn collect_merge_scan_remote_dyn_filter_producer_id_list(
         .unwrap();
 }
 
+fn assert_remote_table_scan_filters_are_safe(plan: &LogicalPlan) {
+    let mut checked_filters = 0;
+    assert_remote_table_scan_filters_are_safe_inner(plan, false, &mut checked_filters);
+    assert!(
+        checked_filters > 0,
+        "expected at least one remote TableScan filter in plan:\n{plan}"
+    );
+}
+
+fn assert_remote_table_scan_filters_are_safe_inner(
+    plan: &LogicalPlan,
+    in_merge_scan_remote_input: bool,
+    checked_filters: &mut usize,
+) {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+    {
+        assert_remote_table_scan_filters_are_safe_inner(merge_scan.input(), true, checked_filters);
+    }
+
+    if in_merge_scan_remote_input && let LogicalPlan::TableScan(table_scan) = plan {
+        for filter in &table_scan.filters {
+            assert_table_scan_filter_is_remote_safe(table_scan, filter);
+            *checked_filters += 1;
+        }
+    }
+
+    for child in plan.inputs() {
+        assert_remote_table_scan_filters_are_safe_inner(
+            child,
+            in_merge_scan_remote_input,
+            checked_filters,
+        );
+    }
+}
+
+fn assert_table_scan_filter_is_remote_safe(
+    table_scan: &datafusion_expr::logical_plan::TableScan,
+    filter: &Expr,
+) {
+    filter
+        .apply(|expr| match expr {
+            Expr::Exists(_)
+            | Expr::InSubquery(_)
+            | Expr::ScalarSubquery(_)
+            | Expr::SetComparison(_)
+            | Expr::OuterReferenceColumn(_, _) => {
+                panic!("remote TableScan filter contains non-scan-local expression: {filter}")
+            }
+            _ => Ok(TreeNodeRecursion::Continue),
+        })
+        .unwrap();
+
+    let mut columns = HashSet::new();
+    expr_to_columns(filter, &mut columns).unwrap();
+    for column in columns {
+        assert!(
+            table_scan
+                .projected_schema
+                .field_from_column(&column)
+                .is_ok(),
+            "remote TableScan filter references non-scan column {column}: {filter}\nscan schema: {:?}",
+            table_scan.projected_schema
+        );
+    }
+}
+
 pub(crate) struct TestTable;
 
 impl TestTable {
     pub fn table_with_name(table_id: TableId, name: String) -> TableRef {
+        Self::table_with_filter_pushdown(table_id, name, FilterPushDownType::Unsupported)
+    }
+
+    pub fn table_with_filter_pushdown(
+        table_id: TableId,
+        name: String,
+        filter_pushdown: FilterPushDownType,
+    ) -> TableRef {
         let data_source = Arc::new(TestDataSource::new(Self::schema()));
         let table = Table::new(
             Self::table_info(table_id, name, "test_engine".to_string()),
-            FilterPushDownType::Unsupported,
+            filter_pushdown,
             data_source,
         );
         Arc::new(table)
@@ -1461,6 +1540,48 @@ fn sibling_merge_scans_have_unique_remote_dyn_filter_producer_ids() {
 }
 
 #[test]
+fn pre_merge_scan_optimizer_eliminates_projected_false_filter() {
+    init_default_ut_logging();
+    let left_table =
+        TestTable::table_with_filter_pushdown(0, "i1".to_string(), FilterPushDownType::Inexact);
+    let right_table =
+        TestTable::table_with_filter_pushdown(1, "i2".to_string(), FilterPushDownType::Inexact);
+
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let left = LogicalPlanBuilder::scan_with_filters("i1", left_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    let right = LogicalPlanBuilder::scan_with_filters("i2", right_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let plan = LogicalPlanBuilder::from(left)
+        .cross_join(right)
+        .unwrap()
+        .project(vec![lit(false).alias("cond")])
+        .unwrap()
+        .filter(col("cond"))
+        .unwrap()
+        .sort(vec![col("cond").sort(true, true)])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    assert_eq!("EmptyRelation: rows=0", result.to_string());
+}
+
+#[test]
 fn test_simplify_now_expression() {
     init_default_ut_logging();
     let test_table = TestTable::table_with_name(0, "t".to_string());
@@ -1543,6 +1664,9 @@ fn expand_proj_limit_part_col_aggr_sort() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    // Pre-MergeScan optimizer intentionally excludes PushDownLimit, so the
+    // remote plan shows an explicit Limit node instead of `fetch=10` on
+    // TableScan.
     let expected = [
         "Sort: t.pk2 ASC NULLS LAST",
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
@@ -1585,6 +1709,9 @@ fn expand_proj_limit_sort_part_col_aggr() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    // Pre-MergeScan optimizer intentionally excludes PushDownLimit, so the
+    // remote plan shows an explicit Limit node instead of `fetch=10` on
+    // TableScan.
     let expected = [
         "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
         "  Sort: t.pk2 ASC NULLS LAST",
@@ -1845,7 +1972,7 @@ fn transform_unalighed_join_with_alias() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
         "Limit: skip=0, fetch=1",
-        "  LeftSemi Join:  Filter: t.number = right.number",
+        "  LeftSemi Join: t.number = right.number",
         "    Projection: t.number",
         "      MergeScan [is_placeholder=false, remote_input=[",
         "TableScan: t",
@@ -2134,4 +2261,196 @@ fn test_table_scan_projection() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
+}
+
+/// Test that static side-local predicates on a JOIN input reach the remote
+/// region TableScan before MergeScan wrapping (issue #8338).
+///
+/// Plan shape: Filter(t1.pk1 = 'v') -> Join(t1.number = t2.number) -> TableScan(t1), TableScan(t2)
+///
+/// After PushDownFilter runs, the side-local filter should be pushed into the
+/// left child branch (inside the MergeScan remote_input), making it visible for
+/// time-index / bloom / skipping pruning.
+#[test]
+fn test_join_side_local_filter_pushdown_into_merge_scan() {
+    init_default_ut_logging();
+    let left_table =
+        TestTable::table_with_filter_pushdown(0, "t1".to_string(), FilterPushDownType::Inexact);
+    let right_table =
+        TestTable::table_with_filter_pushdown(1, "t2".to_string(), FilterPushDownType::Inexact);
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let right_plan = LogicalPlanBuilder::scan_with_filters("t2", right_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    // Plan: Filter -> Join -> TableScan(left), TableScan(right)
+    let plan = LogicalPlanBuilder::scan_with_filters("t1", left_source, None, vec![])
+        .unwrap()
+        .join_on(
+            right_plan,
+            JoinType::Inner,
+            vec![col("t1.number").eq(col("t2.number"))],
+        )
+        .unwrap()
+        .filter(col("t1.pk1").eq(lit("v"))) // side-local filter on left partition column
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    assert_remote_table_scan_filters_are_safe(&result);
+
+    let plan_str = result.to_string();
+    // After PushDownFilter runs, the predicate `t1.pk1 = Utf8("v")` should appear
+    // inside the left MergeScan's remote_input. The pre-MergeScan optimizer may
+    // combine it with join-derived IS NOT NULL pushdowns, so it may not appear as
+    // a standalone Filter: line. It must still be in TableScan partial_filters
+    // and below the Inner Join.
+    assert!(
+        plan_str.contains("t1.pk1 = Utf8(\"v\")"),
+        "Expected predicate t1.pk1 = Utf8(\"v\") in plan, got:\n{plan_str}"
+    );
+    assert!(
+        plan_str.contains(
+            "TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]"
+        ),
+        "Expected t1 TableScan partial_filters to contain pushed predicate, got:\n{plan_str}"
+    );
+
+    // Find the position of the filter and verify it appears after a MergeScan
+    // opening (i.e., inside remote_input) rather than before the Join.
+    let filter_pos = plan_str
+        .find("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]")
+        .unwrap();
+    let join_pos = plan_str.find("Inner Join").unwrap();
+    // The filter should be after the Join (meaning it was pushed down below the Join,
+    // into a MergeScan's remote_input)
+    assert!(
+        filter_pos > join_pos,
+        "Filter should be pushed below Join (into MergeScan remote_input), but found before Join"
+    );
+}
+
+/// LEFT JOIN preserves the left side, so a left-local WHERE predicate is safe
+/// to push into the left scan before MergeScan wrapping.
+#[test]
+fn test_left_join_left_side_filter_pushdown_into_merge_scan() {
+    init_default_ut_logging();
+    let left_table =
+        TestTable::table_with_filter_pushdown(0, "t1".to_string(), FilterPushDownType::Inexact);
+    let right_table =
+        TestTable::table_with_filter_pushdown(1, "t2".to_string(), FilterPushDownType::Inexact);
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let right_plan = LogicalPlanBuilder::scan_with_filters("t2", right_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t1", left_source, None, vec![])
+        .unwrap()
+        .join_on(
+            right_plan,
+            JoinType::Left,
+            vec![col("t1.number").eq(col("t2.number"))],
+        )
+        .unwrap()
+        .filter(col("t1.pk1").eq(lit("v")))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    assert_remote_table_scan_filters_are_safe(&result);
+
+    let plan_str = result.to_string();
+    assert!(
+        plan_str.contains("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\")]"),
+        "Expected left-side TableScan partial_filters under LEFT JOIN, got:\n{plan_str}"
+    );
+    let scan_filter_pos = plan_str
+        .find("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\")]")
+        .unwrap();
+    let join_pos = plan_str.find("Left Join").unwrap();
+    assert!(
+        scan_filter_pos > join_pos,
+        "Left-side filter should be pushed below LEFT JOIN into MergeScan remote_input:\n{plan_str}"
+    );
+}
+
+/// Negative case: cross-table predicate t1.pk1 = t2.pk2 should NOT become a
+/// side-local scan filter but remain as a join filter.
+#[test]
+fn test_join_cross_table_predicate_not_pushed_to_single_side() {
+    init_default_ut_logging();
+    let left_table =
+        TestTable::table_with_filter_pushdown(0, "t1".to_string(), FilterPushDownType::Inexact);
+    let right_table =
+        TestTable::table_with_filter_pushdown(1, "t2".to_string(), FilterPushDownType::Inexact);
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let right_plan = LogicalPlanBuilder::scan_with_filters("t2", right_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    // Plan: Filter(t1.pk1 = t2.pk2) -> Join(t1.number = t2.number) -> ...
+    // The filter involves columns from both tables, so PushDownFilter should
+    // keep it as a join filter (not push into a single side's scan).
+    let plan = LogicalPlanBuilder::scan_with_filters("t1", left_source, None, vec![])
+        .unwrap()
+        .join_on(
+            right_plan,
+            JoinType::Inner,
+            vec![col("t1.number").eq(col("t2.number"))],
+        )
+        .unwrap()
+        .filter(col("t1.pk1").eq(col("t2.pk2"))) // cross-table predicate
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    assert_remote_table_scan_filters_are_safe(&result);
+
+    let plan_str = result.to_string();
+    // The cross-table predicate should NOT appear as a filter on a single table's
+    // scan inside a MergeScan remote_input. It should remain as part of the
+    // Join's filter.
+    // The key assertion: it should NOT appear as "Filter: t1.pk1 = t2.pk2"
+    assert!(
+        !plan_str.contains("Filter: t1.pk1 = t2.pk2"),
+        "Cross-table predicate should not become a side-local Filter:\n{plan_str}"
+    );
+    assert!(
+        plan_str.contains("t1.pk1 = t2.pk2") || plan_str.contains("t2.pk2 = t1.pk1"),
+        "Cross-table predicate should remain in the join plan:\n{plan_str}"
+    );
+    assert!(
+        !plan_str.contains("partial_filters=[t1.pk1 = t2.pk2]")
+            && !plan_str.contains("partial_filters=[t2.pk2 = t1.pk1]")
+            && !plan_str.contains("full_filters=[t1.pk1 = t2.pk2]")
+            && !plan_str.contains("full_filters=[t2.pk2 = t1.pk1]"),
+        "Cross-table predicate should not become a single-side TableScan filter:\n{plan_str}"
+    );
 }
