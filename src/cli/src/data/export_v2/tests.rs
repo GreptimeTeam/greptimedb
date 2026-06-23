@@ -799,10 +799,15 @@ async fn import_v2_fails_on_incomplete_snapshot_e2e() -> Result<()> {
         .await?;
     database_client
         .sql(
-            "INSERT INTO metrics (ts, host, cpu) VALUES ('2025-01-01T00:00:00Z', 'h1', 1.0)",
+            "INSERT INTO metrics (ts, host, cpu) VALUES \
+             ('2025-01-01T00:00:00Z', 'h1', 1.0), \
+             ('2025-01-01T01:00:00Z', 'h2', 2.0)",
             schema,
         )
         .await?;
+
+    let expected_rows = query_count(&database_client, schema, "metrics").await?;
+    assert_eq!(expected_rows, 2);
 
     let src_dir = tempdir().context(FileIoSnafu)?;
     let src_uri = path_to_uri(src_dir.path())?;
@@ -817,6 +822,16 @@ async fn import_v2_fails_on_incomplete_snapshot_e2e() -> Result<()> {
         &catalog,
         "--schemas",
         schema,
+        "--start-time",
+        "2025-01-01T00:00:00Z",
+        "--end-time",
+        "2025-01-01T02:00:00Z",
+        "--chunk-time-window",
+        "1h",
+        "--chunk-parallelism",
+        "2",
+        "--progress",
+        "never",
     ];
     if let Some(auth) = &auth_basic {
         export_args.push("--auth-basic");
@@ -824,6 +839,15 @@ async fn import_v2_fails_on_incomplete_snapshot_e2e() -> Result<()> {
     }
     let export_cmd = ExportCreateCommand::parse_from(export_args);
     export_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)?;
+
+    let verify_cmd = ExportVerifyCommand::parse_from(["export-v2-verify", "--snapshot", &src_uri]);
+    verify_cmd
         .build()
         .await
         .context(OtherSnafu)?
@@ -840,19 +864,41 @@ async fn import_v2_fails_on_incomplete_snapshot_e2e() -> Result<()> {
         .await
         .map_err(BoxedError::new)
         .context(OtherSnafu)?;
-    if let Some(first_chunk) = manifest.chunks.first_mut() {
-        first_chunk.status = ChunkStatus::Failed;
-    }
+    assert_eq!(manifest.chunks.len(), 2);
+    assert!(
+        manifest
+            .chunks
+            .iter()
+            .all(|chunk| chunk.status == ChunkStatus::Completed)
+    );
+    manifest.chunks[0].mark_failed("injected incomplete snapshot for e2e".to_string());
     storage
         .write_manifest(&manifest)
         .await
         .map_err(BoxedError::new)
         .context(OtherSnafu)?;
 
+    let verify_cmd = ExportVerifyCommand::parse_from(["export-v2-verify", "--snapshot", &src_uri]);
+    let verify_err = verify_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .expect_err("verify should fail on incomplete snapshot");
+    assert!(
+        verify_err
+            .to_string()
+            .contains("Snapshot verification failed")
+    );
+
     database_client
         .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
         .await?;
 
+    let import_state_dir = tempdir().context(FileIoSnafu)?;
+    let import_state_path = import_state_dir.path().join("import-state.json");
+    let import_state_path_str = import_state_path.to_string_lossy().into_owned();
     let mut import_args = vec![
         "import-v2",
         "--addr",
@@ -863,6 +909,10 @@ async fn import_v2_fails_on_incomplete_snapshot_e2e() -> Result<()> {
         &catalog,
         "--schemas",
         schema,
+        "--state-path",
+        &import_state_path_str,
+        "--progress",
+        "never",
     ];
     if let Some(auth) = &auth_basic {
         import_args.push("--auth-basic");
@@ -877,6 +927,8 @@ async fn import_v2_fails_on_incomplete_snapshot_e2e() -> Result<()> {
         .await
         .expect_err("import should fail on incomplete snapshot");
     assert!(err.to_string().contains("Incomplete snapshot"));
+    assert!(!schema_exists(&database_client, schema).await?);
+    assert!(!import_state_path.exists());
 
     Ok(())
 }
