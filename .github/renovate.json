@@ -13,7 +13,9 @@
     {
       "description": "Allow our own forks/internal crates to update immediately",
       "matchSourceUrls": [
-        "https://github.com/GreptimeTeam/**"
+        "https://github.com/GreptimeTeam/**",
+        "git+https://github.com/GreptimeTeam/**",
+        "git@github.com:GreptimeTeam/**"
       ],
       "minimumReleaseAge": null
     }
