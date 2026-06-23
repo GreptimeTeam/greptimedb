@@ -1081,12 +1081,7 @@ impl ScanInput {
     fn try_file_level_pruning_stats(&self, file: &FileHandle) -> Option<FileLevelPruningStats> {
         let (ts_min, ts_max) = file.time_range();
         let time_index = self.mapper.metadata().time_index_column();
-        let time_index_unit = time_index
-            .column_schema
-            .data_type
-            .as_timestamp()
-            .expect("Time index must have timestamp-compatible type")
-            .unit();
+        let time_index_unit = time_index.column_schema.data_type.as_timestamp()?.unit();
 
         // Convert file timestamps to the time index column's unit. Use `convert_to_ceil` for
         // the upper bound to avoid accidentally shrinking the manifest range.
@@ -1123,9 +1118,11 @@ impl ScanInput {
             && !pred.is_empty()
             && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
         {
-            let arrow_schema = self.mapper.metadata().schema.arrow_schema().clone();
-            let pruning_results = pred.prune_with_stats(&file_level_stats, &arrow_schema);
-            if pruning_results.len() == 1 && !pruning_results[0] {
+            let pruning_results = pred.prune_with_stats(
+                &file_level_stats,
+                self.mapper.metadata().schema.arrow_schema(),
+            );
+            if pruning_results.first() == Some(&false) {
                 debug!(
                     "File {} pruned at file-level: time_range [{:?}, {:?}] cannot satisfy predicate",
                     file.file_id(),
