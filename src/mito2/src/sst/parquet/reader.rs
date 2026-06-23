@@ -1370,6 +1370,9 @@ fn all_required_row_groups_searched(
 /// Metrics of filtering rows groups and rows.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ReaderFilterMetrics {
+    /// Number of files filtered by manifest time-range pruning.
+    pub(crate) files_pruned_by_manifest_time_range: usize,
+
     /// Number of row groups before filtering.
     pub(crate) rg_total: usize,
     /// Number of row groups filtered by fulltext index.
@@ -1433,6 +1436,8 @@ pub(crate) struct ReaderFilterMetrics {
 impl ReaderFilterMetrics {
     /// Adds `other` metrics to this metrics.
     pub(crate) fn merge_from(&mut self, other: &ReaderFilterMetrics) {
+        self.files_pruned_by_manifest_time_range += other.files_pruned_by_manifest_time_range;
+
         self.rg_total += other.rg_total;
         self.rg_fulltext_filtered += other.rg_fulltext_filtered;
         self.rg_inverted_filtered += other.rg_inverted_filtered;

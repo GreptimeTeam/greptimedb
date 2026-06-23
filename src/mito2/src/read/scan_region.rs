@@ -1123,6 +1123,9 @@ impl ScanInput {
                 self.mapper.metadata().schema.arrow_schema(),
             );
             if pruning_results.first() == Some(&false) {
+                reader_metrics
+                    .filter_metrics
+                    .files_pruned_by_manifest_time_range += 1;
                 return Ok(FileRangeBuilder::default());
             }
         }

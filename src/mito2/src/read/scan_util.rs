@@ -147,6 +147,8 @@ pub(crate) struct ScanMetricsSet {
     build_parts_cost: Duration,
     /// Duration to scan SST files.
     sst_scan_cost: Duration,
+    /// Number of files filtered by manifest time-range pruning.
+    files_pruned_by_manifest_time_range: usize,
     /// Number of row groups before filtering.
     rg_total: usize,
     /// Number of row groups filtered by fulltext index.
@@ -302,6 +304,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_file_ranges,
             build_parts_cost,
             sst_scan_cost,
+            files_pruned_by_manifest_time_range,
             rg_total,
             rg_fulltext_filtered,
             rg_inverted_filtered,
@@ -390,6 +393,12 @@ impl fmt::Debug for ScanMetricsSet {
         }
 
         // Write non-zero filter counters
+        if *files_pruned_by_manifest_time_range > 0 {
+            write!(
+                f,
+                ", \"files_pruned_by_manifest_time_range\":{files_pruned_by_manifest_time_range}"
+            )?;
+        }
         if *rg_fulltext_filtered > 0 {
             write!(f, ", \"rg_fulltext_filtered\":{rg_fulltext_filtered}")?;
         }
@@ -665,6 +674,7 @@ impl ScanMetricsSet {
             build_cost,
             filter_metrics:
                 ReaderFilterMetrics {
+                    files_pruned_by_manifest_time_range,
                     rg_total,
                     rg_fulltext_filtered,
                     rg_inverted_filtered,
@@ -705,6 +715,8 @@ impl ScanMetricsSet {
 
         self.build_parts_cost += *build_cost;
         self.sst_scan_cost += *scan_cost;
+
+        self.files_pruned_by_manifest_time_range += *files_pruned_by_manifest_time_range;
 
         self.rg_total += *rg_total;
         self.rg_fulltext_filtered += *rg_fulltext_filtered;
