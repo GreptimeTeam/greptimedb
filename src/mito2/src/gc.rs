@@ -713,7 +713,7 @@ impl LocalGcWorker {
         let region_dir = self.access_layer.build_region_dir(region_id);
         let index_dir = object_store::util::join_dir(&region_dir, "index");
 
-        let lister = match self
+        let mut lister = match self
             .access_layer
             .object_store()
             .lister_with(&index_dir)
@@ -733,19 +733,13 @@ impl LocalGcWorker {
             Err(e) => return Err(e).context(OpenDalSnafu),
         };
 
-        let entries = lister
-            .filter(|e| {
-                if let Ok(e) = &e {
-                    e.metadata().is_file() && e.name().ends_with(".puffin")
-                } else {
-                    true
-                }
-            })
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .map(|entry| entry.context(OpenDalSnafu))
-            .collect::<Result<Vec<_>>>()?;
+        let mut entries = Vec::new();
+        while let Some(entry) = lister.next().await {
+            let entry = entry.context(OpenDalSnafu)?;
+            if entry.metadata().is_file() && entry.name().ends_with(".puffin") {
+                entries.push(entry);
+            }
+        }
 
         Ok(entries)
     }
