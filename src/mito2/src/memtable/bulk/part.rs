@@ -32,7 +32,7 @@ use datatypes::arrow;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, StringDictionaryBuilder, UInt8Array, UInt64Array,
 };
-use datatypes::arrow::compute::{SortColumn, SortOptions};
+use datatypes::arrow::compute::{SortColumn, SortOptions, concat_batches};
 use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, Schema, SchemaRef, UInt32Type,
 };
@@ -40,9 +40,9 @@ use datatypes::data_type::DataType;
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::{MutableVector, Vector};
 use datatypes::types::JsonType;
+use datatypes::schema::ext::ArrowSchemaExt;
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
-use datatypes::vectors::json::array::JsonArray;
 use mito_codec::key_values::{KeyValue, KeyValues};
 use mito_codec::row_converter::{PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields};
 use parquet::arrow::ArrowWriter;
@@ -57,11 +57,12 @@ use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId, SequenceNumber, SequenceRange};
 
 use crate::error::{
-    self, ColumnNotFoundSnafu, ComputeArrowSnafu, ConvertValueSnafu, CreateDefaultSnafu,
-    DataTypeMismatchSnafu, EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu,
-    InvalidRequestSnafu, NewRecordBatchSnafu, Result,
+    self, ColumnNotFoundSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DataTypeMismatchSnafu,
+    EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu, InvalidRequestSnafu,
+    NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
+use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
@@ -150,6 +151,10 @@ impl TryFrom<&BulkPart> for BulkWalEntry {
 }
 
 impl BulkPart {
+    pub(crate) fn schema(&self) -> SchemaRef {
+        self.batch.schema()
+    }
+
     pub(crate) fn estimated_size(&self) -> usize {
         record_batch_estimated_size(&self.batch)
     }
@@ -435,10 +440,12 @@ impl UnorderedPart {
         // Get the schema from the first part
         let schema = self.parts[0].batch.schema();
         let concatenated = if schema.fields().iter().any(is_structured_json_field) {
-            let (schema, batches) = align_parts(&self.parts)?;
-            arrow::compute::concat_batches(&schema, &batches).context(ComputeArrowSnafu)?
+            let aligner = Json2Aligner::try_new(self.parts.iter().map(|part| part.batch.schema()))?;
+            let aligned_batches =
+                aligner.align_batches(self.parts.iter().map(|part| part.batch.clone()))?;
+            concat_batches(aligner.schema(), &aligned_batches).context(ComputeArrowSnafu)?
         } else {
-            arrow::compute::concat_batches(&schema, self.parts.iter().map(|x| &x.batch))
+            concat_batches(&schema, self.parts.iter().map(|x| &x.batch))
                 .context(ComputeArrowSnafu)?
         };
 
@@ -475,73 +482,6 @@ impl UnorderedPart {
         self.max_timestamp = i64::MIN;
         self.max_sequence = 0;
     }
-}
-
-/// Align the JSON columns in [BulkPart]s, to unified Arrow arrays. So that we can compute (concat,
-/// sort, etc.) on them.
-fn align_parts(parts: &[BulkPart]) -> Result<(SchemaRef, Vec<RecordBatch>)> {
-    debug_assert!(
-        !parts.is_empty()
-            && parts
-                .windows(2)
-                .all(|w| w[0].batch.schema_ref().fields().len()
-                    == w[1].batch.schema_ref().fields().len())
-    );
-
-    let first = &parts[0];
-    let base_schema = first.batch.schema_ref();
-    let rest = &parts[1..];
-
-    let mut merged_types = HashMap::new();
-    let mut aligned_fields = Vec::with_capacity(base_schema.fields().len());
-    for (i, field) in base_schema.fields().iter().enumerate() {
-        if is_structured_json_field(field) {
-            let mut merged = JsonType::from(field.data_type());
-            rest.iter()
-                .try_fold(&mut merged, |acc, x| {
-                    acc.merge(&JsonType::from(x.batch.schema_ref().field(i).data_type()))?;
-                    Ok(acc)
-                })
-                .context(DataTypeMismatchSnafu)?;
-            merged_types.insert(i, merged.as_arrow_type());
-
-            aligned_fields.push(Arc::new(
-                Field::new(
-                    field.name().clone(),
-                    merged.as_arrow_type(),
-                    field.is_nullable(),
-                )
-                .with_metadata(field.metadata().clone()),
-            ));
-        } else {
-            aligned_fields.push(field.clone())
-        };
-    }
-    let aligned_schema = Arc::new(Schema::new_with_metadata(
-        aligned_fields,
-        base_schema.metadata().clone(),
-    ));
-
-    let mut aligned_batches = Vec::with_capacity(parts.len());
-    for part in parts {
-        let mut columns = Vec::with_capacity(part.batch.num_columns());
-        for (i, column) in part.batch.columns().iter().enumerate() {
-            if let Some(expect) = merged_types.get(&i) {
-                columns.push(
-                    JsonArray::from(column)
-                        .try_align(expect)
-                        .context(ConvertValueSnafu)?,
-                );
-            } else {
-                columns.push(column.clone());
-            }
-        }
-        aligned_batches.push(
-            RecordBatch::try_new(aligned_schema.clone(), columns).context(NewRecordBatchSnafu)?,
-        );
-    }
-
-    Ok((aligned_schema, aligned_batches))
 }
 
 /// More accurate estimation of the size of a record batch.
@@ -1045,15 +985,25 @@ pub fn convert_bulk_part(
 pub struct EncodedBulkPart {
     data: Bytes,
     metadata: BulkPartMeta,
+    /// Cached Arrow schema to avoid rebuilding it from parquet metadata.
+    schema: SchemaRef,
 }
 
 impl EncodedBulkPart {
-    pub fn new(data: Bytes, metadata: BulkPartMeta) -> Self {
-        Self { data, metadata }
+    pub fn new(data: Bytes, metadata: BulkPartMeta, schema: SchemaRef) -> Self {
+        Self {
+            data,
+            metadata,
+            schema,
+        }
     }
 
     pub fn metadata(&self) -> &BulkPartMeta {
         &self.metadata
+    }
+
+    pub(crate) fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 
     /// Returns the size of the encoded data in bytes
@@ -1227,8 +1177,9 @@ impl BulkPartEncoder {
         metrics: &mut BulkPartEncodeMetrics,
     ) -> Result<Option<EncodedBulkPart>> {
         let mut buf = Vec::with_capacity(4096);
-        let mut writer = ArrowWriter::try_new(&mut buf, arrow_schema, self.writer_props.clone())
-            .context(EncodeMemtableSnafu)?;
+        let mut writer =
+            ArrowWriter::try_new(&mut buf, arrow_schema.clone(), self.writer_props.clone())
+                .context(EncodeMemtableSnafu)?;
         let mut total_rows = 0;
         let mut series_estimator = SeriesEstimator::default();
 
@@ -1276,6 +1227,7 @@ impl BulkPartEncoder {
                 num_series,
                 max_sequence,
             },
+            schema: arrow_schema,
         }))
     }
 
@@ -1290,7 +1242,7 @@ impl BulkPartEncoder {
 
         let file_metadata = {
             let mut writer =
-                ArrowWriter::try_new(&mut buf, arrow_schema, self.writer_props.clone())
+                ArrowWriter::try_new(&mut buf, arrow_schema.clone(), self.writer_props.clone())
                     .context(EncodeMemtableSnafu)?;
             writer.write(&part.batch).context(EncodeMemtableSnafu)?;
             writer.finish().context(EncodeMemtableSnafu)?
@@ -1310,6 +1262,7 @@ impl BulkPartEncoder {
                 num_series: part.estimated_series_count() as u64,
                 max_sequence: part.sequence,
             },
+            schema: arrow_schema,
         }))
     }
 }
@@ -1585,6 +1538,10 @@ impl MultiBulkPart {
     /// Returns the total number of rows across all batches.
     pub fn num_rows(&self) -> usize {
         self.total_rows
+    }
+
+    pub(crate) fn schemas(&self) -> impl Iterator<Item = SchemaRef> + '_ {
+        self.batches.iter().map(|batch| batch.schema())
     }
 
     /// Returns the minimum timestamp.
