@@ -1370,9 +1370,6 @@ fn all_required_row_groups_searched(
 /// Metrics of filtering rows groups and rows.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ReaderFilterMetrics {
-    /// Number of files filtered by manifest time-range pruning.
-    pub(crate) files_pruned_by_manifest_time_range: usize,
-
     /// Number of row groups before filtering.
     pub(crate) rg_total: usize,
     /// Number of row groups filtered by fulltext index.
@@ -1431,13 +1428,13 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) pruner_cache_miss: usize,
     /// Duration spent waiting for pruner to build file ranges.
     pub(crate) pruner_prune_cost: Duration,
+    /// Number of files filtered by manifest time-range pruning.
+    pub(crate) files_time_range_pruned: usize,
 }
 
 impl ReaderFilterMetrics {
     /// Adds `other` metrics to this metrics.
     pub(crate) fn merge_from(&mut self, other: &ReaderFilterMetrics) {
-        self.files_pruned_by_manifest_time_range += other.files_pruned_by_manifest_time_range;
-
         self.rg_total += other.rg_total;
         self.rg_fulltext_filtered += other.rg_fulltext_filtered;
         self.rg_inverted_filtered += other.rg_inverted_filtered;
@@ -1465,6 +1462,7 @@ impl ReaderFilterMetrics {
         self.pruner_cache_hit += other.pruner_cache_hit;
         self.pruner_cache_miss += other.pruner_cache_miss;
         self.pruner_prune_cost += other.pruner_prune_cost;
+        self.files_time_range_pruned += other.files_time_range_pruned;
 
         // Merge optional applier metrics
         if let Some(other_metrics) = &other.inverted_index_apply_metrics {
