@@ -86,12 +86,13 @@ fn query_load_region_id(plan: &Arc<dyn ExecutionPlan>) -> Option<u64> {
     while let Some(plan) = stack.pop() {
         if plan.name() == REGION_SCAN_EXEC_NAME
             && let Some(scan) = plan.as_any().downcast_ref::<RegionScanExec>()
+            && let Some(scan_region_id) = scan.query_load_region_id()
         {
-            let scan_region_id = scan.query_load_region_id();
-            if region_id.is_some() && scan_region_id != region_id {
-                return None;
+            match region_id {
+                Some(region_id) if region_id != scan_region_id => return None,
+                Some(_) => {}
+                None => region_id = Some(scan_region_id),
             }
-            region_id = scan_region_id;
         }
         stack.extend(plan.children().into_iter().cloned());
     }
@@ -786,6 +787,72 @@ mod tests {
         fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "RecordingScanner")
         }
+    }
+
+    fn build_query_load_region_scan(
+        query_load_region_id: Option<RegionId>,
+    ) -> Arc<dyn ExecutionPlan> {
+        let schema = Arc::new(datatypes::schema::Schema::new(vec![ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )]));
+
+        let mut metadata_builder = RegionMetadataBuilder::new(RegionId::new(1024, 1));
+        metadata_builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![]);
+        let metadata = Arc::new(metadata_builder.build().unwrap());
+        let mut scanner = RecordingScanner::new(
+            schema,
+            metadata,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        if let Some(region_id) = query_load_region_id {
+            scanner.set_query_load_region_id(region_id);
+        }
+
+        Arc::new(RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None).unwrap())
+    }
+
+    #[test]
+    fn query_load_region_id_ignores_scans_without_region_id() {
+        let query_load_region_id = RegionId::new(1024, 42);
+        let scan_without_region_id = build_query_load_region_scan(None);
+        let scan_with_region_id = build_query_load_region_scan(Some(query_load_region_id));
+        let on: JoinOn = vec![(
+            Arc::new(Column::new("ts", 0)) as Arc<dyn PhysicalExpr>,
+            Arc::new(Column::new("ts", 0)) as Arc<dyn PhysicalExpr>,
+        )];
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(
+            HashJoinExec::try_new(
+                scan_without_region_id,
+                scan_with_region_id,
+                on,
+                None,
+                &JoinType::Inner,
+                None,
+                PartitionMode::CollectLeft,
+                NullEquality::NullEqualsNull,
+                false,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            super::query_load_region_id(&plan),
+            Some(query_load_region_id.as_u64())
+        );
     }
 
     async fn create_test_engine() -> QueryEngineRef {
