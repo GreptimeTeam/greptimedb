@@ -108,7 +108,8 @@ pub struct FileRefsManifest {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcReport {
-    /// deleted files per region
+    /// Deleted SST/parquet file ids per region. Index-only deletions are reported via
+    /// `deleted_indexes` because a naked `FileId` cannot distinguish index versions.
     /// TODO(discord9): change to `RemovedFile`?
     pub deleted_files: HashMap<RegionId, Vec<FileId>>,
     pub deleted_indexes: HashMap<RegionId, Vec<(FileId, IndexVersion)>>,
