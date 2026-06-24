@@ -53,7 +53,7 @@ use crate::metrics::{
 use crate::read::FlatSource;
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
-use crate::region::options::{IndexOptions, MemtableOptions, MergeMode, RegionOptions};
+use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
 use crate::request::{
