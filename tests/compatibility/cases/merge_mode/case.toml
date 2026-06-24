@@ -1,0 +1,8 @@
+name = "merge_mode"
+reason = "Verify data written with merge_mode='last_non_null' by old binaries is still merged correctly by newer binaries."
+introduced_by = "PR #8334"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table", "merge"]
+owner = "query"

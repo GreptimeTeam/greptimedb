@@ -1,0 +1,42 @@
+SELECT host, ts, cpu, memory
+FROM merge_mode
+ORDER BY host, ts;
+
++-------+-------------------------+------+--------+
+| host  | ts                      | cpu  | memory |
++-------+-------------------------+------+--------+
+| host1 | 1970-01-01T00:00:00     | 20.0 | 10.0   |
+| host2 | 1970-01-01T00:00:00.001 | 11.0 | 1.0    |
++-------+-------------------------+------+--------+
+
+SELECT host, cpu
+FROM merge_mode
+WHERE memory >= 10
+ORDER BY host;
+
++-------+------+
+| host  | cpu  |
++-------+------+
+| host1 | 20.0 |
++-------+------+
+
+SHOW CREATE TABLE merge_mode;
+
++------------+-------------------------------------------+
+| Table      | Create Table                              |
++------------+-------------------------------------------+
+| merge_mode | CREATE TABLE IF NOT EXISTS "merge_mode" ( |
+|            |   "host" STRING NULL,                     |
+|            |   "ts" TIMESTAMP(3) NOT NULL,             |
+|            |   "cpu" DOUBLE NULL,                      |
+|            |   "memory" DOUBLE NULL,                   |
+|            |   TIME INDEX ("ts"),                      |
+|            |   PRIMARY KEY ("host")                    |
+|            | )                                         |
+|            |                                           |
+|            | ENGINE=mito                               |
+|            | WITH(                                     |
+|            |   merge_mode = 'last_non_null'            |
+|            | )                                         |
++------------+-------------------------------------------+
+
