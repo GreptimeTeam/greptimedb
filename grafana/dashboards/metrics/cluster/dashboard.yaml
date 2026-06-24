@@ -535,6 +535,11 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: trigger-save-alert
+            - expr: sum(rate(greptime_flow_batching_error_count[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: flow-batching
         - title: Mito GC Failures
           type: timeseries
           description: Mito garbage-collection errors and skipped/orphaned files on datanodes.
@@ -2245,6 +2250,106 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{code}}]'
+        - title: Flow Batching Attempt / Error Rate
+          type: timeseries
+          description: Flow batching mode task attempt, error, and slow-query rates by flow.
+          unit: ops
+          queries:
+            - expr: sum by(instance,pod,flow_id) (rate(greptime_flow_batching_start_query_count[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-attempt'
+            - expr: sum by(instance,pod,flow_id) (rate(greptime_flow_batching_error_count[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-error'
+            - expr: sum by(instance,pod,flow_id) (rate(greptime_flow_batching_engine_slow_query_secs_count[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-slow'
+        - title: Flow Batching Query Latency
+          type: timeseries
+          description: Flow batching mode query latency by flow.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.95, sum by(le,instance,pod,flow_id) (rate(greptime_flow_batching_engine_query_time_secs_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-p95'
+            - expr: histogram_quantile(0.99, sum by(le,instance,pod,flow_id) (rate(greptime_flow_batching_engine_query_time_secs_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-p99'
+            - expr: sum by(instance,pod,flow_id) (rate(greptime_flow_batching_engine_query_time_secs_sum[$__rate_interval])) / sum by(instance,pod,flow_id) (rate(greptime_flow_batching_engine_query_time_secs_count[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-avg'
+        - title: Flow Batching Query Window Count
+          type: timeseries
+          description: Flow batching mode query window count by flow.
+          unit: short
+          queries:
+            - expr: histogram_quantile(0.95, sum by(le,instance,pod,flow_id) (rate(greptime_flow_batching_engine_query_window_cnt_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-p95'
+            - expr: sum by(instance,pod,flow_id) (rate(greptime_flow_batching_engine_query_window_cnt_sum[$__rate_interval])) / sum by(instance,pod,flow_id) (rate(greptime_flow_batching_engine_query_window_cnt_count[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-avg'
+        - title: Flow Batching Window Size
+          type: timeseries
+          description: Flow batching mode query and stalled window sizes by flow.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.95, sum by(le,instance,pod,flow_id) (rate(greptime_flow_batching_engine_query_window_size_secs_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-query-p95'
+            - expr: histogram_quantile(0.95, sum by(le,instance,pod,flow_id) (rate(greptime_flow_batching_engine_stalled_window_size_secs_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-stalled-p95'
+        - title: Flow Batching Bulk Dirty Windows
+          type: timeseries
+          description: Flow batching mode dirty time-window count marked by bulk inserts.
+          unit: short
+          queries:
+            - expr: sum by(instance,pod,flow_id) (greptime_flow_batching_engine_bulk_mark_time_window)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]'
+        - title: Flow Batching Checkpoint Decisions
+          type: timeseries
+          description: Flow batching mode checkpoint state-machine decision rate.
+          unit: ops
+          queries:
+            - expr: sum by(instance,pod,flow_id,mode,decision,reason) (rate(greptime_flow_batching_checkpoint_decision_count[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-[{{mode}}]-[{{decision}}]-[{{reason}}]'
+        - title: Flow Batching Query Mode
+          type: timeseries
+          description: Flow batching mode query attempts by checkpoint mode.
+          unit: ops
+          queries:
+            - expr: sum by(instance,pod,flow_id,mode) (rate(greptime_flow_batching_query_mode_count[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[flow={{flow_id}}]-[{{mode}}]'
     - title: Trigger
       panels:
         - title: Trigger Count
