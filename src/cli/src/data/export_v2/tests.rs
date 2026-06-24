@@ -117,6 +117,25 @@ async fn query_hosts(database_client: &DatabaseClient, schema: &str) -> Result<V
         .collect()
 }
 
+async fn delete_snapshot(snapshot_uri: &str, common_storage_args: Vec<String>) -> Result<()> {
+    let mut delete_args = vec![
+        "export-v2-delete".to_string(),
+        "--snapshot".to_string(),
+        snapshot_uri.to_string(),
+        "--no-confirm".to_string(),
+    ];
+    delete_args.extend(common_storage_args);
+
+    let delete_cmd = ExportDeleteCommand::parse_from(delete_args);
+    delete_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)
+}
+
 async fn schema_exists(database_client: &DatabaseClient, schema: &str) -> Result<bool> {
     let rows = database_client
         .sql_in_public("SHOW DATABASES")
@@ -588,8 +607,8 @@ async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
         uuid::Uuid::new_v4()
     );
 
-    let append_common_storage_args = |args: &mut Vec<String>| {
-        args.extend([
+    let common_storage_args = || {
+        vec![
             "--s3".to_string(),
             "--s3-region".to_string(),
             region.clone(),
@@ -599,7 +618,10 @@ async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
             secret_access_key.clone(),
             "--s3-endpoint".to_string(),
             endpoint.clone(),
-        ]);
+        ]
+    };
+    let append_common_storage_args = |args: &mut Vec<String>| {
+        args.extend(common_storage_args());
     };
     let append_auth_args = |args: &mut Vec<String>| {
         if let Some(auth) = &conn.auth_basic {
@@ -676,74 +698,85 @@ async fn export_import_v2_minio_roundtrip_e2e() -> Result<()> {
         .await
         .context(OtherSnafu)?;
 
-    let mut verify_args = vec![
-        "export-v2-verify".to_string(),
-        "--snapshot".to_string(),
-        snapshot_uri.clone(),
-    ];
-    append_common_storage_args(&mut verify_args);
-    let verify_cmd = ExportVerifyCommand::parse_from(verify_args);
-    verify_cmd
-        .build()
-        .await
-        .context(OtherSnafu)?
-        .do_work()
-        .await
-        .context(OtherSnafu)?;
+    let roundtrip_result: Result<()> = async {
+        let mut verify_args = vec![
+            "export-v2-verify".to_string(),
+            "--snapshot".to_string(),
+            snapshot_uri.clone(),
+        ];
+        append_common_storage_args(&mut verify_args);
+        let verify_cmd = ExportVerifyCommand::parse_from(verify_args);
+        verify_cmd
+            .build()
+            .await
+            .context(OtherSnafu)?
+            .do_work()
+            .await
+            .context(OtherSnafu)?;
 
-    database_client
-        .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
-        .await?;
+        database_client
+            .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
+            .await?;
 
-    let import_state_dir = tempdir().context(FileIoSnafu)?;
-    let import_state_path = import_state_dir.path().join("import-state.json");
-    let import_state_path = import_state_path.to_string_lossy().into_owned();
-    let mut import_args = vec![
-        "import-v2".to_string(),
-        "--addr".to_string(),
-        conn.addr.clone(),
-        "--from".to_string(),
-        snapshot_uri.clone(),
-        "--catalog".to_string(),
-        conn.catalog.clone(),
-        "--schemas".to_string(),
-        schema.to_string(),
-        "--task-parallelism".to_string(),
-        "2".to_string(),
-        "--state-path".to_string(),
-        import_state_path,
-        "--progress".to_string(),
-        "never".to_string(),
-    ];
-    append_auth_args(&mut import_args);
-    append_common_storage_args(&mut import_args);
-    let import_cmd = ImportV2Command::parse_from(import_args);
-    import_cmd
-        .build()
-        .await
-        .context(OtherSnafu)?
-        .do_work()
-        .await
-        .context(OtherSnafu)?;
+        let import_state_dir = tempdir().context(FileIoSnafu)?;
+        let import_state_path = import_state_dir.path().join("import-state.json");
+        let import_state_path = import_state_path.to_string_lossy().into_owned();
+        let mut import_args = vec![
+            "import-v2".to_string(),
+            "--addr".to_string(),
+            conn.addr.clone(),
+            "--from".to_string(),
+            snapshot_uri.clone(),
+            "--catalog".to_string(),
+            conn.catalog.clone(),
+            "--schemas".to_string(),
+            schema.to_string(),
+            "--task-parallelism".to_string(),
+            "2".to_string(),
+            "--state-path".to_string(),
+            import_state_path,
+            "--progress".to_string(),
+            "never".to_string(),
+        ];
+        append_auth_args(&mut import_args);
+        append_common_storage_args(&mut import_args);
+        let import_cmd = ImportV2Command::parse_from(import_args);
+        import_cmd
+            .build()
+            .await
+            .context(OtherSnafu)?
+            .do_work()
+            .await
+            .context(OtherSnafu)?;
 
-    let actual_rows = query_count(&database_client, schema, "metrics").await?;
-    assert_eq!(actual_rows, expected_rows);
+        let actual_rows = query_count(&database_client, schema, "metrics").await?;
+        if actual_rows != expected_rows {
+            return InvalidArgumentsSnafu {
+                msg: format!("expected {expected_rows} rows, got {actual_rows}"),
+            }
+            .fail();
+        }
 
-    let mut delete_args = vec![
-        "export-v2-delete".to_string(),
-        "--snapshot".to_string(),
-        snapshot_uri.clone(),
-        "--no-confirm".to_string(),
-    ];
-    append_common_storage_args(&mut delete_args);
-    let delete_cmd = ExportDeleteCommand::parse_from(delete_args);
-    delete_cmd
-        .build()
-        .await
-        .context(OtherSnafu)?
-        .do_work()
-        .await
-        .context(OtherSnafu)?;
+        let hosts = query_hosts(&database_client, schema).await?;
+        let expected_hosts = vec!["minio-h1".to_string(), "minio-h2".to_string()];
+        if hosts != expected_hosts {
+            return InvalidArgumentsSnafu {
+                msg: format!("expected hosts {expected_hosts:?}, got {hosts:?}"),
+            }
+            .fail();
+        }
+
+        Ok(())
+    }
+    .await;
+
+    let cleanup_result = delete_snapshot(&snapshot_uri, common_storage_args()).await;
+    match (roundtrip_result, cleanup_result) {
+        (Ok(()), Ok(())) => {}
+        (Ok(()), Err(err)) => return Err(err),
+        (Err(err), Ok(())) => return Err(err),
+        (Err(err), Err(_cleanup_err)) => return Err(err),
+    }
 
     database_client
         .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
