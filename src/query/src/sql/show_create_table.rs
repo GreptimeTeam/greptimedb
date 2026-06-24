@@ -29,12 +29,13 @@ use datatypes::schema::{
     COLUMN_VECTOR_INDEX_OPT_KEY_METRIC, COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema,
     FulltextBackend, SchemaRef,
 };
+use datatypes::types::JsonFormat;
 use snafu::ResultExt;
-use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName};
+use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Ident, ObjectName};
 use sql::dialect::GreptimeDbDialect;
 use sql::parser::ParserContext;
 use sql::statements::create::{Column, ColumnExtensions, CreateTable, TableConstraint};
-use sql::statements::{self, OptionMap};
+use sql::statements::{self, OptionMap, concrete_data_type_to_sql_data_type};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
@@ -197,27 +198,32 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         extensions.inverted_index_options = Some(HashMap::new().into());
     }
 
-    if column_schema
-        .data_type
-        .as_json()
-        .is_some_and(|json_type| json_type.is_json2())
-        && let Some(json_extension) = column_schema.extension_type::<JsonExtensionType>()?
-    {
+    let mut data_type = concrete_data_type_to_sql_data_type(&column_schema.data_type)
+        .with_context(|_| ConvertSqlTypeSnafu {
+            datatype: column_schema.data_type.clone(),
+        })?;
+
+    if matches!(
+        &column_schema.data_type,
+        datatypes::data_type::ConcreteDataType::Json(json_type)
+            if matches!(json_type.format, JsonFormat::Json2(_))
+    ) {
+        data_type = DataType::Custom(ObjectName::from(vec![Ident::new("JSON2")]), vec![]);
+    }
+
+    if let Some(json_extension) = column_schema.extension_type::<JsonExtensionType>()? {
         let settings = json_extension
             .metadata()
-            .json_structure_settings
+            .json_settings
             .clone()
             .unwrap_or_default();
-        extensions.set_json_structure_settings(settings);
+        extensions.set_json_settings(settings).context(SqlSnafu)?;
     }
 
     Ok(Column {
         column_def: ColumnDef {
             name: Ident::with_quote(quote_style, name),
-            data_type: statements::concrete_data_type_to_sql_data_type(&column_schema.data_type)
-                .with_context(|_| ConvertSqlTypeSnafu {
-                    datatype: column_schema.data_type.clone(),
-                })?,
+            data_type,
             options,
         },
         extensions,
@@ -429,9 +435,7 @@ WITH(
         let mut json_column = ColumnSchema::new("j", ConcreteDataType::json_datatype(), true);
         json_column
             .with_extension_type(&JsonExtensionType::new(Arc::new(
-                datatypes::extension::json::JsonMetadata {
-                    json_structure_settings: Some(datatypes::json::JsonStructureSettings::default()),
-                },
+                datatypes::extension::json::JsonMetadata::default(),
             )))
             .unwrap();
 

@@ -295,7 +295,7 @@ async fn desc_table(frontend: &Arc<Instance>) {
 +---------+----------------------+-----+------+---------+---------------+
 | Column  | Type                 | Key | Null | Default | Semantic Type |
 +---------+----------------------+-----+------+---------+---------------+
-| data    | Json2{}              |     | YES  |         | FIELD         |
+| data    | Json2                |     | YES  |         | FIELD         |
 | time_us | TimestampMicrosecond | PRI | NO   |         | TIMESTAMP     |
 +---------+----------------------+-----+------+---------+---------------+"#;
     execute_sql_and_expect(frontend, sql, expected).await;

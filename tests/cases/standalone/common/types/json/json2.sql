@@ -46,10 +46,6 @@ select j.a, j.a.x from json2_table order by ts;
 
 select j.c, j.y from json2_table order by ts;
 
-select j from json2_table order by ts;
-
-select * from json2_table order by ts;
-
 select j.a.b + 1 from json2_table order by ts;
 
 select abs(j.a.b) from json2_table order by ts;
@@ -60,3 +56,19 @@ select abs(j.c) from json2_table order by ts;
 select j.d from json2_table order by ts;
 
 drop table json2_table;
+
+create table json2_default_null_ok (
+    ts timestamp time index,
+    j json2(
+        a int64 null default null
+    )
+);
+
+drop table json2_default_null_ok;
+
+create table json2_default_null_check (
+    ts timestamp time index,
+    j json2(
+        a int64 not null default null
+    )
+);

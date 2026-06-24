@@ -1,0 +1,92 @@
+CREATE TABLE json2_type_hints (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        user.age BIGINT NOT NULL DEFAULT 18,
+        user.name STRING DEFAULT 'unknown',
+        user.active BOOLEAN NULL,
+        score DOUBLE NULL DEFAULT 1.5
+    )
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE json2_type_hints;
+
++------------------+--------------------------------------------------+
+| Table            | Create Table                                     |
++------------------+--------------------------------------------------+
+| json2_type_hints | CREATE TABLE IF NOT EXISTS "json2_type_hints" (  |
+|                  |   "ts" TIMESTAMP(3) NOT NULL,                    |
+|                  |   "j" JSON2(                                     |
+|                  |     "user"."age" BIGINT NOT NULL DEFAULT 18,     |
+|                  |     "user"."name" STRING NULL DEFAULT 'unknown', |
+|                  |     "user"."active" BOOLEAN NULL,                |
+|                  |     "score" DOUBLE NULL DEFAULT 1.5              |
+|                  |   ) NULL,                                        |
+|                  |   TIME INDEX ("ts")                              |
+|                  | )                                                |
+|                  |                                                  |
+|                  | ENGINE=mito                                      |
+|                  |                                                  |
++------------------+--------------------------------------------------+
+
+INSERT INTO json2_type_hints
+VALUES
+    (1, '{"user":{"age":42,"name":"Alice","active":true},"score":3.25}'),
+    (2, '{"user":{"name":"Bob"}}'),
+    (3, '{}');
+
+Affected Rows: 3
+
+SELECT
+    j.user.age,
+    j.user.name,
+    j.user.active,
+    j.score
+FROM json2_type_hints
+ORDER BY ts;
+
++-----------------------------------------------+------------------------------------------------+--------------------------------------------------+--------------------------------------------+
+| json_get(json2_type_hints.j,Utf8("user.age")) | json_get(json2_type_hints.j,Utf8("user.name")) | json_get(json2_type_hints.j,Utf8("user.active")) | json_get(json2_type_hints.j,Utf8("score")) |
++-----------------------------------------------+------------------------------------------------+--------------------------------------------------+--------------------------------------------+
+| 42                                            | Alice                                          | true                                             | 3.25                                       |
+| 18                                            | Bob                                            |                                                  | 1.5                                        |
+| 18                                            | unknown                                        |                                                  | 1.5                                        |
++-----------------------------------------------+------------------------------------------------+--------------------------------------------------+--------------------------------------------+
+
+INSERT INTO json2_type_hints
+VALUES (4, '{"user":{"age":"bad"}}');
+
+Error: 1004(InvalidArguments), Invalid JSON: JSON value at user.age does not match JSON2 type hint Int64
+
+CREATE TABLE json2_type_hints_required (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        user.age BIGINT NOT NULL
+    )
+);
+
+Affected Rows: 0
+
+INSERT INTO json2_type_hints_required
+VALUES (1, '{}');
+
+Error: 1004(InvalidArguments), Invalid JSON: missing non-null JSON2 type hint path user.age
+
+CREATE TABLE json2_type_hints_timestamp (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        event_time TIMESTAMP
+    )
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: TIMESTAMP
+
+DROP TABLE json2_type_hints;
+
+Affected Rows: 0
+
+DROP TABLE json2_type_hints_required;
+
+Affected Rows: 0
+

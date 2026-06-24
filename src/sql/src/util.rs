@@ -26,7 +26,7 @@ use promql_parser::parser::{
 use serde::Serialize;
 use snafu::ensure;
 use sqlparser::ast::{
-    Array, Expr, Ident, ObjectName, ObjectNamePart, SetExpr, SqlOption, StructField, TableFactor,
+    Array, Expr, Ident, ObjectName, ObjectNamePart, SetExpr, SqlOption, TableFactor,
     TableWithJoins, Value, ValueWithSpan,
 };
 use sqlparser_derive::{Visit, VisitMut};
@@ -125,13 +125,6 @@ impl OptionValue {
                 .iter()
                 .map(Self::expr_as_string)
                 .collect::<Option<Vec<_>>>(),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn as_struct_fields(&self) -> Option<&[StructField]> {
-        match &self.0 {
-            Expr::Struct { fields, .. } => Some(fields),
             _ => None,
         }
     }

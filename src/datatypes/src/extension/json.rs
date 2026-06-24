@@ -18,14 +18,15 @@ use arrow_schema::extension::ExtensionType;
 use arrow_schema::{ArrowError, DataType, FieldRef};
 use serde::{Deserialize, Serialize};
 
-use crate::json::JsonStructureSettings;
+use crate::json::JsonSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JsonMetadata {
-    /// Indicates how to handle JSON is stored in underlying data type
+    /// JSON2 settings stored in column schema metadata and represented through
+    /// Arrow extension metadata.
     ///
-    /// This field can be `None` for data is converted to complete structured in-memory form.
-    pub json_structure_settings: Option<JsonStructureSettings>,
+    /// This field can be `None` when data is converted to complete structured in-memory form.
+    pub json_settings: Option<JsonSettings>,
 }
 
 #[derive(Debug, Clone)]

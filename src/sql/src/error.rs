@@ -215,13 +215,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid JSON structure setting, reason: {reason}"))]
-    InvalidJsonStructureSetting {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to serialize column default constraint"))]
     SerializeColumnDefaultConstraint {
         #[snafu(implicit)]
@@ -348,7 +341,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to set JSON structure settings: {value}"))]
-    SetJsonStructureSettings {
+    SetJsonSettings {
         value: String,
         source: datatypes::error::Error,
         #[snafu(implicit)]
@@ -381,7 +374,6 @@ impl ErrorExt for Error {
 
             InvalidColumnOption { .. }
             | InvalidExprAsOptionValue { .. }
-            | InvalidJsonStructureSetting { .. }
             | InvalidDatabaseName { .. }
             | InvalidDatabaseOption { .. }
             | ColumnTypeMismatch { .. }
@@ -400,8 +392,9 @@ impl ErrorExt for Error {
             #[cfg(feature = "enterprise")]
             InvalidTriggerWebhookOption { .. } => StatusCode::InvalidArguments,
 
-            SerializeColumnDefaultConstraint { source, .. }
-            | SetJsonStructureSettings { source, .. } => source.status_code(),
+            SerializeColumnDefaultConstraint { source, .. } | SetJsonSettings { source, .. } => {
+                source.status_code()
+            }
 
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             SqlCommon { source, .. } => source.status_code(),
