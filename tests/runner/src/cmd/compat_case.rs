@@ -170,11 +170,15 @@ pub fn discover_cases(case_root: &Path) -> Result<Vec<CompatCase>, String> {
     Ok(cases)
 }
 
-/// Validate a set of compat cases.
-/// Checks required metadata fields, namespace format, and duplicate namespace rules.
-pub fn validate_cases(cases: &[CompatCase]) -> Result<(), String> {
-    let mut namespaces: HashSet<&str> = HashSet::new();
-
+/// Validate per-case metadata for all discovered cases.
+///
+/// Checks that required fields are non-empty, version constraints are parseable,
+/// namespace format is valid, and isolation values are supported.
+///
+/// Call this **before** version-range filtering so that invalid constraints
+/// (e.g. `>=not-a-version`) cause a hard error instead of being silently
+/// filtered out.
+pub fn validate_cases_metadata(cases: &[CompatCase]) -> Result<(), String> {
     for case in cases {
         // Validate namespace format: must start with a lowercase letter, followed by
         // lowercase alphanumeric or underscores only.
@@ -182,17 +186,6 @@ pub fn validate_cases(cases: &[CompatCase]) -> Result<(), String> {
             return Err(format!(
                 "Case '{}' has invalid namespace '{}': must match [a-z][a-z0-9_]*",
                 case.metadata.name, case.namespace
-            ));
-        }
-
-        // Check duplicate namespace
-        let is_shared = case.metadata.isolation.as_deref() == Some("shared");
-
-        if !is_shared && !namespaces.insert(&case.namespace) {
-            return Err(format!(
-                "Duplicate namespace '{}' for case '{}'. \
-                 Set isolation = \"shared\" in case.toml to allow this.",
-                case.namespace, case.metadata.name
             ));
         }
 
@@ -242,6 +235,29 @@ pub fn validate_cases(cases: &[CompatCase]) -> Result<(), String> {
                     case.metadata.name, isolation
                 ));
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check for duplicate namespaces in the **final selected batch**.
+///
+/// Cases with `isolation = "shared"` are exempt from the duplicate check.
+/// Call this **after** version-range filtering so unrelated filtered-out cases
+/// do not trigger false-positive namespace conflicts.
+pub fn validate_case_namespaces(cases: &[CompatCase]) -> Result<(), String> {
+    let mut namespaces: HashSet<&str> = HashSet::new();
+
+    for case in cases {
+        let is_shared = case.metadata.isolation.as_deref() == Some("shared");
+
+        if !is_shared && !namespaces.insert(&case.namespace) {
+            return Err(format!(
+                "Duplicate namespace '{}' for case '{}'. \
+                 Set isolation = \"shared\" in case.toml to allow this.",
+                case.namespace, case.metadata.name
+            ));
         }
     }
 
@@ -470,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cases_rejects_empty_required_vectors() {
+    fn test_validate_cases_metadata_rejects_empty_required_vectors() {
         let case = CompatCase {
             metadata: CaseMetadata {
                 name: "case".to_string(),
@@ -488,11 +504,110 @@ mod tests {
             namespace: "case".to_string(),
         };
 
-        assert!(validate_cases(&[case]).is_err());
+        assert!(validate_cases_metadata(&[case]).is_err());
     }
 
     #[test]
-    fn test_validate_cases_rejects_invalid_version_range() {
+    fn test_validate_cases_metadata_catches_invalid_version_constraint() {
+        let case = CompatCase {
+            metadata: CaseMetadata {
+                name: "bad_constraint".to_string(),
+                reason: "test".to_string(),
+                introduced_by: "test".to_string(),
+                topologies: vec!["distributed".to_string()],
+                from_range: vec![">=not-a-version".to_string()],
+                to_range: vec!["*".to_string()],
+                features: vec!["table".to_string()],
+                owner: "test".to_string(),
+                namespace: None,
+                isolation: None,
+            },
+            dir: PathBuf::from("bad_constraint"),
+            namespace: "bad_constraint".to_string(),
+        };
+
+        assert!(validate_cases_metadata(&[case]).is_err());
+    }
+
+    #[test]
+    fn test_validate_case_namespaces_rejects_duplicate() {
+        let case_a = CompatCase {
+            metadata: CaseMetadata {
+                name: "case_a".to_string(),
+                reason: "test".to_string(),
+                introduced_by: "test".to_string(),
+                topologies: vec!["distributed".to_string()],
+                from_range: vec!["*".to_string()],
+                to_range: vec!["*".to_string()],
+                features: vec!["table".to_string()],
+                owner: "test".to_string(),
+                namespace: None,
+                isolation: None,
+            },
+            dir: PathBuf::from("case_a"),
+            namespace: "shared_name".to_string(),
+        };
+        let case_b = CompatCase {
+            metadata: CaseMetadata {
+                name: "case_b".to_string(),
+                reason: "test".to_string(),
+                introduced_by: "test".to_string(),
+                topologies: vec!["distributed".to_string()],
+                from_range: vec!["*".to_string()],
+                to_range: vec!["*".to_string()],
+                features: vec!["table".to_string()],
+                owner: "test".to_string(),
+                namespace: None,
+                isolation: None,
+            },
+            dir: PathBuf::from("case_b"),
+            namespace: "shared_name".to_string(),
+        };
+
+        assert!(validate_cases_metadata(&[case_a.clone(), case_b.clone()]).is_ok());
+        assert!(validate_case_namespaces(&[case_a, case_b]).is_err());
+    }
+
+    #[test]
+    fn test_validate_case_namespaces_allows_shared_isolation_duplicate() {
+        let case_a = CompatCase {
+            metadata: CaseMetadata {
+                name: "case_a".to_string(),
+                reason: "test".to_string(),
+                introduced_by: "test".to_string(),
+                topologies: vec!["distributed".to_string()],
+                from_range: vec!["*".to_string()],
+                to_range: vec!["*".to_string()],
+                features: vec!["table".to_string()],
+                owner: "test".to_string(),
+                namespace: None,
+                isolation: Some("shared".to_string()),
+            },
+            dir: PathBuf::from("case_a"),
+            namespace: "shared_name".to_string(),
+        };
+        let case_b = CompatCase {
+            metadata: CaseMetadata {
+                name: "case_b".to_string(),
+                reason: "test".to_string(),
+                introduced_by: "test".to_string(),
+                topologies: vec!["distributed".to_string()],
+                from_range: vec!["*".to_string()],
+                to_range: vec!["*".to_string()],
+                features: vec!["table".to_string()],
+                owner: "test".to_string(),
+                namespace: None,
+                isolation: Some("shared".to_string()),
+            },
+            dir: PathBuf::from("case_b"),
+            namespace: "shared_name".to_string(),
+        };
+
+        assert!(validate_case_namespaces(&[case_a, case_b]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_cases_metadata_rejects_invalid_version_range() {
         let case = CompatCase {
             metadata: CaseMetadata {
                 name: "case".to_string(),
@@ -510,7 +625,7 @@ mod tests {
             namespace: "case".to_string(),
         };
 
-        assert!(validate_cases(&[case]).is_err());
+        assert!(validate_cases_metadata(&[case]).is_err());
     }
 
     /// Write minimal required files for a compat case into `dir`.

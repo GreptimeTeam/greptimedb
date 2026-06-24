@@ -39,4 +39,3 @@ SHOW CREATE TABLE merge_mode;
 |            |   merge_mode = 'last_non_null'            |
 |            | )                                         |
 +------------+-------------------------------------------+
-

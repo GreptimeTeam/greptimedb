@@ -120,6 +120,11 @@ impl CompatCommand {
             return;
         }
 
+        // ---- 3b. Validate metadata (incl. version constraints) before filtering ----
+        // Must run before version-range filtering so invalid constraints like
+        // `>=not-a-version` cause a hard error instead of silent skip.
+        compat_case::validate_cases_metadata(&cases).unwrap_or_else(|e| panic!("{e}"));
+
         // ---- 4. Resolve "from" binary path and infer version ----
         let from_bins_dir = resolve_bins(
             self.from_bins_dir.as_ref(),
@@ -195,8 +200,8 @@ impl CompatCommand {
             return;
         }
 
-        // ---- 5c. Validate final selected cases ----
-        compat_case::validate_cases(&cases).unwrap_or_else(|e| panic!("{e}"));
+        // ---- 5c. Validate namespace dedup on final selected batch ----
+        compat_case::validate_case_namespaces(&cases).unwrap_or_else(|e| panic!("{e}"));
 
         println!(
             "Running {} compat case(s) with topology {}:",
@@ -482,6 +487,8 @@ async fn run_compat_phase(
     }
 
     if phase == CompatPhase::Verify {
+        trim_trailing_blank_lines(&mut verify_output);
+
         let result_path = case.dir.join("verify.result");
 
         // If verify.result doesn't exist, create it (like sqlness does on first run)
@@ -512,6 +519,14 @@ async fn run_compat_phase(
     }
 
     Ok(())
+}
+
+/// Keep generated snapshots compatible with `git diff --check` by avoiding a
+/// trailing blank line at EOF while preserving the final newline.
+fn trim_trailing_blank_lines(output: &mut String) {
+    while output.ends_with("\n\n") {
+        output.pop();
+    }
 }
 
 /// Execute the namespace prelude (CREATE DATABASE IF NOT EXISTS + USE) for a case.
@@ -736,4 +751,17 @@ fn simple_diff(expected: &str, actual: &str) -> String {
     }
 
     diff
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_trailing_blank_lines;
+
+    #[test]
+    fn test_trim_trailing_blank_lines_preserves_single_final_newline() {
+        let mut output = "SELECT 1;\n\n+---+\n\n".to_string();
+        trim_trailing_blank_lines(&mut output);
+
+        assert_eq!(output, "SELECT 1;\n\n+---+\n");
+    }
 }
