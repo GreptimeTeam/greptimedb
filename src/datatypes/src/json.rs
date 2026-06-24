@@ -459,6 +459,31 @@ mod tests {
     }
 
     #[test]
+    fn test_json_settings_ser_de() {
+        let settings = JsonSettings::new(vec![
+            JsonTypeHint {
+                path: vec!["user".to_string(), "age".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                nullable: false,
+                default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(18))),
+                inverted_index: true,
+            },
+            JsonTypeHint {
+                path: vec!["user".to_string(), "name".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                nullable: true,
+                default_constraint: None,
+                inverted_index: false,
+            },
+        ]);
+
+        let serialized = serde_json::to_string(&settings).unwrap();
+        let deserialized = serde_json::from_str::<JsonSettings>(&serialized).unwrap();
+
+        assert_eq!(settings, deserialized);
+    }
+
+    #[test]
     fn test_encode_json_null() {
         let json = Json::Null;
         let settings = JsonSettings::default();
