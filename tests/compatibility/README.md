@@ -118,7 +118,7 @@ If output differs from expected, the run fails and `verify.result` is updated wi
 
 ## PR1 Limitations
 
-- **Sqlness interceptors**: `-- SQLNESS ...` comments are applied per statement using the same interceptor registry as the ordinary sqlness runner, including the GreptimeDB `PROTOCOL` interceptor.
+- **Sqlness interceptors**: `-- SQLNESS ...` comments are applied per statement using the same interceptor registry as the ordinary sqlness runner, including the GreptimeDB `PROTOCOL` interceptor. For `PROTOCOL POSTGRES`, the namespace prelude uses `SET search_path` instead of `USE`; compatibility cases should still qualify table names with the case namespace when relying on PostgreSQL table lookup semantics.
 - **Full distributed topology**: The compat runner starts 1 metasrv + 3 datanodes + 1 frontend + 1 flownode.
 - **No comment-based compat config**: The compat runner does not define extra compatibility configuration in SQL comments; sqlness comments keep their normal sqlness meaning.
 

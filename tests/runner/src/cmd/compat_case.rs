@@ -164,6 +164,9 @@ pub fn discover_cases(case_root: &Path) -> Result<Vec<CompatCase>, String> {
         ));
     }
 
+    // Sort by directory name for deterministic ordering across runs.
+    cases.sort_by(|a, b| a.dir.file_name().cmp(&b.dir.file_name()));
+
     Ok(cases)
 }
 

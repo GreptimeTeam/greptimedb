@@ -23,7 +23,8 @@ use sqlness::interceptor::{InterceptorRef, Registry};
 use crate::cmd::bare::ServerAddr;
 use crate::cmd::compat_case::{self, CompatCase, try_infer_version, version_matches_range};
 use crate::env::bare::{Env, StoreConfig, WalConfig};
-use crate::{protocol_interceptor, util};
+use crate::protocol_interceptor::{self, POSTGRES, PROTOCOL_KEY};
+use crate::util;
 
 const COMPAT_TOPOLOGY: &str = "distributed";
 const COMMENT_PREFIX: &str = "--";
@@ -86,31 +87,21 @@ pub struct CompatCommand {
 
 impl CompatCommand {
     pub async fn run(self) {
-        // ---- 1. Create temp directory ----
-        let temp_dir = tempfile::Builder::new()
-            .prefix("sqlness-compat")
-            .tempdir()
-            .unwrap();
-        let sqlness_home = temp_dir.keep();
-        unsafe {
-            std::env::set_var("SQLNESS_HOME", sqlness_home.display().to_string());
-        }
-
-        // ---- 2. Validate MVP runtime constraints ----
+        // ---- 1. Validate MVP runtime constraints ----
         if !self.setup_etcd {
             panic!(
                 "compat MVP requires Docker etcd (--setup-etcd=true); external metadata stores are not supported yet"
             );
         }
 
-        // ---- 3. Resolve case directory ----
+        // ---- 2. Resolve case directory ----
         let case_dir = self.case_dir.unwrap_or_else(default_compat_case_dir);
 
         if !case_dir.is_dir() {
             panic!("Case directory not found: {}", case_dir.display());
         }
 
-        // ---- 4. Discover cases ----
+        // ---- 3. Discover cases ----
         let mut cases = compat_case::discover_cases(&case_dir).unwrap_or_else(|e| panic!("{e}"));
 
         // Filter by test_filter
@@ -129,7 +120,7 @@ impl CompatCommand {
             return;
         }
 
-        // ---- 5. Resolve "from" binary path and infer version ----
+        // ---- 4. Resolve "from" binary path and infer version ----
         let from_bins_dir = resolve_bins(
             self.from_bins_dir.as_ref(),
             self.from_version.as_deref(),
@@ -219,10 +210,20 @@ impl CompatCommand {
             );
         }
 
-        // ---- 6. Build interceptor registry ----
+        // ---- 6. Create temp directory (after filtering so early exits don't leave empty dirs) ----
+        let temp_dir = tempfile::Builder::new()
+            .prefix("sqlness-compat")
+            .tempdir()
+            .unwrap();
+        let sqlness_home = temp_dir.keep();
+        unsafe {
+            std::env::set_var("SQLNESS_HOME", sqlness_home.display().to_string());
+        }
+
+        // ---- 7. Build interceptor registry ----
         let interceptor_registry = create_interceptor_registry();
 
-        // ---- 6b. Create Env for bare distributed mode ----
+        // ---- 7b. Create Env for bare distributed mode ----
         let store_config = StoreConfig {
             store_addrs: if self.setup_etcd {
                 vec!["127.0.0.1:2379".to_string()]
@@ -245,7 +246,7 @@ impl CompatCommand {
             vec![],
         );
 
-        // ---- 6c. Etcd cleanup guard ----
+        // ---- 7c. Etcd cleanup guard ----
         // Arm this only immediately before starting the cluster. Earlier validation
         // failures should not stop an unrelated local container named `etcd`.
         let mut etcd_guard = if self.setup_etcd {
@@ -254,7 +255,7 @@ impl CompatCommand {
             None
         };
 
-        // ---- 7. Run setup phase on old cluster ----
+        // ---- 8. Run setup phase on old cluster ----
         println!("Starting old-version distributed cluster with flownode...");
         let mut db = env.compat_start_distributed(0).await;
 
@@ -266,12 +267,12 @@ impl CompatCommand {
             println!("  Setup: {} - OK", case.metadata.name);
         }
 
-        // ---- 8. Switch to "to" binary and restart cluster ----
+        // ---- 9. Switch to "to" binary and restart cluster ----
         // to_bins_dir was already resolved during version-range filtering
         println!("Restarting cluster with new-version binary on preserved state...");
         env.compat_restart_all(&db, to_bins_dir).await;
 
-        // ---- 9. Run verify phase on new cluster ----
+        // ---- 10. Run verify phase on new cluster ----
         println!("Running verify phase...");
         let mut failed = Vec::new();
         for case in &cases {
@@ -287,10 +288,10 @@ impl CompatCommand {
             }
         }
 
-        // ---- 10. Stop cluster ----
+        // ---- 11. Stop cluster ----
         db.compat_stop();
 
-        // ---- 11. Cleanup ----
+        // ---- 12. Cleanup ----
         // Etcd is always cleaned up; --preserve-state only preserves sqlness_home.
         if self.setup_etcd {
             println!("Stopping etcd");
@@ -515,15 +516,37 @@ async fn run_compat_phase(
 
 /// Execute the namespace prelude (CREATE DATABASE IF NOT EXISTS + USE) for a case.
 /// This is NOT written into verify.result.
+///
+/// The prelude is protocol-aware:
+/// - `CREATE DATABASE` is always sent via gRPC so it works regardless of
+///   statement-level protocol directives.
+/// - For Postgres-protocol statements, `SET search_path` selects the case
+///   namespace instead of running `USE` (which is not valid PG SQL).
+/// - For MySQL and default/gRPC statements, `USE <ns>` runs through the
+///   statement's effective context.
 async fn run_namespace_prelude(
     db: &crate::env::bare::GreptimeDB,
     namespace: &str,
     query_ctx: &QueryContext,
 ) -> Result<(), String> {
+    // CREATE DATABASE always via gRPC — no protocol override
     let create_db = format!("CREATE DATABASE IF NOT EXISTS {namespace}");
-    let use_db = format!("USE {namespace}");
+    let default_ctx = QueryContext::default();
+    db.compat_query(&create_db, &default_ctx).await?;
 
-    db.compat_query(&create_db, query_ctx).await?;
+    // Postgres: select the namespace via search_path instead of USE.
+    if query_ctx
+        .context
+        .get(PROTOCOL_KEY)
+        .is_some_and(|p| p == POSTGRES)
+    {
+        let set_search_path = format!("SET search_path TO '{namespace}'");
+        db.compat_query(&set_search_path, query_ctx).await?;
+        return Ok(());
+    }
+
+    // MySQL / default (gRPC): execute USE
+    let use_db = format!("USE {namespace}");
     db.compat_query(&use_db, query_ctx).await?;
 
     Ok(())
