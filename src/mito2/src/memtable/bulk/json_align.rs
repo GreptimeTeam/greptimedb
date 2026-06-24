@@ -19,7 +19,6 @@ use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::DataType;
 use datatypes::extension::json::is_structured_json_field;
-use datatypes::schema::ext::ArrowSchemaExt;
 use datatypes::types::JsonType;
 use datatypes::vectors::json::array::JsonArray;
 use snafu::{OptionExt, ResultExt};
@@ -57,14 +56,6 @@ impl Json2Aligner {
             reason: "Json2Aligner requires at least one input schema",
         })?;
 
-        // No JSON2 columns, no alignment needed.
-        if !base_schema.has_json_extension_field() {
-            return Ok(Self {
-                schema: base_schema,
-                json_columns: Vec::new(),
-            });
-        }
-
         // Init merged types from base schema.
         let mut merged_types: HashMap<usize, JsonType> = base_schema
             .fields()
@@ -73,6 +64,14 @@ impl Json2Aligner {
             .filter(|&(_idx, field)| is_structured_json_field(field))
             .map(|(idx, field)| (idx, JsonType::from(field.data_type())))
             .collect();
+
+        // No JSON2 columns, no alignment needed.
+        if merged_types.is_empty() {
+            return Ok(Self {
+                schema: base_schema,
+                json_columns: Vec::new(),
+            });
+        }
 
         // Merge JSON2 types from remaining schemas.
         for schema in input_schemas {
@@ -199,6 +198,23 @@ mod tests {
 
         let aligned = aligner.align_batch(batch).unwrap();
         assert!(Arc::ptr_eq(aligned.schema_ref(), &schema));
+    }
+
+    #[test]
+    fn test_try_new_ignores_legacy_jsonb_extension_field() {
+        let legacy_jsonb_field = Arc::new(
+            Field::new("data", DataType::Binary, true)
+                .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default()))),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Arc::new(Field::new("ts", DataType::Int64, false)),
+            legacy_jsonb_field,
+        ]));
+
+        let aligner = Json2Aligner::try_new([schema.clone()]).unwrap();
+
+        assert!(Arc::ptr_eq(aligner.schema(), &schema));
+        assert!(aligner.json_columns.is_empty());
     }
 
     #[test]
