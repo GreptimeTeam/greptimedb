@@ -66,8 +66,9 @@ greptimedb_data
 !/.github
 
 # AI related
-CLAUDE.md
-AGENTS.md
+# Root-level personal/local agent config only; per-crate AGENTS.md files are tracked.
+/CLAUDE.md
+/AGENTS.md
 .codex
 .gemini
 .opencode
