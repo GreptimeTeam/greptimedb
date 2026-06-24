@@ -195,6 +195,8 @@ pub(crate) struct ScanMetricsSet {
     pruner_cache_miss: usize,
     /// Duration spent waiting for pruner to build file ranges.
     pruner_prune_cost: Duration,
+    /// Number of files filtered by manifest time-range pruning.
+    files_time_range_pruned: usize,
     /// Number of record batches read from SST.
     num_sst_record_batches: usize,
     /// Number of batches decoded from SST.
@@ -326,6 +328,7 @@ impl fmt::Debug for ScanMetricsSet {
             pruner_cache_hit,
             pruner_cache_miss,
             pruner_prune_cost,
+            files_time_range_pruned,
             num_sst_record_batches,
             num_sst_batches,
             num_sst_rows,
@@ -390,6 +393,9 @@ impl fmt::Debug for ScanMetricsSet {
         }
 
         // Write non-zero filter counters
+        if *files_time_range_pruned > 0 {
+            write!(f, ", \"files_time_range_pruned\":{files_time_range_pruned}")?;
+        }
         if *rg_fulltext_filtered > 0 {
             write!(f, ", \"rg_fulltext_filtered\":{rg_fulltext_filtered}")?;
         }
@@ -689,6 +695,7 @@ impl ScanMetricsSet {
                     pruner_cache_hit,
                     pruner_cache_miss,
                     pruner_prune_cost,
+                    files_time_range_pruned,
                     inverted_index_apply_metrics,
                     bloom_filter_apply_metrics,
                     fulltext_index_apply_metrics,
@@ -705,6 +712,8 @@ impl ScanMetricsSet {
 
         self.build_parts_cost += *build_cost;
         self.sst_scan_cost += *scan_cost;
+
+        self.files_time_range_pruned += *files_time_range_pruned;
 
         self.rg_total += *rg_total;
         self.rg_fulltext_filtered += *rg_fulltext_filtered;
