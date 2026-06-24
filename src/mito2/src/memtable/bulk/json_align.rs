@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(&DataType::Int64, fields[0].data_type());
         assert_eq!("name", fields[1].name());
         assert_eq!(&DataType::Utf8View, fields[1].data_type());
-        assert!(is_json_extension_type(&aligner.schema().fields()[1]));
+        assert!(is_structured_json_field(&aligner.schema().fields()[1]));
     }
 
     #[test]
