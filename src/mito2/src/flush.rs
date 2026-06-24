@@ -53,7 +53,7 @@ use crate::metrics::{
 use crate::read::FlatSource;
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
-use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
+use crate::region::options::{IndexOptions, MemtableOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
 use crate::request::{
@@ -808,7 +808,8 @@ fn memtable_flat_sources(
         let mut input_iters = Vec::with_capacity(num_ranges);
         let mut current_ranges = Vec::new();
 
-        let mut json_align_schemas = if schema.fields().iter().any(is_structured_json_field) {
+        let has_json2 = schema.fields().iter().any(is_structured_json_field);
+        let mut json_align_schemas = if has_json2 {
             Some(Vec::with_capacity(num_ranges))
         } else {
             None
@@ -856,20 +857,33 @@ fn memtable_flat_sources(
                     .max()
                     .unwrap_or(0);
 
+                let input_iters =
+                    std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges));
+                let (schema, input_iters) = maybe_align_json2_iters(
+                    schema.clone(),
+                    json_align_schemas.take(),
+                    input_iters,
+                )?;
+
                 let maybe_dedup = merge_and_dedup(
                     &schema,
                     options.append_mode,
                     options.merge_mode(),
                     field_column_start,
-                    std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
+                    input_iters,
                 )?;
 
-                flat_sources.sources.push((
-                    FlatSource::new_iter(schema.clone(), maybe_dedup),
-                    max_sequence,
-                ));
+                flat_sources
+                    .sources
+                    .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
                 last_iter_rows = 0;
                 current_ranges.clear();
+
+                json_align_schemas = if has_json2 {
+                    Some(Vec::with_capacity(num_ranges))
+                } else {
+                    None
+                };
             }
         }
 
@@ -883,16 +897,8 @@ fn memtable_flat_sources(
                 rows_remaining
             );
 
-            let (schema, input_iters) = if let Some(schemas) = json_align_schemas {
-                let aligner = Json2Aligner::try_new(schemas)?;
-                let input_iters = input_iters
-                    .into_iter()
-                    .map(|input_iter| aligner.wrap_iter(input_iter))
-                    .collect();
-                (aligner.schema().clone(), input_iters)
-            } else {
-                (schema, input_iters)
-            };
+            let (schema, input_iters) =
+                maybe_align_json2_iters(schema, json_align_schemas, input_iters)?;
 
             let max_sequence = current_ranges
                 .iter()
@@ -915,6 +921,24 @@ fn memtable_flat_sources(
     }
 
     Ok(flat_sources)
+}
+
+fn maybe_align_json2_iters(
+    schema: SchemaRef,
+    schemas: Option<Vec<SchemaRef>>,
+    input_iters: Vec<BoxedRecordBatchIterator>,
+) -> Result<(SchemaRef, Vec<BoxedRecordBatchIterator>)> {
+    let Some(schemas) = schemas else {
+        return Ok((schema, input_iters));
+    };
+
+    let aligner = Json2Aligner::try_new(schemas)?;
+    let input_iters = input_iters
+        .into_iter()
+        .map(|input_iter| aligner.wrap_iter(input_iter))
+        .collect();
+
+    Ok((aligner.schema().clone(), input_iters))
 }
 
 /// Merges multiple record batch iterators and applies deduplication based on the specified mode.
