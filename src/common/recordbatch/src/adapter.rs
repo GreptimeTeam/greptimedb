@@ -217,6 +217,7 @@ pub struct RecordBatchStreamAdapter {
     metrics: Option<BaselineMetrics>,
     /// Aggregated plan-level metrics. Resolved after an [ExecutionPlan] is finished.
     metrics_2: Metrics,
+    query_load_region_id: Option<u64>,
     /// Display plan and metrics in verbose mode.
     explain_verbose: bool,
     span: Span,
@@ -239,6 +240,7 @@ impl RecordBatchStreamAdapter {
             stream,
             metrics: None,
             metrics_2: Metrics::Unavailable,
+            query_load_region_id: None,
             explain_verbose: false,
             span: Span::current(),
         })
@@ -253,6 +255,7 @@ impl RecordBatchStreamAdapter {
             stream,
             metrics: None,
             metrics_2: Metrics::Unavailable,
+            query_load_region_id: None,
             explain_verbose: false,
             span: subspan,
         })
@@ -260,6 +263,10 @@ impl RecordBatchStreamAdapter {
 
     pub fn set_metrics2(&mut self, plan: Arc<dyn ExecutionPlan>) {
         self.metrics_2 = Metrics::Unresolved(plan)
+    }
+
+    pub fn set_query_load_region_id(&mut self, region_id: Option<u64>) {
+        self.query_load_region_id = region_id;
     }
 
     /// Set the verbose mode for displaying plan and metrics.
@@ -312,6 +319,8 @@ impl Stream for RecordBatchStreamAdapter {
                 {
                     let mut metric_collector = MetricCollector::new(self.explain_verbose);
                     accept(df_plan.as_ref(), &mut metric_collector).unwrap();
+                    metric_collector.record_batch_metrics.query_load_region_id =
+                        self.query_load_region_id;
                     self.metrics_2 = Metrics::PartialResolved(
                         df_plan.clone(),
                         metric_collector.record_batch_metrics,
@@ -328,6 +337,8 @@ impl Stream for RecordBatchStreamAdapter {
                 {
                     let mut metric_collector = MetricCollector::new(self.explain_verbose);
                     accept(df_plan.as_ref(), &mut metric_collector).unwrap();
+                    metric_collector.record_batch_metrics.query_load_region_id =
+                        self.query_load_region_id;
                     self.metrics_2 = Metrics::Resolved(metric_collector.record_batch_metrics);
                 }
                 Poll::Ready(None)
@@ -448,6 +459,9 @@ pub struct RecordBatchMetrics {
     // Detailed per-plan metrics
     /// An ordered list of plan metrics, from top to bottom in post-order.
     pub plan_metrics: Vec<PlanMetrics>,
+    /// Region id that should receive query-load metrics for this scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_load_region_id: Option<u64>,
     /// Per-region watermark for incremental-read checkpoint advancement.
     ///
     /// The watermark is the latest sequence (`seq`) this query round safely read

@@ -49,6 +49,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
+use table::table::scan::{REGION_SCAN_EXEC_NAME, RegionScanExec};
 use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
@@ -77,6 +78,26 @@ pub const QUERY_PARALLELISM_HINT: &str = "query_parallelism";
 
 /// Whether to fallback to the original plan when failed to push down.
 pub const QUERY_FALLBACK_HINT: &str = "query_fallback";
+
+fn query_load_region_id(plan: &Arc<dyn ExecutionPlan>) -> Option<u64> {
+    let mut region_id = None;
+    let mut stack = vec![plan.clone()];
+
+    while let Some(plan) = stack.pop() {
+        if plan.name() == REGION_SCAN_EXEC_NAME
+            && let Some(scan) = plan.as_any().downcast_ref::<RegionScanExec>()
+        {
+            let scan_region_id = scan.query_load_region_id();
+            if region_id.is_some() && scan_region_id != region_id {
+                return None;
+            }
+            region_id = scan_region_id;
+        }
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    region_id
+}
 
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
@@ -587,6 +608,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
+                stream.set_query_load_region_id(query_load_region_id(&plan));
                 stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
                     let exec_cost = exec_timer.stop_and_record();
@@ -620,6 +642,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
+                stream.set_query_load_region_id(query_load_region_id(&plan));
                 stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
                     let exec_cost = exec_timer.stop_and_record();
@@ -752,6 +775,10 @@ mod tests {
 
         fn set_logical_region(&mut self, logical_region: bool) {
             self.properties.set_logical_region(logical_region);
+        }
+
+        fn set_query_load_region_id(&mut self, region_id: store_api::storage::RegionId) {
+            self.properties.set_query_load_region_id(region_id);
         }
     }
 

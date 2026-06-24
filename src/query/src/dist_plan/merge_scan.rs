@@ -943,6 +943,13 @@ fn report_region_query_load(region_id: RegionId, load: &ReadItem) {
         .inc_by(load.table_scan);
 }
 
+fn query_load_region_id(default_region_id: RegionId, metrics: &RecordBatchMetrics) -> RegionId {
+    metrics
+        .query_load_region_id
+        .map(RegionId::from_u64)
+        .unwrap_or(default_region_id)
+}
+
 impl Drop for MergeScanExec {
     fn drop(&mut self) {
         if !self.enable_per_region_metrics {
@@ -952,7 +959,7 @@ impl Drop for MergeScanExec {
         let metrics = self.sub_stage_metrics.lock().unwrap();
         for (region_id, metrics) in metrics.iter() {
             let load = region_scan_load(metrics);
-            report_region_query_load(*region_id, &load);
+            report_region_query_load(query_load_region_id(*region_id, metrics), &load);
         }
     }
 }
@@ -1370,5 +1377,90 @@ mod tests {
 
         let _ = REGION_QUERY_CPU_TIME.remove_label_values(&labels);
         let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(&labels);
+    }
+
+    #[test]
+    fn merge_scan_reports_query_load_with_metrics_region_id() {
+        use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
+
+        let logical_region_id = RegionId::new(1024, 10002);
+        let physical_region_id = RegionId::new(1024, 1);
+        let logical_region_id_label = logical_region_id.to_string();
+        let physical_region_id_label = physical_region_id.to_string();
+        let logical_labels = [&logical_region_id_label];
+        let physical_labels = [&physical_region_id_label];
+        let _ = REGION_QUERY_CPU_TIME.remove_label_values(&logical_labels);
+        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(&logical_labels);
+        let _ = REGION_QUERY_CPU_TIME.remove_label_values(&physical_labels);
+        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(&physical_labels);
+
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i32).alias("col1")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let schema = plan.schema().as_arrow().clone();
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            vec![logical_region_id],
+            plan,
+            &schema,
+            Arc::new(TestRegionQueryHandler),
+            QueryContext::arc(),
+            1,
+            AliasMapping::new(),
+            None,
+            true,
+        )
+        .unwrap();
+
+        let metrics = RecordBatchMetrics {
+            elapsed_compute: 42,
+            query_load_region_id: Some(physical_region_id.as_u64()),
+            plan_metrics: vec![PlanMetrics {
+                plan: "RegionScanExec: region=1".to_string(),
+                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 24)],
+            }],
+            ..Default::default()
+        };
+        exec.sub_stage_metrics
+            .lock()
+            .unwrap()
+            .insert(logical_region_id, metrics);
+
+        drop(exec);
+
+        assert_eq!(
+            REGION_QUERY_CPU_TIME
+                .with_label_values(&logical_labels)
+                .get(),
+            0
+        );
+        assert_eq!(
+            REGION_QUERY_SCANNED_BYTES
+                .with_label_values(&logical_labels)
+                .get(),
+            0
+        );
+        assert_eq!(
+            REGION_QUERY_CPU_TIME
+                .with_label_values(&physical_labels)
+                .get(),
+            42
+        );
+        assert_eq!(
+            REGION_QUERY_SCANNED_BYTES
+                .with_label_values(&physical_labels)
+                .get(),
+            24
+        );
+
+        let _ = REGION_QUERY_CPU_TIME.remove_label_values(&logical_labels);
+        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(&logical_labels);
+        let _ = REGION_QUERY_CPU_TIME.remove_label_values(&physical_labels);
+        let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(&physical_labels);
     }
 }

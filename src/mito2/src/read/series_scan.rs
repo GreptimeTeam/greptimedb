@@ -381,6 +381,10 @@ impl RegionScanner for SeriesScan {
         self.properties.set_logical_region(logical_region);
     }
 
+    fn set_query_load_region_id(&mut self, region_id: store_api::storage::RegionId) {
+        self.properties.set_query_load_region_id(region_id);
+    }
+
     fn snapshot_sequence(&self) -> Option<u64> {
         self.stream_ctx.input.snapshot_sequence
     }

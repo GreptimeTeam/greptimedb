@@ -220,6 +220,7 @@ impl RegionScanExec {
         ));
         let append_mode = scanner_props.append_mode();
         let total_rows = scanner_props.total_rows();
+
         Ok(Self {
             scanner: Arc::new(Mutex::new(scanner)),
             arrow_schema,
@@ -358,6 +359,15 @@ impl RegionScanExec {
             .lock()
             .unwrap()
             .add_dyn_filter_to_predicate(filter_exprs)
+    }
+
+    pub fn query_load_region_id(&self) -> Option<u64> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .properties()
+            .query_load_region_id()
+            .map(|region_id| region_id.as_u64())
     }
 }
 
