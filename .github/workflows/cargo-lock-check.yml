@@ -27,7 +27,7 @@ jobs:
                   BASE_SHA: ${{ github.event.pull_request.base.sha }}
                   HEAD_SHA: ${{ github.event.pull_request.head.sha }}
               run: |
-                  set -euo pipefail
+                  set -eo pipefail
 
                   # Make sure the base commit is available locally (it may be absent
                   # from a shallow/fetched history).
@@ -36,9 +36,9 @@ jobs:
                   # `base...head` diffs from the merge-base of the PR, i.e. exactly
                   # what this PR changes in Cargo.lock. --numstat prints
                   # "<added> <deleted> <path>".
-                  NUMSTAT="$(git diff "${BASE_SHA}...${HEAD_SHA}" -- Cargo.lock --numstat || true)"
+                  NUMSTAT="$(git diff --numstat "${BASE_SHA}...${HEAD_SHA}" -- Cargo.lock || true)"
                   echo "::group::Cargo.lock numstat"
-                  echo "${NUMSTAT}"
+                  echo "${NUMSTAT}" >&2
                   echo "::endgroup::"
 
                   ADDED="$(awk '{print $1}' <<<"${NUMSTAT}")"
@@ -56,7 +56,7 @@ jobs:
                   echo "Computed Cargo.lock diff: +${ADDED} -${DELETED} (${TOTAL} lines)"
 
             - name: Warn when Cargo.lock diff exceeds 500 lines
-              if: ${{ fromJSON(steps.diff.outputs.total) > 500 }}
+              if: ${{ fromJSON(steps.diff.outputs.total || '0') > 500 }}
               uses: marocchino/sticky-pull-request-comment@v2
               with:
                   header: cargo-lock-diff-warning
@@ -72,7 +72,7 @@ jobs:
                       - If intended (e.g. a deliberate dependency bump), you can ignore this warning.
 
             - name: Hide resolved warning
-              if: ${{ fromJSON(steps.diff.outputs.total) <= 500 }}
+              if: ${{ fromJSON(steps.diff.outputs.total || '0') <= 500 }}
               uses: marocchino/sticky-pull-request-comment@v2
               with:
                   header: cargo-lock-diff-warning
