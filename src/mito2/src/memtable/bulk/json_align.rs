@@ -18,7 +18,7 @@ use std::sync::Arc;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::DataType;
-use datatypes::extension::json::is_json_extension_type;
+use datatypes::extension::json::is_structured_json_field;
 use datatypes::schema::ext::ArrowSchemaExt;
 use datatypes::types::JsonType;
 use datatypes::vectors::json::array::JsonArray;
@@ -70,7 +70,7 @@ impl Json2Aligner {
             .fields()
             .iter()
             .enumerate()
-            .filter(|&(_idx, field)| is_json_extension_type(field))
+            .filter(|&(_idx, field)| is_structured_json_field(field))
             .map(|(idx, field)| (idx, JsonType::from(field.data_type())))
             .collect();
 
