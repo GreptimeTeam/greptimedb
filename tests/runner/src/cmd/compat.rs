@@ -92,6 +92,9 @@ impl CompatCommand {
             .tempdir()
             .unwrap();
         let sqlness_home = temp_dir.keep();
+        unsafe {
+            std::env::set_var("SQLNESS_HOME", sqlness_home.display().to_string());
+        }
 
         // ---- 2. Validate MVP runtime constraints ----
         if !self.setup_etcd {
@@ -140,10 +143,8 @@ impl CompatCommand {
             } else {
                 try_infer_version(&from_bins_dir).map(|v| v.to_string())
             }
-        } else if self.from_bins_dir.is_some() {
-            try_infer_version(&from_bins_dir).map(|v| v.to_string())
         } else {
-            None
+            try_infer_version(&from_bins_dir).map(|v| v.to_string())
         };
 
         let from_ver_parsed = from_version
@@ -320,12 +321,27 @@ impl CompatCommand {
 
 /// Guard that stops/removes Docker etcd on drop (panic or early exit).
 /// Disarm before normal cleanup to avoid double-cleanup.
+///
+/// The guard refuses to arm if a container named `etcd` already exists, so a
+/// failed compat run never deletes a developer-owned container with that name.
 struct EtcdGuard {
     active: bool,
 }
 
 impl EtcdGuard {
     fn new() -> Self {
+        let inspect_status = std::process::Command::new("docker")
+            .args(["container", "inspect", "etcd"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if inspect_status.is_ok_and(|status| status.success()) {
+            panic!(
+                "A Docker container named `etcd` already exists. \
+                 Remove it before running compat tests so the cleanup guard \
+                 cannot delete a container it did not create."
+            );
+        }
         Self { active: true }
     }
 
