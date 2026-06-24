@@ -28,11 +28,14 @@ use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
-use datafusion_common::Column;
+use datafusion_common::pruning::PruningStatistics;
+use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
+use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::types::json_type::JsonNativeType;
+use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
 use itertools::Itertools;
 use partition::expr::PartitionExpr;
@@ -1071,6 +1074,27 @@ impl ScanInput {
         }
     }
 
+    /// Tries to build file-level pruning statistics using only the [FileHandle]'s manifest-level
+    /// time range, without reading any parquet metadata.
+    ///
+    /// Returns `None` if timestamp unit conversion overflows (conservative: keep the file).
+    fn try_file_level_pruning_stats(&self, file: &FileHandle) -> Option<FileLevelPruningStats> {
+        let (ts_min, ts_max) = file.time_range();
+        let time_index = self.mapper.metadata().time_index_column();
+        let time_index_unit = time_index.column_schema.data_type.as_timestamp()?.unit();
+
+        // Convert file timestamps to the time index column's unit. Use `convert_to_ceil` for
+        // the upper bound to avoid accidentally shrinking the manifest range.
+        let min_ts = ts_min.convert_to(time_index_unit)?;
+        let max_ts = ts_max.convert_to_ceil(time_index_unit)?;
+
+        Some(FileLevelPruningStats {
+            min_scalar: timestamp_to_scalar_value(time_index_unit, Some(min_ts.value())),
+            max_scalar: timestamp_to_scalar_value(time_index_unit, Some(max_ts.value())),
+            time_index_col_name: time_index.column_schema.name.clone(),
+        })
+    }
+
     /// Prunes a file to scan and returns the builder to build readers.
     #[tracing::instrument(
         skip_all,
@@ -1086,6 +1110,24 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
+
+        // Early file-level pruning using manifest time range before any parquet metadata access.
+        // This avoids I/O for files that definitely can't match the current predicate snapshot,
+        // especially after TopK dynamic filters have established a timestamp threshold.
+        if let Some(ref pred) = predicate
+            && !pred.is_empty()
+            && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
+        {
+            let pruning_results = pred.prune_with_stats(
+                &file_level_stats,
+                self.mapper.metadata().schema.arrow_schema(),
+            );
+            if pruning_results.first() == Some(&false) {
+                reader_metrics.filter_metrics.files_time_range_pruned += 1;
+                return Ok(FileRangeBuilder::default());
+            }
+        }
+
         let may_build_selective_row_selection = predicate.is_some();
         let decode_pk_values = !self.compaction
             && self
@@ -1302,6 +1344,57 @@ impl ScanInput {
     #[cfg(feature = "enterprise")]
     pub(crate) fn extension_range(&self, i: usize) -> &BoxedExtensionRange {
         &self.extension_ranges[i - self.num_memtables() - self.num_files()]
+    }
+}
+
+/// Lightweight [PruningStatistics] that only uses the file-level time range from manifest
+/// metadata, avoiding any parquet metadata reads. Used for early file-level pruning before
+/// accessing row-group-level statistics.
+pub(crate) struct FileLevelPruningStats {
+    /// Scalar value for the file's minimum timestamp in the time index column's unit.
+    pub(crate) min_scalar: ScalarValue,
+    /// Scalar value for the file's maximum timestamp in the time index column's unit.
+    pub(crate) max_scalar: ScalarValue,
+    /// Name of the time index column.
+    pub(crate) time_index_col_name: String,
+}
+
+impl PruningStatistics for FileLevelPruningStats {
+    fn min_values(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            ScalarValue::iter_to_array(std::iter::once(self.min_scalar.clone())).ok()
+        } else {
+            None
+        }
+    }
+
+    fn max_values(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            ScalarValue::iter_to_array(std::iter::once(self.max_scalar.clone())).ok()
+        } else {
+            None
+        }
+    }
+
+    fn num_containers(&self) -> usize {
+        1
+    }
+
+    fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            // The time index column is NOT NULL.
+            Some(Arc::new(UInt64Array::from(vec![0u64])))
+        } else {
+            None
+        }
+    }
+
+    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+        None
+    }
+
+    fn contained(&self, _column: &Column, _values: &HashSet<ScalarValue>) -> Option<BooleanArray> {
+        None
     }
 }
 
@@ -1861,9 +1954,13 @@ impl PredicateGroup {
 mod tests {
     use std::sync::Arc;
 
+    use common_time::timestamp::{TimeUnit, Timestamp};
     use datafusion::physical_plan::expressions::lit as physical_lit;
     use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
+    use datatypes::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
+    };
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::JsonObjectType;
@@ -1877,6 +1974,7 @@ mod tests {
     use crate::error::InvalidMetadataSnafu;
     use crate::read::range_cache::ScanRequestFingerprintBuilder;
     use crate::read::read_columns::ReadColumn;
+    use crate::sst::file::FileMeta;
     use crate::test_util::memtable_util::metadata_with_primary_key;
     use crate::test_util::scheduler_util::SchedulerEnv;
 
@@ -1902,6 +2000,60 @@ mod tests {
     /// Helper to create a timestamp millisecond literal.
     fn ts_lit(val: i64) -> datafusion_expr::Expr {
         lit(ScalarValue::TimestampMillisecond(Some(val), None))
+    }
+
+    fn metadata_with_time_index_unit(unit: TimeUnit) -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "k0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "k1".to_string(),
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_datatype(unit),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "v0".to_string(),
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![0, 1]);
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn file_handle_with_time_range(start: Timestamp, end: Timestamp) -> FileHandle {
+        FileHandle::new(
+            FileMeta {
+                time_range: (start, end),
+                ..Default::default()
+            },
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        )
     }
 
     #[test]
@@ -2127,6 +2279,144 @@ mod tests {
         let predicate_without_region = predicate_group.predicate_without_region().unwrap();
         assert!(predicate_without_region.exprs().is_empty());
         assert_eq!(1, predicate_without_region.dyn_filters().len());
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_prunes_old_file() {
+        let ts_col_name = "ts";
+        let predicate = Predicate::new(vec![col(ts_col_name).gt(ts_lit(1000))]);
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            ts_col_name,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )]));
+
+        // File with time range [0ms, 500ms] is completely before `ts > 1000ms`.
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+        assert_eq!(
+            vec![false],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+
+        // File with time range [0ms, 2000ms] overlaps `ts > 1000ms`, so keep it.
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(2000), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_no_predicate_keeps_all() {
+        let predicate = Predicate::new(vec![]);
+        assert!(predicate.is_empty());
+
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
+            time_index_col_name: "ts".to_string(),
+        };
+        let arrow_schema = Arc::new(ArrowSchema::new(Vec::<Field>::new()));
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_level_pruning_stats_ceil_max_unit_conversion() {
+        let metadata = metadata_with_time_index_unit(TimeUnit::Millisecond);
+        let input = new_scan_input(metadata, vec![]).await;
+        let file = file_handle_with_time_range(
+            Timestamp::new(1_000_001, TimeUnit::Nanosecond),
+            Timestamp::new(1_000_001, TimeUnit::Nanosecond),
+        );
+
+        let stats = input.try_file_level_pruning_stats(&file).unwrap();
+        assert_eq!(
+            ScalarValue::TimestampMillisecond(Some(1), None),
+            stats.min_scalar
+        );
+        assert_eq!(
+            ScalarValue::TimestampMillisecond(Some(2), None),
+            stats.max_scalar
+        );
+
+        // The actual max timestamp is slightly greater than 1ms. It must be kept for `ts > 1ms`.
+        let predicate = Predicate::new(vec![col("ts").gt(ts_lit(1))]);
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, input.mapper.metadata().schema.arrow_schema())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_level_pruning_stats_overflow_keeps_file() {
+        let metadata = metadata_with_time_index_unit(TimeUnit::Nanosecond);
+        let input = new_scan_input(metadata, vec![]).await;
+        let file = file_handle_with_time_range(
+            Timestamp::new(0, TimeUnit::Second),
+            Timestamp::new(i64::MAX, TimeUnit::Second),
+        );
+
+        assert!(input.try_file_level_pruning_stats(&file).is_none());
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_keeps_inclusive_boundary() {
+        let ts_col_name = "ts";
+        let predicate = Predicate::new(vec![col(ts_col_name).gt_eq(ts_lit(1000))]);
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            ts_col_name,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )]));
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(1000), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_level_pruning_with_dyn_filter_only_predicate() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        predicate_group.add_dyn_filters(vec![Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![],
+            physical_lit(false),
+        ))]);
+        let input = ScanInput::new(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group);
+        let file = file_handle_with_time_range(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(1000),
+        );
+        let mut reader_metrics = ReaderMetrics::default();
+
+        let builder = input
+            .prune_file(&file, PreFilterMode::SkipFields, &mut reader_metrics)
+            .await
+            .unwrap();
+
+        assert_eq!(1, reader_metrics.filter_metrics.files_time_range_pruned);
+        let mut ranges = SmallVec::new();
+        builder.build_ranges(-1, &mut ranges);
+        assert!(ranges.is_empty());
     }
 
     #[tokio::test]
