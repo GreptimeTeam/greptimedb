@@ -32,7 +32,7 @@ cargo run -p sqlness-runner -- compat --help
 
 ## Case Format
 
-Each compat case is a directory under `tests/compatibility/cases/` containing exactly four files:
+Each compat case is a directory under `tests/compatibility/cases/` containing three required files plus an optional generated result file:
 
 ```
 my_case/
@@ -59,6 +59,33 @@ isolation = "shared"                  # only "shared" to allow duplicate namespa
 ```
 
 **Required fields**: `name`, `reason`, `introduced_by`, `topologies`, `from_range`, `to_range`, `features`, `owner`.
+
+### Version-Range Filtering
+
+`from_range` and `to_range` control which binary versions a case applies to:
+
+| Entry | Meaning |
+|-------|---------|
+| `"*"` | Matches any version (including unknown). |
+| `"vX.Y.Z"` or `"=vX.Y.Z"` | Matches exactly version X.Y.Z. |
+| `">=vX.Y.Z"` | Matches X.Y.Z or later. |
+| `">vX.Y.Z"` | Matches versions strictly later than X.Y.Z. |
+| `"<=vX.Y.Z"` | Matches X.Y.Z or earlier. |
+| `"<vX.Y.Z"` | Matches versions strictly earlier than X.Y.Z. |
+
+The range list is **OR**: a case matches if **any** entry matches.
+
+**Best-effort enforcement**: The runner tries to determine the effective version:
+- `--from-version` is used directly.
+- `--from-bins-dir` / `--to-bins-dir` (or the default debug build) runs `<binary> --version` to infer the version.
+- When the version **cannot** be determined (e.g. binary missing or `--version` fails), non-wildcard ranges are **skipped** with a message; wildcard (`*`) ranges still match.
+
+**Example** (`legacy_jsonb`):
+```toml
+from_range = ["<=v1.1.0"]
+to_range = [">=v1.1.1"]
+```
+This case only runs when the old binary is <= v1.1.0 and the new binary is >= v1.1.1.
 
 ### `setup.sql` — Setup Phase (Old Version)
 

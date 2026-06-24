@@ -690,8 +690,14 @@ impl GreptimeDB {
         }
     }
 
-    /// Execute a gRPC query and return `Result<String, String>` so errors can be
-    /// detected without parsing sqlness formatted output. Used by the compat runner.
+    /// Handle `QueryContext` directives for compat statement execution.
+    ///
+    /// Inspects `QueryContext` keys set by sqlness interceptors:
+    /// - `restart`: restarts the server (datanode-only) if not using external address.
+    /// - `version`: switches to the specified binary version and performs a full restart.
+    ///
+    /// This does **not** execute queries itself; it only prepares the server state.
+    /// Used by the compat runner.
     pub(crate) async fn compat_prepare_query_context(&self, ctx: &QueryContext) {
         if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
             self.env.restart_server(self, false).await;

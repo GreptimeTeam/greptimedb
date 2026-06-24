@@ -21,7 +21,7 @@ use sqlness::interceptor::template::DELIMITER as TEMPLATE_DELIMITER;
 use sqlness::interceptor::{InterceptorRef, Registry};
 
 use crate::cmd::bare::ServerAddr;
-use crate::cmd::compat_case::{self, CompatCase};
+use crate::cmd::compat_case::{self, CompatCase, try_infer_version, version_matches_range};
 use crate::env::bare::{Env, StoreConfig, WalConfig};
 use crate::{protocol_interceptor, util};
 
@@ -107,15 +107,15 @@ impl CompatCommand {
             panic!("Case directory not found: {}", case_dir.display());
         }
 
-        // ---- 4. Discover and validate cases ----
+        // ---- 4. Discover cases ----
         let mut cases = compat_case::discover_cases(&case_dir).unwrap_or_else(|e| panic!("{e}"));
-
-        compat_case::validate_cases(&cases).unwrap_or_else(|e| panic!("{e}"));
 
         // Filter by test_filter
         let filter_re = regex::Regex::new(&self.test_filter)
             .unwrap_or_else(|e| panic!("Invalid test filter regex '{}': {e}", self.test_filter));
         cases.retain(|c| filter_re.is_match(&c.metadata.name));
+
+        // Filter by topology
         cases.retain(|c| c.metadata.topologies.iter().any(|t| t == COMPAT_TOPOLOGY));
 
         if cases.is_empty() {
@@ -125,6 +125,86 @@ impl CompatCommand {
             );
             return;
         }
+
+        // ---- 5. Resolve "from" binary path and infer version ----
+        let from_bins_dir = resolve_bins(
+            self.from_bins_dir.as_ref(),
+            self.from_version.as_deref(),
+            self.pull_version_on_need,
+        )
+        .await;
+
+        let from_version = if let Some(ref ver) = self.from_version {
+            if ver != "current" {
+                Some(ver.clone())
+            } else {
+                try_infer_version(&from_bins_dir).map(|v| v.to_string())
+            }
+        } else if self.from_bins_dir.is_some() {
+            try_infer_version(&from_bins_dir).map(|v| v.to_string())
+        } else {
+            None
+        };
+
+        let from_ver_parsed = from_version
+            .as_deref()
+            .and_then(|s| compat_case::Version::parse(s).ok());
+
+        // Resolve "to" binary path before filtering so we can infer its version
+        // and reuse the same path for the restart.
+        let to_bins_dir =
+            resolve_bins(self.to_bins_dir.as_ref(), None, self.pull_version_on_need).await;
+        let to_version = try_infer_version(&to_bins_dir).map(|v| v.to_string());
+        let to_ver_parsed = to_version
+            .as_deref()
+            .and_then(|s| compat_case::Version::parse(s).ok());
+
+        // ---- 5b. Filter by version range ----
+        let pre_filter_count = cases.len();
+        cases.retain(|c| {
+            let from_ok = version_matches_range(from_ver_parsed.as_ref(), &c.metadata.from_range);
+            if !from_ok {
+                let from_label = from_ver_parsed
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                println!(
+                    "Skipping case '{}': from_range {:?} does not match version '{}'",
+                    c.metadata.name, c.metadata.from_range, from_label
+                );
+            }
+            from_ok
+        });
+        cases.retain(|c| {
+            let to_ok = version_matches_range(to_ver_parsed.as_ref(), &c.metadata.to_range);
+            if !to_ok {
+                let to_label = to_ver_parsed
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                println!(
+                    "Skipping case '{}': to_range {:?} does not match version '{}'",
+                    c.metadata.name, c.metadata.to_range, to_label
+                );
+            }
+            to_ok
+        });
+
+        if pre_filter_count != cases.len() {
+            println!(
+                "Version-range filtering: {} → {} cases",
+                pre_filter_count,
+                cases.len()
+            );
+        }
+
+        if cases.is_empty() {
+            println!("No compat cases remaining after version-range filtering");
+            return;
+        }
+
+        // ---- 5c. Validate final selected cases ----
+        compat_case::validate_cases(&cases).unwrap_or_else(|e| panic!("{e}"));
 
         println!(
             "Running {} compat case(s) with topology {}:",
@@ -137,14 +217,6 @@ impl CompatCommand {
                 c.metadata.name, c.namespace, c.metadata.topologies
             );
         }
-
-        // ---- 5. Resolve "from" binary path ----
-        let from_bins_dir = resolve_bins(
-            self.from_bins_dir.as_ref(),
-            self.from_version.as_deref(),
-            self.pull_version_on_need,
-        )
-        .await;
 
         // ---- 6. Build interceptor registry ----
         let interceptor_registry = create_interceptor_registry();
@@ -194,9 +266,7 @@ impl CompatCommand {
         }
 
         // ---- 8. Switch to "to" binary and restart cluster ----
-        let to_bins_dir =
-            resolve_bins(self.to_bins_dir.as_ref(), None, self.pull_version_on_need).await;
-
+        // to_bins_dir was already resolved during version-range filtering
         println!("Restarting cluster with new-version binary on preserved state...");
         env.compat_restart_all(&db, to_bins_dir).await;
 
