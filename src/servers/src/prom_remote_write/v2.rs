@@ -488,112 +488,64 @@ mod tests {
     }
 
     #[test]
-    fn test_into_context_req_rejects_missing_metric_name() {
-        assert_invalid(
-            test_util::request_with_labels_and_samples(
-                vec![("job", "api")],
-                vec![Sample {
-                    value: 1.0,
-                    timestamp: 1000,
-                    start_timestamp: 0,
-                }],
-            ),
+    fn test_into_context_req_rejects_invalid_requests() {
+        let mut cases = Vec::new();
+
+        cases.push((
+            "missing metric name",
+            request_with_sample(vec![("job", "api")]),
             "missing '__name__'",
-        );
-    }
+        ));
 
-    #[test]
-    fn test_into_context_req_rejects_odd_label_refs() {
-        let mut request = test_util::request_with_labels_and_samples(
-            vec![(METRIC_NAME_LABEL, "metric")],
-            vec![Sample {
-                value: 1.0,
-                timestamp: 1000,
-                start_timestamp: 0,
-            }],
-        );
+        let mut request = request_with_sample(vec![(METRIC_NAME_LABEL, "metric")]);
         request.timeseries[0].labels_refs.push(1);
+        cases.push((
+            "odd label refs",
+            request,
+            "labels_refs must contain name/value pairs",
+        ));
 
-        assert_invalid(request, "labels_refs must contain name/value pairs");
-    }
-
-    #[test]
-    fn test_into_context_req_rejects_out_of_range_symbol_ref() {
-        let mut request = test_util::request_with_labels_and_samples(
-            vec![(METRIC_NAME_LABEL, "metric")],
-            vec![Sample {
-                value: 1.0,
-                timestamp: 1000,
-                start_timestamp: 0,
-            }],
-        );
+        let mut request = request_with_sample(vec![(METRIC_NAME_LABEL, "metric")]);
         request.timeseries[0].labels_refs[1] = 99;
+        cases.push((
+            "out of range symbol ref",
+            request,
+            "symbol reference 99 is out of range",
+        ));
 
-        assert_invalid(request, "symbol reference 99 is out of range");
-    }
-
-    #[test]
-    fn test_into_context_req_rejects_non_empty_first_symbol() {
-        let mut request = test_util::request_with_labels_and_samples(
-            vec![(METRIC_NAME_LABEL, "metric")],
-            vec![Sample {
-                value: 1.0,
-                timestamp: 1000,
-                start_timestamp: 0,
-            }],
-        );
+        let mut request = request_with_sample(vec![(METRIC_NAME_LABEL, "metric")]);
         request.symbols[0] = "not-empty".to_string();
+        cases.push((
+            "non-empty first symbol",
+            request,
+            "symbols must start with an empty string",
+        ));
 
-        assert_invalid(request, "symbols must start with an empty string");
-    }
-
-    #[test]
-    fn test_into_context_req_rejects_repeated_label_name() {
-        assert_invalid(
-            test_util::request_with_labels_and_samples(
-                vec![
-                    (METRIC_NAME_LABEL, "metric"),
-                    ("job", "api"),
-                    ("job", "worker"),
-                ],
-                vec![Sample {
-                    value: 1.0,
-                    timestamp: 1000,
-                    start_timestamp: 0,
-                }],
-            ),
+        cases.push((
+            "repeated label name",
+            request_with_sample(vec![
+                (METRIC_NAME_LABEL, "metric"),
+                ("job", "api"),
+                ("job", "worker"),
+            ]),
             "label name `job` is repeated",
-        );
-    }
+        ));
 
-    #[test]
-    fn test_into_context_req_rejects_empty_label_name() {
-        assert_invalid(
-            test_util::request_with_labels_and_samples(
-                vec![(METRIC_NAME_LABEL, "metric"), ("", "api")],
-                vec![Sample {
-                    value: 1.0,
-                    timestamp: 1000,
-                    start_timestamp: 0,
-                }],
-            ),
+        cases.push((
+            "empty label name",
+            request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("", "api")]),
             "label names must not be empty",
-        );
-    }
+        ));
 
-    #[test]
-    fn test_into_context_req_rejects_empty_label_value() {
-        assert_invalid(
-            test_util::request_with_labels_and_samples(
-                vec![(METRIC_NAME_LABEL, "metric"), ("job", "")],
-                vec![Sample {
-                    value: 1.0,
-                    timestamp: 1000,
-                    start_timestamp: 0,
-                }],
-            ),
+        cases.push((
+            "empty label value",
+            request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("job", "")]),
             "label `job` value must not be empty",
-        );
+        ));
+
+        for (name, request, expected) in cases {
+            assert_invalid(name, request, expected);
+        }
     }
 
     #[test]
@@ -625,12 +577,26 @@ mod tests {
         assert_eq!(ctx_req.all_req().count(), 0);
     }
 
-    fn assert_invalid(request: Request, expected: &str) {
+    fn request_with_sample(labels: Vec<(&str, &str)>) -> Request {
+        test_util::request_with_labels_and_samples(
+            labels,
+            vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+                start_timestamp: 0,
+            }],
+        )
+    }
+
+    fn assert_invalid(name: &str, request: Request, expected: &str) {
         let err = request.into_context_req().unwrap_err();
-        assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
+        assert!(
+            matches!(err, error::Error::InvalidPromRemoteRequest { .. }),
+            "{name}: expected invalid request error, got {err}"
+        );
         assert!(
             err.to_string().contains(expected),
-            "expected error containing {expected:?}, got {err}"
+            "{name}: expected error containing {expected:?}, got {err}"
         );
     }
 }

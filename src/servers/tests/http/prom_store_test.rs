@@ -37,7 +37,7 @@ use query::query_engine::DescribeResult;
 use servers::error::{self, Result};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
-use servers::http::test_helpers::TestClient;
+use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_remote_write::validation::PromValidationMode;
@@ -48,6 +48,9 @@ use servers::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 use tokio::sync::mpsc;
+
+const REMOTE_WRITE_V2_CONTENT_TYPE: &str =
+    "application/x-protobuf;proto=io.prometheus.write.v2.Request";
 
 struct DummyInstance {
     read_tx: mpsc::Sender<(String, Vec<u8>)>,
@@ -182,6 +185,28 @@ fn make_test_app_with_write_failure(
     server.build(server.make_app()).unwrap()
 }
 
+async fn post_remote_write_v2(client: &TestClient, request: &RemoteWriteV2Request) -> TestResponse {
+    post_remote_write_v2_body(client, snappy_compress(&request.encode_to_vec()).unwrap()).await
+}
+
+async fn post_remote_write_v2_body(client: &TestClient, body: Vec<u8>) -> TestResponse {
+    post_remote_write_with_content_type(client, REMOTE_WRITE_V2_CONTENT_TYPE, body).await
+}
+
+async fn post_remote_write_with_content_type(
+    client: &TestClient,
+    content_type: &str,
+    body: Vec<u8>,
+) -> TestResponse {
+    client
+        .post("/v1/prometheus/write")
+        .header("content-type", content_type)
+        .header("content-encoding", "snappy")
+        .body(body)
+        .send()
+        .await
+}
+
 #[tokio::test]
 async fn test_prometheus_remote_write_v2_decode_error_has_written_headers() {
     common_telemetry::init_default_ut_logging();
@@ -191,16 +216,7 @@ async fn test_prometheus_remote_write_v2_decode_error_has_written_headers() {
     let app = make_test_app_with_write_capture(read_tx, write_tx);
     let client = TestClient::new(app).await;
 
-    let result = client
-        .post("/v1/prometheus/write")
-        .header(
-            "content-type",
-            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
-        )
-        .header("content-encoding", "snappy")
-        .body(vec![0xff, 0xff])
-        .send()
-        .await;
+    let result = post_remote_write_v2_body(&client, vec![0xff, 0xff]).await;
 
     assert_eq!(result.status(), 400);
     assert_remote_write_v2_written_headers(&result.headers(), "0");
@@ -226,16 +242,7 @@ async fn test_prometheus_remote_write_v2_convert_error_has_written_headers() {
         }],
     );
 
-    let result = client
-        .post("/v1/prometheus/write")
-        .header(
-            "content-type",
-            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
-        )
-        .header("content-encoding", "snappy")
-        .body(snappy_compress(&write_request.encode_to_vec()).unwrap())
-        .send()
-        .await;
+    let result = post_remote_write_v2(&client, &write_request).await;
 
     assert_eq!(result.status(), 400);
     assert_remote_write_v2_written_headers(&result.headers(), "0");
@@ -283,16 +290,7 @@ async fn test_prometheus_remote_write_v2_write_error_has_partial_written_headers
         ],
     };
 
-    let result = client
-        .post("/v1/prometheus/write")
-        .header(
-            "content-type",
-            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
-        )
-        .header("content-encoding", "snappy")
-        .body(snappy_compress(&write_request.encode_to_vec()).unwrap())
-        .send()
-        .await;
+    let result = post_remote_write_v2(&client, &write_request).await;
 
     assert_eq!(result.status(), 400);
     assert_remote_write_v2_written_headers(&result.headers(), "1");
@@ -442,16 +440,7 @@ async fn test_prometheus_remote_write_v2_samples() {
         ],
     );
 
-    let result = client
-        .post("/v1/prometheus/write")
-        .header(
-            "content-type",
-            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
-        )
-        .header("content-encoding", "snappy")
-        .body(snappy_compress(&write_request.encode_to_vec()).unwrap())
-        .send()
-        .await;
+    let result = post_remote_write_v2(&client, &write_request).await;
 
     assert_eq!(result.status(), 204);
     assert_remote_write_v2_written_headers(&result.headers(), "2");
@@ -542,16 +531,7 @@ async fn test_prometheus_remote_write_v2_ignores_histogram_only_series() {
         vec![remote_write_v2::histogram(1000)],
     );
 
-    let result = client
-        .post("/v1/prometheus/write")
-        .header(
-            "content-type",
-            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
-        )
-        .header("content-encoding", "snappy")
-        .body(snappy_compress(&write_request.encode_to_vec()).unwrap())
-        .send()
-        .await;
+    let result = post_remote_write_v2(&client, &write_request).await;
 
     assert_eq!(result.status(), 204);
     assert_remote_write_v2_written_headers(&result.headers(), "0");
@@ -568,16 +548,12 @@ async fn test_prometheus_remote_write_rejects_unsupported_proto() {
     let app = make_test_app_with_write_capture(read_tx, write_tx);
     let client = TestClient::new(app).await;
 
-    let result = client
-        .post("/v1/prometheus/write")
-        .header(
-            "content-type",
-            "application/x-protobuf;proto=io.prometheus.write.v3.Request",
-        )
-        .header("content-encoding", "snappy")
-        .body(Vec::new())
-        .send()
-        .await;
+    let result = post_remote_write_with_content_type(
+        &client,
+        "application/x-protobuf;proto=io.prometheus.write.v3.Request",
+        Vec::new(),
+    )
+    .await;
 
     assert_eq!(result.status(), 415);
     assert!(
