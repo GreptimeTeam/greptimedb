@@ -889,10 +889,7 @@ pub async fn sql_to_df_plan(
     let stmts = ParserContext::create_with_dialect(
         sql,
         query_ctx.sql_dialect(),
-        ParseOptions {
-            scheduled_runtime,
-            ..ParseOptions::default()
-        },
+        ParseOptions { scheduled_runtime },
     )
     .map_err(BoxedError::new)
     .context(ExternalSnafu)?;

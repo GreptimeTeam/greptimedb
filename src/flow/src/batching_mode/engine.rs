@@ -633,7 +633,7 @@ impl BatchingEngine {
 
         // Compute typed EvalSchedule from FlowScheduleConfig.
         let eval_schedule = {
-            let interval = eval_interval.map(|s| s as i64);
+            let interval = eval_interval;
             let config = eval_schedule_config.as_ref();
             match EvalSchedule::from_config(interval, config) {
                 Ok(s) => s,
