@@ -854,24 +854,8 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                 ];
                 let expire_after = expire_after.map(|e| e.value);
 
-                // Decode typed schedule config from internal transient key. This
-                // is emitted by metasrv, so malformed JSON is an internal error
-                // rather than a reason to silently fall back to another schedule.
-                let eval_schedule = match flow_options.remove(INTERNAL_EVAL_SCHEDULE_KEY) {
-                    Some(json) => Some(
-                        serde_json::from_str::<FlowScheduleConfig>(&json)
-                            .map_err(|err| {
-                                InternalSnafu {
-                                    reason: format!(
-                                        "Invalid internal eval schedule payload: {err}"
-                                    ),
-                                }
-                                .build()
-                            })
-                            .map_err(to_meta_err(snafu::location!()))?,
-                    ),
-                    None => None,
-                };
+                let eval_schedule = decode_internal_eval_schedule(&mut flow_options)
+                    .map_err(to_meta_err(snafu::location!()))?;
 
                 let args = CreateFlowArgs {
                     flow_id: task_id.id as u64,
@@ -941,6 +925,24 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
             .await
             .map(|_| FlowResponse::default())
             .map_err(to_meta_err(snafu::location!()))
+    }
+}
+
+/// Decode typed schedule config from the internal transient key emitted by metasrv.
+/// Malformed JSON is an internal error rather than a reason to silently fall back.
+fn decode_internal_eval_schedule(
+    flow_options: &mut HashMap<String, String>,
+) -> Result<Option<FlowScheduleConfig>, Error> {
+    match flow_options.remove(INTERNAL_EVAL_SCHEDULE_KEY) {
+        Some(json) => serde_json::from_str::<FlowScheduleConfig>(&json)
+            .map(Some)
+            .map_err(|err| {
+                InternalSnafu {
+                    reason: format!("Invalid internal eval schedule payload: {err}"),
+                }
+                .build()
+            }),
+        None => Ok(None),
     }
 }
 
@@ -1151,5 +1153,32 @@ impl StreamingEngine {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use common_meta::ddl::create_flow::INTERNAL_EVAL_SCHEDULE_KEY;
+
+    use super::decode_internal_eval_schedule;
+    use crate::error::Error;
+
+    #[test]
+    fn test_malformed_internal_eval_schedule_json_is_error() {
+        let mut flow_options = HashMap::new();
+        flow_options.insert(
+            INTERNAL_EVAL_SCHEDULE_KEY.to_string(),
+            "not-json".to_string(),
+        );
+
+        let err = decode_internal_eval_schedule(&mut flow_options).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Internal { reason, .. }
+                if reason.contains("Invalid internal eval schedule payload")
+        ));
+        assert!(!flow_options.contains_key(INTERNAL_EVAL_SCHEDULE_KEY));
     }
 }

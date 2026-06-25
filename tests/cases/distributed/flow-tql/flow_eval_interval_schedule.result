@@ -1,0 +1,52 @@
+CREATE TABLE eval_interval_schedule_input (
+  ts TIMESTAMP(3) TIME INDEX,
+  series STRING,
+  v DOUBLE,
+  PRIMARY KEY(series)
+);
+
+Affected Rows: 0
+
+CREATE FLOW eval_interval_schedule_flow
+SINK TO eval_interval_schedule_sink
+EVAL INTERVAL '1s'
+AS
+SELECT
+  date_trunc('second', now()) AS ts,
+  count(v) AS value_count
+FROM eval_interval_schedule_input
+GROUP BY date_trunc('second', now());
+
+Affected Rows: 0
+
+INSERT INTO eval_interval_schedule_input VALUES
+  ('2026-06-25 00:00:00', 'a', 1.0);
+
+Affected Rows: 1
+
+-- SQLNESS SLEEP 5s
+SELECT
+  count(DISTINCT ts) >= 2 AS has_multiple_scheduled_ticks,
+  min(value_count) AS min_value_count,
+  max(value_count) AS max_value_count
+FROM eval_interval_schedule_sink
+WHERE value_count > 0;
+
++------------------------------+-----------------+-----------------+
+| has_multiple_scheduled_ticks | min_value_count | max_value_count |
++------------------------------+-----------------+-----------------+
+| true                         | 1               | 1               |
++------------------------------+-----------------+-----------------+
+
+DROP FLOW eval_interval_schedule_flow;
+
+Affected Rows: 0
+
+DROP TABLE eval_interval_schedule_sink;
+
+Affected Rows: 0
+
+DROP TABLE eval_interval_schedule_input;
+
+Affected Rows: 0
+
