@@ -21,8 +21,6 @@ use axum::middleware::Next;
 use axum::response::Response;
 use common_telemetry::warn;
 
-use super::HTTP_API_PREFIX;
-
 /// Middleware that logs HTTP error responses (4xx/5xx) with client IP address.
 ///
 /// Extracts client address from [`ConnectInfo`] if available.
@@ -63,7 +61,7 @@ pub async fn log_error_with_client_ip(req: Request<Body>, next: Next) -> Respons
 }
 
 fn is_public_http_api_path(path: &str) -> bool {
-    path == HTTP_API_PREFIX.trim_end_matches('/') || path.starts_with(HTTP_API_PREFIX)
+    path == super::HTTP_API_PREFIX.trim_end_matches('/') || path.starts_with(super::HTTP_API_PREFIX)
 }
 
 #[cfg(test)]
