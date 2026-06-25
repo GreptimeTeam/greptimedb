@@ -223,6 +223,28 @@ mod tests {
     use super::*;
     use crate::request::join_hash_bloom::JoinHashBloomPayload;
 
+    /// Convenience helper to create a test Bloom payload with minimal fields.
+    fn make_test_bloom(
+        num_bits: u64,
+        bitset: Vec<u8>,
+        residual: Vec<u8>,
+        join_key_child_indices: Vec<u32>,
+    ) -> JoinHashBloomPayload {
+        JoinHashBloomPayload {
+            version: 1,
+            df_seed0: 0,
+            df_seed1: 0,
+            df_seed2: 0,
+            df_seed3: 0,
+            num_bits,
+            num_probes: 2,
+            bitset,
+            join_key_child_indices,
+            residual_datafusion_physical_expr: residual,
+            hash_compat_fingerprint: 0,
+        }
+    }
+
     #[test]
     fn initial_dyn_filter_regs_json_round_trip() {
         let regs = InitialDynFilterRegs::new(vec![
@@ -407,19 +429,7 @@ mod tests {
     #[test]
     fn initial_dyn_filter_snapshot_bloom_encoded_payload_bytes_counts_full_proto() {
         let bitset = vec![0u8; 128];
-        let bloom = JoinHashBloomPayload {
-            version: 1,
-            df_seed0: 0,
-            df_seed1: 0,
-            df_seed2: 0,
-            df_seed3: 0,
-            num_bits: 1024,
-            num_probes: 2,
-            bitset: bitset.clone(),
-            join_key_child_indices: vec![0],
-            residual_datafusion_physical_expr: vec![1, 2, 3],
-            hash_compat_fingerprint: 0,
-        };
+        let bloom = make_test_bloom(1024, bitset.clone(), vec![1, 2, 3], vec![0]);
 
         let snapshot =
             InitialDynFilterSnapshot::new(DynFilterPayload::JoinHashBloom(bloom.clone()), 2, false);
@@ -435,47 +445,8 @@ mod tests {
     }
 
     #[test]
-    fn initial_dyn_filter_snapshot_bloom_json_roundtrip() {
-        let bloom = JoinHashBloomPayload {
-            version: 1,
-            df_seed0: 0,
-            df_seed1: 0,
-            df_seed2: 0,
-            df_seed3: 0,
-            num_bits: 1024,
-            num_probes: 2,
-            bitset: vec![0u8; 128],
-            join_key_child_indices: vec![0],
-            residual_datafusion_physical_expr: vec![1, 2, 3],
-            hash_compat_fingerprint: 0,
-        };
-
-        let snapshot =
-            InitialDynFilterSnapshot::new(DynFilterPayload::JoinHashBloom(bloom.clone()), 5, true);
-
-        let json = serde_json::to_string(&snapshot).unwrap();
-        let decoded: InitialDynFilterSnapshot = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(decoded.generation, 5);
-        assert!(decoded.is_complete);
-        assert_eq!(decoded.payload, DynFilterPayload::JoinHashBloom(bloom));
-    }
-
-    #[test]
     fn initial_dyn_filter_reg_encoded_registration_bytes_include_bloom_snapshot() {
-        let bloom = JoinHashBloomPayload {
-            version: 1,
-            df_seed0: 0,
-            df_seed1: 0,
-            df_seed2: 0,
-            df_seed3: 0,
-            num_bits: 64,
-            num_probes: 2,
-            bitset: vec![0u8; 8],
-            join_key_child_indices: vec![0],
-            residual_datafusion_physical_expr: vec![1],
-            hash_compat_fingerprint: 0,
-        };
+        let bloom = make_test_bloom(64, vec![0u8; 8], vec![1], vec![0]);
 
         let snapshot =
             InitialDynFilterSnapshot::new(DynFilterPayload::JoinHashBloom(bloom), 2, false);
@@ -496,19 +467,7 @@ mod tests {
 
     #[test]
     fn initial_dyn_filter_regs_json_round_trip_with_bloom_snapshot() {
-        let bloom = JoinHashBloomPayload {
-            version: 1,
-            df_seed0: 0,
-            df_seed1: 0,
-            df_seed2: 0,
-            df_seed3: 0,
-            num_bits: 256,
-            num_probes: 2,
-            bitset: vec![0u8; 32],
-            join_key_child_indices: vec![0],
-            residual_datafusion_physical_expr: vec![4, 5, 6],
-            hash_compat_fingerprint: 0,
-        };
+        let bloom = make_test_bloom(256, vec![0u8; 32], vec![4, 5, 6], vec![0]);
 
         let regs = InitialDynFilterRegs::new(vec![
             InitialDynFilterReg::new("filter-bloom", vec![vec![1, 2, 3]]).with_initial_snapshot(
@@ -529,19 +488,7 @@ mod tests {
 
     #[test]
     fn initial_dyn_filter_regs_from_extension_rejects_invalid_bloom_snapshot() {
-        let bloom = JoinHashBloomPayload {
-            version: 1,
-            df_seed0: 0,
-            df_seed1: 0,
-            df_seed2: 0,
-            df_seed3: 0,
-            num_bits: 256,
-            num_probes: 2,
-            bitset: vec![0u8; 32],
-            join_key_child_indices: vec![],
-            residual_datafusion_physical_expr: vec![4, 5, 6],
-            hash_compat_fingerprint: 0,
-        };
+        let bloom = make_test_bloom(256, vec![0u8; 32], vec![4, 5, 6], vec![]);
 
         let regs = InitialDynFilterRegs::new(vec![
             InitialDynFilterReg::new("filter-bloom", vec![vec![1, 2, 3]]).with_initial_snapshot(

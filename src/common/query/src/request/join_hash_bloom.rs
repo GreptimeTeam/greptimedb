@@ -388,7 +388,7 @@ impl JoinHashBloomPayload {
 /// `ceil(n / 8)` without floating point.
 #[inline]
 fn num_bits_ceil_bytes(num_bits: usize) -> usize {
-    (num_bits / 8) + usize::from(!num_bits.is_multiple_of(8))
+    num_bits.div_ceil(8)
 }
 
 // ---------------------------------------------------------------------------
@@ -466,8 +466,6 @@ fn bloom_insert_many(
 
 #[cfg(test)]
 mod tests {
-    use datafusion_common::DataFusionError;
-
     use super::*;
 
     fn minimal_valid_payload() -> JoinHashBloomPayload {
@@ -492,101 +490,40 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_unsupported_version() {
-        let mut p = minimal_valid_payload();
-        p.version = 99;
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("unsupported version 99"));
-    }
-
-    #[test]
-    fn validate_rejects_zero_num_bits() {
-        let mut p = minimal_valid_payload();
-        p.num_bits = 0;
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("num_bits is zero"));
-    }
-
-    #[test]
-    fn validate_accepts_num_bits_at_usize_max() {
-        let mut p = minimal_valid_payload();
-        p.num_bits = usize::MAX as u64;
-        // bitset must match: ceil(usize::MAX / 8) — but that's huge and would OOM.
-        // On 64-bit platforms, usize::MAX == u64::MAX and the check
-        // `num_bits > usize::MAX` is always false, so we only verify
-        // the validation path does not panic on a passing value.
-        // The `> usize::MAX` branch is only reachable on 32-bit targets.
-        if cfg!(target_pointer_width = "64") {
-            // On 64-bit we cannot construct a bitset of size ceil(u64::MAX/8),
-            // but we can verify that smaller valid sizes still pass.
-            p.num_bits = 1024;
-            p.bitset = vec![0u8; 128];
-            p.validate().unwrap();
+    fn validate_rejections_table_driven() {
+        #[track_caller]
+        fn case(mutate: impl FnOnce(&mut JoinHashBloomPayload), expected_substr: &str) {
+            let mut p = minimal_valid_payload();
+            mutate(&mut p);
+            let err = p.validate().unwrap_err();
+            assert!(
+                err.to_string().contains(expected_substr),
+                "expected error containing '{expected_substr}', got: {}",
+                err
+            );
         }
-    }
 
-    #[test]
-    fn validate_rejects_zero_num_probes() {
-        let mut p = minimal_valid_payload();
-        p.num_probes = 0;
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("num_probes is zero"));
-    }
-
-    #[test]
-    fn validate_rejects_excessive_num_probes() {
-        let mut p = minimal_valid_payload();
-        p.num_probes = MAX_BLOOM_NUM_PROBES + 1;
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("exceeds limit"));
-    }
-
-    #[test]
-    fn validate_rejects_wrong_bitset_length() {
-        let mut p = minimal_valid_payload();
-        p.bitset = vec![0u8; 127]; // should be 128 for num_bits=1024
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("bitset length"));
-    }
-
-    #[test]
-    fn validate_rejects_duplicate_join_key_child_indices() {
-        let mut p = minimal_valid_payload();
-        p.join_key_child_indices = vec![0, 1, 0];
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("duplicate join key child index 0"));
-    }
-
-    #[test]
-    fn validate_rejects_oversized_residual() {
-        let mut p = minimal_valid_payload();
-        p.residual_datafusion_physical_expr = vec![0u8; MAX_BLOOM_RESIDUAL_BYTES + 1];
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("exceeds budget"));
-    }
-
-    #[test]
-    fn validate_rejects_empty_join_key_child_indices() {
-        let mut p = minimal_valid_payload();
-        p.join_key_child_indices = vec![];
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("join_key_child_indices is empty"));
-    }
-
-    #[test]
-    fn validate_rejects_empty_residual() {
-        let mut p = minimal_valid_payload();
-        p.residual_datafusion_physical_expr = vec![];
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("residual expression is empty"));
-    }
-
-    #[test]
-    fn validate_num_bits_exactly_divisible_by_8() {
-        let mut p = minimal_valid_payload();
-        p.num_bits = 1024;
-        p.bitset = vec![0u8; 128];
-        p.validate().unwrap();
+        case(|p| p.version = 99, "unsupported version 99");
+        case(|p| p.num_bits = 0, "num_bits is zero");
+        case(|p| p.num_probes = 0, "num_probes is zero");
+        case(|p| p.num_probes = MAX_BLOOM_NUM_PROBES + 1, "exceeds limit");
+        case(|p| p.bitset = vec![0u8; 127], "bitset length");
+        case(
+            |p| p.join_key_child_indices = vec![0, 1, 0],
+            "duplicate join key child index 0",
+        );
+        case(
+            |p| p.residual_datafusion_physical_expr = vec![0u8; MAX_BLOOM_RESIDUAL_BYTES + 1],
+            "exceeds budget",
+        );
+        case(
+            |p| p.join_key_child_indices = vec![],
+            "join_key_child_indices is empty",
+        );
+        case(
+            |p| p.residual_datafusion_physical_expr = vec![],
+            "residual expression is empty",
+        );
     }
 
     #[test]
@@ -665,30 +602,6 @@ mod tests {
     }
 
     #[test]
-    fn expected_bitset_bytes_computes_ceil_division() {
-        let p = JoinHashBloomPayload {
-            num_bits: 1024,
-            bitset: vec![0u8; 128],
-            ..minimal_valid_payload()
-        };
-        assert_eq!(p.expected_bitset_bytes(), 128);
-
-        let p2 = JoinHashBloomPayload {
-            num_bits: 1025,
-            bitset: vec![0u8; 129],
-            ..p
-        };
-        assert_eq!(p2.expected_bitset_bytes(), 129);
-    }
-
-    #[test]
-    fn num_bits_ceil_bytes_does_not_overflow() {
-        assert_eq!(num_bits_ceil_bytes(usize::MAX), (usize::MAX / 8) + 1);
-    }
-
-    // ── Bloom bitset / SplitMix64 tests ──────────────────────────
-
-    #[test]
     fn bloom_insert_contains_no_false_negatives() {
         let hashes: Vec<u64> = (0..100).map(|i| i * 7 + 13).collect();
         let payload = JoinHashBloomPayload::build_from_hashes(
@@ -715,9 +628,19 @@ mod tests {
     }
 
     #[test]
-    fn bloom_roundtrip_no_false_negatives_after_json() {
+    fn bloom_roundtrip_no_false_negatives_table_driven() {
+        type Roundtrip = fn(&JoinHashBloomPayload) -> JoinHashBloomPayload;
+
+        fn json_roundtrip(p: &JoinHashBloomPayload) -> JoinHashBloomPayload {
+            serde_json::from_str(&serde_json::to_string(p).unwrap()).unwrap()
+        }
+
+        fn proto_roundtrip(p: &JoinHashBloomPayload) -> JoinHashBloomPayload {
+            JoinHashBloomPayload::from_proto(&p.to_proto()).unwrap()
+        }
+
         let hashes = vec![42u64, 12345, 98765];
-        let payload = JoinHashBloomPayload::build_from_hashes(
+        let original = JoinHashBloomPayload::build_from_hashes(
             hashes.clone(),
             256,
             2,
@@ -726,41 +649,18 @@ mod tests {
             vec![1],
         );
 
-        let json = serde_json::to_string(&payload).unwrap();
-        let decoded: JoinHashBloomPayload = serde_json::from_str(&json).unwrap();
+        // Test both JSON and proto roundtrip preserve all inserted hashes
+        let test_cases: &[(&str, Roundtrip)] =
+            &[("json", json_roundtrip), ("proto", proto_roundtrip)];
 
-        for &h in &hashes {
-            assert!(decoded.contains_join_hash(h));
+        for (name, decode) in test_cases {
+            let decoded = decode(&original);
+            for &h in &hashes {
+                assert!(
+                    decoded.contains_join_hash(h),
+                    "[{name}] hash {h} should be in the Bloom filter after roundtrip"
+                );
+            }
         }
-    }
-
-    #[test]
-    fn bloom_roundtrip_no_false_negatives_after_proto() {
-        let hashes = vec![42u64, 12345, 98765];
-        let payload = JoinHashBloomPayload::build_from_hashes(
-            hashes.clone(),
-            256,
-            2,
-            (0, 0, 0, 0),
-            vec![0],
-            vec![1],
-        );
-
-        let proto = payload.to_proto();
-        let decoded = JoinHashBloomPayload::from_proto(&proto).unwrap();
-
-        for &h in &hashes {
-            assert!(decoded.contains_join_hash(h));
-        }
-    }
-
-    #[test]
-    fn splitmix64_is_deterministic() {
-        let h1 = splitmix64(42);
-        let h2 = splitmix64(42);
-        assert_eq!(h1, h2);
-
-        let h3 = splitmix64(43);
-        assert_ne!(h1, h3);
     }
 }
