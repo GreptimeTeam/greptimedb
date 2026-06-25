@@ -19,6 +19,9 @@ cargo run -p sqlness-runner -- compat --from-bins-dir ./bins/old --to-bins-dir .
 # Run a specific case:
 cargo run -p sqlness-runner -- compat --test-filter "basic_table"
 
+# Preview which cases would run (no services started):
+cargo run -p sqlness-runner -- compat --dry-run --from-version v0.9.5
+
 # See all options:
 cargo run -p sqlness-runner -- compat --help
 ```

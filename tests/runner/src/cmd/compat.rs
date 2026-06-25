@@ -83,12 +83,19 @@ pub struct CompatCommand {
     /// External metadata stores are not supported by the compat MVP yet.
     #[clap(long, default_value = "true")]
     setup_etcd: bool,
+
+    /// Perform discovery and filtering only; print what would run without
+    /// starting any services, mutating files, or running setup/verify.
+    #[clap(long, default_value = "false")]
+    dry_run: bool,
 }
 
 impl CompatCommand {
     pub async fn run(self) {
+        let dry_run = self.dry_run;
+
         // ---- 1. Validate MVP runtime constraints ----
-        if !self.setup_etcd {
+        if !dry_run && !self.setup_etcd {
             panic!(
                 "compat MVP requires Docker etcd (--setup-etcd=true); external metadata stores are not supported yet"
             );
@@ -113,10 +120,17 @@ impl CompatCommand {
         cases.retain(|c| c.metadata.topologies.iter().any(|t| t == COMPAT_TOPOLOGY));
 
         if cases.is_empty() {
-            println!(
-                "No compat cases found matching filter '{}' and topology '{}'",
-                self.test_filter, COMPAT_TOPOLOGY
-            );
+            if dry_run {
+                println!(
+                    "DRY-RUN: no compat cases found matching filter '{}' and topology '{}'",
+                    self.test_filter, COMPAT_TOPOLOGY
+                );
+            } else {
+                println!(
+                    "No compat cases found matching filter '{}' and topology '{}'",
+                    self.test_filter, COMPAT_TOPOLOGY
+                );
+            }
             return;
         }
 
@@ -130,36 +144,86 @@ impl CompatCommand {
         // namespaces cannot hide behind version filters.
         compat_case::validate_case_namespaces(&cases).unwrap_or_else(|e| panic!("{e}"));
 
-        // ---- 4. Resolve "from" binary path and infer version ----
-        let from_bins_dir = resolve_bins(
-            self.from_bins_dir.as_ref(),
-            self.from_version.as_deref(),
-            self.pull_version_on_need,
-        )
-        .await;
+        // ---- 4. Resolve "from" and "to" versions ----
+        let (from_bins_dir, from_version, from_ver_parsed, to_bins_dir, to_version, to_ver_parsed) =
+            if dry_run {
+                // Dry-run: resolve versions without panicking on missing binaries.
+                // try_infer_version returns None gracefully when the binary is absent.
+                let dry_run_from_bins_dir = self
+                    .from_bins_dir
+                    .clone()
+                    .unwrap_or_else(|| util::get_binary_dir("debug"));
+                let from_ver_str = self
+                    .from_version
+                    .as_deref()
+                    .and_then(|v| {
+                        if v == "current" {
+                            None
+                        } else {
+                            Some(v.to_string())
+                        }
+                    })
+                    .or_else(|| try_infer_version(&dry_run_from_bins_dir).map(|v| v.to_string()));
+                let from_ver_parsed = from_ver_str
+                    .as_deref()
+                    .and_then(|s| compat_case::Version::parse(s).ok());
 
-        let from_version = if let Some(ref ver) = self.from_version {
-            if ver != "current" {
-                Some(ver.clone())
+                let dry_run_to_bins_dir = self
+                    .to_bins_dir
+                    .clone()
+                    .unwrap_or_else(|| util::get_binary_dir("debug"));
+                let to_ver_str = try_infer_version(&dry_run_to_bins_dir).map(|v| v.to_string());
+                let to_ver_parsed = to_ver_str
+                    .as_deref()
+                    .and_then(|s| compat_case::Version::parse(s).ok());
+
+                (
+                    Some(dry_run_from_bins_dir),
+                    from_ver_str,
+                    from_ver_parsed,
+                    Some(dry_run_to_bins_dir),
+                    to_ver_str,
+                    to_ver_parsed,
+                )
             } else {
-                try_infer_version(&from_bins_dir).map(|v| v.to_string())
-            }
-        } else {
-            try_infer_version(&from_bins_dir).map(|v| v.to_string())
-        };
+                // Normal path: resolve bins (may panic if binary not found).
+                let from_bins_dir = resolve_bins(
+                    self.from_bins_dir.as_ref(),
+                    self.from_version.as_deref(),
+                    self.pull_version_on_need,
+                )
+                .await;
 
-        let from_ver_parsed = from_version
-            .as_deref()
-            .and_then(|s| compat_case::Version::parse(s).ok());
+                let from_version = if let Some(ref ver) = self.from_version {
+                    if ver != "current" {
+                        Some(ver.clone())
+                    } else {
+                        try_infer_version(&from_bins_dir).map(|v| v.to_string())
+                    }
+                } else {
+                    try_infer_version(&from_bins_dir).map(|v| v.to_string())
+                };
 
-        // Resolve "to" binary path before filtering so we can infer its version
-        // and reuse the same path for the restart.
-        let to_bins_dir =
-            resolve_bins(self.to_bins_dir.as_ref(), None, self.pull_version_on_need).await;
-        let to_version = try_infer_version(&to_bins_dir).map(|v| v.to_string());
-        let to_ver_parsed = to_version
-            .as_deref()
-            .and_then(|s| compat_case::Version::parse(s).ok());
+                let from_ver_parsed = from_version
+                    .as_deref()
+                    .and_then(|s| compat_case::Version::parse(s).ok());
+
+                let to_bins_dir =
+                    resolve_bins(self.to_bins_dir.as_ref(), None, self.pull_version_on_need).await;
+                let to_version = try_infer_version(&to_bins_dir).map(|v| v.to_string());
+                let to_ver_parsed = to_version
+                    .as_deref()
+                    .and_then(|s| compat_case::Version::parse(s).ok());
+
+                (
+                    Some(from_bins_dir),
+                    from_version,
+                    from_ver_parsed,
+                    Some(to_bins_dir),
+                    to_version,
+                    to_ver_parsed,
+                )
+            };
 
         // ---- 5b. Filter by version range ----
         let pre_filter_count = cases.len();
@@ -201,7 +265,47 @@ impl CompatCommand {
         }
 
         if cases.is_empty() {
-            println!("No compat cases remaining after version-range filtering");
+            if dry_run {
+                println!("DRY-RUN: no compat cases would run after version-range filtering");
+            } else {
+                println!("No compat cases remaining after version-range filtering");
+            }
+            return;
+        }
+
+        if dry_run {
+            println!("DRY-RUN: would run {} compat case(s)", cases.len());
+            println!("  topology:     {}", COMPAT_TOPOLOGY);
+            println!(
+                "  from version: {}",
+                from_version.as_deref().unwrap_or(
+                    "unknown (use --from-version, --from-bins-dir, or build debug binary)"
+                )
+            );
+            println!(
+                "  to version:   {}",
+                to_version
+                    .as_deref()
+                    .unwrap_or("unknown (use --to-bins-dir or build debug binary)")
+            );
+            if pre_filter_count != cases.len() {
+                println!();
+                println!(
+                    "Version-range filtering reduced {} → {} cases (see 'Skipping case' messages above)",
+                    pre_filter_count,
+                    cases.len()
+                );
+            }
+            println!();
+            for c in &cases {
+                println!("  case:        {}", c.metadata.name);
+                println!("    namespace:   {}", c.namespace);
+                println!("    from_range:  {:?}", c.metadata.from_range);
+                println!("    to_range:    {:?}", c.metadata.to_range);
+                println!("    features:    {:?}", c.metadata.features);
+            }
+            println!();
+            println!("Dry run complete. Remove --dry-run to execute.");
             return;
         }
 
@@ -248,7 +352,7 @@ impl CompatCommand {
             ServerAddr::default(),
             WalConfig::RaftEngine,
             self.pull_version_on_need,
-            Some(from_bins_dir),
+            from_bins_dir,
             store_config,
             vec![],
         );
@@ -277,7 +381,11 @@ impl CompatCommand {
         // ---- 9. Switch to "to" binary and restart cluster ----
         // to_bins_dir was already resolved during version-range filtering
         println!("Restarting cluster with new-version binary on preserved state...");
-        env.compat_restart_all(&db, to_bins_dir).await;
+        env.compat_restart_all(
+            &db,
+            to_bins_dir.expect("to_bins_dir must be resolved in non-dry-run mode"),
+        )
+        .await;
 
         // ---- 10. Run verify phase on new cluster ----
         println!("Running verify phase...");
