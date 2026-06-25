@@ -119,6 +119,7 @@ macro_rules! http_tests {
                 test_dashboard_path,
                 test_dashboard_api,
                 test_prometheus_remote_write,
+                test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_batched,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
@@ -272,6 +273,108 @@ fn basic_auth(username: &str, password: &str) -> String {
         "basic {}",
         BASE64_STANDARD.encode(format!("{username}:{password}"))
     )
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct RemoteWriteV2Request {
+    #[prost(string, repeated, tag = "4")]
+    symbols: Vec<String>,
+    #[prost(message, repeated, tag = "5")]
+    timeseries: Vec<RemoteWriteV2TimeSeries>,
+}
+
+impl RemoteWriteV2Request {
+    fn with_labels_and_samples(
+        labels: Vec<(&str, &str)>,
+        samples: Vec<RemoteWriteV2Sample>,
+    ) -> Self {
+        let mut symbols = vec!["".to_string()];
+        let mut labels_refs = Vec::with_capacity(labels.len() * 2);
+        for (name, value) in labels {
+            labels_refs.push(push_remote_write_v2_symbol(&mut symbols, name));
+            labels_refs.push(push_remote_write_v2_symbol(&mut symbols, value));
+        }
+
+        Self {
+            symbols,
+            timeseries: vec![RemoteWriteV2TimeSeries {
+                labels_refs,
+                samples,
+                histograms: Vec::new(),
+                exemplars: Vec::new(),
+            }],
+        }
+    }
+
+    fn with_labels_and_histograms(
+        labels: Vec<(&str, &str)>,
+        histograms: Vec<RemoteWriteV2Histogram>,
+    ) -> Self {
+        let mut symbols = vec!["".to_string()];
+        let mut labels_refs = Vec::with_capacity(labels.len() * 2);
+        for (name, value) in labels {
+            labels_refs.push(push_remote_write_v2_symbol(&mut symbols, name));
+            labels_refs.push(push_remote_write_v2_symbol(&mut symbols, value));
+        }
+
+        Self {
+            symbols,
+            timeseries: vec![RemoteWriteV2TimeSeries {
+                labels_refs,
+                samples: Vec::new(),
+                histograms,
+                exemplars: Vec::new(),
+            }],
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct RemoteWriteV2TimeSeries {
+    #[prost(uint32, repeated, tag = "1")]
+    labels_refs: Vec<u32>,
+    #[prost(message, repeated, tag = "2")]
+    samples: Vec<RemoteWriteV2Sample>,
+    #[prost(message, repeated, tag = "3")]
+    histograms: Vec<RemoteWriteV2Histogram>,
+    #[prost(message, repeated, tag = "4")]
+    exemplars: Vec<RemoteWriteV2Exemplar>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct RemoteWriteV2Sample {
+    #[prost(double, tag = "1")]
+    value: f64,
+    #[prost(int64, tag = "2")]
+    timestamp: i64,
+    #[prost(int64, tag = "3")]
+    start_timestamp: i64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct RemoteWriteV2Histogram {
+    #[prost(int64, tag = "15")]
+    timestamp: i64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct RemoteWriteV2Exemplar {
+    #[prost(uint32, repeated, tag = "1")]
+    labels_refs: Vec<u32>,
+    #[prost(double, tag = "2")]
+    value: f64,
+    #[prost(int64, tag = "3")]
+    timestamp: i64,
+}
+
+fn push_remote_write_v2_symbol(symbols: &mut Vec<String>, symbol: &str) -> u32 {
+    if let Some(idx) = symbols.iter().position(|s| s == symbol) {
+        return idx as u32;
+    }
+
+    let idx = symbols.len();
+    symbols.push(symbol.to_string());
+    idx as u32
 }
 
 pub async fn test_http_auth_from_standalone_user_provider_config() {
@@ -2264,6 +2367,140 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
         .await;
 
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "prometheus_remote_write_v2").await;
+    let client = TestClient::new(app).await;
+
+    let write_request = RemoteWriteV2Request::with_labels_and_samples(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "remote_write_v2_total"),
+            ("job", "api"),
+            ("instance", "localhost:9090"),
+        ],
+        vec![
+            RemoteWriteV2Sample {
+                value: 42.0,
+                timestamp: 1000,
+                start_timestamp: 0,
+            },
+            RemoteWriteV2Sample {
+                value: 43.0,
+                timestamp: 2000,
+                start_timestamp: 0,
+            },
+        ],
+    );
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let headers = res.headers();
+    assert_eq!(
+        Some("2"),
+        headers
+            .get("X-Prometheus-Remote-Write-Samples-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Histograms-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Exemplars-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert!(res.text().await.is_empty());
+
+    validate_data(
+        "prometheus_remote_write_v2_rows",
+        &client,
+        "select greptime_timestamp, greptime_value, job, instance from remote_write_v2_total order by greptime_timestamp;",
+        "[[1000,42.0,\"api\",\"localhost:9090\"],[2000,43.0,\"api\",\"localhost:9090\"]]",
+    )
+    .await;
+
+    validate_data(
+        "prometheus_remote_write_v2_semantic_identity",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_total' \
+         and create_options like '%greptime.semantic.signal_type=metric%' \
+         and create_options like '%greptime.semantic.source=prometheus%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=inferred%';",
+        "[[1]]",
+    )
+    .await;
+
+    let write_request = RemoteWriteV2Request::with_labels_and_histograms(
+        vec![(
+            prom_store::METRIC_NAME_LABEL,
+            "remote_write_v2_histogram_only",
+        )],
+        vec![RemoteWriteV2Histogram { timestamp: 3000 }],
+    );
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let headers = res.headers();
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Samples-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Histograms-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Exemplars-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert!(res.text().await.is_empty());
+
+    validate_data(
+        "prometheus_remote_write_v2_histogram_only",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_histogram_only';",
+        "[[0]]",
+    )
+    .await;
 
     guard.remove_all().await;
 }

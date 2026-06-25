@@ -17,10 +17,12 @@ use std::sync::Arc;
 use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
-use api::v1::RowInsertRequests;
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, RowInsertRequests, SemanticType};
 use async_trait::async_trait;
 use axum::Router;
 use common_query::Output;
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_test_util::ports;
 use datafusion_expr::LogicalPlan;
 use prost::Message;
@@ -28,6 +30,7 @@ use query::parser::PromQuery;
 use query::query_engine::DescribeResult;
 use servers::error::Result;
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
+use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::prom_remote_write::validation::PromValidationMode;
@@ -40,23 +43,39 @@ use sql::statements::statement::Statement;
 use tokio::sync::mpsc;
 
 struct DummyInstance {
-    tx: mpsc::Sender<(String, Vec<u8>)>,
+    read_tx: mpsc::Sender<(String, Vec<u8>)>,
+    write_tx: mpsc::Sender<RemoteWriteCapture>,
+}
+
+struct RemoteWriteCapture {
+    schema: String,
+    physical_table: Option<String>,
+    request: RowInsertRequests,
 }
 
 #[async_trait]
 impl PromStoreProtocolHandler for DummyInstance {
     async fn write(
         &self,
-        _request: RowInsertRequests,
-        _ctx: QueryContextRef,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
         _with_metric_engine: bool,
     ) -> Result<Output> {
+        let _ = self
+            .write_tx
+            .send(RemoteWriteCapture {
+                schema: ctx.current_schema(),
+                physical_table: ctx.extension(PHYSICAL_TABLE_PARAM).map(ToString::to_string),
+                request,
+            })
+            .await;
+
         Ok(Output::new_with_affected_rows(0))
     }
 
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse> {
         let _ = self
-            .tx
+            .read_tx
             .send((ctx.current_schema(), request.encode_to_vec()))
             .await;
 
@@ -112,12 +131,20 @@ impl SqlQueryHandler for DummyInstance {
 }
 
 fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
+    let (write_tx, _write_rx) = mpsc::channel(100);
+    make_test_app_with_write_capture(tx, write_tx)
+}
+
+fn make_test_app_with_write_capture(
+    read_tx: mpsc::Sender<(String, Vec<u8>)>,
+    write_tx: mpsc::Sender<RemoteWriteCapture>,
+) -> Router {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
         ..Default::default()
     };
 
-    let instance = Arc::new(DummyInstance { tx });
+    let instance = Arc::new(DummyInstance { read_tx, write_tx });
     let server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(instance.clone())
         .with_prom_handler(instance, None, true, PromValidationMode::Unchecked, None)
@@ -219,4 +246,293 @@ async fn test_prometheus_remote_write_read() {
         read_request,
         ReadRequest::decode(&(requests[1].1)[..]).unwrap()
     );
+}
+
+#[tokio::test]
+async fn test_prometheus_remote_write_v2_samples() {
+    common_telemetry::init_default_ut_logging();
+    let (read_tx, _read_rx) = mpsc::channel(100);
+    let (write_tx, mut write_rx) = mpsc::channel(100);
+
+    let app = make_test_app_with_write_capture(read_tx, write_tx);
+    let client = TestClient::new(app).await;
+
+    let write_request = RemoteWriteV2Request::with_labels_and_samples(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "http_requests_total"),
+            (prom_store::DATABASE_LABEL, "tenant_a"),
+            (prom_store::PHYSICAL_TABLE_LABEL, "metrics_physical"),
+            ("job", "api"),
+        ],
+        vec![
+            RemoteWriteV2Sample {
+                value: 42.0,
+                timestamp: 1000,
+                start_timestamp: 0,
+            },
+            RemoteWriteV2Sample {
+                value: 43.0,
+                timestamp: 2000,
+                start_timestamp: 0,
+            },
+        ],
+    );
+
+    let result = client
+        .post("/v1/prometheus/write")
+        .header(
+            "content-type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .header("content-encoding", "snappy")
+        .body(snappy_compress(&write_request.encode_to_vec()).unwrap())
+        .send()
+        .await;
+
+    assert_eq!(result.status(), 204);
+    assert_eq!(
+        Some("2"),
+        result
+            .headers()
+            .get("X-Prometheus-Remote-Write-Samples-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        result
+            .headers()
+            .get("X-Prometheus-Remote-Write-Histograms-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        result
+            .headers()
+            .get("X-Prometheus-Remote-Write-Exemplars-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert!(result.text().await.is_empty());
+
+    let captured = write_rx.recv().await.unwrap();
+    assert_eq!("tenant_a", captured.schema);
+    assert_eq!(
+        Some("metrics_physical".to_string()),
+        captured.physical_table
+    );
+    assert_eq!(1, captured.request.inserts.len());
+
+    let insert = &captured.request.inserts[0];
+    assert_eq!("http_requests_total", insert.table_name);
+    let rows = insert.rows.as_ref().unwrap();
+    assert_eq!(
+        vec![greptime_timestamp(), greptime_value(), "job"],
+        rows.schema
+            .iter()
+            .map(|column| column.column_name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        vec![
+            ColumnDataType::TimestampMillisecond as i32,
+            ColumnDataType::Float64 as i32,
+            ColumnDataType::String as i32,
+        ],
+        rows.schema
+            .iter()
+            .map(|column| column.datatype)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        vec![
+            SemanticType::Timestamp as i32,
+            SemanticType::Field as i32,
+            SemanticType::Tag as i32,
+        ],
+        rows.schema
+            .iter()
+            .map(|column| column.semantic_type)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(2, rows.rows.len());
+    assert_eq!(
+        Some(ValueData::TimestampMillisecondValue(1000)),
+        rows.rows[0].values[0].value_data
+    );
+    assert_eq!(
+        Some(ValueData::F64Value(42.0)),
+        rows.rows[0].values[1].value_data
+    );
+    assert_eq!(
+        Some(ValueData::StringValue("api".to_string())),
+        rows.rows[0].values[2].value_data
+    );
+    assert_eq!(
+        Some(ValueData::TimestampMillisecondValue(2000)),
+        rows.rows[1].values[0].value_data
+    );
+    assert_eq!(
+        Some(ValueData::F64Value(43.0)),
+        rows.rows[1].values[1].value_data
+    );
+    assert_eq!(
+        Some(ValueData::StringValue("api".to_string())),
+        rows.rows[1].values[2].value_data
+    );
+    assert!(write_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_prometheus_remote_write_v2_ignores_histogram_only_series() {
+    common_telemetry::init_default_ut_logging();
+    let (read_tx, _read_rx) = mpsc::channel(100);
+    let (write_tx, mut write_rx) = mpsc::channel(100);
+
+    let app = make_test_app_with_write_capture(read_tx, write_tx);
+    let client = TestClient::new(app).await;
+
+    let write_request = RemoteWriteV2Request::with_labels_and_histograms(
+        vec![(
+            prom_store::METRIC_NAME_LABEL,
+            "http_request_duration_seconds",
+        )],
+        vec![RemoteWriteV2Histogram { timestamp: 1000 }],
+    );
+
+    let result = client
+        .post("/v1/prometheus/write")
+        .header(
+            "content-type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .header("content-encoding", "snappy")
+        .body(snappy_compress(&write_request.encode_to_vec()).unwrap())
+        .send()
+        .await;
+
+    assert_eq!(result.status(), 204);
+    assert_eq!(
+        Some("0"),
+        result
+            .headers()
+            .get("X-Prometheus-Remote-Write-Samples-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        result
+            .headers()
+            .get("X-Prometheus-Remote-Write-Histograms-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        result
+            .headers()
+            .get("X-Prometheus-Remote-Write-Exemplars-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert!(result.text().await.is_empty());
+    assert!(write_rx.try_recv().is_err());
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct RemoteWriteV2Request {
+    #[prost(string, repeated, tag = "4")]
+    symbols: Vec<String>,
+    #[prost(message, repeated, tag = "5")]
+    timeseries: Vec<RemoteWriteV2TimeSeries>,
+}
+
+impl RemoteWriteV2Request {
+    fn with_labels_and_samples(
+        labels: Vec<(&str, &str)>,
+        samples: Vec<RemoteWriteV2Sample>,
+    ) -> Self {
+        let mut symbols = vec!["".to_string()];
+        let mut labels_refs = Vec::with_capacity(labels.len() * 2);
+        for (name, value) in labels {
+            labels_refs.push(push_symbol(&mut symbols, name));
+            labels_refs.push(push_symbol(&mut symbols, value));
+        }
+
+        Self {
+            symbols,
+            timeseries: vec![RemoteWriteV2TimeSeries {
+                labels_refs,
+                samples,
+                histograms: Vec::new(),
+                exemplars: Vec::new(),
+            }],
+        }
+    }
+
+    fn with_labels_and_histograms(
+        labels: Vec<(&str, &str)>,
+        histograms: Vec<RemoteWriteV2Histogram>,
+    ) -> Self {
+        let mut symbols = vec!["".to_string()];
+        let mut labels_refs = Vec::with_capacity(labels.len() * 2);
+        for (name, value) in labels {
+            labels_refs.push(push_symbol(&mut symbols, name));
+            labels_refs.push(push_symbol(&mut symbols, value));
+        }
+
+        Self {
+            symbols,
+            timeseries: vec![RemoteWriteV2TimeSeries {
+                labels_refs,
+                samples: Vec::new(),
+                histograms,
+                exemplars: Vec::new(),
+            }],
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct RemoteWriteV2TimeSeries {
+    #[prost(uint32, repeated, tag = "1")]
+    labels_refs: Vec<u32>,
+    #[prost(message, repeated, tag = "2")]
+    samples: Vec<RemoteWriteV2Sample>,
+    #[prost(message, repeated, tag = "3")]
+    histograms: Vec<RemoteWriteV2Histogram>,
+    #[prost(message, repeated, tag = "4")]
+    exemplars: Vec<RemoteWriteV2Exemplar>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct RemoteWriteV2Sample {
+    #[prost(double, tag = "1")]
+    value: f64,
+    #[prost(int64, tag = "2")]
+    timestamp: i64,
+    #[prost(int64, tag = "3")]
+    start_timestamp: i64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct RemoteWriteV2Histogram {
+    #[prost(int64, tag = "15")]
+    timestamp: i64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct RemoteWriteV2Exemplar {
+    #[prost(uint32, repeated, tag = "1")]
+    labels_refs: Vec<u32>,
+    #[prost(double, tag = "2")]
+    value: f64,
+    #[prost(int64, tag = "3")]
+    timestamp: i64,
+}
+
+fn push_symbol(symbols: &mut Vec<String>, symbol: &str) -> u32 {
+    if let Some(idx) = symbols.iter().position(|s| s == symbol) {
+        return idx as u32;
+    }
+
+    let idx = symbols.len();
+    symbols.push(symbol.to_string());
+    idx as u32
 }
