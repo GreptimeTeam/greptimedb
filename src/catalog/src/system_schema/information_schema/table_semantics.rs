@@ -19,9 +19,10 @@
 //! table's `create_options`.
 //!
 //! The few signal-agnostic keys are promoted to their own columns
-//! (`signal_type` / `source` / `pipeline` / `metadata_quality`); the remaining
-//! signal-specific keys are folded into a `semantic_options` JSON string, keyed
-//! by the option name with the `greptime.semantic.` prefix stripped.
+//! (`signal_type` / `source` / `source_version` / `pipeline` /
+//! `metadata_quality`); the remaining signal-specific keys are folded into a
+//! `semantic_options` JSON string, keyed by the option name with the
+//! `greptime.semantic.` prefix stripped.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
@@ -45,7 +46,7 @@ use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableInfo;
 use table::requests::{
     SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_PIPELINE, SEMANTIC_PREFIX, SEMANTIC_SIGNAL_TYPE,
-    SEMANTIC_SOURCE, is_semantic_option_key,
+    SEMANTIC_SOURCE, SEMANTIC_SOURCE_VERSION, is_semantic_option_key,
 };
 
 use crate::CatalogManager;
@@ -60,6 +61,7 @@ pub const TABLE_NAME: &str = "table_name";
 pub const TABLE_ID: &str = "table_id";
 pub const SIGNAL_TYPE: &str = "signal_type";
 pub const SOURCE: &str = "source";
+pub const SOURCE_VERSION: &str = "source_version";
 pub const PIPELINE: &str = "pipeline";
 pub const METADATA_QUALITY: &str = "metadata_quality";
 pub const SEMANTIC_OPTIONS: &str = "semantic_options";
@@ -75,6 +77,7 @@ fn optional_value(v: Option<&str>) -> Value {
 struct SemanticRow<'a> {
     signal_type: Option<&'a str>,
     source: Option<&'a str>,
+    source_version: Option<&'a str>,
     pipeline: Option<&'a str>,
     metadata_quality: Option<&'a str>,
     options_json: Option<String>,
@@ -86,6 +89,7 @@ impl<'a> SemanticRow<'a> {
     fn extract(table_info: &'a TableInfo) -> Option<Self> {
         let mut signal_type = None;
         let mut source = None;
+        let mut source_version = None;
         let mut pipeline = None;
         let mut metadata_quality = None;
         let mut rest = BTreeMap::new();
@@ -97,6 +101,7 @@ impl<'a> SemanticRow<'a> {
             match key.as_str() {
                 SEMANTIC_SIGNAL_TYPE => signal_type = Some(value.as_str()),
                 SEMANTIC_SOURCE => source = Some(value.as_str()),
+                SEMANTIC_SOURCE_VERSION => source_version = Some(value.as_str()),
                 SEMANTIC_PIPELINE => pipeline = Some(value.as_str()),
                 SEMANTIC_METRIC_METADATA_QUALITY => metadata_quality = Some(value.as_str()),
                 _ => {
@@ -108,6 +113,7 @@ impl<'a> SemanticRow<'a> {
 
         let has_any = signal_type.is_some()
             || source.is_some()
+            || source_version.is_some()
             || pipeline.is_some()
             || metadata_quality.is_some()
             || !rest.is_empty();
@@ -125,6 +131,7 @@ impl<'a> SemanticRow<'a> {
         Some(Self {
             signal_type,
             source,
+            source_version,
             pipeline,
             metadata_quality,
             options_json,
@@ -156,6 +163,7 @@ impl InformationSchemaTableSemantics {
             ColumnSchema::new(TABLE_ID, ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new(SIGNAL_TYPE, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(SOURCE, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(SOURCE_VERSION, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(PIPELINE, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(METADATA_QUALITY, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(SEMANTIC_OPTIONS, ConcreteDataType::string_datatype(), true),
@@ -216,6 +224,7 @@ struct InformationSchemaSemanticTablesBuilder {
     table_ids: UInt32VectorBuilder,
     signal_types: StringVectorBuilder,
     sources: StringVectorBuilder,
+    source_versions: StringVectorBuilder,
     pipelines: StringVectorBuilder,
     metadata_qualities: StringVectorBuilder,
     semantic_options: StringVectorBuilder,
@@ -237,6 +246,7 @@ impl InformationSchemaSemanticTablesBuilder {
             table_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             signal_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             sources: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            source_versions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             pipelines: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             metadata_qualities: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             semantic_options: StringVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -279,6 +289,7 @@ impl InformationSchemaSemanticTablesBuilder {
         let name_v = Value::from(table_name);
         let signal_v = optional_value(row.signal_type);
         let source_v = optional_value(row.source);
+        let source_version_v = optional_value(row.source_version);
         let pipeline_v = optional_value(row.pipeline);
         let quality_v = optional_value(row.metadata_quality);
         let predicate_row = [
@@ -287,6 +298,7 @@ impl InformationSchemaSemanticTablesBuilder {
             (TABLE_NAME, &name_v),
             (SIGNAL_TYPE, &signal_v),
             (SOURCE, &source_v),
+            (SOURCE_VERSION, &source_version_v),
             (PIPELINE, &pipeline_v),
             (METADATA_QUALITY, &quality_v),
         ];
@@ -300,6 +312,7 @@ impl InformationSchemaSemanticTablesBuilder {
         self.table_ids.push(Some(table_info.table_id()));
         self.signal_types.push(row.signal_type);
         self.sources.push(row.source);
+        self.source_versions.push(row.source_version);
         self.pipelines.push(row.pipeline);
         self.metadata_qualities.push(row.metadata_quality);
         self.semantic_options.push(row.options_json.as_deref());
@@ -313,6 +326,7 @@ impl InformationSchemaSemanticTablesBuilder {
             Arc::new(self.table_ids.finish()),
             Arc::new(self.signal_types.finish()),
             Arc::new(self.sources.finish()),
+            Arc::new(self.source_versions.finish()),
             Arc::new(self.pipelines.finish()),
             Arc::new(self.metadata_qualities.finish()),
             Arc::new(self.semantic_options.finish()),
@@ -349,7 +363,9 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use datatypes::schema::SchemaBuilder;
     use table::metadata::{TableInfoBuilder, TableMeta, TableType};
-    use table::requests::{SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT, TableOptions};
+    use table::requests::{
+        SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT, SEMANTIC_SOURCE_VERSION, TableOptions,
+    };
 
     use super::*;
 
@@ -400,6 +416,7 @@ mod tests {
         let info = table_info(&[
             (SEMANTIC_SIGNAL_TYPE, "metric"),
             (SEMANTIC_SOURCE, "opentelemetry"),
+            (SEMANTIC_SOURCE_VERSION, "2.0"),
             (SEMANTIC_PIPELINE, "greptime_metric_v1"),
             (SEMANTIC_METRIC_METADATA_QUALITY, "declared"),
             (SEMANTIC_METRIC_TYPE, "counter"),
@@ -411,6 +428,7 @@ mod tests {
         let row = SemanticRow::extract(&info).unwrap();
         assert_eq!(row.signal_type, Some("metric"));
         assert_eq!(row.source, Some("opentelemetry"));
+        assert_eq!(row.source_version, Some("2.0"));
         assert_eq!(row.pipeline, Some("greptime_metric_v1"));
         assert_eq!(row.metadata_quality, Some("declared"));
         // Promoted keys stay out of the JSON tail; remaining keys are sorted and

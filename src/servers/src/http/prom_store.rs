@@ -34,7 +34,7 @@ use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 use table::requests::{
     METADATA_QUALITY_INFERRED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_SIGNAL_TYPE,
-    SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_PROMETHEUS,
+    SEMANTIC_SOURCE, SEMANTIC_SOURCE_VERSION, SIGNAL_TYPE_METRIC, SOURCE_PROMETHEUS,
 };
 
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
@@ -54,6 +54,8 @@ pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
+const REMOTE_WRITE_V1_VERSION: &str = "1.0";
+const REMOTE_WRITE_V2_VERSION: &str = "2.0";
 const REMOTE_WRITE_V1_PROTO: &str = "prometheus.WriteRequest";
 const REMOTE_WRITE_V2_PROTO: &str = "io.prometheus.write.v2.Request";
 const CONTENT_TYPE_PROTO_PARAM: &str = "proto";
@@ -143,7 +145,8 @@ async fn remote_write_v1(
         return Ok(response);
     }
 
-    let (db, query_ctx, _timer) = prepare_remote_write_context(&params, query_ctx);
+    let (db, query_ctx, _timer) =
+        prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V1_VERSION);
 
     let mut processor = PromSeriesProcessor::default_processor();
 
@@ -211,7 +214,8 @@ async fn remote_write_v2(
     // optional pipeline parameter and ingest samples directly.
     let _ = pipeline_info;
 
-    let (db, query_ctx, _timer) = prepare_remote_write_context(&params, query_ctx);
+    let (db, query_ctx, _timer) =
+        prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
 
     let request = match decode_remote_write_v2_request(is_zstd, body) {
         Ok(request) => request,
@@ -259,6 +263,7 @@ fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response
 fn prepare_remote_write_context(
     params: &RemoteWriteQuery,
     mut query_ctx: QueryContext,
+    remote_write_version: &str,
 ) -> (String, Arc<QueryContext>, HistogramTimer) {
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
@@ -273,6 +278,7 @@ fn prepare_remote_write_context(
     // here, so the type is inferred from naming.
     query_ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
     query_ctx.set_extension(SEMANTIC_SOURCE, SOURCE_PROMETHEUS);
+    query_ctx.set_extension(SEMANTIC_SOURCE_VERSION, remote_write_version);
     query_ctx.set_extension(SEMANTIC_METRIC_METADATA_QUALITY, METADATA_QUALITY_INFERRED);
     let query_ctx = Arc::new(query_ctx);
     let timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
@@ -557,6 +563,32 @@ mod tests {
 
     fn content_type(value: &str) -> Option<TypedHeader<headers::ContentType>> {
         Some(TypedHeader(std::str::FromStr::from_str(value).unwrap()))
+    }
+
+    #[test]
+    fn test_prepare_remote_write_context_stamps_semantics() {
+        let (_, query_ctx, _timer) = prepare_remote_write_context(
+            &RemoteWriteQuery::default(),
+            QueryContext::with("greptime", "public"),
+            REMOTE_WRITE_V2_VERSION,
+        );
+
+        assert_eq!(
+            query_ctx.extension(SEMANTIC_SIGNAL_TYPE),
+            Some(SIGNAL_TYPE_METRIC)
+        );
+        assert_eq!(
+            query_ctx.extension(SEMANTIC_SOURCE),
+            Some(SOURCE_PROMETHEUS)
+        );
+        assert_eq!(
+            query_ctx.extension(SEMANTIC_SOURCE_VERSION),
+            Some(REMOTE_WRITE_V2_VERSION)
+        );
+        assert_eq!(
+            query_ctx.extension(SEMANTIC_METRIC_METADATA_QUALITY),
+            Some(METADATA_QUALITY_INFERRED)
+        );
     }
 
     #[tokio::test]

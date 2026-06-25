@@ -46,6 +46,8 @@ pub const SEMANTIC_PER_TABLE_INDEX_KEY: &str = "greptime.internal.semantic.per_t
 pub const SEMANTIC_SIGNAL_TYPE: &str = "greptime.semantic.signal_type";
 /// Ingestion ecosystem, e.g. [`SOURCE_OPENTELEMETRY`] / [`SOURCE_PROMETHEUS`].
 pub const SEMANTIC_SOURCE: &str = "greptime.semantic.source";
+/// Source protocol version, e.g. Prometheus remote write `1.0` / `2.0`.
+pub const SEMANTIC_SOURCE_VERSION: &str = "greptime.semantic.source_version";
 /// Internal ingestion pipeline / data model, e.g. `greptime_trace_v1`. The
 /// signal-agnostic successor to the engine-specific `table_data_model` option.
 pub const SEMANTIC_PIPELINE: &str = "greptime.semantic.pipeline";
@@ -103,6 +105,7 @@ pub const SEMANTIC_VALUE_MIXED: &str = "mixed";
 pub const SEMANTIC_OPTION_KEYS: &[&str] = &[
     SEMANTIC_SIGNAL_TYPE,
     SEMANTIC_SOURCE,
+    SEMANTIC_SOURCE_VERSION,
     SEMANTIC_PIPELINE,
     SEMANTIC_TRACE_CONVENTIONS,
     SEMANTIC_METRIC_TYPE,
@@ -131,6 +134,7 @@ pub fn is_semantic_option_key(key: &str) -> bool {
 pub fn validate_semantic_option(key: &str, value: &str) -> bool {
     match key {
         SEMANTIC_PIPELINE
+        | SEMANTIC_SOURCE_VERSION
         | SEMANTIC_METRIC_UNIT
         | SEMANTIC_METRIC_ORIGINAL_NAME
         | SEMANTIC_TRACE_CONVENTIONS => !value.is_empty(),
@@ -248,6 +252,7 @@ mod tests {
             SOURCE_OPENTELEMETRY
         ));
         assert!(validate_semantic_option(SEMANTIC_SOURCE, SOURCE_PROMETHEUS));
+        assert!(validate_semantic_option(SEMANTIC_SOURCE_VERSION, "2.0"));
         assert!(validate_semantic_option(
             SEMANTIC_METRIC_METADATA_QUALITY,
             METADATA_QUALITY_INFERRED

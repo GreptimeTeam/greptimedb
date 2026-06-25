@@ -7,6 +7,7 @@ CREATE TABLE metrics_tagged (
 WITH (
   'greptime.semantic.signal_type' = 'metric',
   'greptime.semantic.source' = 'opentelemetry',
+  'greptime.semantic.source_version' = '2.0',
   'greptime.semantic.pipeline' = 'greptime_metric_v1',
   'greptime.semantic.metric.metadata_quality' = 'declared',
   'greptime.semantic.metric.type' = 'counter',
@@ -29,7 +30,7 @@ CREATE TABLE plain_table (
   val DOUBLE,
 );
 
-SELECT table_schema, table_name, signal_type, source, pipeline, metadata_quality, semantic_options
+SELECT table_schema, table_name, signal_type, source, source_version, pipeline, metadata_quality, semantic_options
 FROM information_schema.table_semantics
 ORDER BY table_name;
 

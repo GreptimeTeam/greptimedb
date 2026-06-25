@@ -9,6 +9,7 @@ DESC TABLE information_schema.table_semantics;
 | table_id         | UInt32 |     | NO   |         | FIELD         |
 | signal_type      | String |     | YES  |         | FIELD         |
 | source           | String |     | YES  |         | FIELD         |
+| source_version   | String |     | YES  |         | FIELD         |
 | pipeline         | String |     | YES  |         | FIELD         |
 | metadata_quality | String |     | YES  |         | FIELD         |
 | semantic_options | String |     | YES  |         | FIELD         |
@@ -21,6 +22,7 @@ CREATE TABLE metrics_tagged (
 WITH (
   'greptime.semantic.signal_type' = 'metric',
   'greptime.semantic.source' = 'opentelemetry',
+  'greptime.semantic.source_version' = '2.0',
   'greptime.semantic.pipeline' = 'greptime_metric_v1',
   'greptime.semantic.metric.metadata_quality' = 'declared',
   'greptime.semantic.metric.type' = 'counter',
@@ -49,16 +51,16 @@ CREATE TABLE plain_table (
 
 Affected Rows: 0
 
-SELECT table_schema, table_name, signal_type, source, pipeline, metadata_quality, semantic_options
+SELECT table_schema, table_name, signal_type, source, source_version, pipeline, metadata_quality, semantic_options
 FROM information_schema.table_semantics
 ORDER BY table_name;
 
-+--------------+----------------+-------------+---------------+--------------------+------------------+-----------------------------------------------------------------+
-| table_schema | table_name     | signal_type | source        | pipeline           | metadata_quality | semantic_options                                                |
-+--------------+----------------+-------------+---------------+--------------------+------------------+-----------------------------------------------------------------+
-| public       | metrics_tagged | metric      | opentelemetry | greptime_metric_v1 | declared         | {"metric.type":"counter","metric.unit":"By"}                    |
-| public       | traces_tagged  | trace       | opentelemetry |                    |                  | {"trace.conventions":"https://opentelemetry.io/schemas/1.27.0"} |
-+--------------+----------------+-------------+---------------+--------------------+------------------+-----------------------------------------------------------------+
++--------------+----------------+-------------+---------------+----------------+--------------------+------------------+-----------------------------------------------------------------+
+| table_schema | table_name     | signal_type | source        | source_version | pipeline           | metadata_quality | semantic_options                                                |
++--------------+----------------+-------------+---------------+----------------+--------------------+------------------+-----------------------------------------------------------------+
+| public       | metrics_tagged | metric      | opentelemetry | 2.0            | greptime_metric_v1 | declared         | {"metric.type":"counter","metric.unit":"By"}                    |
+| public       | traces_tagged  | trace       | opentelemetry |                |                    |                  | {"trace.conventions":"https://opentelemetry.io/schemas/1.27.0"} |
++--------------+----------------+-------------+---------------+----------------+--------------------+------------------+-----------------------------------------------------------------+
 
 -- Predicate pushdown on a promoted column.
 SELECT table_name, signal_type
@@ -83,4 +85,3 @@ Affected Rows: 0
 DROP TABLE plain_table;
 
 Affected Rows: 0
-
