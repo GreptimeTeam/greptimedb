@@ -2785,150 +2785,28 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert!(result.is_ok());
     }
 
-    // --- Schedule keys are rejected as unknown options (not in the allowlist) ---
-
     #[test]
-    fn test_schedule_anchor_rejected_as_unknown_option() {
-        let err = validate_and_normalize_flow_options(
-            HashMap::from([(
-                "eval_interval_anchor".to_string(),
-                "2025-01-01T00:00:00Z".to_string(),
-            )]),
-            Some(300),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown flow option 'eval_interval_anchor'")
-        );
-    }
+    fn test_schedule_and_internal_keys_rejected_as_unknown_options() {
+        for key in [
+            "eval_interval_anchor",
+            "eval_interval_start",
+            "eval_interval_missed_tick_policy",
+            "eval_interval_catchup_max_runs",
+            "eval_interval_catchup_max_lag",
+            "__greptime_internal_eval_schedule",
+        ] {
+            let err = validate_and_normalize_flow_options(
+                HashMap::from([(key.to_string(), "value".to_string())]),
+                Some(300),
+            )
+            .unwrap_err();
 
-    #[test]
-    fn test_schedule_anchor_rejected_without_eval_interval() {
-        let err = validate_and_normalize_flow_options(
-            HashMap::from([(
-                "eval_interval_anchor".to_string(),
-                "2025-01-01T00:00:00Z".to_string(),
-            )]),
-            None,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown flow option 'eval_interval_anchor'")
-        );
-    }
-
-    #[test]
-    fn test_schedule_start_rejected_as_unknown_option() {
-        let err = validate_and_normalize_flow_options(
-            HashMap::from([(
-                "eval_interval_start".to_string(),
-                "2025-06-01T12:00:00Z".to_string(),
-            )]),
-            Some(60),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown flow option 'eval_interval_start'")
-        );
-    }
-
-    #[test]
-    fn test_schedule_missed_tick_policy_rejected() {
-        let err = validate_and_normalize_flow_options(
-            HashMap::from([(
-                "eval_interval_missed_tick_policy".to_string(),
-                "bounded_catch_up".to_string(),
-            )]),
-            Some(300),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown flow option 'eval_interval_missed_tick_policy'")
-        );
-    }
-
-    #[test]
-    fn test_schedule_catchup_max_runs_rejected() {
-        let err = validate_and_normalize_flow_options(
-            HashMap::from([(
-                "eval_interval_catchup_max_runs".to_string(),
-                "5".to_string(),
-            )]),
-            Some(300),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown flow option 'eval_interval_catchup_max_runs'")
-        );
-    }
-
-    #[test]
-    fn test_schedule_catchup_max_lag_rejected() {
-        let err = validate_and_normalize_flow_options(
-            HashMap::from([(
-                "eval_interval_catchup_max_lag".to_string(),
-                "5m".to_string(),
-            )]),
-            Some(300),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown flow option 'eval_interval_catchup_max_lag'")
-        );
-    }
-
-    #[test]
-    fn test_all_schedule_options_rejected_as_unknown() {
-        let err = validate_and_normalize_flow_options(
-            HashMap::from([
-                (
-                    "eval_interval_anchor".to_string(),
-                    "2025-01-01T00:00:00Z".to_string(),
-                ),
-                (
-                    "eval_interval_start".to_string(),
-                    "2025-06-01T12:00:00Z".to_string(),
-                ),
-                (
-                    "eval_interval_missed_tick_policy".to_string(),
-                    "bounded_catch_up".to_string(),
-                ),
-                (
-                    "eval_interval_catchup_max_runs".to_string(),
-                    "5".to_string(),
-                ),
-                (
-                    "eval_interval_catchup_max_lag".to_string(),
-                    "10m".to_string(),
-                ),
-            ]),
-            Some(300),
-        )
-        .unwrap_err();
-        // The first key encountered triggers the "unknown" error.
-        assert!(err.to_string().contains("unknown flow option"));
-    }
-
-    #[test]
-    fn test_internal_eval_schedule_key_rejected_as_unknown_option() {
-        let err = validate_and_normalize_flow_options(
-            HashMap::from([(
-                "__greptime_internal_eval_schedule".to_string(),
-                "{}".to_string(),
-            )]),
-            Some(300),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown flow option '__greptime_internal_eval_schedule'")
-        );
+            assert!(
+                err.to_string()
+                    .contains(&format!("unknown flow option '{key}'")),
+                "unexpected error for {key}: {err}"
+            );
+        }
     }
 
     #[test]

@@ -326,200 +326,48 @@ fn test_validate_flow_options_allows_incremental_read_option() {
 }
 
 #[test]
-fn test_validate_flow_options_rejects_schedule_options_without_eval_interval() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.flow_options.insert(
-        "eval_interval_anchor".to_string(),
-        "2025-01-01T00:00:00Z".to_string(),
-    );
+fn test_validate_flow_options_rejects_schedule_and_internal_keys_as_unknown() {
+    for key in [
+        "eval_interval_anchor",
+        "eval_interval_start",
+        "eval_interval_missed_tick_policy",
+        "eval_interval_catchup_max_runs",
+        "eval_interval_catchup_max_lag",
+        "__greptime_internal_eval_schedule",
+    ] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.eval_interval_secs = Some(300);
+        task.flow_options
+            .insert(key.to_string(), "value".to_string());
 
-    let err = validate_flow_options(&task).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Unknown flow option 'eval_interval_anchor'")
-    );
+        let err = validate_flow_options(&task).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("Unknown flow option '{key}'")),
+            "unexpected error for {key}: {err}"
+        );
+    }
 }
 
 #[test]
-fn test_validate_flow_options_rejects_schedule_options_with_eval_interval() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.eval_interval_secs = Some(300);
-    task.flow_options.insert(
-        "eval_interval_anchor".to_string(),
-        "2025-01-01T00:00:00Z".to_string(),
-    );
-    task.flow_options.insert(
-        "eval_interval_missed_tick_policy".to_string(),
-        "bounded_catch_up".to_string(),
-    );
+fn test_validate_flow_options_rejects_non_positive_eval_interval() {
+    for secs in [0, -1] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.eval_interval_secs = Some(secs);
 
-    let err = validate_flow_options(&task).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Unknown flow option 'eval_interval_anchor'")
-    );
-}
-
-#[test]
-fn test_validate_flow_options_rejects_schedule_option_non_utc_anchor() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.eval_interval_secs = Some(300);
-    task.flow_options.insert(
-        "eval_interval_anchor".to_string(),
-        "2025-01-01T00:00:00+05:00".to_string(),
-    );
-
-    let err = validate_flow_options(&task).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Unknown flow option 'eval_interval_anchor'")
-    );
-}
-
-#[test]
-fn test_validate_flow_options_rejects_schedule_option_invalid_policy() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.eval_interval_secs = Some(300);
-    task.flow_options.insert(
-        "eval_interval_missed_tick_policy".to_string(),
-        "bad_policy".to_string(),
-    );
-
-    let err = validate_flow_options(&task).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Unknown flow option 'eval_interval_missed_tick_policy'")
-    );
-}
-
-#[test]
-fn test_validate_flow_options_rejects_schedule_option_invalid_max_runs() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.eval_interval_secs = Some(300);
-    task.flow_options.insert(
-        "eval_interval_catchup_max_runs".to_string(),
-        "0".to_string(),
-    );
-
-    let err = validate_flow_options(&task).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Unknown flow option 'eval_interval_catchup_max_runs'")
-    );
-}
-
-#[test]
-fn test_validate_flow_options_rejects_schedule_option_invalid_max_lag() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.eval_interval_secs = Some(300);
-    task.flow_options.insert(
-        "eval_interval_catchup_max_lag".to_string(),
-        "5d".to_string(),
-    );
-
-    let err = validate_flow_options(&task).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Unknown flow option 'eval_interval_catchup_max_lag'")
-    );
-}
-
-#[test]
-fn test_validate_flow_options_rejects_schedule_option_zero_max_lag() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.eval_interval_secs = Some(300);
-    task.flow_options
-        .insert("eval_interval_catchup_max_lag".to_string(), "0".to_string());
-
-    let err = validate_flow_options(&task).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Unknown flow option 'eval_interval_catchup_max_lag'")
-    );
-}
-
-#[test]
-fn test_validate_flow_options_rejects_schedule_option_negative_max_lag() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.eval_interval_secs = Some(300);
-    task.flow_options.insert(
-        "eval_interval_catchup_max_lag".to_string(),
-        "-1".to_string(),
-    );
-
-    let err = validate_flow_options(&task).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Unknown flow option 'eval_interval_catchup_max_lag'")
-    );
-}
-
-#[test]
-fn test_validate_flow_options_rejects_eval_interval_zero() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.eval_interval_secs = Some(0);
-
-    let err = validate_flow_options(&task).unwrap_err();
-    assert!(err.to_string().contains("EVAL INTERVAL must be positive"));
-}
-
-#[test]
-fn test_validate_flow_options_rejects_eval_interval_negative() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.eval_interval_secs = Some(-1);
-
-    let err = validate_flow_options(&task).unwrap_err();
-    assert!(err.to_string().contains("EVAL INTERVAL must be positive"));
+        let err = validate_flow_options(&task).unwrap_err();
+        assert!(err.to_string().contains("EVAL INTERVAL must be positive"));
+    }
 }
 
 #[test]
@@ -568,6 +416,16 @@ fn test_resolved_schedule_defaults_in_create_request() {
         start_before
     );
 
+    let flow_context = FlowQueryContext {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        timezone: "UTC".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
+    };
+
     // Construct CreateFlowData and verify CreateRequest carries internal key.
     let data = CreateFlowData {
         state: CreateFlowState::CreateFlows,
@@ -576,15 +434,7 @@ fn test_resolved_schedule_defaults_in_create_request() {
         peers: vec![],
         source_table_ids: vec![],
         unresolved_source_table_names: vec![],
-        flow_context: FlowQueryContext {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            timezone: "UTC".to_string(),
-            extensions: HashMap::new(),
-            channel: 0,
-            snapshot_seqs: HashMap::new(),
-            sst_min_sequences: HashMap::new(),
-        },
+        flow_context: flow_context.clone(),
         prev_flow_info_value: None,
         did_replace: false,
         flow_type: Some(FlowType::Batching),
@@ -597,15 +447,7 @@ fn test_resolved_schedule_defaults_in_create_request() {
         peers: vec![],
         source_table_ids: vec![],
         unresolved_source_table_names: vec![],
-        flow_context: FlowQueryContext {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            timezone: "UTC".to_string(),
-            extensions: HashMap::new(),
-            channel: 0,
-            snapshot_seqs: HashMap::new(),
-            sst_min_sequences: HashMap::new(),
-        },
+        flow_context,
         prev_flow_info_value: None,
         did_replace: false,
         flow_type: Some(FlowType::Batching),
