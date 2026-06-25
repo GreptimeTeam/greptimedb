@@ -45,6 +45,7 @@ use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::checkpoint::checkpoint_mode_label;
+use crate::batching_mode::eval_schedule::{EvalSchedule, select_due_runtimes};
 use crate::batching_mode::frontend_client::{FrontendClient, PeerDesc};
 use crate::batching_mode::state::{
     CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState, to_df_literal,
@@ -70,6 +71,14 @@ use crate::{Error, FlowId};
 mod ckpt;
 mod inc;
 
+/// Returns the current wall-clock Unix timestamp in seconds.
+fn wall_clock_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 /// The task's config, immutable once created
 #[derive(Clone)]
 pub struct TaskConfig {
@@ -86,6 +95,8 @@ pub struct TaskConfig {
     pub query_type: QueryType,
     pub batch_opts: Arc<BatchingModeOptions>,
     pub flow_eval_interval: Option<Duration>,
+    /// Typed schedule configuration, pre-parsed at task creation time.
+    pub eval_schedule: Option<EvalSchedule>,
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
@@ -156,6 +167,8 @@ pub struct TaskArgs<'a> {
     pub shutdown_rx: oneshot::Receiver<()>,
     pub batch_opts: Arc<BatchingModeOptions>,
     pub flow_eval_interval: Option<Duration>,
+    /// Typed schedule configuration pre-parsed from `CreateFlowArgs`.
+    pub eval_schedule: Option<EvalSchedule>,
 }
 
 pub struct PlanInfo {
@@ -238,6 +251,7 @@ impl BatchingTask {
             shutdown_rx,
             batch_opts,
             flow_eval_interval,
+            eval_schedule,
         }: TaskArgs<'_>,
     ) -> Result<Self, Error> {
         let mut state = TaskState::with_dirty_time_windows(
@@ -265,6 +279,7 @@ impl BatchingTask {
                 query_type: determine_query_type(query, &query_ctx)?,
                 batch_opts,
                 flow_eval_interval,
+                eval_schedule,
             }),
             state: Arc::new(RwLock::new(state)),
             execution_lock: Arc::new(Mutex::new(())),
@@ -273,6 +288,23 @@ impl BatchingTask {
 
     pub fn last_execution_time_millis(&self) -> Option<i64> {
         self.state.read().unwrap().last_execution_time_millis()
+    }
+
+    /// Collect flow-related extensions from the task's query context that should be
+    /// forwarded to the frontend (e.g. scheduled runtime).
+    fn frontend_extensions(&self) -> HashMap<String, String> {
+        let ctx = self.state.read().unwrap();
+        let all = ctx.query_ctx.extensions();
+        let mut flow_exts = HashMap::new();
+        // Propagate the scheduled runtime extension if present so that frontend
+        // execution can use the same logical time.
+        if let Some(v) = all.get(query::options::FLOW_SCHEDULED_RUNTIME_MILLIS) {
+            flow_exts.insert(
+                query::options::FLOW_SCHEDULED_RUNTIME_MILLIS.to_string(),
+                v.clone(),
+            );
+        }
+        flow_exts
     }
 
     /// mark time window range (now - expire_after, now) as dirty (or (0, now) if expire_after not set)
@@ -596,9 +628,15 @@ impl BatchingTask {
         let extensions = self
             .build_flow_query_extensions(incremental_safe, coverage.is_incremental_delta())
             .await?;
+        let frontend_extensions = self.frontend_extensions();
         let extension_refs = extensions
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
+            .chain(
+                frontend_extensions
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            )
             .collect::<Vec<_>>();
         let query_mode = if extensions
             .iter()
@@ -909,37 +947,201 @@ impl BatchingTask {
 
     /// start executing query in a loop, break when receive shutdown signal
     ///
-    /// any error will be logged when executing query
+    /// any error will be logged when executing query.
+    ///
+    /// Dispatches to:
+    /// - scheduled loop when `flow_eval_interval.is_some()`
+    /// - adaptive dirty-window loop otherwise
     pub async fn start_executing_loop(
+        &self,
+        engine: QueryEngineRef,
+        frontend_client: Arc<FrontendClient>,
+    ) {
+        if self.config.flow_eval_interval.is_some() {
+            self.start_scheduled_loop(engine, frontend_client).await;
+        } else {
+            self.start_adaptive_loop(engine, frontend_client).await;
+        }
+    }
+
+    /// Scheduled batching loop for flows with `EVAL INTERVAL`.
+    ///
+    /// Uses the pre-parsed `EvalSchedule` from `TaskConfig`, selects due
+    /// scheduled runtimes using bounded catch-up semantics. Each attempt
+    /// temporarily sets `flow.scheduled_runtime_millis` on the task's
+    /// `QueryContext` and executes under the existing `execution_lock`.
+    /// After every attempt (success, no-op, or failure) the in-memory
+    /// cursor advances.
+    async fn start_scheduled_loop(
+        &self,
+        engine: QueryEngineRef,
+        frontend_client: Arc<FrontendClient>,
+    ) {
+        let flow_id_str = self.config.flow_id.to_string();
+
+        let schedule = match &self.config.eval_schedule {
+            Some(s) => s.clone(),
+            None => {
+                let eval_interval_secs = self
+                    .config
+                    .flow_eval_interval
+                    .map(|d| d.as_secs() as i64)
+                    .expect("checked by caller");
+
+                // Fallback: no typed config provided. Compute defaults
+                // anchored at epoch/start=0.
+                match EvalSchedule::from_config(Some(eval_interval_secs), None) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => {
+                        warn!(
+                            "Flow {}: EVAL INTERVAL set but no schedule parsed; exiting loop",
+                            flow_id_str
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Flow {}: Failed to parse eval schedule: {}; exiting loop",
+                            flow_id_str, e
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+
+        // Initial cursor is one interval before start so the first due
+        // runtime is `start_secs`.
+        let mut cursor_secs = schedule.start_secs.saturating_sub(schedule.interval_secs);
+
+        info!(
+            "Flow {}: entering scheduled loop, interval={}s, start={}, anchor={}, policy={:?}, max_runs={}, max_lag={}s",
+            flow_id_str,
+            schedule.interval_secs,
+            schedule.start_secs,
+            schedule.anchor_secs,
+            schedule.missed_tick_policy,
+            schedule.max_runs,
+            schedule.max_lag_secs,
+        );
+
+        loop {
+            if self.is_shutdown_signaled() {
+                break;
+            }
+
+            let wall_now_secs = wall_clock_unix_secs();
+
+            let due = match select_due_runtimes(&schedule, cursor_secs, wall_now_secs) {
+                Some(d) => d,
+                None => {
+                    warn!(
+                        "Flow {}: Invalid schedule (interval <= 0), exiting loop",
+                        flow_id_str
+                    );
+                    return;
+                }
+            };
+
+            if due.runtimes.is_empty() {
+                if due.skipped > 0 {
+                    warn!(
+                        "Flow {}: all {} due runtimes skipped by max-lag, advancing cursor to wall-clock ({wall_now_secs}) to avoid re-skipping",
+                        flow_id_str, due.skipped
+                    );
+                    cursor_secs = wall_now_secs;
+                    continue;
+                }
+
+                // No due yet — sleep until the next runtime instant.
+                let next = schedule.next_runtime_after(cursor_secs);
+                if next <= wall_now_secs {
+                    // Shouldn't happen given select_due_runtimes returned empty,
+                    // but guard against clock skew / logic error.
+                    cursor_secs = wall_now_secs;
+                    continue;
+                }
+                let wait_secs = (next - wall_now_secs) as u64;
+                let wait_dur = Duration::from_secs(wait_secs);
+                debug!(
+                    "Flow {}: no due runtimes, sleeping for {}s until next runtime at {}",
+                    flow_id_str, wait_secs, next
+                );
+                tokio::time::sleep(wait_dur).await;
+                continue;
+            }
+
+            if due.skipped > 0 {
+                info!(
+                    "Flow {}: {} due runtimes, {} skipped (catch-up)",
+                    flow_id_str,
+                    due.runtimes.len(),
+                    due.skipped
+                );
+            }
+
+            // Execute runtimes oldest → newest.
+            for runtime_secs in &due.runtimes {
+                if self.is_shutdown_signaled() {
+                    break;
+                }
+
+                METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT
+                    .with_label_values(&[&flow_id_str])
+                    .inc();
+
+                let outcome = self
+                    .execute_once_serialized_at_scheduled_runtime(
+                        &engine,
+                        &frontend_client,
+                        *runtime_secs,
+                    )
+                    .await;
+
+                // Advance cursor regardless of outcome.
+                cursor_secs = *runtime_secs;
+
+                match outcome.result {
+                    Ok(Some((rows, _elapsed))) => {
+                        debug!(
+                            "Flow {}: scheduled runtime {} completed, rows={}",
+                            flow_id_str, runtime_secs, rows
+                        );
+                    }
+                    Ok(None) => {
+                        debug!(
+                            "Flow {}: scheduled runtime {} produced no query (no dirty signal or no-op)",
+                            flow_id_str, runtime_secs
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Flow {}: scheduled runtime {} failed: {:?}",
+                            flow_id_str, runtime_secs, err
+                        );
+                        METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT
+                            .with_label_values(&[&flow_id_str])
+                            .inc();
+                        // Dirty-window restoration is handled by the
+                        // existing `handle_executed_query_failure` inside
+                        // `execute_once_unlocked`.
+                    }
+                }
+            }
+        }
+    }
+
+    /// Existing adaptive dirty-window loop for flows without `EVAL INTERVAL`.
+    async fn start_adaptive_loop(
         &self,
         engine: QueryEngineRef,
         frontend_client: Arc<FrontendClient>,
     ) {
         let flow_id_str = self.config.flow_id.to_string();
         let mut max_window_cnt = None;
-        let mut interval = self
-            .config
-            .flow_eval_interval
-            .map(|d| tokio::time::interval(d));
-        if let Some(tick) = &mut interval {
-            tick.tick().await; // pass the first tick immediately
-        }
         loop {
-            // first check if shutdown signal is received
-            // if so, break the loop
-            {
-                let mut state = self.state.write().unwrap();
-                match state.shutdown_rx.try_recv() {
-                    Ok(()) => break,
-                    Err(TryRecvError::Closed) => {
-                        warn!(
-                            "Unexpected shutdown flow {}, shutdown anyway",
-                            self.config.flow_id
-                        );
-                        break;
-                    }
-                    Err(TryRecvError::Empty) => (),
-                }
+            if self.is_shutdown_signaled() {
+                break;
             }
             METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT
                 .with_label_values(&[&flow_id_str])
@@ -952,46 +1154,36 @@ impl BatchingTask {
                 .await;
 
             match outcome.result {
-                // normal execute, sleep for some time before doing next query
                 Ok(Some(_)) => {
-                    // can increase max_window_cnt to query more windows next time
                     max_window_cnt = max_window_cnt.map(|cnt| {
                         (cnt + 1).min(self.config.batch_opts.experimental_max_filter_num_per_query)
                     });
 
-                    // here use proper ticking if set eval interval
-                    if let Some(eval_interval) = &mut interval {
-                        eval_interval.tick().await;
-                    } else {
-                        // if not explicitly set, just automatically calculate next start time
-                        // using time window size and more args
-                        let sleep_until = {
-                            let state = self.state.write().unwrap();
+                    let sleep_until = {
+                        let state = self.state.write().unwrap();
 
-                            let time_window_size = self
-                                .config
-                                .time_window_expr
-                                .as_ref()
-                                .and_then(|t| *t.time_window_size());
+                        let time_window_size = self
+                            .config
+                            .time_window_expr
+                            .as_ref()
+                            .and_then(|t| *t.time_window_size());
 
-                            let prefer_short_incremental_cadence = state.checkpoint_mode()
-                                == CheckpointMode::Incremental
-                                && !state.is_incremental_disabled();
+                        let prefer_short_incremental_cadence = state.checkpoint_mode()
+                            == CheckpointMode::Incremental
+                            && !state.is_incremental_disabled();
 
-                            state.get_next_start_query_time(
-                                self.config.flow_id,
-                                &time_window_size,
-                                min_refresh,
-                                Some(self.config.batch_opts.query_timeout),
-                                self.config.batch_opts.experimental_max_filter_num_per_query,
-                                prefer_short_incremental_cadence,
-                            )
-                        };
-
-                        tokio::time::sleep_until(sleep_until).await;
+                        state.get_next_start_query_time(
+                            self.config.flow_id,
+                            &time_window_size,
+                            min_refresh,
+                            Some(self.config.batch_opts.query_timeout),
+                            self.config.batch_opts.experimental_max_filter_num_per_query,
+                            prefer_short_incremental_cadence,
+                        )
                     };
+
+                    tokio::time::sleep_until(sleep_until).await;
                 }
-                // no new data, sleep for some time before checking for new data
                 Ok(None) => {
                     debug!(
                         "Flow id = {:?} found no new data, sleep for {:?} then continue",
@@ -1000,7 +1192,6 @@ impl BatchingTask {
                     tokio::time::sleep(min_refresh).await;
                     continue;
                 }
-                // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
                 Err(err) => {
                     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT
                         .with_label_values(&[&flow_id_str])
@@ -1008,21 +1199,67 @@ impl BatchingTask {
                     match outcome.new_query {
                         Some(query) => {
                             common_telemetry::error!(err; "Failed to execute query for flow={} with query: {}", self.config.flow_id, query.plan);
-                            // TODO(discord9): add some backoff here? half the query time window or what
-                            // backoff meaning use smaller `max_window_cnt` for next query
-
-                            // since last query failed, we should not try to query too many windows
                             max_window_cnt = Some(1);
                         }
                         None => {
                             common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id)
                         }
                     }
-                    // also sleep for a little while before try again to prevent flooding logs
                     tokio::time::sleep(min_refresh).await;
                 }
             }
         }
+    }
+
+    /// Check whether the shutdown signal has been received.
+    fn is_shutdown_signaled(&self) -> bool {
+        let mut state = self.state.write().unwrap();
+        match state.shutdown_rx.try_recv() {
+            Ok(()) | Err(TryRecvError::Closed) => true,
+            Err(TryRecvError::Empty) => false,
+        }
+    }
+
+    /// Execute one scheduled attempt, temporarily setting
+    /// `flow.scheduled_runtime_millis` on the task's QueryContext so
+    /// SQL/TQL `now()` resolves to the logical scheduled time.
+    ///
+    /// The extension is removed after the attempt so a later manual
+    /// `flush_flow` does not reuse a stale scheduled runtime.
+    async fn execute_once_serialized_at_scheduled_runtime(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        runtime_secs: i64,
+    ) -> ExecuteOnceOutcome {
+        let _execution_guard = self.execution_lock.lock().await;
+
+        // Clone the current QueryContext and add the scheduled runtime
+        // extension, then swap it into the task state for this attempt.
+        let old_ctx = {
+            let mut state = self.state.write().unwrap();
+            let old = state.query_ctx.clone();
+            let mut new_ctx = (*old).clone();
+            new_ctx.set_extension(
+                query::options::FLOW_SCHEDULED_RUNTIME_MILLIS,
+                (runtime_secs.saturating_mul(1000)).to_string(),
+            );
+            state.query_ctx = Arc::new(new_ctx);
+            old
+        };
+
+        let outcome = self
+            .execute_once_unlocked(engine, frontend_client, None)
+            .await;
+
+        // Restore the original QueryContext so no stale scheduled runtime
+        // leaks into future manual flushes.
+        {
+            let mut state = self.state.write().unwrap();
+            state.query_ctx = old_ctx;
+        }
+
+        outcome
     }
 
     /// Generate the create table SQL

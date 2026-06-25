@@ -181,7 +181,18 @@ fn normalize_flow_bool_option(key: &str, value: &str) -> Result<String> {
 
 fn validate_and_normalize_flow_options(
     options: HashMap<String, String>,
+    eval_interval: Option<i64>,
 ) -> Result<HashMap<String, String>> {
+    // Reject non-positive eval_interval (zero or negative).
+    if let Some(secs) = eval_interval
+        && secs <= 0
+    {
+        return InvalidSqlSnafu {
+            err_msg: format!("EVAL INTERVAL must be positive, got {secs} seconds"),
+        }
+        .fail();
+    }
+
     options
         .into_iter()
         .map(|(key, value)| {
@@ -722,7 +733,20 @@ impl StatementExecutor {
         mut expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        expr.flow_options = validate_and_normalize_flow_options(expr.flow_options)?;
+        let eval_interval_secs = expr.eval_interval.as_ref().map(|e| e.seconds);
+
+        // Reject non-positive eval_interval (zero or negative).
+        if let Some(secs) = eval_interval_secs
+            && secs <= 0
+        {
+            return InvalidSqlSnafu {
+                err_msg: format!("EVAL INTERVAL must be positive, got {secs} seconds"),
+            }
+            .fail();
+        }
+
+        expr.flow_options =
+            validate_and_normalize_flow_options(expr.flow_options, eval_interval_secs)?;
 
         let flow_type = self
             .determine_flow_type(&expr, query_context.clone())
@@ -2641,7 +2665,7 @@ mod test {
     #[test]
     fn test_validate_and_normalize_flow_options_empty() {
         assert!(
-            validate_and_normalize_flow_options(HashMap::new())
+            validate_and_normalize_flow_options(HashMap::new(), None)
                 .unwrap()
                 .is_empty()
         );
@@ -2658,7 +2682,7 @@ mod test {
         ]);
 
         assert_eq!(
-            validate_and_normalize_flow_options(options).unwrap(),
+            validate_and_normalize_flow_options(options, None).unwrap(),
             HashMap::from([
                 (DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string(),),
                 (
@@ -2671,24 +2695,27 @@ mod test {
 
     #[test]
     fn test_validate_and_normalize_flow_options_unknown_option() {
-        let err = validate_and_normalize_flow_options(HashMap::from([(
-            "foo".to_string(),
-            "bar".to_string(),
-        )]))
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([("foo".to_string(), "bar".to_string())]),
+            None,
+        )
         .unwrap_err();
 
         assert!(
             err.to_string()
-                .contains("unknown flow option 'foo', supported options: defer_on_missing_source, experimental_enable_incremental_read")
+                .contains("unknown flow option 'foo', supported options:")
         );
     }
 
     #[test]
     fn test_validate_and_normalize_flow_options_reserved_option() {
-        let err = validate_and_normalize_flow_options(HashMap::from([(
-            FlowType::FLOW_TYPE_KEY.to_string(),
-            FlowType::BATCHING.to_string(),
-        )]))
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                FlowType::FLOW_TYPE_KEY.to_string(),
+                FlowType::BATCHING.to_string(),
+            )]),
+            None,
+        )
         .unwrap_err();
 
         assert!(
@@ -2699,10 +2726,13 @@ mod test {
 
     #[test]
     fn test_validate_and_normalize_flow_options_invalid_bool() {
-        let err = validate_and_normalize_flow_options(HashMap::from([(
-            DEFER_ON_MISSING_SOURCE_KEY.to_string(),
-            "not-a-bool".to_string(),
-        )]))
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                DEFER_ON_MISSING_SOURCE_KEY.to_string(),
+                "not-a-bool".to_string(),
+            )]),
+            None,
+        )
         .unwrap_err();
 
         assert!(
@@ -2730,11 +2760,175 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
         let expr =
             expr_helper::to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
-        let err = validate_and_normalize_flow_options(expr.flow_options).unwrap_err();
+        let err = validate_and_normalize_flow_options(expr.flow_options, None).unwrap_err();
 
-        assert!(err.to_string().contains(
-            "unknown flow option 'access_key_id', supported options: defer_on_missing_source"
-        ));
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'access_key_id'")
+        );
+    }
+
+    // --- Schedule option tests ---
+
+    #[test]
+    fn test_eval_interval_rejected_non_positive() {
+        // Zero eval_interval should be rejected.
+        let err = validate_and_normalize_flow_options(HashMap::new(), Some(0)).unwrap_err();
+        assert!(err.to_string().contains("EVAL INTERVAL must be positive"));
+
+        // Negative eval_interval should be rejected.
+        let err = validate_and_normalize_flow_options(HashMap::new(), Some(-5)).unwrap_err();
+        assert!(err.to_string().contains("EVAL INTERVAL must be positive"));
+
+        // Positive eval_interval should be accepted.
+        let result = validate_and_normalize_flow_options(HashMap::new(), Some(300));
+        assert!(result.is_ok());
+    }
+
+    // --- Schedule keys are rejected as unknown options (not in the allowlist) ---
+
+    #[test]
+    fn test_schedule_anchor_rejected_as_unknown_option() {
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                "eval_interval_anchor".to_string(),
+                "2025-01-01T00:00:00Z".to_string(),
+            )]),
+            Some(300),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'eval_interval_anchor'")
+        );
+    }
+
+    #[test]
+    fn test_schedule_anchor_rejected_without_eval_interval() {
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                "eval_interval_anchor".to_string(),
+                "2025-01-01T00:00:00Z".to_string(),
+            )]),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'eval_interval_anchor'")
+        );
+    }
+
+    #[test]
+    fn test_schedule_start_rejected_as_unknown_option() {
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                "eval_interval_start".to_string(),
+                "2025-06-01T12:00:00Z".to_string(),
+            )]),
+            Some(60),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'eval_interval_start'")
+        );
+    }
+
+    #[test]
+    fn test_schedule_missed_tick_policy_rejected() {
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                "eval_interval_missed_tick_policy".to_string(),
+                "bounded_catch_up".to_string(),
+            )]),
+            Some(300),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'eval_interval_missed_tick_policy'")
+        );
+    }
+
+    #[test]
+    fn test_schedule_catchup_max_runs_rejected() {
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                "eval_interval_catchup_max_runs".to_string(),
+                "5".to_string(),
+            )]),
+            Some(300),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'eval_interval_catchup_max_runs'")
+        );
+    }
+
+    #[test]
+    fn test_schedule_catchup_max_lag_rejected() {
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                "eval_interval_catchup_max_lag".to_string(),
+                "5m".to_string(),
+            )]),
+            Some(300),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'eval_interval_catchup_max_lag'")
+        );
+    }
+
+    #[test]
+    fn test_all_schedule_options_rejected_as_unknown() {
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([
+                (
+                    "eval_interval_anchor".to_string(),
+                    "2025-01-01T00:00:00Z".to_string(),
+                ),
+                (
+                    "eval_interval_start".to_string(),
+                    "2025-06-01T12:00:00Z".to_string(),
+                ),
+                (
+                    "eval_interval_missed_tick_policy".to_string(),
+                    "bounded_catch_up".to_string(),
+                ),
+                (
+                    "eval_interval_catchup_max_runs".to_string(),
+                    "5".to_string(),
+                ),
+                (
+                    "eval_interval_catchup_max_lag".to_string(),
+                    "10m".to_string(),
+                ),
+            ]),
+            Some(300),
+        )
+        .unwrap_err();
+        // The first key encountered triggers the "unknown" error.
+        assert!(err.to_string().contains("unknown flow option"));
+    }
+
+    #[test]
+    fn test_internal_eval_schedule_key_rejected_as_unknown_option() {
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                "__greptime_internal_eval_schedule".to_string(),
+                "{}".to_string(),
+            )]),
+            Some(300),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown flow option '__greptime_internal_eval_schedule'")
+        );
     }
 
     #[test]

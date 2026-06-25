@@ -25,9 +25,12 @@ use api::v1::region::InsertRequests;
 use catalog::CatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{
+    FlowType, INTERNAL_EVAL_SCHEDULE_KEY, effective_eval_schedule_from_flow_info,
+};
 use common_meta::error::Result as MetaResult;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::flow::flow_info::FlowScheduleConfig;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, trace, warn};
@@ -380,6 +383,7 @@ impl FlowDualEngine {
                         comment: Some(info.comment().clone()),
                         sql: info.raw_sql().clone(),
                         flow_options: info.options().clone(),
+                        eval_schedule: effective_eval_schedule_from_flow_info(&info),
                         query_ctx: info
                             .query_context()
                             .clone()
@@ -839,7 +843,7 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                 eval_interval,
                 comment,
                 sql,
-                flow_options,
+                mut flow_options,
                 or_replace,
             })) => {
                 let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
@@ -849,6 +853,26 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     sink_table_name.table_name,
                 ];
                 let expire_after = expire_after.map(|e| e.value);
+
+                // Decode typed schedule config from internal transient key. This
+                // is emitted by metasrv, so malformed JSON is an internal error
+                // rather than a reason to silently fall back to another schedule.
+                let eval_schedule = match flow_options.remove(INTERNAL_EVAL_SCHEDULE_KEY) {
+                    Some(json) => Some(
+                        serde_json::from_str::<FlowScheduleConfig>(&json)
+                            .map_err(|err| {
+                                InternalSnafu {
+                                    reason: format!(
+                                        "Invalid internal eval schedule payload: {err}"
+                                    ),
+                                }
+                                .build()
+                            })
+                            .map_err(to_meta_err(snafu::location!()))?,
+                    ),
+                    None => None,
+                };
+
                 let args = CreateFlowArgs {
                     flow_id: task_id.id as u64,
                     sink_table_name,
@@ -861,6 +885,7 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     sql: sql.clone(),
                     flow_options,
                     query_ctx,
+                    eval_schedule,
                 };
                 let ret = self
                     .create_flow(args)

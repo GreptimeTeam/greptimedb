@@ -14,6 +14,7 @@
 
 use std::str::FromStr;
 
+use chrono::{DateTime, Utc};
 use snafu::{OptionExt, ResultExt};
 use sqlparser::ast::{Ident, Query, Value};
 use sqlparser::dialect::Dialect;
@@ -32,12 +33,18 @@ pub const FLOW: &str = "FLOW";
 
 /// SQL Parser options.
 #[derive(Clone, Debug, Default)]
-pub struct ParseOptions {}
+pub struct ParseOptions {
+    /// If set, TQL parameter expressions containing `now()` will be evaluated
+    /// against this timestamp instead of wall-clock time.
+    pub scheduled_runtime: Option<DateTime<Utc>>,
+}
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
     pub(crate) parser: Parser<'a>,
     pub(crate) sql: &'a str,
+    /// Optional scheduled runtime for `now()` evaluation in TQL parameters.
+    pub(crate) scheduled_runtime: Option<DateTime<Utc>>,
 }
 
 impl ParserContext<'_> {
@@ -48,7 +55,11 @@ impl ParserContext<'_> {
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 
-        Ok(ParserContext { parser, sql })
+        Ok(ParserContext {
+            parser,
+            sql,
+            scheduled_runtime: None,
+        })
     }
 
     /// Parses parser context to Query.
@@ -60,11 +71,12 @@ impl ParserContext<'_> {
     pub fn create_with_dialect(
         sql: &str,
         dialect: &dyn Dialect,
-        _opts: ParseOptions,
+        opts: ParseOptions,
     ) -> Result<Vec<Statement>> {
         let mut stmts: Vec<Statement> = Vec::new();
 
         let mut parser_ctx = ParserContext::new(dialect, sql)?;
+        parser_ctx.scheduled_runtime = opts.scheduled_runtime;
 
         let mut expecting_statement_delimiter = false;
         loop {
@@ -95,7 +107,12 @@ impl ParserContext<'_> {
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
-        ParserContext { parser, sql }.intern_parse_table_name()
+        ParserContext {
+            parser,
+            sql,
+            scheduled_runtime: None,
+        }
+        .intern_parse_table_name()
     }
 
     pub(crate) fn intern_parse_table_name(&mut self) -> Result<ObjectName> {

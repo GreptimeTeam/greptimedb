@@ -746,6 +746,7 @@ impl StreamingEngine {
             sql,
             flow_options,
             query_ctx,
+            ..
         } = args;
 
         let mut node_ctx = self.node_context.write().await;

@@ -252,6 +252,7 @@ mod tests {
                     status: FlowStatus::Active,
                     created_time: chrono::Utc::now(),
                     updated_time: chrono::Utc::now(),
+                    eval_schedule: None,
                 },
                 (1..=3)
                     .map(|i| {
