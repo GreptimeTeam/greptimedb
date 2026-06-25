@@ -398,6 +398,36 @@ async fn test_prometheus_remote_write_v2_ignores_histogram_only_series() {
     assert!(write_rx.try_recv().is_err());
 }
 
+#[tokio::test]
+async fn test_prometheus_remote_write_rejects_unsupported_proto() {
+    common_telemetry::init_default_ut_logging();
+    let (read_tx, _read_rx) = mpsc::channel(100);
+    let (write_tx, mut write_rx) = mpsc::channel(100);
+
+    let app = make_test_app_with_write_capture(read_tx, write_tx);
+    let client = TestClient::new(app).await;
+
+    let result = client
+        .post("/v1/prometheus/write")
+        .header(
+            "content-type",
+            "application/x-protobuf;proto=io.prometheus.write.v3.Request",
+        )
+        .header("content-encoding", "snappy")
+        .body(Vec::new())
+        .send()
+        .await;
+
+    assert_eq!(result.status(), 415);
+    assert!(
+        result
+            .text()
+            .await
+            .contains("unsupported prometheus remote write content type")
+    );
+    assert!(write_rx.try_recv().is_err());
+}
+
 fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
     assert_eq!(
         Some(samples),

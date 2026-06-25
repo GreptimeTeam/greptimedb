@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
 use api::greptime_proto::io::prometheus::write::v2::{
@@ -30,7 +30,6 @@ use snafu::{OptionExt, ResultExt, ensure};
 use crate::error::{self, Result};
 use crate::prom_remote_write::row_builder::PromCtx;
 use crate::prom_remote_write::try_decompress;
-use crate::prom_remote_write::validation::validate_label_name;
 #[allow(deprecated)]
 use crate::prom_store::{
     DATABASE_LABEL, DATABASE_LABEL_ALT, METRIC_NAME_LABEL, PHYSICAL_TABLE_LABEL,
@@ -116,10 +115,18 @@ fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<Reso
     let mut prom_ctx = PromCtx::default();
     let mut table_name = None;
     let mut tags = Vec::with_capacity(series.labels_refs.len() / 2);
+    let mut label_names = HashSet::with_capacity(series.labels_refs.len() / 2);
 
     for pair in series.labels_refs.chunks_exact(2) {
         let name = symbol_ref(symbols, pair[0], "label name")?;
         let value = symbol_ref(symbols, pair[1], "label value")?;
+        validate_label(name, value)?;
+        ensure!(
+            label_names.insert(name),
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!("remote write v2 label name `{name}` is repeated"),
+            }
+        );
 
         if name == METRIC_NAME_LABEL {
             table_name = Some(value.to_string());
@@ -129,12 +136,6 @@ fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<Reso
             continue;
         }
 
-        ensure!(
-            validate_label_name(name.as_bytes()),
-            error::InvalidPromRemoteRequestSnafu {
-                msg: format!("Invalid label name: `{name}`"),
-            }
-        );
         tags.push((name.to_string(), value.to_string()));
     }
 
@@ -143,6 +144,23 @@ fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<Reso
     })?;
 
     Ok((prom_ctx, table_name, tags))
+}
+
+fn validate_label(name: &str, value: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty(),
+        error::InvalidPromRemoteRequestSnafu {
+            msg: "remote write v2 label names must not be empty".to_string(),
+        }
+    );
+    ensure!(
+        !value.is_empty(),
+        error::InvalidPromRemoteRequestSnafu {
+            msg: format!("remote write v2 label `{name}` value must not be empty"),
+        }
+    );
+
+    Ok(())
 }
 
 fn symbol_ref<'a>(symbols: &'a [String], idx: u32, field: &str) -> Result<&'a str> {
@@ -389,6 +407,48 @@ mod tests {
     }
 
     #[test]
+    fn test_into_context_req_accepts_utf8_label_names() {
+        let ctx_req = test_util::request_with_labels_and_samples(
+            vec![
+                (METRIC_NAME_LABEL, "http_requests_total"),
+                ("service.name", "api"),
+                ("区域", "华东"),
+            ],
+            vec![Sample {
+                value: 42.0,
+                timestamp: 1000,
+                start_timestamp: 0,
+            }],
+        )
+        .into_context_req()
+        .unwrap();
+
+        let mut inserts = ctx_req.all_req().collect::<Vec<_>>();
+        assert_eq!(inserts.len(), 1);
+        let rows = inserts.pop().unwrap().rows.unwrap();
+        assert_eq!(
+            rows.schema
+                .iter()
+                .map(|col| col.column_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                greptime_timestamp(),
+                greptime_value(),
+                "service.name",
+                "区域"
+            ]
+        );
+        assert_eq!(
+            rows.rows[0].values[2].value_data,
+            Some(ValueData::StringValue("api".to_string()))
+        );
+        assert_eq!(
+            rows.rows[0].values[3].value_data,
+            Some(ValueData::StringValue("华东".to_string()))
+        );
+    }
+
+    #[test]
     fn test_into_context_req_special_labels() {
         let ctx_req = test_util::request_with_labels_and_samples(
             vec![
@@ -485,6 +545,55 @@ mod tests {
         request.symbols[0] = "not-empty".to_string();
 
         assert_invalid(request, "symbols must start with an empty string");
+    }
+
+    #[test]
+    fn test_into_context_req_rejects_repeated_label_name() {
+        assert_invalid(
+            test_util::request_with_labels_and_samples(
+                vec![
+                    (METRIC_NAME_LABEL, "metric"),
+                    ("job", "api"),
+                    ("job", "worker"),
+                ],
+                vec![Sample {
+                    value: 1.0,
+                    timestamp: 1000,
+                    start_timestamp: 0,
+                }],
+            ),
+            "label name `job` is repeated",
+        );
+    }
+
+    #[test]
+    fn test_into_context_req_rejects_empty_label_name() {
+        assert_invalid(
+            test_util::request_with_labels_and_samples(
+                vec![(METRIC_NAME_LABEL, "metric"), ("", "api")],
+                vec![Sample {
+                    value: 1.0,
+                    timestamp: 1000,
+                    start_timestamp: 0,
+                }],
+            ),
+            "label names must not be empty",
+        );
+    }
+
+    #[test]
+    fn test_into_context_req_rejects_empty_label_value() {
+        assert_invalid(
+            test_util::request_with_labels_and_samples(
+                vec![(METRIC_NAME_LABEL, "metric"), ("job", "")],
+                vec![Sample {
+                    value: 1.0,
+                    timestamp: 1000,
+                    start_timestamp: 0,
+                }],
+            ),
+            "label `job` value must not be empty",
+        );
     }
 
     #[test]

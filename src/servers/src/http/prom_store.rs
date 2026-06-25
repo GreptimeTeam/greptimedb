@@ -54,6 +54,7 @@ pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
+const REMOTE_WRITE_V1_PROTO: &str = "prometheus.WriteRequest";
 const REMOTE_WRITE_V2_PROTO: &str = "io.prometheus.write.v2.Request";
 const CONTENT_TYPE_PROTO_PARAM: &str = "proto";
 const REMOTE_WRITE_V2_SAMPLES_WRITTEN_HEADER: &str = "x-prometheus-remote-write-samples-written";
@@ -107,13 +108,19 @@ pub async fn remote_write(
 ) -> Result<axum::response::Response> {
     let is_zstd = content_encoding.contains(VM_ENCODING);
 
-    if let Some(ct) = content_type
-        && is_remote_write_v2(ct.0)
-    {
-        return remote_write_v2(state, params, query_ctx, pipeline_info, is_zstd, body).await;
+    match remote_write_proto(content_type) {
+        RemoteWriteProto::V1 => {
+            remote_write_v1(state, params, query_ctx, pipeline_info, is_zstd, body).await
+        }
+        RemoteWriteProto::V2 => {
+            remote_write_v2(state, params, query_ctx, pipeline_info, is_zstd, body).await
+        }
+        RemoteWriteProto::Unsupported(content_type) => Ok((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("unsupported prometheus remote write content type: {content_type}"),
+        )
+            .into_response()),
     }
-
-    remote_write_v1(state, params, query_ctx, pipeline_info, is_zstd, body).await
 }
 
 async fn remote_write_v1(
@@ -336,20 +343,39 @@ fn append_remote_write_v2_written_headers(
     );
 }
 
+enum RemoteWriteProto {
+    V1,
+    V2,
+    Unsupported(mime::Mime),
+}
+
 // ref: https://github.com/prometheus/client_golang/blob/74560058a7af7a695db8196c8e84a0754032c6af/exp/api/remote/remote_api.go#L544
-fn is_remote_write_v2(content_type: headers::ContentType) -> bool {
+fn remote_write_proto(content_type: Option<TypedHeader<headers::ContentType>>) -> RemoteWriteProto {
+    let Some(TypedHeader(content_type)) = content_type else {
+        return RemoteWriteProto::V1;
+    };
+
     let mime_type: mime::Mime = content_type.into();
     if !mime_type
         .essence_str()
         .eq_ignore_ascii_case(CONTENT_TYPE_PROTOBUF_STR)
     {
-        return false;
+        return RemoteWriteProto::Unsupported(mime_type);
     }
 
-    mime_type.params().any(|(name, value)| {
-        name.as_str().eq_ignore_ascii_case(CONTENT_TYPE_PROTO_PARAM)
-            && value.as_str() == REMOTE_WRITE_V2_PROTO
-    })
+    for (name, value) in mime_type.params() {
+        if !name.as_str().eq_ignore_ascii_case(CONTENT_TYPE_PROTO_PARAM) {
+            continue;
+        }
+
+        return match value.as_str() {
+            REMOTE_WRITE_V1_PROTO => RemoteWriteProto::V1,
+            REMOTE_WRITE_V2_PROTO => RemoteWriteProto::V2,
+            _ => RemoteWriteProto::Unsupported(mime_type.clone()),
+        };
+    }
+
+    RemoteWriteProto::V1
 }
 
 impl IntoResponse for PromStoreResponse {
@@ -421,21 +447,52 @@ mod tests {
     use crate::query_handler::PromStoreProtocolHandler;
 
     #[test]
-    fn test_is_remote_write_v2() {
-        assert!(is_remote_write_v2(content_type(
-            "application/x-protobuf;proto=io.prometheus.write.v2.Request"
-        )));
-        assert!(is_remote_write_v2(content_type(
-            "application/x-protobuf; proto=\"io.prometheus.write.v2.Request\""
-        )));
+    fn test_remote_write_proto() {
+        assert!(matches!(
+            remote_write_proto(content_type(
+                "application/x-protobuf;proto=io.prometheus.write.v2.Request"
+            )),
+            RemoteWriteProto::V2
+        ));
+        assert!(matches!(
+            remote_write_proto(content_type(
+                "application/x-protobuf; proto=\"io.prometheus.write.v2.Request\""
+            )),
+            RemoteWriteProto::V2
+        ));
+        assert!(matches!(
+            remote_write_proto(content_type(
+                "APPLICATION/X-PROTOBUF;proto=io.prometheus.write.v2.Request"
+            )),
+            RemoteWriteProto::V2
+        ));
+        assert!(matches!(
+            remote_write_proto(content_type("application/x-protobuf")),
+            RemoteWriteProto::V1
+        ));
+        assert!(matches!(
+            remote_write_proto(content_type(
+                "application/x-protobuf;proto=prometheus.WriteRequest"
+            )),
+            RemoteWriteProto::V1
+        ));
+        assert!(matches!(
+            remote_write_proto(content_type(
+                "application/x-protobuf;proto=unknown.WriteRequest"
+            )),
+            RemoteWriteProto::Unsupported(_)
+        ));
+        assert!(matches!(
+            remote_write_proto(content_type(
+                "application/json;proto=io.prometheus.write.v2.Request"
+            )),
+            RemoteWriteProto::Unsupported(_)
+        ));
+        assert!(matches!(remote_write_proto(None), RemoteWriteProto::V1));
+    }
 
-        assert!(!is_remote_write_v2(content_type("application/x-protobuf")));
-        assert!(!is_remote_write_v2(content_type(
-            "application/x-protobuf;proto=prometheus.WriteRequest"
-        )));
-        assert!(!is_remote_write_v2(content_type(
-            "application/json;proto=io.prometheus.write.v2.Request"
-        )));
+    fn content_type(value: &str) -> Option<TypedHeader<headers::ContentType>> {
+        Some(TypedHeader(std::str::FromStr::from_str(value).unwrap()))
     }
 
     #[tokio::test]
@@ -456,10 +513,6 @@ mod tests {
             err.to_string()
                 .contains("pipeline processing is not supported")
         );
-    }
-
-    fn content_type(value: &str) -> headers::ContentType {
-        std::str::FromStr::from_str(value).unwrap()
     }
 
     fn test_state() -> PromStoreState {
