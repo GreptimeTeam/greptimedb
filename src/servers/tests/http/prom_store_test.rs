@@ -13,8 +13,12 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use api::greptime_proto::io::prometheus::write::v2::Sample as RemoteWriteV2Sample;
+use api::greptime_proto::io::prometheus::write::v2::{
+    Request as RemoteWriteV2Request, Sample as RemoteWriteV2Sample,
+    TimeSeries as RemoteWriteV2TimeSeries,
+};
 use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
@@ -30,7 +34,7 @@ use datafusion_expr::LogicalPlan;
 use prost::Message;
 use query::parser::PromQuery;
 use query::query_engine::DescribeResult;
-use servers::error::Result;
+use servers::error::{self, Result};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::http::test_helpers::TestClient;
@@ -48,6 +52,8 @@ use tokio::sync::mpsc;
 struct DummyInstance {
     read_tx: mpsc::Sender<(String, Vec<u8>)>,
     write_tx: mpsc::Sender<RemoteWriteCapture>,
+    write_calls: Arc<AtomicUsize>,
+    fail_write_call: Option<usize>,
 }
 
 struct RemoteWriteCapture {
@@ -64,6 +70,14 @@ impl PromStoreProtocolHandler for DummyInstance {
         ctx: QueryContextRef,
         _with_metric_engine: bool,
     ) -> Result<Output> {
+        let write_call = self.write_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_write_call == Some(write_call) {
+            return error::InvalidPromRemoteRequestSnafu {
+                msg: "injected prometheus remote write failure".to_string(),
+            }
+            .fail();
+        }
+
         let _ = self
             .write_tx
             .send(RemoteWriteCapture {
@@ -142,17 +156,164 @@ fn make_test_app_with_write_capture(
     read_tx: mpsc::Sender<(String, Vec<u8>)>,
     write_tx: mpsc::Sender<RemoteWriteCapture>,
 ) -> Router {
+    make_test_app_with_write_failure(read_tx, write_tx, None)
+}
+
+fn make_test_app_with_write_failure(
+    read_tx: mpsc::Sender<(String, Vec<u8>)>,
+    write_tx: mpsc::Sender<RemoteWriteCapture>,
+    fail_write_call: Option<usize>,
+) -> Router {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
         ..Default::default()
     };
 
-    let instance = Arc::new(DummyInstance { read_tx, write_tx });
+    let instance = Arc::new(DummyInstance {
+        read_tx,
+        write_tx,
+        write_calls: Arc::new(AtomicUsize::new(0)),
+        fail_write_call,
+    });
     let server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(instance.clone())
         .with_prom_handler(instance, None, true, PromValidationMode::Unchecked, None)
         .build();
     server.build(server.make_app()).unwrap()
+}
+
+#[tokio::test]
+async fn test_prometheus_remote_write_v2_decode_error_has_written_headers() {
+    common_telemetry::init_default_ut_logging();
+    let (read_tx, _read_rx) = mpsc::channel(100);
+    let (write_tx, mut write_rx) = mpsc::channel(100);
+
+    let app = make_test_app_with_write_capture(read_tx, write_tx);
+    let client = TestClient::new(app).await;
+
+    let result = client
+        .post("/v1/prometheus/write")
+        .header(
+            "content-type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .header("content-encoding", "snappy")
+        .body(vec![0xff, 0xff])
+        .send()
+        .await;
+
+    assert_eq!(result.status(), 400);
+    assert_remote_write_v2_written_headers(&result.headers(), "0");
+    assert!(result.text().await.contains("error"));
+    assert!(write_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_prometheus_remote_write_v2_convert_error_has_written_headers() {
+    common_telemetry::init_default_ut_logging();
+    let (read_tx, _read_rx) = mpsc::channel(100);
+    let (write_tx, mut write_rx) = mpsc::channel(100);
+
+    let app = make_test_app_with_write_capture(read_tx, write_tx);
+    let client = TestClient::new(app).await;
+
+    let write_request = remote_write_v2::request_with_labels_and_samples(
+        vec![("job", "api")],
+        vec![RemoteWriteV2Sample {
+            value: 42.0,
+            timestamp: 1000,
+            start_timestamp: 0,
+        }],
+    );
+
+    let result = client
+        .post("/v1/prometheus/write")
+        .header(
+            "content-type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .header("content-encoding", "snappy")
+        .body(snappy_compress(&write_request.encode_to_vec()).unwrap())
+        .send()
+        .await;
+
+    assert_eq!(result.status(), 400);
+    assert_remote_write_v2_written_headers(&result.headers(), "0");
+    assert!(result.text().await.contains("missing '__name__'"));
+    assert!(write_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_prometheus_remote_write_v2_write_error_has_partial_written_headers() {
+    common_telemetry::init_default_ut_logging();
+    let (read_tx, _read_rx) = mpsc::channel(100);
+    let (write_tx, mut write_rx) = mpsc::channel(100);
+
+    let app = make_test_app_with_write_failure(read_tx, write_tx, Some(2));
+    let client = TestClient::new(app).await;
+
+    let write_request = RemoteWriteV2Request {
+        symbols: vec![
+            String::new(),
+            prom_store::METRIC_NAME_LABEL.to_string(),
+            "http_requests_total".to_string(),
+            prom_store::DATABASE_LABEL.to_string(),
+            "tenant_a".to_string(),
+            "tenant_b".to_string(),
+        ],
+        timeseries: vec![
+            RemoteWriteV2TimeSeries {
+                labels_refs: vec![1, 2, 3, 4],
+                samples: vec![RemoteWriteV2Sample {
+                    value: 42.0,
+                    timestamp: 1000,
+                    start_timestamp: 0,
+                }],
+                ..Default::default()
+            },
+            RemoteWriteV2TimeSeries {
+                labels_refs: vec![1, 2, 3, 5],
+                samples: vec![RemoteWriteV2Sample {
+                    value: 43.0,
+                    timestamp: 2000,
+                    start_timestamp: 0,
+                }],
+                ..Default::default()
+            },
+        ],
+    };
+
+    let result = client
+        .post("/v1/prometheus/write")
+        .header(
+            "content-type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .header("content-encoding", "snappy")
+        .body(snappy_compress(&write_request.encode_to_vec()).unwrap())
+        .send()
+        .await;
+
+    assert_eq!(result.status(), 400);
+    assert_remote_write_v2_written_headers(&result.headers(), "1");
+    assert!(
+        result
+            .text()
+            .await
+            .contains("injected prometheus remote write failure")
+    );
+
+    let captured = write_rx.recv().await.unwrap();
+    assert_eq!(
+        1,
+        captured.request.inserts[0]
+            .rows
+            .as_ref()
+            .unwrap()
+            .rows
+            .len()
+    );
+    assert!(write_rx.try_recv().is_err());
 }
 
 #[tokio::test]

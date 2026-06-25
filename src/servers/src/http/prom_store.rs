@@ -207,19 +207,22 @@ async fn remote_write_v2(
         return Ok(response);
     }
 
-    ensure!(
-        pipeline_info.pipeline_name.is_none(),
-        error::InvalidPromRemoteRequestSnafu {
-            msg: "remote write v2 pipeline processing is not supported".to_string(),
-        }
-    );
+    // Pipeline processing is not supported for remote write v2 yet. Ignore the
+    // optional pipeline parameter and ingest samples directly.
+    let _ = pipeline_info;
 
     let (db, query_ctx, _timer) = prepare_remote_write_context(&params, query_ctx);
 
-    let request = decode_remote_write_v2_request(is_zstd, body)?;
-    let req = request.into_context_req()?;
+    let request = match decode_remote_write_v2_request(is_zstd, body) {
+        Ok(request) => request,
+        Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
+    };
+    let req = match request.into_context_req() {
+        Ok(req) => req,
+        Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
+    };
 
-    let outcome = write_prometheus_rows(
+    let outcome = match write_prometheus_rows_with_progress(
         prom_store_handler,
         pending_rows_batcher,
         prom_store_with_metric_engine,
@@ -227,7 +230,18 @@ async fn remote_write_v2(
         query_ctx,
         req,
     )
-    .await?;
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Ok(remote_write_v2_error_response(
+                error.error,
+                error.rows_written,
+                0,
+                0,
+            ));
+        }
+    };
 
     let mut headers = write_cost_header_map(outcome.write_cost);
     append_remote_write_v2_written_headers(&mut headers, outcome.rows_written, 0, 0);
@@ -273,6 +287,11 @@ struct PromWriteOutcome {
     rows_written: u64,
 }
 
+struct PromWriteError {
+    error: error::Error,
+    rows_written: u64,
+}
+
 async fn write_prometheus_rows(
     prom_store_handler: PromStoreProtocolHandlerRef,
     pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
@@ -281,13 +300,43 @@ async fn write_prometheus_rows(
     query_ctx: Arc<QueryContext>,
     req: ContextReq,
 ) -> Result<PromWriteOutcome> {
+    write_prometheus_rows_with_progress(
+        prom_store_handler,
+        pending_rows_batcher,
+        prom_store_with_metric_engine,
+        db,
+        query_ctx,
+        req,
+    )
+    .await
+    .map_err(|error| error.error)
+}
+
+async fn write_prometheus_rows_with_progress(
+    prom_store_handler: PromStoreProtocolHandlerRef,
+    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    prom_store_with_metric_engine: bool,
+    db: &str,
+    query_ctx: Arc<QueryContext>,
+    req: ContextReq,
+) -> std::result::Result<PromWriteOutcome, PromWriteError> {
     if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
         let mut rows_written = 0;
         for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
             prom_store_handler
                 .pre_write(&reqs, temp_ctx.clone())
-                .await?;
-            let rows = batcher.submit(reqs, temp_ctx).await?;
+                .await
+                .map_err(|error| PromWriteError {
+                    error,
+                    rows_written,
+                })?;
+            let rows = batcher
+                .submit(reqs, temp_ctx)
+                .await
+                .map_err(|error| PromWriteError {
+                    error,
+                    rows_written,
+                })?;
             crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
                 .with_label_values(&[db])
                 .inc_by(rows);
@@ -309,7 +358,11 @@ async fn write_prometheus_rows(
             .sum();
         let output = prom_store_handler
             .write(reqs, temp_ctx, prom_store_with_metric_engine)
-            .await?;
+            .await
+            .map_err(|error| PromWriteError {
+                error,
+                rows_written,
+            })?;
         crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
             .with_label_values(&[db])
             .inc_by(cnt);
@@ -321,6 +374,17 @@ async fn write_prometheus_rows(
         write_cost,
         rows_written,
     })
+}
+
+fn remote_write_v2_error_response(
+    error: error::Error,
+    samples: u64,
+    histograms: u64,
+    exemplars: u64,
+) -> axum::response::Response {
+    let mut response = error.into_response();
+    append_remote_write_v2_written_headers(response.headers_mut(), samples, histograms, exemplars);
+    response
 }
 
 fn append_remote_write_v2_written_headers(
@@ -496,22 +560,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remote_write_v2_rejects_pipeline() {
-        let err = remote_write_v2(
+    async fn test_remote_write_v2_ignores_pipeline() {
+        let request = api::greptime_proto::io::prometheus::write::v2::Request {
+            symbols: vec![String::new()],
+            timeseries: Vec::new(),
+        };
+        let body =
+            Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
+
+        let response = remote_write_v2(
             test_state(),
             RemoteWriteQuery::default(),
             QueryContext::with("greptime", "public"),
             pipeline_info(Some("pipeline")),
             false,
-            Bytes::new(),
+            body,
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-        assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
-        assert!(
-            err.to_string()
-                .contains("pipeline processing is not supported")
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            Some("0"),
+            response
+                .headers()
+                .get(REMOTE_WRITE_V2_SAMPLES_WRITTEN_HEADER)
+                .map(|x| x.to_str().unwrap())
         );
     }
 
@@ -543,7 +617,7 @@ mod tests {
             _ctx: QueryContextRef,
             _with_metric_engine: bool,
         ) -> Result<Output> {
-            unreachable!("remote write v2 pipeline rejection must happen before writing")
+            unreachable!("empty remote write v2 request should not write")
         }
 
         async fn read(
