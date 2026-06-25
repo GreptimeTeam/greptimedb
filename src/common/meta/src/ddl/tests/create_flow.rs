@@ -521,6 +521,25 @@ fn test_effective_eval_schedule_none_without_eval_interval() {
     assert!(effective_eval_schedule_from_flow_info(&flow_info).is_none());
 }
 
+#[test]
+fn test_effective_eval_schedule_deterministic_on_old_metadata() {
+    // Old metadata: no typed eval_schedule, but has eval_interval_secs and
+    // a fixed created_time. Repeated calls must produce the same config.
+    let flow_info = flow_info_for_schedule_test(None, Some(60), HashMap::new(), 61);
+    let first = effective_eval_schedule_from_flow_info(&flow_info).unwrap();
+    let second = effective_eval_schedule_from_flow_info(&flow_info).unwrap();
+    assert_eq!(first, second);
+    // Sanity: the derived values are based on created_time=61 + interval=60.
+    assert_eq!(first.anchor_secs, 0);
+    assert_eq!(first.start_secs, 120); // ceil(61, 0, 60) = 120
+    assert_eq!(
+        first.missed_tick_policy,
+        FlowMissedTickPolicy::BoundedCatchUp
+    );
+    assert_eq!(first.catchup_max_runs, 3);
+    assert_eq!(first.catchup_max_lag_secs, 300); // max(300, 3*60) = 300
+}
+
 #[tokio::test]
 async fn test_create_flow_rejects_unknown_option_in_meta_task() {
     let mut task = test_create_flow_task(
