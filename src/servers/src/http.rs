@@ -119,6 +119,7 @@ pub mod test_helpers;
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
+pub const HTTP_API_PREFIX_WITHOUT_TRAILING_SLASH: &str = "/v1";
 /// Default http body limit (64M).
 const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 
