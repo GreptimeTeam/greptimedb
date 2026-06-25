@@ -32,6 +32,7 @@ use common_base::regex_pattern::NAME_PATTERN_REG;
 use common_error::ext::ErrorExt;
 use common_query::prelude::greptime_timestamp;
 use common_telemetry::{debug, error};
+use operator::insert::SPLUNK_PK_METADATA_ORDER_KEY;
 use pipeline::{
     ContextReq, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GreptimePipelineParams, PipelineContext,
     PipelineDefinition,
@@ -358,6 +359,11 @@ pub async fn handle_event(
     });
     // Only post-process tags for the identity default; respect a user pipeline's schema.
     let apply_tags = pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME;
+    if apply_tags {
+        // Ask the insert path to lead the primary key with our metadata tags. Scoped to the
+        // identity path so a user pipeline's own key order is left untouched.
+        query_ctx.set_extension(SPLUNK_PK_METADATA_ORDER_KEY, "true");
+    }
     // custom_time_index so timestamp doesn't get overriden by identity pipeline.
     let custom_time_index = Some((format!("{};epoch;ns", greptime_timestamp()), false));
     let pipeline = match PipelineDefinition::from_name(&pipeline_name, None, custom_time_index) {

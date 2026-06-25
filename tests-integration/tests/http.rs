@@ -1551,6 +1551,14 @@ pub async fn test_splunk_logs(store_type: StorageType) {
             "expected `{col}` in primary key: {create}"
         );
     }
+    // host/source/sourcetype lead the primary key (ahead of the `fields` tag `region`),
+    let pos = |col: &str| pk.find(col).expect("column missing from primary key");
+    assert!(
+        pos("host") < pos("source")
+            && pos("source") < pos("sourcetype")
+            && pos("sourcetype") < pos("region"),
+        "expected host/source/sourcetype to lead the primary key: {create}"
+    );
 
     // 4. A brand-new `fields` key on a later write also becomes a tag (dynamic
     //    tag column added to the existing table's primary key).
