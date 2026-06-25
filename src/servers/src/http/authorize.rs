@@ -70,7 +70,6 @@ pub async fn inner_auth<B>(
 
     let query_ctx = query_ctx_builder.build();
     let need_auth = need_auth(&req);
-    let is_splunk = is_splunk_request(&req);
 
     // 2. check if auth is needed
     let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
@@ -89,7 +88,7 @@ pub async fn inner_auth<B>(
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
-            if is_splunk {
+            if is_splunk_request(&req) {
                 // HEC: missing header -> 2 ("token is required"), else 4 ("invalid token").
                 let (status, code) = match &e {
                     error::Error::NotFoundAuthHeader { .. } => (StatusCode::UNAUTHORIZED, 2),
@@ -122,7 +121,7 @@ pub async fn inner_auth<B>(
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
             // HEC: bad credentials -> 4 ("invalid token", 403).
-            if is_splunk {
+            if is_splunk_request(&req) {
                 return Err(splunk_hec_err(StatusCode::FORBIDDEN, 4));
             }
             Err(err_response(e))

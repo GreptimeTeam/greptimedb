@@ -31,7 +31,7 @@ use chrono::{DateTime, Utc};
 use common_base::regex_pattern::NAME_PATTERN_REG;
 use common_error::ext::ErrorExt;
 use common_query::prelude::greptime_timestamp;
-use common_telemetry::error;
+use common_telemetry::{debug, error};
 use pipeline::{
     ContextReq, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GreptimePipelineParams, PipelineContext,
     PipelineDefinition,
@@ -54,7 +54,6 @@ use crate::query_handler::PipelineHandlerRef;
 /// Default table used when neither the event's `index` nor a `?table=` query
 /// param is provided.
 const DEFAULT_SPLUNK_TABLE: &str = "splunk_logs";
-pub(crate) const SPLUNK_API_PATH_NAME: &str = "/v1/splunk";
 /// HEC response code for a healthy collector. Splunk returns
 /// `{"text":"HEC is healthy","code":17}`.
 const HEC_HEALTHY_CODE: u32 = 17;
@@ -96,6 +95,35 @@ fn parse_hec_time(value: &VrlValue) -> Option<DateTime<Utc>> {
     }
 }
 
+/// `event` missing -> 12, `event` blank -> 13.
+/// present, non-null but unparseable `time` -> 6.
+fn validate_event(event: &VrlValue) -> Option<(u32, &'static str)> {
+    let VrlValue::Object(obj) = event else {
+        return None;
+    };
+    match obj.get("event") {
+        None => return Some((12, "Event field is required")),
+        Some(value) if is_blank_event(value) => return Some((13, "Event field cannot be blank")),
+        _ => {}
+    }
+    if let Some(time) = obj.get("time")
+        && !matches!(time, VrlValue::Null)
+        && parse_hec_time(time).is_none()
+    {
+        return Some((6, "invalid data format"));
+    }
+    None
+}
+
+/// A HEC `event` value is blank if it's `null` or an empty/whitespace-only string.
+fn is_blank_event(value: &VrlValue) -> bool {
+    match value {
+        VrlValue::Null => true,
+        VrlValue::Bytes(b) => std::str::from_utf8(b).is_ok_and(|s| s.trim().is_empty()),
+        _ => false,
+    }
+}
+
 /// Maps one HEC event to `(table, per-event map, tag names)`: `time`->timestamp,
 /// `index`->table, host/source/sourcetype/`fields`->tags, `event`+rest->data.
 /// `None` if the event isn't a JSON object.
@@ -103,8 +131,12 @@ fn hec_event_to_map(
     event: VrlValue,
     query_table: Option<&str>,
 ) -> Option<(String, VrlValue, Vec<String>)> {
-    let VrlValue::Object(mut obj) = event else {
-        return None;
+    let mut obj = match event {
+        VrlValue::Object(obj) => obj,
+        other => {
+            debug!("skipping non-object splunk HEC event: {other:?}");
+            return None;
+        }
     };
 
     // Timestamp: HEC `time` is honored first, else ingest time.
@@ -215,8 +247,8 @@ fn sanitize_index(raw: &str) -> Option<String> {
 }
 
 pub(crate) fn is_splunk_request<B>(req: &axum::extract::Request<B>) -> bool {
-    let path = req.uri().path();
-    path.starts_with(SPLUNK_API_PATH_NAME)
+    // Match only `/v1/splunk/<subpath>`
+    req.uri().path().starts_with("/v1/splunk/")
 }
 /// Like `ingest_logs_inner`, but retags metadata columns (identity default) before insert.
 async fn ingest_events(
@@ -287,6 +319,11 @@ pub async fn handle_event(
     let mut by_table: HashMap<String, Vec<VrlValue>> = HashMap::new();
     let mut tag_columns: HashMap<String, HashSet<String>> = HashMap::new();
     for event in events {
+        // Reject the batch on an invalid event: missing/blank `event` (12/13) or an
+        // unparseable `time` (6).
+        if let Some((code, text)) = validate_event(&event) {
+            return hec_response(StatusCode::BAD_REQUEST, code, text);
+        }
         if let Some((table, map, tags)) = hec_event_to_map(event, query_table) {
             tag_columns.entry(table.clone()).or_default().extend(tags);
             by_table.entry(table).or_default().push(map);
@@ -321,7 +358,9 @@ pub async fn handle_event(
     });
     // Only post-process tags for the identity default; respect a user pipeline's schema.
     let apply_tags = pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME;
-    let pipeline = match PipelineDefinition::from_name(&pipeline_name, None, None) {
+    // custom_time_index so timestamp doesn't get overriden by identity pipeline.
+    let custom_time_index = Some((format!("{};epoch;ns", greptime_timestamp()), false));
+    let pipeline = match PipelineDefinition::from_name(&pipeline_name, None, custom_time_index) {
         Ok(pipeline) => pipeline,
         Err(_) => return hec_response(StatusCode::INTERNAL_SERVER_ERROR, 8, "pipeline error"),
     };
@@ -578,6 +617,51 @@ mod tests {
     fn map_rejects_non_object_event() {
         let ev: VrlValue = json!("just a string").into();
         assert!(hec_event_to_map(ev, None).is_none());
+    }
+
+    // ---- validate_event ----
+
+    #[test]
+    fn validates_event() {
+        let check = |v: serde_json::Value| validate_event(&v.into());
+
+        // missing `event` -> code 12.
+        assert_eq!(
+            check(json!({ "host": "h" })),
+            Some((12, "Event field is required"))
+        );
+        // present but blank (empty / whitespace) or null -> code 13.
+        assert_eq!(
+            check(json!({ "event": "" })),
+            Some((13, "Event field cannot be blank"))
+        );
+        assert_eq!(
+            check(json!({ "event": "   " })),
+            Some((13, "Event field cannot be blank"))
+        );
+        assert_eq!(
+            check(json!({ "event": null })),
+            Some((13, "Event field cannot be blank"))
+        );
+        // valid: non-empty string, object, or other non-blank value.
+        assert_eq!(check(json!({ "event": "hello" })), None);
+        assert_eq!(check(json!({ "event": { "a": 1 } })), None);
+        assert_eq!(check(json!({ "event": 0 })), None);
+        // non-object events aren't validated here (handled by `hec_event_to_map`).
+        assert_eq!(check(json!("just a string")), None);
+
+        // present but unparseable `time` -> code 6 (number string / numeric are fine).
+        let bad_time = Some((6, "invalid data format"));
+        assert_eq!(
+            check(json!({ "event": "x", "time": "not-a-time" })),
+            bad_time
+        );
+        assert_eq!(check(json!({ "event": "x", "time": { "a": 1 } })), bad_time);
+        assert_eq!(check(json!({ "event": "x", "time": 1700000000 })), None);
+        assert_eq!(check(json!({ "event": "x", "time": "1700000000" })), None);
+        // absent or null `time` falls back to ingest time, so it's allowed.
+        assert_eq!(check(json!({ "event": "x" })), None);
+        assert_eq!(check(json!({ "event": "x", "time": null })), None);
     }
 
     #[test]

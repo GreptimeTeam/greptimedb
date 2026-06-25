@@ -1529,13 +1529,14 @@ pub async fn test_splunk_logs(store_type: StorageType) {
     let rows = get_rows_from_output(
         &query(
             &client,
-            "select host, region, event from splunk_logs order by host",
+            "select host, region, event, greptime_timestamp from splunk_logs order by host",
         )
         .await,
     );
+    // `time` (epoch seconds) maps to the nanosecond timestamp column.
     assert_eq!(
         rows,
-        r#"[["web-01","us-east","login ok"],["web-02","us-west","login fail"]]"#
+        r#"[["web-01","us-east","login ok",1700000000000000000],["web-02","us-west","login fail",1700000001000000000]]"#
     );
 
     // 3. host/source/sourcetype + `fields` keys are tags (i.e. primary key).
