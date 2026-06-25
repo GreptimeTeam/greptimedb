@@ -125,6 +125,11 @@ impl CompatCommand {
         // `>=not-a-version` cause a hard error instead of silent skip.
         compat_case::validate_cases_metadata(&cases).unwrap_or_else(|e| panic!("{e}"));
 
+        // ---- 3c. Validate namespace dedup before version filtering ----
+        // Validate globally for all selected topology/name cases so duplicated
+        // namespaces cannot hide behind version filters.
+        compat_case::validate_case_namespaces(&cases).unwrap_or_else(|e| panic!("{e}"));
+
         // ---- 4. Resolve "from" binary path and infer version ----
         let from_bins_dir = resolve_bins(
             self.from_bins_dir.as_ref(),
@@ -199,9 +204,6 @@ impl CompatCommand {
             println!("No compat cases remaining after version-range filtering");
             return;
         }
-
-        // ---- 5c. Validate namespace dedup on final selected batch ----
-        compat_case::validate_case_namespaces(&cases).unwrap_or_else(|e| panic!("{e}"));
 
         println!(
             "Running {} compat case(s) with topology {}:",
@@ -491,30 +493,21 @@ async fn run_compat_phase(
 
         let result_path = case.dir.join("verify.result");
 
-        // If verify.result doesn't exist, create it (like sqlness does on first run)
-        if !result_path.is_file() {
+        // verify.result is required at discovery time, so it always exists here.
+        let expected = std::fs::read_to_string(&result_path)
+            .map_err(|e| format!("Failed to read {}: {e}", result_path.display()))?;
+
+        if verify_output != expected {
+            // Update the result file with actual output to aid local update.
             std::fs::write(&result_path, &verify_output)
-                .map_err(|e| format!("Failed to create {}: {e}", result_path.display()))?;
-            println!(
-                "  Created initial verify.result for case '{}'",
+                .map_err(|e| format!("Failed to update {}: {e}", result_path.display()))?;
+
+            // Generate a simple diff
+            let diff = simple_diff(&expected, &verify_output);
+            return Err(format!(
+                "Result mismatch for case '{}'.\nDiff:\n{diff}",
                 case.metadata.name
-            );
-        } else {
-            let expected = std::fs::read_to_string(&result_path)
-                .map_err(|e| format!("Failed to read {}: {e}", result_path.display()))?;
-
-            if verify_output != expected {
-                // Update the result file with actual output (sqlness behavior)
-                std::fs::write(&result_path, &verify_output)
-                    .map_err(|e| format!("Failed to update {}: {e}", result_path.display()))?;
-
-                // Generate a simple diff
-                let diff = simple_diff(&expected, &verify_output);
-                return Err(format!(
-                    "Result mismatch for case '{}'.\nDiff:\n{diff}",
-                    case.metadata.name
-                ));
-            }
+            ));
         }
     }
 

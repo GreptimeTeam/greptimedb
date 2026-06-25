@@ -32,14 +32,14 @@ cargo run -p sqlness-runner -- compat --help
 
 ## Case Format
 
-Each compat case is a directory under `tests/compatibility/cases/` containing three required files plus an optional generated result file:
+Each compat case is a directory under `tests/compatibility/cases/` containing four required files:
 
 ```
 my_case/
   case.toml       # Metadata (required)
   setup.sql       # SQL to run on old version (required)
   verify.sql      # SQL to run on new version (required)
-  verify.result   # Expected output from verify.sql (auto-generated on first run)
+  verify.result   # Expected output from verify.sql (required)
 ```
 
 ### `case.toml` — Required Metadata
@@ -55,7 +55,6 @@ features = ["table"]
 owner = "team-name"
 # optional:
 namespace = "my_explicit_namespace"   # defaults to sanitized directory name
-isolation = "shared"                  # only "shared" to allow duplicate namespace
 ```
 
 **Required fields**: `name`, `reason`, `introduced_by`, `topologies`, `from_range`, `to_range`, `features`, `owner`.
@@ -98,11 +97,11 @@ Rules:
 
 ### `verify.sql` — Verify Phase (New Version)
 
-SQL statements executed on the **new** version cluster. Output is compared against `verify.result` in sqlness snapshot style. If `verify.result` does not exist, it is created automatically on first run.
+SQL statements executed on the **new** version cluster. Output is compared against `verify.result` in sqlness snapshot style. `verify.result` is required — missing files fail at discovery.
 
 ### `verify.result` — Expected Output
 
-Auto-generated on first run in sqlness format:
+Required file containing the expected output in sqlness format:
 ```
 <statement>;
 
@@ -118,7 +117,7 @@ If output differs from expected, the run fails and `verify.result` is updated wi
 
 ## PR1 Limitations
 
-- **Sqlness interceptors**: `-- SQLNESS ...` comments are applied per statement using the same interceptor registry as the ordinary sqlness runner, including the GreptimeDB `PROTOCOL` interceptor. For `PROTOCOL POSTGRES`, the namespace prelude uses `SET search_path` instead of `USE`; compatibility cases should still qualify table names with the case namespace when relying on PostgreSQL table lookup semantics.
+- **Sqlness interceptors**: `-- SQLNESS ...` comments are applied per statement using the same interceptor registry as the ordinary sqlness runner, including the GreptimeDB `PROTOCOL` interceptor. For `PROTOCOL POSTGRES`, the namespace prelude uses `SET search_path` instead of `USE`. Avoid unqualified PostgreSQL-protocol table names starting with `pg_`: GreptimeDB's current PostgreSQL compatibility parser rewrites them to `pg_catalog.<table>`.
 - **Full distributed topology**: The compat runner starts 1 metasrv + 3 datanodes + 1 frontend + 1 flownode.
 - **No comment-based compat config**: The compat runner does not define extra compatibility configuration in SQL comments; sqlness comments keep their normal sqlness meaning.
 
@@ -128,14 +127,14 @@ Each case runs in its own database namespace to prevent cross-case interference:
 
 - Default namespace is derived from the case directory name (sanitized to `[a-z][a-z0-9_]*`)
 - Override with `namespace` in `case.toml`
-- Duplicate namespaces are **rejected** unless `isolation = "shared"` is set
-- The runner executes `CREATE DATABASE IF NOT EXISTS <ns>; USE <ns>;` before each statement (not written to verify.result)
+- Duplicate namespaces are **rejected** at discovery time (before version filtering)
+- Before each statement, the runner executes a namespace prelude (not written to verify.result): `CREATE DATABASE IF NOT EXISTS <ns>` via gRPC; then `USE <ns>` for gRPC/MySQL statements or `SET search_path TO '<ns>'` for PostgreSQL statements.
 
 ## Batch Behavior
 
 - All cases in a run share one cluster lifecycle: start old cluster → run all setups → restart with new binary → run all verifies
-- Cases run **serially** (no parallelism in PR1). `USE <db>` is session state and cannot be shared concurrently.
-- Same namespace across cases is rejected by default. Use `isolation = "shared"` for cases that intentionally share state.
+- Cases run **serially** (no parallelism in PR1). Namespace state is session/protocol state and cannot be shared concurrently.
+- Same namespace across cases is rejected.
 
 ## xfail Policy (Future)
 

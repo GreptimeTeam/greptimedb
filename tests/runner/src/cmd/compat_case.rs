@@ -20,6 +20,7 @@ use serde::Deserialize;
 
 /// Metadata for a compatibility test case, parsed from `case.toml`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct CaseMetadata {
     /// Human-readable name of the case.
@@ -42,10 +43,6 @@ pub struct CaseMetadata {
     /// Must match `[a-z0-9_]+`.
     #[serde(default)]
     pub namespace: Option<String>,
-    /// Optional isolation mode. Set to `"shared"` to allow duplicate namespaces
-    /// across cases in the same batch.
-    #[serde(default)]
-    pub isolation: Option<String>,
 }
 
 impl CaseMetadata {
@@ -96,8 +93,8 @@ fn sanitize_namespace(name: &str) -> String {
 }
 
 /// Discover all compat cases under `case_root`.
-/// Each case is a directory containing `case.toml`, `setup.sql`, and `verify.sql`.
-/// `verify.result` is optional — it is auto-generated on first run.
+/// Each case is a directory containing `case.toml`, `setup.sql`, `verify.sql`,
+/// and `verify.result` — all four files are required.
 pub fn discover_cases(case_root: &Path) -> Result<Vec<CompatCase>, String> {
     let mut cases = Vec::new();
 
@@ -126,8 +123,9 @@ pub fn discover_cases(case_root: &Path) -> Result<Vec<CompatCase>, String> {
 
         let setup_sql = path.join("setup.sql");
         let verify_sql = path.join("verify.sql");
+        let verify_result = path.join("verify.result");
 
-        for required in [&setup_sql, &verify_sql] {
+        for required in [&setup_sql, &verify_sql, &verify_result] {
             if !required.is_file() {
                 return Err(format!(
                     "Missing required file {} in case directory {}",
@@ -173,7 +171,7 @@ pub fn discover_cases(case_root: &Path) -> Result<Vec<CompatCase>, String> {
 /// Validate per-case metadata for all discovered cases.
 ///
 /// Checks that required fields are non-empty, version constraints are parseable,
-/// namespace format is valid, and isolation values are supported.
+/// and namespace format is valid.
 ///
 /// Call this **before** version-range filtering so that invalid constraints
 /// (e.g. `>=not-a-version`) cause a hard error instead of being silently
@@ -225,37 +223,23 @@ pub fn validate_cases_metadata(cases: &[CompatCase]) -> Result<(), String> {
         if case.metadata.features.is_empty() {
             return Err(format!("Case '{}' has empty features", case.metadata.name));
         }
-
-        // Validate isolation value
-        match case.metadata.isolation.as_deref() {
-            Some("shared") | None => {}
-            Some(isolation) => {
-                return Err(format!(
-                    "Case '{}' has invalid isolation '{}': only \"shared\" is supported",
-                    case.metadata.name, isolation
-                ));
-            }
-        }
     }
 
     Ok(())
 }
 
-/// Check for duplicate namespaces in the **final selected batch**.
+/// Check for duplicate namespaces.
 ///
-/// Cases with `isolation = "shared"` are exempt from the duplicate check.
-/// Call this **after** version-range filtering so unrelated filtered-out cases
-/// do not trigger false-positive namespace conflicts.
+/// Call this **before** version-range filtering so duplicated namespaces cannot
+/// hide behind version filters.
 pub fn validate_case_namespaces(cases: &[CompatCase]) -> Result<(), String> {
     let mut namespaces: HashSet<&str> = HashSet::new();
 
     for case in cases {
-        let is_shared = case.metadata.isolation.as_deref() == Some("shared");
-
-        if !is_shared && !namespaces.insert(&case.namespace) {
+        if !namespaces.insert(&case.namespace) {
             return Err(format!(
                 "Duplicate namespace '{}' for case '{}'. \
-                 Set isolation = \"shared\" in case.toml to allow this.",
+                 Each case must have a unique effective namespace.",
                 case.namespace, case.metadata.name
             ));
         }
@@ -498,7 +482,6 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "team".to_string(),
                 namespace: None,
-                isolation: None,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),
@@ -520,7 +503,6 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: None,
-                isolation: None,
             },
             dir: PathBuf::from("bad_constraint"),
             namespace: "bad_constraint".to_string(),
@@ -542,7 +524,6 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: None,
-                isolation: None,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -558,7 +539,6 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: None,
-                isolation: None,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -569,7 +549,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_case_namespaces_allows_shared_isolation_duplicate() {
+    fn test_validate_case_namespaces_rejects_any_duplicate() {
+        // All duplicate namespaces are rejected — the removed `isolation = "shared"`
+        // exemption no longer applies.
         let case_a = CompatCase {
             metadata: CaseMetadata {
                 name: "case_a".to_string(),
@@ -580,8 +562,7 @@ mod tests {
                 to_range: vec!["*".to_string()],
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
-                namespace: None,
-                isolation: Some("shared".to_string()),
+                namespace: Some("shared_name".to_string()),
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -596,14 +577,13 @@ mod tests {
                 to_range: vec!["*".to_string()],
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
-                namespace: None,
-                isolation: Some("shared".to_string()),
+                namespace: Some("shared_name".to_string()),
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
         };
 
-        assert!(validate_case_namespaces(&[case_a, case_b]).is_ok());
+        assert!(validate_case_namespaces(&[case_a, case_b]).is_err());
     }
 
     #[test]
@@ -619,7 +599,6 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "team".to_string(),
                 namespace: None,
-                isolation: None,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),
@@ -634,6 +613,7 @@ mod tests {
         let case_toml = dir.join("case.toml");
         let setup_sql = dir.join("setup.sql");
         let verify_sql = dir.join("verify.sql");
+        let verify_result = dir.join("verify.result");
 
         std::fs::write(
             &case_toml,
@@ -651,20 +631,19 @@ owner = "test"
         .unwrap();
         std::fs::write(&setup_sql, "CREATE TABLE t (a INT);").unwrap();
         std::fs::write(&verify_sql, "SELECT * FROM t;").unwrap();
+        std::fs::write(&verify_result, "SELECT * FROM t;\n\n+\n\n").unwrap();
     }
 
     #[test]
-    fn test_discover_cases_allows_missing_verify_result() {
+    fn test_discover_cases_rejects_missing_verify_result() {
         let tmp = tempfile::tempdir().unwrap();
         let case_dir = tmp.path().join("my_case");
         write_minimal_case(&case_dir);
-        // verify.result is intentionally absent
+        // Remove verify.result — should now be a hard error
+        std::fs::remove_file(case_dir.join("verify.result")).unwrap();
         assert!(!case_dir.join("verify.result").is_file());
 
-        let cases =
-            discover_cases(tmp.path()).expect("discover should succeed without verify.result");
-        assert_eq!(cases.len(), 1);
-        assert_eq!(cases[0].metadata.name, "test_case");
+        assert!(discover_cases(tmp.path()).is_err());
     }
 
     #[test]
@@ -685,6 +664,31 @@ owner = "test"
         std::fs::remove_file(case_dir.join("verify.sql")).unwrap();
 
         assert!(discover_cases(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_discover_cases_rejects_unknown_isolation_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let case_dir = tmp.path().join("my_case");
+        write_minimal_case(&case_dir);
+        std::fs::write(
+            case_dir.join("case.toml"),
+            r#"
+name = "test_case"
+reason = "test"
+introduced_by = "test"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table"]
+owner = "test"
+isolation = "shared"
+"#,
+        )
+        .unwrap();
+
+        let err = discover_cases(tmp.path()).unwrap_err();
+        assert!(err.contains("unknown field `isolation`"));
     }
 
     #[test]
