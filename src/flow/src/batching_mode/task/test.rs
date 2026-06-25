@@ -29,7 +29,8 @@ use datatypes::schema::ColumnSchema;
 use datatypes::vectors::{TimestampMillisecondVector, UInt32Vector, VectorRef};
 use pretty_assertions::assert_eq;
 use query::options::{
-    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY, QueryOptions,
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+    FLOW_SCHEDULED_RUNTIME_MILLIS, QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
@@ -115,6 +116,7 @@ async fn new_test_task_engine_and_plan_with_query_and_opts(
         shutdown_rx: rx,
         batch_opts,
         flow_eval_interval: None,
+        eval_schedule: None,
     })
     .unwrap();
 
@@ -240,6 +242,7 @@ async fn new_time_window_test_task_with_query(query: &str) -> TestTaskParts {
         shutdown_rx: rx,
         batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
+        eval_schedule: None,
     })
     .unwrap();
 
@@ -366,6 +369,196 @@ async fn assert_unscoped_failure_restore(
     assert_eq!(
         state.dirty_time_windows.window_size(),
         std::time::Duration::from_secs(expected_window_size_secs)
+    );
+}
+
+// --- scheduled-runtime QueryContext restore regression tests ---
+
+/// Register a sink table whose schema matches the output of a `date_bin`
+/// time-window-expression query (columns: `number` uint32, `time_window` timestamp).
+fn register_twe_sink(query_engine: &QueryEngineRef, table_name: &str, table_id: u32) {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("time_window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+    ]));
+    let columns: Vec<VectorRef> = vec![
+        Arc::new(UInt32Vector::from_slice([1_u32])),
+        Arc::new(TimestampMillisecondVector::from_slice([0_i64])),
+    ];
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    let table = MemTable::table(table_name, recordbatch);
+    let request = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        table_id,
+        table,
+    };
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog.register_table_sync(request).unwrap();
+}
+
+/// After a scheduled-runtime attempt fails (missing sink), the
+/// `FLOW_SCHEDULED_RUNTIME_MILLIS` extension must not leak into
+/// `TaskState.query_ctx` or `frontend_extensions()`.
+#[tokio::test]
+async fn test_scheduled_runtime_ctx_restored_on_error() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "missing_sink",
+    )
+    .await;
+    let (frontend_client, _handler) =
+        FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend_client = Arc::new(frontend_client);
+
+    // Before: no scheduled runtime extension
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_RUNTIME_MILLIS),
+        None
+    );
+    assert!(
+        !task
+            .frontend_extensions()
+            .contains_key(FLOW_SCHEDULED_RUNTIME_MILLIS)
+    );
+
+    let runtime_secs = 1700000000i64;
+    let outcome = task
+        .execute_once_serialized_at_scheduled_runtime(&query_engine, &frontend_client, runtime_secs)
+        .await;
+
+    // Missing sink table → gen_insert_plan_unlocked should fail.
+    assert!(
+        outcome.result.is_err(),
+        "Expected an error (missing sink), got {:?}",
+        outcome.result
+    );
+
+    // After: extension must be restored to absent.
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_RUNTIME_MILLIS),
+        None,
+        "FLOW_SCHEDULED_RUNTIME_MILLIS leaked into query_ctx after error"
+    );
+    assert!(
+        !task
+            .frontend_extensions()
+            .contains_key(FLOW_SCHEDULED_RUNTIME_MILLIS),
+        "FLOW_SCHEDULED_RUNTIME_MILLIS leaked into frontend_extensions after error"
+    );
+}
+
+/// After a scheduled-runtime attempt returns `Ok(None)` (no dirty windows),
+/// the `FLOW_SCHEDULED_RUNTIME_MILLIS` extension must not leak into
+/// `TaskState.query_ctx`.
+#[tokio::test]
+async fn test_scheduled_runtime_ctx_restored_on_no_dirty_windows() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let plan_query = "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window \
+                      FROM numbers_with_ts GROUP BY time_window, number";
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), plan_query, true)
+        .await
+        .unwrap();
+    let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+        &plan,
+        query_engine.engine_state().catalog_manager().clone(),
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let time_window_expr = time_window_expr
+        .map(|expr| {
+            TimeWindowExpr::from_expr(
+                &expr,
+                &column_name,
+                &df_schema,
+                &query_engine.engine_state().session_state(),
+            )
+        })
+        .transpose()
+        .unwrap();
+
+    let sink_table_name = "twe_sink_for_ctx_restore";
+    register_twe_sink(&query_engine, sink_table_name, 9101);
+
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query: plan_query,
+        plan: plan.clone(),
+        time_window_expr,
+        expire_after: None,
+        sink_table_name: [
+            "greptime".to_string(),
+            "public".to_string(),
+            sink_table_name.to_string(),
+        ],
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx: rx,
+        batch_opts: incremental_batch_opts(),
+        flow_eval_interval: None,
+        eval_schedule: None,
+    })
+    .unwrap();
+
+    let (frontend_client, _handler) =
+        FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend_client = Arc::new(frontend_client);
+
+    // Before: no scheduled runtime extension
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_RUNTIME_MILLIS),
+        None
+    );
+
+    let runtime_secs = 1700000000i64;
+    let outcome = task
+        .execute_once_serialized_at_scheduled_runtime(&query_engine, &frontend_client, runtime_secs)
+        .await;
+
+    // No dirty windows → scoped repair returns None → outcome is Ok(None).
+    assert!(
+        matches!(outcome.result, Ok(None)),
+        "Expected Ok(None) (no dirty windows), got {:?}",
+        outcome.result
+    );
+
+    // After: extension must be restored to absent.
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_RUNTIME_MILLIS),
+        None,
+        "FLOW_SCHEDULED_RUNTIME_MILLIS leaked into query_ctx after Ok(None)"
     );
 }
 
@@ -1668,6 +1861,7 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
         shutdown_rx: rx,
         batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
+        eval_schedule: None,
     })
     .unwrap();
 
@@ -1745,6 +1939,7 @@ async fn test_unsafe_incremental_plan_skip_restores_dirty_without_query() {
         shutdown_rx: rx,
         batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
+        eval_schedule: None,
     })
     .unwrap();
 
@@ -1833,6 +2028,7 @@ async fn test_prepare_plan_for_incremental_group_by_without_merge_columns_uses_o
         shutdown_rx: rx,
         batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
+        eval_schedule: None,
     })
     .unwrap();
 

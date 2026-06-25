@@ -543,6 +543,19 @@ impl QueryEngine for DatafusionQueryEngine {
             .config_options
             .insert(config_options);
 
+        // Apply scheduled runtime from query context if present, so that `now()` /
+        // `current_timestamp()` functions evaluate against the logical scheduled time
+        // rather than wall-clock.
+        match crate::options::parse_scheduled_runtime_datetime(&query_ctx.extensions()) {
+            Ok(Some(scheduled_rt)) => {
+                state.execution_props_mut().query_execution_start_time = Some(scheduled_rt);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                common_telemetry::warn!(err; "Ignoring invalid scheduled runtime query extension");
+            }
+        }
+
         QueryEngineContext::new(state, query_ctx)
     }
 

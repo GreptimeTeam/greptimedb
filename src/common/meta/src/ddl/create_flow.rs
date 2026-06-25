@@ -41,7 +41,9 @@ use crate::ddl::DdlContext;
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{self, Result, UnexpectedSnafu};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
-use crate::key::flow::flow_info::{FlowInfoValue, FlowStatus};
+use crate::key::flow::flow_info::{
+    FlowInfoValue, FlowMissedTickPolicy, FlowScheduleConfig, FlowStatus,
+};
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
@@ -209,6 +211,18 @@ impl CreateFlowProcedure {
             self.allocate_flow_id().await?;
         }
         self.data.flow_type = Some(get_flow_type_from_options(&self.data.task)?);
+
+        // Resolve schedule defaults into task.eval_schedule once, before
+        // CreateRequest / FlowInfoValue are constructed. This ensures the same
+        // typed schedule config is sent to flownodes and persisted in metadata.
+        // Idempotent: if eval_schedule is already present we do not recompute.
+        resolve_schedule_defaults_into_task(
+            &mut self.data.task,
+            self.data
+                .prev_flow_info_value
+                .as_ref()
+                .map(|v| v.get_inner_ref()),
+        );
 
         self.data.state = if self.data.is_pending() {
             self.data.peers.clear();
@@ -405,6 +419,16 @@ pub fn get_flow_type_from_options(flow_task: &CreateFlowTask) -> Result<FlowType
 /// The flow option key for creating pending flow metadata when source tables do not exist.
 pub const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 
+/// Internal transient key used to pass the serialized `FlowScheduleConfig` from
+/// meta to flownode through `CreateRequest.flow_options`. This key must never
+/// be accepted as a user-provided option and must never be persisted into
+/// `FlowInfoValue.options`.
+pub const INTERNAL_EVAL_SCHEDULE_KEY: &str = "__greptime_internal_eval_schedule";
+
+const DEFAULT_SCHEDULE_ANCHOR_SECS: i64 = 0;
+const DEFAULT_SCHEDULE_MAX_RUNS: u32 = 3;
+const DEFAULT_SCHEDULE_MIN_LAG_SECS: i64 = 300;
+
 pub fn defer_on_missing_source(flow_task: &CreateFlowTask) -> Result<bool> {
     flow_task
         .flow_options
@@ -428,11 +452,27 @@ pub fn defer_on_missing_source(flow_task: &CreateFlowTask) -> Result<bool> {
 }
 
 pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
+    // Reject non-positive eval_interval_secs (zero or negative).
+    if let Some(secs) = flow_task.eval_interval_secs
+        && secs <= 0
+    {
+        return UnexpectedSnafu {
+            err_msg: format!("EVAL INTERVAL must be positive, got {secs} seconds"),
+        }
+        .fail();
+    }
+
     for key in flow_task.flow_options.keys() {
         match key.as_str() {
             DEFER_ON_MISSING_SOURCE_KEY
             | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY
-            | FlowType::FLOW_TYPE_KEY => {}
+            | FlowType::FLOW_TYPE_KEY => {
+                // flow_type is internal-only; allow it through as the
+                // operator inserts it. Schedule keys and
+                // __greptime_internal_eval_schedule fall through to the
+                // unknown branch naturally since they are not in the
+                // allowlist.
+            }
             unknown => {
                 return UnexpectedSnafu {
                     err_msg: format!(
@@ -449,14 +489,126 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
     Ok(())
 }
 
+/// Computes the ceiling of `time` to the next schedule boundary aligned with `anchor + k * interval`.
+/// All values are Unix timestamps in seconds.
+fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> i64 {
+    if interval <= 0 {
+        return time;
+    }
+    let diff = time - anchor;
+    if diff <= 0 {
+        return anchor;
+    }
+    // ceil division: (diff + interval - 1) / interval
+    let k = (diff + interval - 1) / interval;
+    anchor + k * interval
+}
+
+fn default_catchup_max_lag_secs(eval_interval_secs: i64) -> i64 {
+    std::cmp::max(
+        DEFAULT_SCHEDULE_MIN_LAG_SECS,
+        3_i64.saturating_mul(eval_interval_secs),
+    )
+}
+
+/// Returns the effective typed schedule config for flow metadata.
+///
+/// New metadata should carry `FlowInfoValue.eval_schedule`. For older metadata
+/// that lacks the typed field, derive a deterministic config from `created_time`
+/// and defaults. This avoids recovery-time wall-clock drift.
+pub fn effective_eval_schedule_from_flow_info(
+    flow_info: &FlowInfoValue,
+) -> Option<FlowScheduleConfig> {
+    if let Some(schedule) = &flow_info.eval_schedule {
+        return Some(schedule.clone());
+    }
+
+    let eval_interval_secs = flow_info.eval_interval_secs?;
+    if eval_interval_secs <= 0 {
+        return None;
+    }
+
+    Some(FlowScheduleConfig {
+        anchor_secs: DEFAULT_SCHEDULE_ANCHOR_SECS,
+        start_secs: ceil_to_boundary(
+            flow_info.created_time.timestamp(),
+            DEFAULT_SCHEDULE_ANCHOR_SECS,
+            eval_interval_secs,
+        ),
+        missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
+        catchup_max_runs: DEFAULT_SCHEDULE_MAX_RUNS,
+        catchup_max_lag_secs: default_catchup_max_lag_secs(eval_interval_secs),
+    })
+}
+
+/// Resolve `FlowScheduleConfig` into `task.eval_schedule`.
+///
+/// This must be called in `on_prepare` after `prev_flow_info` is loaded so that
+/// `CreateRequest` and `FlowInfoValue` both see the same resolved defaults.
+///
+/// The function is idempotent: if `task.eval_schedule` is already `Some`,
+/// it returns immediately (important for procedure retry / dump-restore).
+///
+/// Schedule configuration is NOT read from `task.flow_options` (those keys are
+/// no longer user-facing options). For new flows, pure defaults are computed.
+/// For OR REPLACE, the previous typed config is preserved when interval+anchor
+/// are unchanged; otherwise defaults are recomputed.
+pub(crate) fn resolve_schedule_defaults_into_task(
+    task: &mut CreateFlowTask,
+    prev_flow_info: Option<&FlowInfoValue>,
+) {
+    // Idempotent: if already computed, skip recomputation.
+    if task.eval_schedule.is_some() {
+        return;
+    }
+
+    let Some(eval_interval_secs) = task.eval_interval_secs else {
+        return;
+    };
+    if eval_interval_secs <= 0 {
+        return;
+    }
+
+    let anchor_secs: i64 = DEFAULT_SCHEDULE_ANCHOR_SECS;
+
+    // For OR REPLACE: if interval+anchor unchanged, preserve the entire
+    // existing typed config so start / policy / limits are stable.
+    if task.or_replace
+        && let Some(prev) = prev_flow_info
+        && let Some(old_sched) = effective_eval_schedule_from_flow_info(prev)
+    {
+        let old_interval = prev.eval_interval_secs.unwrap_or(0);
+        if old_interval == eval_interval_secs && old_sched.anchor_secs == anchor_secs {
+            task.eval_schedule = Some(old_sched);
+            return;
+        }
+    }
+
+    // --- Compute start ---
+    let start_secs =
+        // New flow, or OR REPLACE with changed interval/anchor: start at the next
+        // aligned boundary after prepare time. The value is written into
+        // task.eval_schedule once so procedure retry does not recompute it.
+        ceil_to_boundary(chrono::Utc::now().timestamp(), anchor_secs, eval_interval_secs);
+
+    let missed_tick_policy = FlowMissedTickPolicy::BoundedCatchUp;
+    let catchup_max_runs: u32 = DEFAULT_SCHEDULE_MAX_RUNS;
+    let catchup_max_lag_secs: i64 = default_catchup_max_lag_secs(eval_interval_secs);
+
+    task.eval_schedule = Some(FlowScheduleConfig {
+        anchor_secs,
+        start_secs,
+        missed_tick_policy,
+        catchup_max_runs,
+        catchup_max_lag_secs,
+    });
+}
+
 fn user_runtime_flow_options(options: &HashMap<String, String>) -> HashMap<String, String> {
     let mut options = options.clone();
     options.remove(DEFER_ON_MISSING_SOURCE_KEY);
+    options.remove(INTERNAL_EVAL_SCHEDULE_KEY);
     options
-}
-
-fn metadata_flow_options(options: &HashMap<String, String>) -> HashMap<String, String> {
-    options.clone()
 }
 
 /// The state of [CreateFlowProcedure].
@@ -561,23 +713,40 @@ impl From<&CreateFlowData> for CreateRequest {
         let flow_type = value.flow_type.unwrap_or_default().to_string();
         req.flow_options
             .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type);
+
+        // Pass typed schedule config via internal transient key in flow_options.
+        if let Some(ref sched) = value.task.eval_schedule {
+            let json = serde_json::to_string(sched)
+                .expect("FlowScheduleConfig serialization should not fail");
+            req.flow_options
+                .insert(INTERNAL_EVAL_SCHEDULE_KEY.to_string(), json);
+        }
+
         req
     }
 }
 
 impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteValue)>) {
     fn from(value: &CreateFlowData) -> Self {
-        let CreateFlowTask {
-            catalog_name,
-            flow_name,
-            sink_table_name,
-            expire_after,
-            eval_interval_secs: eval_interval,
-            comment,
-            sql,
-            ..
-        } = value.task.clone();
-        let mut options = metadata_flow_options(&value.task.flow_options);
+        let catalog_name = value.task.catalog_name.clone();
+        let flow_name = value.task.flow_name.clone();
+        let sink_table_name = value.task.sink_table_name.clone();
+        let expire_after = value.task.expire_after;
+        let eval_interval = value.task.eval_interval_secs;
+        let comment = value.task.comment.clone();
+        let sql = value.task.sql.clone();
+        let eval_schedule = value.task.eval_schedule.clone();
+
+        // Start with a clean options map. The transient schedule payload is
+        // only for the meta→flownode CreateRequest boundary and must not be
+        // persisted in FlowInfoValue.options.
+        let mut options: HashMap<String, String> = value
+            .task
+            .flow_options
+            .iter()
+            .filter(|(k, _)| k.as_str() != INTERNAL_EVAL_SCHEDULE_KEY)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         let flownode_ids = value
             .peers
@@ -606,16 +775,16 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             source_table_ids: value.source_table_ids.clone(),
             all_source_table_names: value.task.source_table_names.clone(),
             unresolved_source_table_names: value.unresolved_source_table_names.clone(),
-            sink_table_name,
+            sink_table_name: sink_table_name.clone(),
             flownode_ids,
-            catalog_name,
+            catalog_name: catalog_name.clone(),
             // Convert FlowQueryContext back to QueryContext for storage
             query_context: Some(QueryContext::from(value.flow_context.clone())),
-            flow_name,
-            raw_sql: sql,
+            flow_name: flow_name.clone(),
+            raw_sql: sql.clone(),
             expire_after,
             eval_interval_secs: eval_interval,
-            comment,
+            comment: comment.clone(),
             options,
             status: if value.is_active() {
                 FlowStatus::Active
@@ -624,6 +793,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             },
             created_time: create_time,
             updated_time: chrono::Utc::now(),
+            eval_schedule: eval_schedule.clone(),
         };
 
         (flow_info, flow_routes)

@@ -1184,6 +1184,11 @@ pub struct CreateFlowTask {
     pub comment: String,
     pub sql: String,
     pub flow_options: HashMap<String, String>,
+    /// Typed schedule configuration resolved during `on_prepare`.
+    /// Not populated from proto; set by the procedure layer after
+    /// defaults are resolved.
+    #[serde(default)]
+    pub eval_schedule: Option<crate::key::flow::flow_info::FlowScheduleConfig>,
 }
 
 impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
@@ -1222,6 +1227,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             comment,
             sql,
             flow_options,
+            eval_schedule: None,
         })
     }
 }
@@ -1240,6 +1246,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             comment,
             sql,
             flow_options,
+            ..
         }: CreateFlowTask,
     ) -> Self {
         PbCreateFlowTask {

@@ -125,12 +125,17 @@ pub struct QueryLanguageParser {}
 
 impl QueryLanguageParser {
     /// Try to parse SQL with GreptimeDB dialect, return the statement when success.
-    pub fn parse_sql(sql: &str, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
+    pub fn parse_sql(sql: &str, query_ctx: &QueryContextRef) -> Result<QueryStatement> {
         let _timer = PARSE_SQL_ELAPSED.start_timer();
-        let mut statement =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .map_err(BoxedError::new)
-                .context(QueryParseSnafu { query: sql })?;
+        let scheduled_runtime =
+            crate::options::parse_scheduled_runtime_datetime(&query_ctx.extensions())?;
+        let mut statement = ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions { scheduled_runtime },
+        )
+        .map_err(BoxedError::new)
+        .context(QueryParseSnafu { query: sql })?;
         if statement.len() != 1 {
             MultipleStatementsSnafu {
                 query: sql.to_string(),
@@ -323,7 +328,7 @@ impl Alias {
 
 #[cfg(test)]
 mod test {
-    use session::context::QueryContext;
+    use session::context::{QueryContext, QueryContextBuilder};
 
     use super::*;
 
@@ -336,6 +341,32 @@ mod test {
             panic!("Expected SQL statement, got {:?}", stmt);
         };
         assert_eq!("SELECT * FROM t1", sql_stmt.to_string());
+    }
+
+    #[test]
+    fn parse_sql_tql_uses_scheduled_runtime_extension() {
+        let ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    crate::options::FLOW_SCHEDULED_RUNTIME_MILLIS.to_string(),
+                    "1700000000000".to_string(),
+                )
+                .build(),
+        );
+        let query = "TQL EVAL (now() - '10 minutes'::interval, now(), '1m') http_requests_total";
+        let stmt = QueryLanguageParser::parse_sql(query, &ctx).unwrap();
+
+        match stmt {
+            QueryStatement::Sql(sql::statements::statement::Statement::Tql(
+                sql::statements::tql::Tql::Eval(eval),
+            )) => {
+                assert_eq!(eval.start, "1699999400");
+                assert_eq!(eval.end, "1700000000");
+                assert_eq!(eval.step, "1m");
+                assert_eq!(eval.query, "http_requests_total");
+            }
+            _ => panic!("Expected TQL eval statement, got {stmt:?}"),
+        }
     }
 
     #[test]
