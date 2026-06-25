@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
-use common_query::request::DynFilterPayload;
+use common_query::request::{DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES};
 use common_runtime::spawn_global;
 use common_telemetry::{debug, warn};
 use datafusion_physical_expr::PhysicalExpr;
@@ -28,9 +28,12 @@ use store_api::storage::RegionId;
 use tokio::sync::{Notify, watch};
 
 use crate::dist_plan::FilterId;
+use crate::metrics::{
+    REMOTE_DYN_FILTER_ENCODE_TOTAL, REMOTE_DYN_FILTER_PAYLOAD_BYTES,
+    REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL,
+};
 use crate::region_query::RegionQueryHandlerRef;
 
-const REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 const REMOTE_DYN_FILTER_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 /// Bound best-effort RDF control RPCs so one bad subscriber cannot stall fanout.
 const REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -387,20 +390,31 @@ async fn fanout_snapshot_for_query(
         let _ = entry.mark_generation_sent(generation);
     }
 
-    let payload = match DynFilterPayload::from_datafusion_expr(
-        &current,
-        REMOTE_DYN_FILTER_UPDATE_PAYLOAD_MAX_BYTES,
-    ) {
-        Ok(DynFilterPayload::Datafusion(payload)) => payload,
-        Ok(_) => {
-            warn!("Ignored unsupported remote dynamic filter producer payload");
-            return true;
-        }
-        Err(error) => {
-            warn!(error; "Failed to encode remote dynamic filter producer snapshot");
-            return true;
-        }
-    };
+    let payload =
+        match DynFilterPayload::from_datafusion_expr(&current, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
+        {
+            Ok(DynFilterPayload::Datafusion(payload)) => {
+                REMOTE_DYN_FILTER_ENCODE_TOTAL
+                    .with_label_values(&["success"])
+                    .inc();
+                REMOTE_DYN_FILTER_PAYLOAD_BYTES.observe(payload.len() as f64);
+                payload
+            }
+            Ok(_) => {
+                REMOTE_DYN_FILTER_ENCODE_TOTAL
+                    .with_label_values(&["unsupported"])
+                    .inc();
+                warn!("Ignored unsupported remote dynamic filter producer payload");
+                return true;
+            }
+            Err(error) => {
+                REMOTE_DYN_FILTER_ENCODE_TOTAL
+                    .with_label_values(&["error"])
+                    .inc();
+                warn!(error; "Failed to encode remote dynamic filter producer snapshot");
+                return true;
+            }
+        };
 
     fanout_update_for_query(
         query_id,
@@ -456,6 +470,9 @@ async fn fanout_update_for_query(
         {
             ControlRpcResult::Ok(result) => {
                 if let Err(error) = result {
+                    REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
+                        .with_label_values(&["error"])
+                        .inc();
                     warn!(
                         error;
                         "Failed to fan out remote dynamic filter update, query_id={}, filter_id={}, region_id={}",
@@ -463,10 +480,23 @@ async fn fanout_update_for_query(
                         filter_id,
                         subscriber.region_id()
                     );
+                } else {
+                    REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
+                        .with_label_values(&["success"])
+                        .inc();
                 }
             }
-            ControlRpcResult::TimedOut => {}
-            ControlRpcResult::LifecycleClosed => return false,
+            ControlRpcResult::TimedOut => {
+                REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
+                    .with_label_values(&["timeout"])
+                    .inc();
+            }
+            ControlRpcResult::LifecycleClosed => {
+                REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL
+                    .with_label_values(&["cancelled"])
+                    .inc();
+                return false;
+            }
         }
     }
 
