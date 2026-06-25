@@ -45,7 +45,7 @@ use crate::http::header::{
 use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
-use crate::prom_remote_write::v2::decode_remote_write_v2_request;
+use crate::prom_remote_write::v2::{RemoteWriteV2RequestExt, decode_remote_write_v2_request};
 use crate::prom_remote_write::validation::PromValidationMode;
 use crate::prom_store::{extract_schema_from_read_request, snappy_decompress};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
@@ -410,6 +410,10 @@ async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
 mod tests {
     use std::sync::Mutex;
 
+    use api::greptime_proto::io::prometheus::write::v2::{
+        Request as RemoteWriteV2Request, Sample as RemoteWriteV2Sample,
+        TimeSeries as RemoteWriteV2TimeSeries,
+    };
     use api::prom_store::remote::ReadRequest;
     use api::v1::RowInsertRequests;
     use async_trait::async_trait;
@@ -418,10 +422,6 @@ mod tests {
     use session::context::{QueryContext, QueryContextRef};
 
     use super::*;
-    use crate::prom_remote_write::v2::{
-        Request as RemoteWriteV2Request, Sample as RemoteWriteV2Sample,
-        TimeSeries as RemoteWriteV2TimeSeries,
-    };
     use crate::prom_remote_write::validation::PromValidationMode;
     use crate::prom_store::{Metrics, snappy_compress};
     use crate::query_handler::PromStoreProtocolHandler;

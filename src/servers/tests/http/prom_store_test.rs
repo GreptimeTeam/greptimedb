@@ -14,6 +14,10 @@
 
 use std::sync::Arc;
 
+use api::greptime_proto::io::prometheus::write::v2::{
+    Histogram as RemoteWriteV2Histogram, Request as RemoteWriteV2Request,
+    Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
+};
 use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
@@ -257,7 +261,7 @@ async fn test_prometheus_remote_write_v2_samples() {
     let app = make_test_app_with_write_capture(read_tx, write_tx);
     let client = TestClient::new(app).await;
 
-    let write_request = RemoteWriteV2Request::with_labels_and_samples(
+    let write_request = remote_write_v2_request_with_labels_and_samples(
         vec![
             (prom_store::METRIC_NAME_LABEL, "http_requests_total"),
             (prom_store::DATABASE_LABEL, "tenant_a"),
@@ -390,12 +394,12 @@ async fn test_prometheus_remote_write_v2_ignores_histogram_only_series() {
     let app = make_test_app_with_write_capture(read_tx, write_tx);
     let client = TestClient::new(app).await;
 
-    let write_request = RemoteWriteV2Request::with_labels_and_histograms(
+    let write_request = remote_write_v2_request_with_labels_and_histograms(
         vec![(
             prom_store::METRIC_NAME_LABEL,
             "http_request_duration_seconds",
         )],
-        vec![RemoteWriteV2Histogram { timestamp: 1000 }],
+        vec![remote_write_v2_histogram(1000)],
     );
 
     let result = client
@@ -435,96 +439,57 @@ async fn test_prometheus_remote_write_v2_ignores_histogram_only_series() {
     assert!(write_rx.try_recv().is_err());
 }
 
-#[derive(Clone, PartialEq, ::prost::Message)]
-struct RemoteWriteV2Request {
-    #[prost(string, repeated, tag = "4")]
-    symbols: Vec<String>,
-    #[prost(message, repeated, tag = "5")]
-    timeseries: Vec<RemoteWriteV2TimeSeries>,
-}
-
-impl RemoteWriteV2Request {
-    fn with_labels_and_samples(
-        labels: Vec<(&str, &str)>,
-        samples: Vec<RemoteWriteV2Sample>,
-    ) -> Self {
-        let mut symbols = vec!["".to_string()];
-        let mut labels_refs = Vec::with_capacity(labels.len() * 2);
-        for (name, value) in labels {
-            labels_refs.push(push_symbol(&mut symbols, name));
-            labels_refs.push(push_symbol(&mut symbols, value));
-        }
-
-        Self {
-            symbols,
-            timeseries: vec![RemoteWriteV2TimeSeries {
-                labels_refs,
-                samples,
-                histograms: Vec::new(),
-                exemplars: Vec::new(),
-            }],
-        }
-    }
-
-    fn with_labels_and_histograms(
-        labels: Vec<(&str, &str)>,
-        histograms: Vec<RemoteWriteV2Histogram>,
-    ) -> Self {
-        let mut symbols = vec!["".to_string()];
-        let mut labels_refs = Vec::with_capacity(labels.len() * 2);
-        for (name, value) in labels {
-            labels_refs.push(push_symbol(&mut symbols, name));
-            labels_refs.push(push_symbol(&mut symbols, value));
-        }
-
-        Self {
-            symbols,
-            timeseries: vec![RemoteWriteV2TimeSeries {
-                labels_refs,
-                samples: Vec::new(),
-                histograms,
-                exemplars: Vec::new(),
-            }],
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-struct RemoteWriteV2TimeSeries {
-    #[prost(uint32, repeated, tag = "1")]
-    labels_refs: Vec<u32>,
-    #[prost(message, repeated, tag = "2")]
+fn remote_write_v2_request_with_labels_and_samples(
+    labels: Vec<(&str, &str)>,
     samples: Vec<RemoteWriteV2Sample>,
-    #[prost(message, repeated, tag = "3")]
+) -> RemoteWriteV2Request {
+    let mut symbols = vec!["".to_string()];
+    let mut labels_refs = Vec::with_capacity(labels.len() * 2);
+    for (name, value) in labels {
+        labels_refs.push(push_symbol(&mut symbols, name));
+        labels_refs.push(push_symbol(&mut symbols, value));
+    }
+
+    RemoteWriteV2Request {
+        symbols,
+        timeseries: vec![RemoteWriteV2TimeSeries {
+            labels_refs,
+            samples,
+            histograms: Vec::new(),
+            exemplars: Vec::new(),
+            metadata: None,
+        }],
+    }
+}
+
+fn remote_write_v2_request_with_labels_and_histograms(
+    labels: Vec<(&str, &str)>,
     histograms: Vec<RemoteWriteV2Histogram>,
-    #[prost(message, repeated, tag = "4")]
-    exemplars: Vec<RemoteWriteV2Exemplar>,
+) -> RemoteWriteV2Request {
+    let mut symbols = vec!["".to_string()];
+    let mut labels_refs = Vec::with_capacity(labels.len() * 2);
+    for (name, value) in labels {
+        labels_refs.push(push_symbol(&mut symbols, name));
+        labels_refs.push(push_symbol(&mut symbols, value));
+    }
+
+    RemoteWriteV2Request {
+        symbols,
+        timeseries: vec![RemoteWriteV2TimeSeries {
+            labels_refs,
+            samples: Vec::new(),
+            histograms,
+            exemplars: Vec::new(),
+            metadata: None,
+        }],
+    }
 }
 
-#[derive(Clone, PartialEq, ::prost::Message)]
-struct RemoteWriteV2Sample {
-    #[prost(double, tag = "1")]
-    value: f64,
-    #[prost(int64, tag = "2")]
-    timestamp: i64,
-    #[prost(int64, tag = "3")]
-    start_timestamp: i64,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-struct RemoteWriteV2Histogram {
-    #[prost(int64, tag = "15")]
-    timestamp: i64,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-struct RemoteWriteV2Exemplar {
-    #[prost(uint32, repeated, tag = "1")]
-    labels_refs: Vec<u32>,
-    #[prost(double, tag = "2")]
-    value: f64,
-    #[prost(int64, tag = "3")]
-    timestamp: i64,
+fn remote_write_v2_histogram(timestamp: i64) -> RemoteWriteV2Histogram {
+    RemoteWriteV2Histogram {
+        timestamp,
+        ..Default::default()
+    }
 }
 
 fn push_symbol(symbols: &mut Vec<String>, symbol: &str) -> u32 {
