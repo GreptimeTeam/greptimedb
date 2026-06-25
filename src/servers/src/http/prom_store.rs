@@ -210,7 +210,7 @@ async fn remote_write_v2(
     let (db, query_ctx, _timer) = prepare_remote_write_context(&params, query_ctx);
 
     let request = decode_remote_write_v2_request(is_zstd, body)?;
-    let (req, _samples) = request.into_context_req()?;
+    let req = request.into_context_req()?;
 
     let outcome = write_prometheus_rows(
         prom_store_handler,
@@ -408,12 +408,6 @@ async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
-    use api::greptime_proto::io::prometheus::write::v2::{
-        Request as RemoteWriteV2Request, Sample as RemoteWriteV2Sample,
-        TimeSeries as RemoteWriteV2TimeSeries,
-    };
     use api::prom_store::remote::ReadRequest;
     use api::v1::RowInsertRequests;
     use async_trait::async_trait;
@@ -423,7 +417,7 @@ mod tests {
 
     use super::*;
     use crate::prom_remote_write::validation::PromValidationMode;
-    use crate::prom_store::{Metrics, snappy_compress};
+    use crate::prom_store::Metrics;
     use crate::query_handler::PromStoreProtocolHandler;
 
     #[test]
@@ -445,89 +439,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remote_write_v2_writes_samples_and_headers() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let state = test_state(captured.clone());
-        let request = RemoteWriteV2Request {
-            symbols: vec![
-                "".to_string(),
-                "__name__".to_string(),
-                "http_requests_total".to_string(),
-                "job".to_string(),
-                "api".to_string(),
-            ],
-            timeseries: vec![RemoteWriteV2TimeSeries {
-                labels_refs: vec![1, 2, 3, 4],
-                samples: vec![
-                    RemoteWriteV2Sample {
-                        value: 42.0,
-                        timestamp: 1000,
-                        start_timestamp: 0,
-                    },
-                    RemoteWriteV2Sample {
-                        value: 43.0,
-                        timestamp: 2000,
-                        start_timestamp: 0,
-                    },
-                ],
-                histograms: Vec::new(),
-                exemplars: Vec::new(),
-                metadata: None,
-            }],
-        };
-        let body = Bytes::from(snappy_compress(&request.encode_to_vec()).unwrap());
-
-        let response = remote_write_v2(
-            state,
-            RemoteWriteQuery::default(),
-            QueryContext::with("greptime", "public"),
-            pipeline_info(None),
-            false,
-            body,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(
-            response
-                .headers()
-                .get("X-Prometheus-Remote-Write-Samples-Written")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "2"
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get("X-Prometheus-Remote-Write-Histograms-Written")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "0"
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get("X-Prometheus-Remote-Write-Exemplars-Written")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "0"
-        );
-
-        let writes = captured.lock().unwrap();
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].inserts.len(), 1);
-        assert_eq!(writes[0].inserts[0].rows.as_ref().unwrap().rows.len(), 2);
-    }
-
-    #[tokio::test]
     async fn test_remote_write_v2_rejects_pipeline() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
         let err = remote_write_v2(
-            test_state(captured.clone()),
+            test_state(),
             RemoteWriteQuery::default(),
             QueryContext::with("greptime", "public"),
             pipeline_info(Some("pipeline")),
@@ -542,48 +456,15 @@ mod tests {
             err.to_string()
                 .contains("pipeline processing is not supported")
         );
-        assert!(captured.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_append_remote_write_v2_written_headers() {
-        let mut headers = HeaderMap::new();
-
-        append_remote_write_v2_written_headers(&mut headers, 3, 0, 0);
-
-        assert_eq!(
-            headers
-                .get("X-Prometheus-Remote-Write-Samples-Written")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "3"
-        );
-        assert_eq!(
-            headers
-                .get("X-Prometheus-Remote-Write-Histograms-Written")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "0"
-        );
-        assert_eq!(
-            headers
-                .get("X-Prometheus-Remote-Write-Exemplars-Written")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "0"
-        );
     }
 
     fn content_type(value: &str) -> headers::ContentType {
         std::str::FromStr::from_str(value).unwrap()
     }
 
-    fn test_state(captured: Arc<Mutex<Vec<RowInsertRequests>>>) -> PromStoreState {
+    fn test_state() -> PromStoreState {
         PromStoreState {
-            prom_store_handler: Arc::new(CapturingPromStoreHandler { captured }),
+            prom_store_handler: Arc::new(NoopPromStoreHandler),
             pipeline_handler: None,
             prom_store_with_metric_engine: false,
             prom_validation_mode: PromValidationMode::Strict,
@@ -599,20 +480,17 @@ mod tests {
         }
     }
 
-    struct CapturingPromStoreHandler {
-        captured: Arc<Mutex<Vec<RowInsertRequests>>>,
-    }
+    struct NoopPromStoreHandler;
 
     #[async_trait]
-    impl PromStoreProtocolHandler for CapturingPromStoreHandler {
+    impl PromStoreProtocolHandler for NoopPromStoreHandler {
         async fn write(
             &self,
-            request: RowInsertRequests,
+            _request: RowInsertRequests,
             _ctx: QueryContextRef,
             _with_metric_engine: bool,
         ) -> Result<Output> {
-            self.captured.lock().unwrap().push(request);
-            Ok(Output::new_with_affected_rows(0))
+            unreachable!("remote write v2 pipeline rejection must happen before writing")
         }
 
         async fn read(

@@ -14,10 +14,7 @@
 
 use std::sync::Arc;
 
-use api::greptime_proto::io::prometheus::write::v2::{
-    Histogram as RemoteWriteV2Histogram, Request as RemoteWriteV2Request,
-    Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
-};
+use api::greptime_proto::io::prometheus::write::v2::Sample as RemoteWriteV2Sample;
 use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
@@ -25,6 +22,7 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests, SemanticType};
 use async_trait::async_trait;
 use axum::Router;
+use axum::http::HeaderMap;
 use common_query::Output;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_test_util::ports;
@@ -37,6 +35,7 @@ use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
+use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::prom_store;
 use servers::prom_store::{Metrics, snappy_compress};
@@ -261,7 +260,7 @@ async fn test_prometheus_remote_write_v2_samples() {
     let app = make_test_app_with_write_capture(read_tx, write_tx);
     let client = TestClient::new(app).await;
 
-    let write_request = remote_write_v2_request_with_labels_and_samples(
+    let write_request = remote_write_v2::request_with_labels_and_samples(
         vec![
             (prom_store::METRIC_NAME_LABEL, "http_requests_total"),
             (prom_store::DATABASE_LABEL, "tenant_a"),
@@ -294,27 +293,7 @@ async fn test_prometheus_remote_write_v2_samples() {
         .await;
 
     assert_eq!(result.status(), 204);
-    assert_eq!(
-        Some("2"),
-        result
-            .headers()
-            .get("X-Prometheus-Remote-Write-Samples-Written")
-            .map(|x| x.to_str().unwrap())
-    );
-    assert_eq!(
-        Some("0"),
-        result
-            .headers()
-            .get("X-Prometheus-Remote-Write-Histograms-Written")
-            .map(|x| x.to_str().unwrap())
-    );
-    assert_eq!(
-        Some("0"),
-        result
-            .headers()
-            .get("X-Prometheus-Remote-Write-Exemplars-Written")
-            .map(|x| x.to_str().unwrap())
-    );
+    assert_remote_write_v2_written_headers(&result.headers(), "2");
     assert!(result.text().await.is_empty());
 
     let captured = write_rx.recv().await.unwrap();
@@ -394,12 +373,12 @@ async fn test_prometheus_remote_write_v2_ignores_histogram_only_series() {
     let app = make_test_app_with_write_capture(read_tx, write_tx);
     let client = TestClient::new(app).await;
 
-    let write_request = remote_write_v2_request_with_labels_and_histograms(
+    let write_request = remote_write_v2::request_with_labels_and_histograms(
         vec![(
             prom_store::METRIC_NAME_LABEL,
             "http_request_duration_seconds",
         )],
-        vec![remote_write_v2_histogram(1000)],
+        vec![remote_write_v2::histogram(1000)],
     );
 
     let result = client
@@ -414,90 +393,28 @@ async fn test_prometheus_remote_write_v2_ignores_histogram_only_series() {
         .await;
 
     assert_eq!(result.status(), 204);
+    assert_remote_write_v2_written_headers(&result.headers(), "0");
+    assert!(result.text().await.is_empty());
+    assert!(write_rx.try_recv().is_err());
+}
+
+fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
     assert_eq!(
-        Some("0"),
-        result
-            .headers()
+        Some(samples),
+        headers
             .get("X-Prometheus-Remote-Write-Samples-Written")
             .map(|x| x.to_str().unwrap())
     );
     assert_eq!(
         Some("0"),
-        result
-            .headers()
+        headers
             .get("X-Prometheus-Remote-Write-Histograms-Written")
             .map(|x| x.to_str().unwrap())
     );
     assert_eq!(
         Some("0"),
-        result
-            .headers()
+        headers
             .get("X-Prometheus-Remote-Write-Exemplars-Written")
             .map(|x| x.to_str().unwrap())
     );
-    assert!(result.text().await.is_empty());
-    assert!(write_rx.try_recv().is_err());
-}
-
-fn remote_write_v2_request_with_labels_and_samples(
-    labels: Vec<(&str, &str)>,
-    samples: Vec<RemoteWriteV2Sample>,
-) -> RemoteWriteV2Request {
-    let mut symbols = vec!["".to_string()];
-    let mut labels_refs = Vec::with_capacity(labels.len() * 2);
-    for (name, value) in labels {
-        labels_refs.push(push_symbol(&mut symbols, name));
-        labels_refs.push(push_symbol(&mut symbols, value));
-    }
-
-    RemoteWriteV2Request {
-        symbols,
-        timeseries: vec![RemoteWriteV2TimeSeries {
-            labels_refs,
-            samples,
-            histograms: Vec::new(),
-            exemplars: Vec::new(),
-            metadata: None,
-        }],
-    }
-}
-
-fn remote_write_v2_request_with_labels_and_histograms(
-    labels: Vec<(&str, &str)>,
-    histograms: Vec<RemoteWriteV2Histogram>,
-) -> RemoteWriteV2Request {
-    let mut symbols = vec!["".to_string()];
-    let mut labels_refs = Vec::with_capacity(labels.len() * 2);
-    for (name, value) in labels {
-        labels_refs.push(push_symbol(&mut symbols, name));
-        labels_refs.push(push_symbol(&mut symbols, value));
-    }
-
-    RemoteWriteV2Request {
-        symbols,
-        timeseries: vec![RemoteWriteV2TimeSeries {
-            labels_refs,
-            samples: Vec::new(),
-            histograms,
-            exemplars: Vec::new(),
-            metadata: None,
-        }],
-    }
-}
-
-fn remote_write_v2_histogram(timestamp: i64) -> RemoteWriteV2Histogram {
-    RemoteWriteV2Histogram {
-        timestamp,
-        ..Default::default()
-    }
-}
-
-fn push_symbol(symbols: &mut Vec<String>, symbol: &str) -> u32 {
-    if let Some(idx) = symbols.iter().position(|s| s == symbol) {
-        return idx as u32;
-    }
-
-    let idx = symbols.len();
-    symbols.push(symbol.to_string());
-    idx as u32
 }

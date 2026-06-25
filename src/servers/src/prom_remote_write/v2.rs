@@ -56,11 +56,11 @@ pub(crate) fn decode_remote_write_v2_request(is_zstd: bool, body: Bytes) -> Resu
 }
 
 pub(crate) trait RemoteWriteV2RequestExt {
-    fn into_context_req(self) -> Result<(ContextReq, u64)>;
+    fn into_context_req(self) -> Result<ContextReq>;
 }
 
 impl RemoteWriteV2RequestExt for Request {
-    fn into_context_req(self) -> Result<(ContextReq, u64)> {
+    fn into_context_req(self) -> Result<ContextReq> {
         let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED.start_timer();
 
         ensure!(
@@ -71,7 +71,6 @@ impl RemoteWriteV2RequestExt for Request {
         );
 
         let mut tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
-        let mut sample_count = 0;
 
         for series in &self.timeseries {
             // Native histograms and exemplars are intentionally ignored for now.
@@ -99,11 +98,10 @@ impl RemoteWriteV2RequestExt for Request {
                 row_writer::write_f64(table_data, greptime_value(), sample.value, &mut row)?;
                 row_writer::write_tags(table_data, tags.iter().cloned(), &mut row)?;
                 table_data.add_row(row);
-                sample_count += 1;
             }
         }
 
-        Ok((into_context_req(tables), sample_count))
+        Ok(into_context_req(tables))
     }
 }
 
@@ -216,6 +214,66 @@ fn table_data_to_row_insert_request(table_name: String, table_data: TableData) -
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util {
+    use api::greptime_proto::io::prometheus::write::v2::{Histogram, Request, Sample, TimeSeries};
+
+    pub fn request_with_labels_and_samples(
+        labels: Vec<(&str, &str)>,
+        samples: Vec<Sample>,
+    ) -> Request {
+        request_with_labels(labels, samples, Vec::new())
+    }
+
+    pub fn request_with_labels_and_histograms(
+        labels: Vec<(&str, &str)>,
+        histograms: Vec<Histogram>,
+    ) -> Request {
+        request_with_labels(labels, Vec::new(), histograms)
+    }
+
+    pub fn histogram(timestamp: i64) -> Histogram {
+        Histogram {
+            timestamp,
+            ..Default::default()
+        }
+    }
+
+    fn request_with_labels(
+        labels: Vec<(&str, &str)>,
+        samples: Vec<Sample>,
+        histograms: Vec<Histogram>,
+    ) -> Request {
+        let mut symbols = vec!["".to_string()];
+        let mut labels_refs = Vec::with_capacity(labels.len() * 2);
+        for (name, value) in labels {
+            labels_refs.push(push_symbol(&mut symbols, name));
+            labels_refs.push(push_symbol(&mut symbols, value));
+        }
+
+        Request {
+            symbols,
+            timeseries: vec![TimeSeries {
+                labels_refs,
+                samples,
+                histograms,
+                exemplars: Vec::new(),
+                metadata: None,
+            }],
+        }
+    }
+
+    fn push_symbol(symbols: &mut Vec<String>, symbol: &str) -> u32 {
+        if let Some(idx) = symbols.iter().position(|s| s == symbol) {
+            return idx as u32;
+        }
+
+        let idx = symbols.len();
+        symbols.push(symbol.to_string());
+        idx as u32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -268,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_into_context_req_samples() {
-        let (ctx_req, sample_count) = request_with_labels(
+        let ctx_req = test_util::request_with_labels_and_samples(
             vec![
                 (METRIC_NAME_LABEL, "http_requests_total"),
                 ("job", "api"),
@@ -290,7 +348,6 @@ mod tests {
         .into_context_req()
         .unwrap();
 
-        assert_eq!(sample_count, 2);
         let mut inserts = ctx_req.all_req().collect::<Vec<_>>();
         assert_eq!(inserts.len(), 1);
 
@@ -333,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_into_context_req_special_labels() {
-        let (ctx_req, sample_count) = request_with_labels(
+        let ctx_req = test_util::request_with_labels_and_samples(
             vec![
                 (METRIC_NAME_LABEL, "cpu_usage"),
                 (DATABASE_LABEL, "tenant_a"),
@@ -349,7 +406,6 @@ mod tests {
         .into_context_req()
         .unwrap();
 
-        assert_eq!(sample_count, 1);
         let mut iter = ctx_req.as_req_iter(Arc::new(QueryContext::with("greptime", "public")));
         let (ctx, reqs) = iter.next().unwrap();
         assert!(iter.next().is_none());
@@ -374,7 +430,7 @@ mod tests {
     #[test]
     fn test_into_context_req_rejects_missing_metric_name() {
         assert_invalid(
-            request_with_labels(
+            test_util::request_with_labels_and_samples(
                 vec![("job", "api")],
                 vec![Sample {
                     value: 1.0,
@@ -388,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_into_context_req_rejects_odd_label_refs() {
-        let mut request = request_with_labels(
+        let mut request = test_util::request_with_labels_and_samples(
             vec![(METRIC_NAME_LABEL, "metric")],
             vec![Sample {
                 value: 1.0,
@@ -403,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_into_context_req_rejects_out_of_range_symbol_ref() {
-        let mut request = request_with_labels(
+        let mut request = test_util::request_with_labels_and_samples(
             vec![(METRIC_NAME_LABEL, "metric")],
             vec![Sample {
                 value: 1.0,
@@ -418,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_into_context_req_rejects_non_empty_first_symbol() {
-        let mut request = request_with_labels(
+        let mut request = test_util::request_with_labels_and_samples(
             vec![(METRIC_NAME_LABEL, "metric")],
             vec![Sample {
                 value: 1.0,
@@ -433,7 +489,7 @@ mod tests {
 
     #[test]
     fn test_into_context_req_ignores_histograms_and_exemplars() {
-        let mut request = request_with_labels(
+        let mut request = test_util::request_with_labels_and_samples(
             vec![(METRIC_NAME_LABEL, "metric")],
             vec![Sample {
                 value: 1.0,
@@ -444,53 +500,20 @@ mod tests {
         request.timeseries[0].histograms.push(Histogram::default());
         request.timeseries[0].exemplars.push(Exemplar::default());
 
-        let (ctx_req, sample_count) = request.into_context_req().unwrap();
+        let ctx_req = request.into_context_req().unwrap();
 
-        assert_eq!(sample_count, 1);
         assert_eq!(ctx_req.all_req().count(), 1);
     }
 
     #[test]
     fn test_into_context_req_skips_histogram_only_series() {
-        let mut request = request_with_labels(vec![(METRIC_NAME_LABEL, "metric")], Vec::new());
+        let mut request =
+            test_util::request_with_labels_and_samples(vec![(METRIC_NAME_LABEL, "metric")], vec![]);
         request.timeseries[0].histograms.push(Histogram::default());
 
-        let (ctx_req, sample_count) = request.into_context_req().unwrap();
+        let ctx_req = request.into_context_req().unwrap();
 
-        assert_eq!(sample_count, 0);
         assert_eq!(ctx_req.all_req().count(), 0);
-    }
-
-    fn request_with_labels(labels: Vec<(&str, &str)>, samples: Vec<Sample>) -> Request {
-        let mut symbols = vec!["".to_string()];
-        let mut labels_refs = Vec::with_capacity(labels.len() * 2);
-        for (name, value) in labels {
-            let name_ref = push_symbol(&mut symbols, name);
-            let value_ref = push_symbol(&mut symbols, value);
-            labels_refs.push(name_ref);
-            labels_refs.push(value_ref);
-        }
-
-        Request {
-            symbols,
-            timeseries: vec![TimeSeries {
-                labels_refs,
-                samples,
-                histograms: Vec::new(),
-                exemplars: Vec::new(),
-                metadata: None,
-            }],
-        }
-    }
-
-    fn push_symbol(symbols: &mut Vec<String>, symbol: &str) -> u32 {
-        if let Some(idx) = symbols.iter().position(|s| s == symbol) {
-            return idx as u32;
-        }
-
-        let idx = symbols.len();
-        symbols.push(symbol.to_string());
-        idx as u32
     }
 
     fn assert_invalid(request: Request, expected: &str) {

@@ -17,16 +17,13 @@ use std::io::Write;
 use std::str::FromStr;
 use std::time::Duration;
 
-use api::greptime_proto::io::prometheus::write::v2::{
-    Histogram as RemoteWriteV2Histogram, Request as RemoteWriteV2Request,
-    Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
-};
+use api::greptime_proto::io::prometheus::write::v2::Sample as RemoteWriteV2Sample;
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
     Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
 };
 use auth::{UserProviderRef, user_provider_from_option};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use chrono::Utc;
 use cmd::options::GreptimeOptions;
@@ -68,6 +65,7 @@ use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
+use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use standalone::options::StandaloneOptions;
@@ -279,67 +277,25 @@ fn basic_auth(username: &str, password: &str) -> String {
     )
 }
 
-fn remote_write_v2_request_with_labels_and_samples(
-    labels: Vec<(&str, &str)>,
-    samples: Vec<RemoteWriteV2Sample>,
-) -> RemoteWriteV2Request {
-    let mut symbols = vec!["".to_string()];
-    let mut labels_refs = Vec::with_capacity(labels.len() * 2);
-    for (name, value) in labels {
-        labels_refs.push(push_remote_write_v2_symbol(&mut symbols, name));
-        labels_refs.push(push_remote_write_v2_symbol(&mut symbols, value));
-    }
-
-    RemoteWriteV2Request {
-        symbols,
-        timeseries: vec![RemoteWriteV2TimeSeries {
-            labels_refs,
-            samples,
-            histograms: Vec::new(),
-            exemplars: Vec::new(),
-            metadata: None,
-        }],
-    }
-}
-
-fn remote_write_v2_request_with_labels_and_histograms(
-    labels: Vec<(&str, &str)>,
-    histograms: Vec<RemoteWriteV2Histogram>,
-) -> RemoteWriteV2Request {
-    let mut symbols = vec!["".to_string()];
-    let mut labels_refs = Vec::with_capacity(labels.len() * 2);
-    for (name, value) in labels {
-        labels_refs.push(push_remote_write_v2_symbol(&mut symbols, name));
-        labels_refs.push(push_remote_write_v2_symbol(&mut symbols, value));
-    }
-
-    RemoteWriteV2Request {
-        symbols,
-        timeseries: vec![RemoteWriteV2TimeSeries {
-            labels_refs,
-            samples: Vec::new(),
-            histograms,
-            exemplars: Vec::new(),
-            metadata: None,
-        }],
-    }
-}
-
-fn remote_write_v2_histogram(timestamp: i64) -> RemoteWriteV2Histogram {
-    RemoteWriteV2Histogram {
-        timestamp,
-        ..Default::default()
-    }
-}
-
-fn push_remote_write_v2_symbol(symbols: &mut Vec<String>, symbol: &str) -> u32 {
-    if let Some(idx) = symbols.iter().position(|s| s == symbol) {
-        return idx as u32;
-    }
-
-    let idx = symbols.len();
-    symbols.push(symbol.to_string());
-    idx as u32
+fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
+    assert_eq!(
+        Some(samples),
+        headers
+            .get("X-Prometheus-Remote-Write-Samples-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Histograms-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Exemplars-Written")
+            .map(|x| x.to_str().unwrap())
+    );
 }
 
 pub async fn test_http_auth_from_standalone_user_provider_config() {
@@ -2342,7 +2298,7 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
         setup_test_prom_app_with_frontend(store_type, "prometheus_remote_write_v2").await;
     let client = TestClient::new(app).await;
 
-    let write_request = remote_write_v2_request_with_labels_and_samples(
+    let write_request = remote_write_v2::request_with_labels_and_samples(
         vec![
             (prom_store::METRIC_NAME_LABEL, "remote_write_v2_total"),
             ("job", "api"),
@@ -2377,24 +2333,7 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
     let headers = res.headers();
-    assert_eq!(
-        Some("2"),
-        headers
-            .get("X-Prometheus-Remote-Write-Samples-Written")
-            .map(|x| x.to_str().unwrap())
-    );
-    assert_eq!(
-        Some("0"),
-        headers
-            .get("X-Prometheus-Remote-Write-Histograms-Written")
-            .map(|x| x.to_str().unwrap())
-    );
-    assert_eq!(
-        Some("0"),
-        headers
-            .get("X-Prometheus-Remote-Write-Exemplars-Written")
-            .map(|x| x.to_str().unwrap())
-    );
+    assert_remote_write_v2_written_headers(&headers, "2");
     assert!(res.text().await.is_empty());
 
     validate_data(
@@ -2416,12 +2355,12 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
     )
     .await;
 
-    let write_request = remote_write_v2_request_with_labels_and_histograms(
+    let write_request = remote_write_v2::request_with_labels_and_histograms(
         vec![(
             prom_store::METRIC_NAME_LABEL,
             "remote_write_v2_histogram_only",
         )],
-        vec![remote_write_v2_histogram(3000)],
+        vec![remote_write_v2::histogram(3000)],
     );
     let serialized_request = write_request.encode_to_vec();
     let compressed_request =
@@ -2439,24 +2378,7 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
     let headers = res.headers();
-    assert_eq!(
-        Some("0"),
-        headers
-            .get("X-Prometheus-Remote-Write-Samples-Written")
-            .map(|x| x.to_str().unwrap())
-    );
-    assert_eq!(
-        Some("0"),
-        headers
-            .get("X-Prometheus-Remote-Write-Histograms-Written")
-            .map(|x| x.to_str().unwrap())
-    );
-    assert_eq!(
-        Some("0"),
-        headers
-            .get("X-Prometheus-Remote-Write-Exemplars-Written")
-            .map(|x| x.to_str().unwrap())
-    );
+    assert_remote_write_v2_written_headers(&headers, "0");
     assert!(res.text().await.is_empty());
 
     validate_data(
