@@ -93,8 +93,9 @@ fn sanitize_namespace(name: &str) -> String {
 }
 
 /// Discover all compat cases under `case_root`.
-/// Each case is a directory containing `case.toml`, `setup.sql`, `verify.sql`,
-/// and `verify.result` — all four files are required.
+/// Each case is a directory containing `case.toml`, `setup.sql`, and `verify.sql`.
+/// `verify.result` is optional at discovery — if missing, the verify phase
+/// generates it from actual output and fails so the author must review/commit.
 pub fn discover_cases(case_root: &Path) -> Result<Vec<CompatCase>, String> {
     let mut cases = Vec::new();
 
@@ -123,9 +124,8 @@ pub fn discover_cases(case_root: &Path) -> Result<Vec<CompatCase>, String> {
 
         let setup_sql = path.join("setup.sql");
         let verify_sql = path.join("verify.sql");
-        let verify_result = path.join("verify.result");
 
-        for required in [&setup_sql, &verify_sql, &verify_result] {
+        for required in [&setup_sql, &verify_sql] {
             if !required.is_file() {
                 return Err(format!(
                     "Missing required file {} in case directory {}",
@@ -613,7 +613,6 @@ mod tests {
         let case_toml = dir.join("case.toml");
         let setup_sql = dir.join("setup.sql");
         let verify_sql = dir.join("verify.sql");
-        let verify_result = dir.join("verify.result");
 
         std::fs::write(
             &case_toml,
@@ -631,19 +630,20 @@ owner = "test"
         .unwrap();
         std::fs::write(&setup_sql, "CREATE TABLE t (a INT);").unwrap();
         std::fs::write(&verify_sql, "SELECT * FROM t;").unwrap();
-        std::fs::write(&verify_result, "SELECT * FROM t;\n\n+\n\n").unwrap();
     }
 
     #[test]
-    fn test_discover_cases_rejects_missing_verify_result() {
+    fn test_discover_cases_allows_missing_verify_result() {
         let tmp = tempfile::tempdir().unwrap();
         let case_dir = tmp.path().join("my_case");
         write_minimal_case(&case_dir);
-        // Remove verify.result — should now be a hard error
-        std::fs::remove_file(case_dir.join("verify.result")).unwrap();
+        // verify.result is intentionally absent — discovery should still succeed
         assert!(!case_dir.join("verify.result").is_file());
 
-        assert!(discover_cases(tmp.path()).is_err());
+        let cases =
+            discover_cases(tmp.path()).expect("discover should succeed without verify.result");
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].metadata.name, "test_case");
     }
 
     #[test]

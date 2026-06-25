@@ -493,7 +493,17 @@ async fn run_compat_phase(
 
         let result_path = case.dir.join("verify.result");
 
-        // verify.result is required at discovery time, so it always exists here.
+        // If verify.result doesn't exist, generate it from actual output but
+        // return an error so the author must review, commit, and rerun.
+        if !result_path.is_file() {
+            std::fs::write(&result_path, &verify_output)
+                .map_err(|e| format!("Failed to create {}: {e}", result_path.display()))?;
+            return Err(format!(
+                "Created missing verify.result for case '{}'; review the generated file, commit it, and rerun",
+                case.metadata.name
+            ));
+        }
+
         let expected = std::fs::read_to_string(&result_path)
             .map_err(|e| format!("Failed to read {}: {e}", result_path.display()))?;
 

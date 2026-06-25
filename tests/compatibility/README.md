@@ -32,14 +32,14 @@ cargo run -p sqlness-runner -- compat --help
 
 ## Case Format
 
-Each compat case is a directory under `tests/compatibility/cases/` containing four required files:
+Each compat case is a directory under `tests/compatibility/cases/` containing three required files plus an expected output file:
 
 ```
 my_case/
   case.toml       # Metadata (required)
   setup.sql       # SQL to run on old version (required)
   verify.sql      # SQL to run on new version (required)
-  verify.result   # Expected output from verify.sql (required)
+  verify.result   # Expected output from verify.sql
 ```
 
 ### `case.toml` — Required Metadata
@@ -94,14 +94,14 @@ Rules:
 - Statements are semicolon-terminated
 - `--` prefix for ordinary comments
 - `-- SQLNESS ...` interceptor comments follow ordinary sqlness semantics
-
 ### `verify.sql` — Verify Phase (New Version)
 
-SQL statements executed on the **new** version cluster. Output is compared against `verify.result` in sqlness snapshot style. `verify.result` is required — missing files fail at discovery.
+SQL statements executed on the **new** version cluster. Output is compared against `verify.result` in sqlness snapshot style.
 
 ### `verify.result` — Expected Output
 
-Required file containing the expected output in sqlness format:
+Expected output in sqlness format. If this file is missing, the runner generates it from actual output and **fails** — the author must review, commit the generated file, and rerun.
+
 ```
 <statement>;
 
