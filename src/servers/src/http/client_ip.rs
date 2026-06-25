@@ -21,20 +21,25 @@ use axum::middleware::Next;
 use axum::response::Response;
 use common_telemetry::warn;
 
+use super::HTTP_API_PREFIX;
+
 /// Middleware that logs HTTP error responses (4xx/5xx) with client IP address.
 ///
 /// Extracts client address from [`ConnectInfo`] if available.
 pub async fn log_error_with_client_ip(req: Request<Body>, next: Next) -> Response {
-    let request_info = req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|c| c.0)
-        .map(|addr| {
-            let method = req.method().clone();
-            let uri = req.uri().clone();
-            let matched_path = req.extensions().get::<MatchedPath>().cloned();
-            (addr, method, uri, matched_path)
-        });
+    let request_info = if is_public_http_api_path(req.uri().path()) {
+        req.extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0)
+            .map(|addr| {
+                let method = req.method().clone();
+                let uri = req.uri().clone();
+                let matched_path = req.extensions().get::<MatchedPath>().cloned();
+                (addr, method, uri, matched_path)
+            })
+    } else {
+        None
+    };
 
     let response = next.run(req).await;
 
@@ -57,6 +62,10 @@ pub async fn log_error_with_client_ip(req: Request<Body>, next: Next) -> Respons
     response
 }
 
+fn is_public_http_api_path(path: &str) -> bool {
+    path == HTTP_API_PREFIX.trim_end_matches('/') || path.starts_with(HTTP_API_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::Router;
@@ -65,6 +74,19 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[test]
+    fn test_public_http_api_path_matches_v1_prefix() {
+        assert!(is_public_http_api_path("/v1"));
+        assert!(is_public_http_api_path("/v1/sql"));
+        assert!(is_public_http_api_path("/v1/prometheus/api/v1/query"));
+
+        assert!(!is_public_http_api_path("/"));
+        assert!(!is_public_http_api_path("/health"));
+        assert!(!is_public_http_api_path("/status"));
+        assert!(!is_public_http_api_path("/metrics"));
+        assert!(!is_public_http_api_path("/v10/sql"));
+    }
 
     #[tokio::test]
     async fn test_middleware_passes_error_response() {
