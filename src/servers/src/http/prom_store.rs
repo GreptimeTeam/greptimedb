@@ -25,8 +25,9 @@ use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
 use mime_guess::mime;
-use pipeline::PipelineDefinition;
 use pipeline::util::to_pipeline_version;
+use pipeline::{ContextReq, PipelineDefinition};
+use prometheus::HistogramTimer;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
@@ -55,6 +56,11 @@ pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
 const REMOTE_WRITE_V2_PROTO: &str = "io.prometheus.write.v2.Request";
 const CONTENT_TYPE_PROTO_PARAM: &str = "proto";
+const REMOTE_WRITE_V2_SAMPLES_WRITTEN_HEADER: &str = "x-prometheus-remote-write-samples-written";
+const REMOTE_WRITE_V2_HISTOGRAMS_WRITTEN_HEADER: &str =
+    "x-prometheus-remote-write-histograms-written";
+const REMOTE_WRITE_V2_EXEMPLARS_WRITTEN_HEADER: &str =
+    "x-prometheus-remote-write-exemplars-written";
 
 #[derive(Clone)]
 pub struct PromStoreState {
@@ -113,7 +119,7 @@ pub async fn remote_write(
 async fn remote_write_v1(
     state: PromStoreState,
     params: RemoteWriteQuery,
-    mut query_ctx: QueryContext,
+    query_ctx: QueryContext,
     pipeline_info: PipelineInfo,
     is_zstd: bool,
     body: Bytes,
@@ -126,28 +132,11 @@ async fn remote_write_v1(
         pending_rows_batcher,
     } = state;
 
-    if let Some(_vm_handshake) = params.get_vm_proto_version {
-        return Ok(VM_PROTO_VERSION.into_response());
+    if let Some(response) = vm_proto_version_response(&params) {
+        return Ok(response);
     }
 
-    let db = params.db.clone().unwrap_or_default();
-    query_ctx.set_channel(Channel::Prometheus);
-    let physical_table = params
-        .physical_table
-        .clone()
-        .unwrap_or_else(|| GREPTIME_PHYSICAL_TABLE.to_string());
-    query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table.clone());
-    // Stamp the Prometheus metric identity here, before `as_req_iter` splits into the
-    // batched and direct write paths, so both inherit it (the batched path bypasses
-    // `PromStoreProtocolHandler::write`). Prom RW v1 metadata is weak, so the type is
-    // inferred from naming.
-    query_ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
-    query_ctx.set_extension(SEMANTIC_SOURCE, SOURCE_PROMETHEUS);
-    query_ctx.set_extension(SEMANTIC_METRIC_METADATA_QUALITY, METADATA_QUALITY_INFERRED);
-    let query_ctx = Arc::new(query_ctx);
-    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
-        .with_label_values(&[db.as_str()])
-        .start_timer();
+    let (db, query_ctx, _timer) = prepare_remote_write_context(&params, query_ctx);
 
     let mut processor = PromSeriesProcessor::default_processor();
 
@@ -174,20 +163,137 @@ async fn remote_write_v1(
         req.as_insert_requests()
     };
 
+    let outcome = write_prometheus_rows(
+        prom_store_handler,
+        pending_rows_batcher,
+        prom_store_with_metric_engine,
+        &db,
+        query_ctx,
+        req,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::NO_CONTENT,
+        write_cost_header_map(outcome.write_cost),
+    )
+        .into_response())
+}
+
+async fn remote_write_v2(
+    state: PromStoreState,
+    params: RemoteWriteQuery,
+    query_ctx: QueryContext,
+    pipeline_info: PipelineInfo,
+    is_zstd: bool,
+    body: Bytes,
+) -> Result<axum::response::Response> {
+    let PromStoreState {
+        prom_store_handler,
+        pipeline_handler: _,
+        prom_store_with_metric_engine,
+        prom_validation_mode: _,
+        pending_rows_batcher,
+    } = state;
+
+    if let Some(response) = vm_proto_version_response(&params) {
+        return Ok(response);
+    }
+
+    ensure!(
+        pipeline_info.pipeline_name.is_none(),
+        error::InvalidPromRemoteRequestSnafu {
+            msg: "remote write v2 pipeline processing is not supported".to_string(),
+        }
+    );
+
+    let (db, query_ctx, _timer) = prepare_remote_write_context(&params, query_ctx);
+
+    let request = decode_remote_write_v2_request(is_zstd, body)?;
+    let (req, _samples) = request.into_context_req()?;
+
+    let outcome = write_prometheus_rows(
+        prom_store_handler,
+        pending_rows_batcher,
+        prom_store_with_metric_engine,
+        &db,
+        query_ctx,
+        req,
+    )
+    .await?;
+
+    let mut headers = write_cost_header_map(outcome.write_cost);
+    append_remote_write_v2_written_headers(&mut headers, outcome.rows_written, 0, 0);
+
+    Ok((StatusCode::NO_CONTENT, headers).into_response())
+}
+
+fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response::Response> {
+    params
+        .get_vm_proto_version
+        .as_ref()
+        .map(|_| VM_PROTO_VERSION.into_response())
+}
+
+fn prepare_remote_write_context(
+    params: &RemoteWriteQuery,
+    mut query_ctx: QueryContext,
+) -> (String, Arc<QueryContext>, HistogramTimer) {
+    let db = params.db.clone().unwrap_or_default();
+    query_ctx.set_channel(Channel::Prometheus);
+    let physical_table = params
+        .physical_table
+        .clone()
+        .unwrap_or_else(|| GREPTIME_PHYSICAL_TABLE.to_string());
+    query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
+    // Stamp the Prometheus metric identity here, before `as_req_iter` splits into the
+    // batched and direct write paths, so both inherit it (the batched path bypasses
+    // `PromStoreProtocolHandler::write`). Prometheus remote-write metadata is weak
+    // here, so the type is inferred from naming.
+    query_ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
+    query_ctx.set_extension(SEMANTIC_SOURCE, SOURCE_PROMETHEUS);
+    query_ctx.set_extension(SEMANTIC_METRIC_METADATA_QUALITY, METADATA_QUALITY_INFERRED);
+    let query_ctx = Arc::new(query_ctx);
+    let timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
+
+    (db, query_ctx, timer)
+}
+
+struct PromWriteOutcome {
+    write_cost: usize,
+    rows_written: u64,
+}
+
+async fn write_prometheus_rows(
+    prom_store_handler: PromStoreProtocolHandlerRef,
+    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    prom_store_with_metric_engine: bool,
+    db: &str,
+    query_ctx: Arc<QueryContext>,
+    req: ContextReq,
+) -> Result<PromWriteOutcome> {
     if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
+        let mut rows_written = 0;
         for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
             prom_store_handler
                 .pre_write(&reqs, temp_ctx.clone())
                 .await?;
             let rows = batcher.submit(reqs, temp_ctx).await?;
             crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-                .with_label_values(&[db.as_str()])
+                .with_label_values(&[db])
                 .inc_by(rows);
+            rows_written += rows;
         }
-        return Ok((StatusCode::NO_CONTENT, write_cost_header_map(0)).into_response());
+        return Ok(PromWriteOutcome {
+            write_cost: 0,
+            rows_written,
+        });
     }
 
-    let mut cost = 0;
+    let mut write_cost = 0;
+    let mut rows_written = 0;
     for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
         let cnt: u64 = reqs
             .inserts
@@ -198,25 +304,36 @@ async fn remote_write_v1(
             .write(reqs, temp_ctx, prom_store_with_metric_engine)
             .await?;
         crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-            .with_label_values(&[db.as_str()])
+            .with_label_values(&[db])
             .inc_by(cnt);
-        cost += output.meta.cost;
+        write_cost += output.meta.cost;
+        rows_written += cnt;
     }
 
-    Ok((StatusCode::NO_CONTENT, write_cost_header_map(cost)).into_response())
+    Ok(PromWriteOutcome {
+        write_cost,
+        rows_written,
+    })
 }
 
-async fn remote_write_v2(
-    _state: PromStoreState,
-    _params: RemoteWriteQuery,
-    _query_ctx: QueryContext,
-    _pipeline_info: PipelineInfo,
-    is_zstd: bool,
-    body: Bytes,
-) -> Result<axum::response::Response> {
-    let _request = decode_remote_write_v2_request(is_zstd, body)?;
-
-    todo!("prometheus remote write v2 handler")
+fn append_remote_write_v2_written_headers(
+    headers: &mut HeaderMap,
+    samples: u64,
+    histograms: u64,
+    exemplars: u64,
+) {
+    headers.insert(
+        REMOTE_WRITE_V2_SAMPLES_WRITTEN_HEADER,
+        HeaderValue::from_str(&samples.to_string()).expect("u64 header value is valid"),
+    );
+    headers.insert(
+        REMOTE_WRITE_V2_HISTOGRAMS_WRITTEN_HEADER,
+        HeaderValue::from_str(&histograms.to_string()).expect("u64 header value is valid"),
+    );
+    headers.insert(
+        REMOTE_WRITE_V2_EXEMPLARS_WRITTEN_HEADER,
+        HeaderValue::from_str(&exemplars.to_string()).expect("u64 header value is valid"),
+    );
 }
 
 // ref: https://github.com/prometheus/client_golang/blob/74560058a7af7a695db8196c8e84a0754032c6af/exp/api/remote/remote_api.go#L544
@@ -291,7 +408,23 @@ async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use api::prom_store::remote::ReadRequest;
+    use api::v1::RowInsertRequests;
+    use async_trait::async_trait;
+    use common_query::Output;
+    use pipeline::GreptimePipelineParams;
+    use session::context::{QueryContext, QueryContextRef};
+
     use super::*;
+    use crate::prom_remote_write::v2::{
+        Request as RemoteWriteV2Request, Sample as RemoteWriteV2Sample,
+        TimeSeries as RemoteWriteV2TimeSeries,
+    };
+    use crate::prom_remote_write::validation::PromValidationMode;
+    use crate::prom_store::{Metrics, snappy_compress};
+    use crate::query_handler::PromStoreProtocolHandler;
 
     #[test]
     fn test_is_remote_write_v2() {
@@ -311,7 +444,187 @@ mod tests {
         )));
     }
 
+    #[tokio::test]
+    async fn test_remote_write_v2_writes_samples_and_headers() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let state = test_state(captured.clone());
+        let request = RemoteWriteV2Request {
+            symbols: vec![
+                "".to_string(),
+                "__name__".to_string(),
+                "http_requests_total".to_string(),
+                "job".to_string(),
+                "api".to_string(),
+            ],
+            timeseries: vec![RemoteWriteV2TimeSeries {
+                labels_refs: vec![1, 2, 3, 4],
+                samples: vec![
+                    RemoteWriteV2Sample {
+                        value: 42.0,
+                        timestamp: 1000,
+                        start_timestamp: 0,
+                    },
+                    RemoteWriteV2Sample {
+                        value: 43.0,
+                        timestamp: 2000,
+                        start_timestamp: 0,
+                    },
+                ],
+                histograms: Vec::new(),
+                exemplars: Vec::new(),
+                metadata: None,
+            }],
+        };
+        let body = Bytes::from(snappy_compress(&request.encode_to_vec()).unwrap());
+
+        let response = remote_write_v2(
+            state,
+            RemoteWriteQuery::default(),
+            QueryContext::with("greptime", "public"),
+            pipeline_info(None),
+            false,
+            body,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get("X-Prometheus-Remote-Write-Samples-Written")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "2"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("X-Prometheus-Remote-Write-Histograms-Written")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "0"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("X-Prometheus-Remote-Write-Exemplars-Written")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "0"
+        );
+
+        let writes = captured.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].inserts.len(), 1);
+        assert_eq!(writes[0].inserts[0].rows.as_ref().unwrap().rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_remote_write_v2_rejects_pipeline() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let err = remote_write_v2(
+            test_state(captured.clone()),
+            RemoteWriteQuery::default(),
+            QueryContext::with("greptime", "public"),
+            pipeline_info(Some("pipeline")),
+            false,
+            Bytes::new(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
+        assert!(
+            err.to_string()
+                .contains("pipeline processing is not supported")
+        );
+        assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_append_remote_write_v2_written_headers() {
+        let mut headers = HeaderMap::new();
+
+        append_remote_write_v2_written_headers(&mut headers, 3, 0, 0);
+
+        assert_eq!(
+            headers
+                .get("X-Prometheus-Remote-Write-Samples-Written")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            headers
+                .get("X-Prometheus-Remote-Write-Histograms-Written")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "0"
+        );
+        assert_eq!(
+            headers
+                .get("X-Prometheus-Remote-Write-Exemplars-Written")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "0"
+        );
+    }
+
     fn content_type(value: &str) -> headers::ContentType {
         std::str::FromStr::from_str(value).unwrap()
+    }
+
+    fn test_state(captured: Arc<Mutex<Vec<RowInsertRequests>>>) -> PromStoreState {
+        PromStoreState {
+            prom_store_handler: Arc::new(CapturingPromStoreHandler { captured }),
+            pipeline_handler: None,
+            prom_store_with_metric_engine: false,
+            prom_validation_mode: PromValidationMode::Strict,
+            pending_rows_batcher: None,
+        }
+    }
+
+    fn pipeline_info(pipeline_name: Option<&str>) -> PipelineInfo {
+        PipelineInfo {
+            pipeline_name: pipeline_name.map(ToString::to_string),
+            pipeline_version: None,
+            pipeline_params: GreptimePipelineParams::default(),
+        }
+    }
+
+    struct CapturingPromStoreHandler {
+        captured: Arc<Mutex<Vec<RowInsertRequests>>>,
+    }
+
+    #[async_trait]
+    impl PromStoreProtocolHandler for CapturingPromStoreHandler {
+        async fn write(
+            &self,
+            request: RowInsertRequests,
+            _ctx: QueryContextRef,
+            _with_metric_engine: bool,
+        ) -> Result<Output> {
+            self.captured.lock().unwrap().push(request);
+            Ok(Output::new_with_affected_rows(0))
+        }
+
+        async fn read(
+            &self,
+            _request: ReadRequest,
+            _ctx: QueryContextRef,
+        ) -> Result<PromStoreResponse> {
+            unimplemented!()
+        }
+
+        async fn ingest_metrics(&self, _metrics: Metrics) -> Result<()> {
+            unimplemented!()
+        }
     }
 }
