@@ -13635,6 +13635,7 @@ dependencies = [
  "local-ip-address",
  "mysql",
  "num_cpus",
+ "regex",
  "reqwest 0.12.24",
  "serde",
  "serde_json",
@@ -13646,6 +13647,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-stream",
+ "toml 0.8.23",
 ]
 
 [[package]]
