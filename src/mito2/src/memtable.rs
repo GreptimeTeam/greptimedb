@@ -23,6 +23,7 @@ use std::time::Duration;
 pub use bulk::part::EncodedBulkPart;
 use bytes::Bytes;
 use common_time::Timestamp;
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
@@ -557,6 +558,11 @@ pub trait IterBuilder: Send + Sync {
         .fail()
     }
 
+    /// Returns a cheap schema hint for record batches yielded by this builder.
+    fn record_batch_schema_hint(&self) -> Option<SchemaRef> {
+        None
+    }
+
     /// Returns the [EncodedRange] if the range is already encoded into SST.
     fn encoded_range(&self) -> Option<EncodedRange> {
         None
@@ -727,6 +733,11 @@ impl MemtableRange {
             err_msg: "Record batch iterator is not supported by this memtable",
         }
         .fail()
+    }
+
+    /// Returns a cheap schema hint for record batches yielded by this range.
+    pub fn record_batch_schema_hint(&self) -> Option<SchemaRef> {
+        self.context.builder.record_batch_schema_hint()
     }
 
     /// Returns whether the iterator is a record batch iterator.

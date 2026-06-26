@@ -23,6 +23,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::extension::json::is_structured_json_field;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
@@ -43,6 +44,7 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
+use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::{BoxedRecordBatchIterator, EncodedRange, MemtableRanges, RangesOptions};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
@@ -805,11 +807,27 @@ fn memtable_flat_sources(
         let num_ranges = ranges.len();
         let mut input_iters = Vec::with_capacity(num_ranges);
         let mut current_ranges = Vec::new();
+
+        let has_json2 = schema.fields().iter().any(is_structured_json_field);
+        let mut json_align_schemas = if has_json2 {
+            Some(Vec::with_capacity(num_ranges))
+        } else {
+            None
+        };
+
         for (_range_id, range) in ranges {
             if let Some(encoded) = range.encoded() {
                 let max_sequence = range.stats().max_sequence();
                 flat_sources.encoded.push((encoded, max_sequence));
                 continue;
+            }
+
+            // Collect schemas if has json2 field.
+            if let Some(schemas) = json_align_schemas.as_mut() {
+                let schema = range
+                    .record_batch_schema_hint()
+                    .unwrap_or_else(|| schema.clone());
+                schemas.push(schema);
             }
 
             let iter = range.build_record_batch_iter(None, None)?;
@@ -839,20 +857,33 @@ fn memtable_flat_sources(
                     .max()
                     .unwrap_or(0);
 
+                let input_iters =
+                    std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges));
+                let (schema, input_iters) = maybe_align_json2_iters(
+                    schema.clone(),
+                    json_align_schemas.take(),
+                    input_iters,
+                )?;
+
                 let maybe_dedup = merge_and_dedup(
                     &schema,
                     options.append_mode,
                     options.merge_mode(),
                     field_column_start,
-                    std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
+                    input_iters,
                 )?;
 
-                flat_sources.sources.push((
-                    FlatSource::new_iter(schema.clone(), maybe_dedup),
-                    max_sequence,
-                ));
+                flat_sources
+                    .sources
+                    .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
                 last_iter_rows = 0;
                 current_ranges.clear();
+
+                json_align_schemas = if has_json2 {
+                    Some(Vec::with_capacity(num_ranges))
+                } else {
+                    None
+                };
             }
         }
 
@@ -865,6 +896,10 @@ fn memtable_flat_sources(
                 input_iters.len(),
                 rows_remaining
             );
+
+            let (schema, input_iters) =
+                maybe_align_json2_iters(schema, json_align_schemas, input_iters)?;
+
             let max_sequence = current_ranges
                 .iter()
                 .map(|r| r.stats().max_sequence())
@@ -886,6 +921,24 @@ fn memtable_flat_sources(
     }
 
     Ok(flat_sources)
+}
+
+fn maybe_align_json2_iters(
+    schema: SchemaRef,
+    schemas: Option<Vec<SchemaRef>>,
+    input_iters: Vec<BoxedRecordBatchIterator>,
+) -> Result<(SchemaRef, Vec<BoxedRecordBatchIterator>)> {
+    let Some(schemas) = schemas else {
+        return Ok((schema, input_iters));
+    };
+
+    let aligner = Json2Aligner::try_new(schemas)?;
+    let input_iters = input_iters
+        .into_iter()
+        .map(|input_iter| aligner.wrap_iter(input_iter))
+        .collect();
+
+    Ok((aligner.schema().clone(), input_iters))
 }
 
 /// Merges multiple record batch iterators and applies deduplication based on the specified mode.
