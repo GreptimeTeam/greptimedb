@@ -608,6 +608,7 @@ pub enum Channel {
     Jaeger = 11,
     Log = 12,
     Promql = 13,
+    Splunk = 14,
 }
 
 impl From<u32> for Channel {
@@ -626,6 +627,7 @@ impl From<u32> for Channel {
             11 => Self::Jaeger,
             12 => Self::Log,
             13 => Self::Promql,
+            14 => Self::Splunk,
             _ => Self::Unknown,
         }
     }
@@ -663,6 +665,7 @@ impl AsRef<str> for Channel {
             Channel::Jaeger => "jaeger",
             Channel::Log => "log",
             Channel::Promql => "promql",
+            Channel::Splunk => "splunk",
             Channel::Unknown => "unknown",
         }
     }

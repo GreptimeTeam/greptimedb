@@ -877,6 +877,11 @@ impl Inserter {
         let mut create_table_expr =
             build_create_table_expr(&table_ref, request_schema, engine_name)?;
 
+        // extension set by the Splunk HEC handler for identity path
+        if ctx.extension(SPLUNK_PK_METADATA_ORDER_KEY).is_some() {
+            reorder_splunk_primary_keys(&mut create_table_expr.primary_keys);
+        }
+
         info!("Table `{table_ref}` does not exist, try creating table");
         create_table_expr.table_options.extend(table_options);
         Ok(create_table_expr)
@@ -1186,6 +1191,24 @@ pub fn build_create_table_expr(
     engine: &str,
 ) -> Result<CreateTableExpr> {
     expr_helper::create_table_expr_by_column_schemas(table, request_schema, engine, None)
+}
+
+/// `QueryContext` extension key the Splunk HEC handler sets (to `"true"`) on its identity
+/// path to request metadata-first primary-key ordering at table creation. It is absent for
+/// user-supplied pipelines, so their primary-key order is left untouched.
+pub const SPLUNK_PK_METADATA_ORDER_KEY: &str = "splunk_pk_metadata_order";
+
+/// Moves Splunk's metadata tags (`host`, `source`, `sourcetype`) to the front of the
+/// primary key, keeping the relative order of the remaining tags.
+fn reorder_splunk_primary_keys(primary_keys: &mut [String]) {
+    const LEAD: [&str; 3] = ["host", "source", "sourcetype"];
+    // Stable sort: `LEAD` columns move to the front in `host`/`source`/`sourcetype` order;
+    // every other column keeps its existing relative position.
+    primary_keys.sort_by_key(|name| {
+        LEAD.iter()
+            .position(|&lead| lead == name.as_str())
+            .unwrap_or(LEAD.len())
+    });
 }
 
 /// Result of `create_or_alter_tables_on_demand`.

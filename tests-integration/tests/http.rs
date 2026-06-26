@@ -157,6 +157,9 @@ macro_rules! http_tests {
                 test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
+                test_splunk_health,
+                test_splunk_health_is_public,
+                test_splunk_logs,
                 test_log_query,
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
@@ -1401,6 +1404,277 @@ pub async fn test_metrics_api(store_type: StorageType) {
     let body = res.text().await;
     // Comment in the metrics text.
     assert!(body.contains("# HELP"));
+    guard.remove_all().await;
+}
+
+pub async fn test_splunk_health(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_splunk_health").await;
+    let client = TestClient::new(app).await;
+
+    // The HEC health endpoint returns 200 with the HEC health body.
+    let res = client
+        .get("/v1/splunk/services/collector/health")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    assert_eq!(json["text"], "HEC is healthy");
+    assert_eq!(json["code"], 17);
+
+    // The versioned alias `/health/1.0` serves the same handler.
+    let res = client
+        .get("/v1/splunk/services/collector/health/1.0")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    assert_eq!(json["text"], "HEC is healthy");
+    assert_eq!(json["code"], 17);
+
+    // Query parameters (e.g. `ack`, `token`) are tolerated and ignored rather
+    // than rejected
+    for path in [
+        "/v1/splunk/services/collector/health?ack=true&token=xyz",
+        "/v1/splunk/services/collector/health/1.0?ack=true&token=xyz",
+    ] {
+        let res = client.get(path).send().await;
+        assert_eq!(StatusCode::OK, res.status());
+    }
+
+    guard.remove_all().await;
+}
+
+pub async fn test_splunk_health_is_public(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
+    let (app, _guard) = setup_test_http_app_with_frontend_and_user_provider(
+        store_type,
+        "test_splunk_health_is_public",
+        Some(user_provider),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // The health endpoint is registered in `PUBLIC_API_PREFIX`, so it must
+    // succeed without credentials even when a user provider is configured.
+    let res = client
+        .get("/v1/splunk/services/collector/health")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+}
+
+pub async fn test_splunk_logs(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
+        store_type,
+        "test_splunk_logs",
+        Some(user_provider),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // Authenticated SQL query (the user-provider harness requires auth on /v1/sql).
+    async fn query(client: &TestClient, sql: &str) -> String {
+        let res = client
+            .get(format!("/v1/sql?sql={sql}").as_str())
+            .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "query failed: {sql}");
+        res.text().await
+    }
+
+    // HEC `Authorization: Splunk <user:pass>` + JSON content type.
+    let splunk_headers = || {
+        vec![
+            (
+                HeaderName::from_static("authorization"),
+                HeaderValue::from_static("Splunk greptime_user:greptime_pwd"),
+            ),
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+        ]
+    };
+    let event_path = "/v1/splunk/services/collector/event";
+
+    // 1. Ingest a HEC batch (no `index` -> default `splunk_logs` table).
+    let body = concat!(
+        r#"{"event":"login ok","time":1700000000,"host":"web-01","source":"auth.log","sourcetype":"syslog","fields":{"region":"us-east"}}"#,
+        "\n",
+        r#"{"event":"login fail","time":1700000001,"host":"web-02","source":"auth.log","sourcetype":"syslog","fields":{"region":"us-west"}}"#,
+    );
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        event_path,
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    assert!(res.text().await.contains("\"code\":0"));
+
+    // 2. Rows landed with the right values (proves route + auth + parse + insert,
+    //    and that the default table name is `splunk_logs`).
+    let rows = get_rows_from_output(
+        &query(
+            &client,
+            "select host, region, event, greptime_timestamp from splunk_logs order by host",
+        )
+        .await,
+    );
+    // `time` (epoch seconds) maps to the nanosecond timestamp column.
+    assert_eq!(
+        rows,
+        r#"[["web-01","us-east","login ok",1700000000000000000],["web-02","us-west","login fail",1700000001000000000]]"#
+    );
+
+    // 3. host/source/sourcetype + `fields` keys are tags (i.e. primary key).
+    let create = query(&client, "show create table splunk_logs").await;
+    let pk = create
+        .split("PRIMARY KEY")
+        .nth(1)
+        .expect("splunk_logs should have a PRIMARY KEY");
+    for col in ["host", "source", "sourcetype", "region"] {
+        assert!(
+            pk.contains(col),
+            "expected `{col}` in primary key: {create}"
+        );
+    }
+    // host/source/sourcetype lead the primary key (ahead of the `fields` tag `region`),
+    let pos = |col: &str| pk.find(col).expect("column missing from primary key");
+    assert!(
+        pos("host") < pos("source")
+            && pos("source") < pos("sourcetype")
+            && pos("sourcetype") < pos("region"),
+        "expected host/source/sourcetype to lead the primary key: {create}"
+    );
+
+    // 4. A brand-new `fields` key on a later write also becomes a tag (dynamic
+    //    tag column added to the existing table's primary key).
+    let body2 = r#"{"event":"deploy","time":1700000002,"host":"web-03","source":"deploy.log","sourcetype":"syslog","fields":{"datacenter":"dc1"}}"#;
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        event_path,
+        body2.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let create = query(&client, "show create table splunk_logs").await;
+    let pk = create.split("PRIMARY KEY").nth(1).unwrap();
+    assert!(
+        pk.contains("datacenter"),
+        "expected dynamically-added `datacenter` in primary key: {create}"
+    );
+
+    // 5. An invalid `?table=` override returns HEC code 7 ("incorrect index").
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        "/v1/splunk/services/collector/event?table=bad%20name",
+        br#"{"event":"x","time":1700000003}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":7"));
+
+    // 6. A custom pipeline (via `x-greptime-pipeline-name`) overrides identity and
+    //    owns the schema: this one keeps host/event/timestamp and drops source/sourcetype.
+    let pipeline_yaml = r#"
+transform:
+  - field: host
+    type: string
+    index: tag
+  - field: event
+    type: string
+  - field: greptime_timestamp
+    type: time
+    index: timestamp
+"#;
+    let res = client
+        .post("/v1/pipelines/splunk_custom")
+        .header("Content-Type", "application/x-yaml")
+        .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+        .body(pipeline_yaml)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "create pipeline failed");
+
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("x-greptime-pipeline-name"),
+        HeaderValue::from_static("splunk_custom"),
+    ));
+    let res = send_req(
+        &client,
+        headers,
+        "/v1/splunk/services/collector/event?table=splunk_custom_tbl",
+        br#"{"event":"hi","time":1700000010,"host":"web-09","source":"s","sourcetype":"st"}"#
+            .to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let create = query(&client, "show create table splunk_custom_tbl").await;
+    assert!(
+        create.contains("host"),
+        "custom pipeline kept host: {create}"
+    );
+    assert!(
+        !create.contains("sourcetype"),
+        "custom pipeline should have dropped sourcetype (identity would keep it): {create}"
+    );
+
+    // 7. Auth failures return HEC codes: missing token -> 2 (401), bad token -> 4 (403).
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        event_path,
+        br#"{"event":"x","time":1700000020}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::UNAUTHORIZED, res.status());
+    assert!(res.text().await.contains("\"code\":2"));
+
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("authorization"),
+                HeaderValue::from_static("Splunk baduser:badpass"),
+            ),
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+        ],
+        event_path,
+        br#"{"event":"x","time":1700000021}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::FORBIDDEN, res.status());
+    assert!(res.text().await.contains("\"code\":4"));
+
     guard.remove_all().await;
 }
 
